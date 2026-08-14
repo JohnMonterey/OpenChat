@@ -33,13 +33,41 @@ Window {
             height: parent.height
         }
 
-        Rectangle {
+        Item {
+            id: conversationPane
             x: Theme.sidebarWidth
             width: parent.width - Theme.sidebarWidth
             height: parent.height
-            gradient: Gradient {
-                GradientStop { position: 0; color: Theme.contentBackground }
-                GradientStop { position: 1; color: Theme.contentBottom }
+
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Theme.contentBackground }
+                    GradientStop { position: 1; color: Theme.contentBottom }
+                }
+            }
+
+            ConversationHeader {
+                id: conversationHeader
+                width: parent.width
+                height: Theme.conversationHeaderHeight
+            }
+
+            MessageHistory {
+                id: history
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: conversationHeader.bottom
+                anchors.bottom: messageComposer.top
+            }
+
+            Composer {
+                id: messageComposer
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Theme.composerHeight
+                onMessageSent: history.positionAtEnd()
             }
         }
     }

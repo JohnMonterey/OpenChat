@@ -37,6 +37,14 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
+        qml/OpenChat/components/ConversationHeader.qml
+        qml/OpenChat/components/MessageDelegate.qml
+        qml/OpenChat/components/MessageHistory.qml
+        qml/OpenChat/components/Composer.qml
+    RESOURCES
+        assets/icons/video-call.svg
+        assets/icons/phone-call.svg
+        assets/icons/chevron-down.svg
 )
 
 target_include_directories(OpenChat PRIVATE src)
@@ -87,6 +95,7 @@ add_executable(tst_qmlload
     src/controllers/ChatController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/render/BubbleBackground.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE

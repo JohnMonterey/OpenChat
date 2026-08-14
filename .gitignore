@@ -1,5 +1,5 @@
 .superpowers/
+.worktrees/
 build/
 build-*/
 clearchat-reference-recreation.png
-

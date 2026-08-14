@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(OpenChat VERSION 0.1.0 LANGUAGES CXX)
+project(OpenChat VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Quick QuickControls2 Svg 
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 include(cmake/dependencies/QtKeychain.cmake)
+include(cmake/dependencies/SqlCipher.cmake)
 
 qt_standard_project_setup(REQUIRES 6.5)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
@@ -85,6 +86,22 @@ add_library(openchat_security STATIC
     src/security/SecureBuffer.cpp
     src/security/QtKeychainVault.cpp
 )
+
+add_library(openchat_storage STATIC
+    src/storage/SqlCipherDatabase.cpp
+)
+target_include_directories(openchat_storage PUBLIC src)
+target_link_libraries(openchat_storage
+    PUBLIC openchat_security Qt6::Core
+    PRIVATE openchat_sqlcipher
+)
+qt_add_resources(openchat_storage "openchat_migrations"
+    PREFIX "/openchat"
+    BASE "src/storage/migrations"
+    FILES
+        src/storage/migrations/001_initial.sql
+        src/storage/migrations/002_indexes.sql
+)
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
     PUBLIC openchat_domain Qt6::Core
@@ -100,6 +117,11 @@ add_executable(tst_keyvault tests/tst_keyvault.cpp)
 target_include_directories(tst_keyvault PRIVATE src tests)
 target_link_libraries(tst_keyvault PRIVATE openchat_security Qt6::Core Qt6::Test)
 add_test(NAME tst_keyvault COMMAND tst_keyvault)
+
+add_executable(tst_sqlcipherstorage tests/tst_sqlcipherstorage.cpp)
+target_include_directories(tst_sqlcipherstorage PRIVATE src)
+target_link_libraries(tst_sqlcipherstorage PRIVATE openchat_storage Qt6::Core Qt6::Test)
+add_test(NAME tst_sqlcipherstorage COMMAND tst_sqlcipherstorage)
 
 add_executable(tst_models
     tests/tst_models.cpp

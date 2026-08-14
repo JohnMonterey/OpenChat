@@ -271,7 +271,7 @@ Configure SQLCipher with OpenSSL 3, `SQLITE_THREADSAFE=2`, `SQLITE_TEMP_STORE=2`
 
 - [ ] **Step 4: Implement keyed open and migration transaction**
 
-Open through the SQLCipher C API, apply a raw hexadecimal 256-bit key before any query, enable foreign keys/WAL/memory security, run `cipher_integrity_check`, and reject an empty or incorrect key without creating a replacement database.
+Open through the SQLCipher C API, apply the raw 32-byte key with `sqlite3_key` before any query (avoiding a hexadecimal secret copy), enable foreign keys/WAL/memory security, run `cipher_integrity_check`, and reject an empty or incorrect key without creating a replacement database.
 
 - [ ] **Step 5: Run storage verification**
 

@@ -268,7 +268,8 @@ private slots:
         const qreal referenceWidth = bubbleWidth(QStringLiteral("Hey Daniel!"));
         const qreal wrappedWidth = bubbleWidth(
             QStringLiteral("Pretty good, just working on some stuff. You?"));
-        QVERIFY(shortWidth >= 158.0);
+        QVERIFY(shortWidth >= 70.0);
+        QVERIFY(shortWidth < 100.0);
         QVERIFY(shortWidth < referenceWidth);
         QVERIFY(referenceWidth < wrappedWidth);
         QVERIFY(wrappedWidth <= 360.0);

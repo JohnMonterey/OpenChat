@@ -15,18 +15,34 @@ Item {
     readonly property real directionalLimit: outgoing
         ? Math.min(338, maximumBubbleWidth)
         : Math.min(290, maximumBubbleWidth)
-    readonly property real minimumBubbleWidth: kind === 1 ? 158 : 190
+    readonly property real bubbleTailWidth: 9
+    readonly property real bodyLeadingInset: outgoing ? 0 : bubbleTailWidth
+    readonly property real bodyTrailingInset: outgoing ? bubbleTailWidth : 0
+    readonly property real contentPadding: 14
+    readonly property real contentLeftInset: bodyLeadingInset + contentPadding
+    readonly property real contentRightInset: bodyTrailingInset + contentPadding
+    readonly property real horizontalContentInset: contentLeftInset + contentRightInset
     readonly property real preferredBubbleWidth: kind === 1
         ? 158
-        : Math.max(Math.min(minimumBubbleWidth, directionalLimit),
-                   Math.min(directionalLimit,
-                            messageBody.implicitWidth + messageTime.implicitWidth + 140))
+        : Math.min(directionalLimit,
+                   Math.max(naturalMessageBody.implicitWidth + horizontalContentInset,
+                            messageTime.implicitWidth + horizontalContentInset))
     readonly property real bubbleWidth: Math.min(maximumBubbleWidth, preferredBubbleWidth)
-    readonly property real bubbleHeight: Math.max(kind === 1 ? 54 : 50,
-                                                   messageBody.paintedHeight + 24)
+    readonly property real bubbleHeight: kind === 1
+        ? 54
+        : Math.max(54, messageBody.paintedHeight + messageTime.implicitHeight + 21)
     readonly property real dateSectionHeight: showDateDivider ? 64 : 0
 
     implicitHeight: dateSectionHeight + bubbleHeight + 20
+
+    Text {
+        id: naturalMessageBody
+        visible: false
+        text: delegateRoot.body
+        font.family: Theme.uiFont
+        font.pixelSize: delegateRoot.kind === 1 ? 22 : 16
+        wrapMode: Text.NoWrap
+    }
 
     Item {
         objectName: "scrollingDateDivider"
@@ -72,7 +88,7 @@ Item {
         height: delegateRoot.bubbleHeight
         outgoing: delegateRoot.outgoing
         radius: 6
-        tailWidth: 9
+        tailWidth: delegateRoot.bubbleTailWidth
         tailHeight: 13
         fillTop: delegateRoot.outgoing ? "#fdfefe" : "#edf8ff"
         fillBottom: delegateRoot.outgoing ? "#f4f8fb" : "#e2f2fc"
@@ -81,9 +97,15 @@ Item {
 
     Text {
         id: messageBody
-        x: bubble.x + (delegateRoot.outgoing ? 14 : 23)
+        x: delegateRoot.kind === 1
+            ? bubble.x + delegateRoot.contentLeftInset
+            : bubble.x + delegateRoot.contentLeftInset
+              + (bubble.width - delegateRoot.horizontalContentInset - width) / 2
         y: bubble.y + (delegateRoot.kind === 1 ? 10 : 11)
-        width: bubble.width - messageTime.implicitWidth - (delegateRoot.outgoing ? 49 : 58)
+        width: delegateRoot.kind === 1
+            ? bubble.width - messageTime.implicitWidth - (delegateRoot.outgoing ? 49 : 58)
+            : Math.min(naturalMessageBody.implicitWidth,
+                       bubble.width - delegateRoot.horizontalContentInset)
         text: delegateRoot.body
         color: Theme.textPrimary
         font.family: Theme.uiFont
@@ -96,14 +118,20 @@ Item {
     Text {
         id: messageTime
         objectName: "messageTimestamp"
-        anchors.right: bubble.right
-        anchors.rightMargin: delegateRoot.outgoing ? 14 : 13
-        anchors.bottom: bubble.bottom
-        anchors.bottomMargin: 11
+        x: delegateRoot.kind === 1
+            ? bubble.x + bubble.width - implicitWidth - (delegateRoot.outgoing ? 14 : 13)
+            : bubble.x + delegateRoot.contentLeftInset
+        y: delegateRoot.kind === 1
+            ? bubble.y + bubble.height - implicitHeight - 11
+            : messageBody.y + messageBody.paintedHeight + 3
+        width: delegateRoot.kind === 1
+            ? implicitWidth
+            : bubble.width - delegateRoot.horizontalContentInset
         text: String(delegateRoot.timestamp)
         color: "#92a2b4"
         font.family: Theme.uiFont
         font.pixelSize: 12
+        horizontalAlignment: Text.AlignRight
         renderType: Text.NativeRendering
     }
 }

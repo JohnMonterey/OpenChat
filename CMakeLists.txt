@@ -24,6 +24,7 @@ qt_add_executable(OpenChat
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/render/BubbleBackground.cpp
+    src/render/AvatarArtwork.cpp
 )
 
 qt_add_qml_module(OpenChat
@@ -88,6 +89,7 @@ add_test(NAME tst_chatcontroller COMMAND tst_chatcontroller)
 add_executable(tst_bubblebackground
     tests/tst_bubblebackground.cpp
     src/render/BubbleBackground.cpp
+    src/render/AvatarArtwork.cpp
 )
 target_include_directories(tst_bubblebackground PRIVATE src)
 target_link_libraries(tst_bubblebackground PRIVATE Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
@@ -99,6 +101,7 @@ add_executable(tst_qmlload
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/render/BubbleBackground.cpp
+    src/render/AvatarArtwork.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE

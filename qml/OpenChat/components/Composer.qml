@@ -6,6 +6,8 @@ Item {
     objectName: "messageComposer"
     required property var controller
     signal messageSent
+    readonly property real inputHeight: Math.max(48, Math.min(112, Math.ceil(input.contentHeight) + 20))
+    implicitHeight: inputHeight + 34
 
     Rectangle {
         anchors.fill: parent
@@ -19,52 +21,69 @@ Item {
         color: Theme.rule
     }
 
-    Rectangle {
+    Item {
         id: inputFrame
+        objectName: "composerInputFrame"
         x: 17
         y: 17
         width: parent.width - 142
-        height: parent.height - 34
-        radius: 5
-        color: "#ffffff"
-        border.width: 1
-        border.color: Theme.inputBorder
+        height: composer.inputHeight
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 5
+            color: "#ffffff"
+        }
 
         TextEdit {
             id: input
             objectName: "messageInput"
-            x: 12
-            y: 10
-            width: parent.width - 56
-            height: parent.height - 20
+            anchors.left: parent.left
+            anchors.right: attachment.left
+            anchors.leftMargin: 12
+            anchors.rightMargin: 8
+            anchors.verticalCenter: parent.verticalCenter
+            height: Math.max(contentHeight, 20)
             text: composer.controller.composerText
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 16
             wrapMode: TextEdit.Wrap
             selectByMouse: true
-            clip: true
+            clip: false
             onTextChanged: {
                 if (text !== composer.controller.composerText)
-                    composer.controller.setComposerText(text)
+                    composer.controller.setComposerText(text);
             }
             Keys.onReturnPressed: event => {
                 if (!(event.modifiers & Qt.ShiftModifier) && composer.controller.canSend) {
-                    composer.controller.sendMessage()
-                    composer.messageSent()
-                    event.accepted = true
+                    composer.controller.sendMessage();
+                    composer.messageSent();
+                    event.accepted = true;
                 }
             }
         }
 
-        Rectangle {
+        Item {
+            id: attachment
+            objectName: "attachmentButton"
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             anchors.right: parent.right
             width: 38
-            radius: 5
-            color: "#fbfdfe"
-            border.width: 0
+
+            Rectangle {
+                anchors.fill: parent
+                radius: 5
+                color: "#fbfdfe"
+            }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width / 2
+                height: parent.height
+                color: "#fbfdfe"
+            }
 
             Rectangle {
                 anchors.left: parent.left
@@ -78,7 +97,42 @@ Item {
                 height: 7
                 source: Qt.resolvedUrl("../../../assets/icons/chevron-down.svg")
             }
-            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+            }
+        }
+
+        // Restrained Aero inset: a shadow along the inner top/left edges and a
+        // faint highlight opposite it. The shared outer outline is drawn last.
+        Rectangle {
+            x: 5
+            y: 1
+            width: parent.width - 10
+            height: 1
+            color: "#24526878"
+        }
+        Rectangle {
+            x: 1
+            y: 5
+            width: 1
+            height: parent.height - 10
+            color: "#18526878"
+        }
+        Rectangle {
+            x: 5
+            y: parent.height - 2
+            width: parent.width - 10
+            height: 1
+            color: "#70ffffff"
+        }
+        Rectangle {
+            anchors.fill: parent
+            z: 10
+            radius: 5
+            color: "transparent"
+            border.width: 1
+            border.color: Theme.inputBorder
         }
     }
 
@@ -88,7 +142,7 @@ Item {
         property bool enabled: composer.controller.canSend
         signal clicked
         x: inputFrame.x + inputFrame.width + 17
-        y: 32
+        y: Math.round((parent.height - height) / 2)
         width: parent.width - x - 18
         height: 43
 
@@ -117,7 +171,7 @@ Item {
         }
         onClicked: {
             if (send.enabled && composer.controller.sendMessage())
-                composer.messageSent()
+                composer.messageSent();
         }
     }
 }

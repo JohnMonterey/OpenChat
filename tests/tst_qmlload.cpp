@@ -5,6 +5,7 @@
 #include <QtTest>
 
 #include "controllers/ChatController.h"
+#include "render/AvatarArtwork.h"
 #include "render/BubbleBackground.h"
 
 class QmlLoadTest final : public QObject
@@ -82,6 +83,45 @@ private slots:
             root->findChild<QObject *>(QStringLiteral("messageList"));
         QVERIFY(messageList);
         QTRY_VERIFY(messageList->property("atYEnd").toBool());
+    }
+
+    void composerUsesUnifiedAdaptiveInputFrame()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QObject *composer = root->findChild<QObject *>(QStringLiteral("messageComposer"));
+        QObject *frame = root->findChild<QObject *>(QStringLiteral("composerInputFrame"));
+        QObject *attachment = root->findChild<QObject *>(QStringLiteral("attachmentButton"));
+        QObject *input = root->findChild<QObject *>(QStringLiteral("messageInput"));
+        QVERIFY(composer);
+        QVERIFY(frame);
+        QVERIFY(attachment);
+        QVERIFY(input);
+
+        QCoreApplication::processEvents();
+        const qreal singleLineHeight = frame->property("height").toReal();
+        QVERIFY(singleLineHeight >= 46.0);
+        QVERIFY(singleLineHeight <= 50.0);
+        QCOMPARE(attachment->property("height").toReal(), singleLineHeight);
+        QCOMPARE(attachment->property("y").toReal(), 0.0);
+
+        QVERIFY(input->setProperty("text", QStringLiteral("First line\nSecond line\nThird line")));
+        QCoreApplication::processEvents();
+        const qreal multilineHeight = frame->property("height").toReal();
+        QVERIFY(multilineHeight > singleLineHeight);
+        QCOMPARE(attachment->property("height").toReal(), multilineHeight);
+        QCOMPARE(composer->property("height").toReal(), multilineHeight + 34.0);
+
+        QVERIFY(input->setProperty("text", QString()));
+        QCoreApplication::processEvents();
+        QCOMPARE(frame->property("height").toReal(), singleLineHeight);
     }
 
     void messageTimestampFormatting()
@@ -194,6 +234,25 @@ private slots:
         QVERIFY(fallback);
         QVERIFY(fallback->property("visible").toBool());
     }
+
+    void avatarUsesRoundedArtworkMask()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "Avatar");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        QScopedPointer<QObject> avatar(component.createWithInitialProperties(
+            {{QStringLiteral("avatarKey"), QStringLiteral("landscape")},
+             {QStringLiteral("width"), 44},
+             {QStringLiteral("height"), 44}}));
+        QVERIFY(avatar);
+        QVERIFY(avatar->property("usesRoundedArtworkMask").toBool());
+        QObject *artwork = avatar->findChild<QObject *>(QStringLiteral("roundedAvatarArtwork"));
+        QVERIFY(artwork);
+        QCOMPARE(artwork->property("cornerRadius").toReal(), 5.0);
+    }
 };
 
 int main(int argc, char **argv)
@@ -203,6 +262,8 @@ int main(int argc, char **argv)
     QGuiApplication application(argc, argv);
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
+    qmlRegisterType<OpenChat::AvatarArtwork>(
+        "OpenChat.Native", 1, 0, "AvatarArtwork");
     QmlLoadTest test;
     return QTest::qExec(&test, argc, argv);
 }

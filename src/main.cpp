@@ -12,6 +12,7 @@
 
 #include "app/AppMetadata.h"
 #include "controllers/ChatController.h"
+#include "render/AvatarArtwork.h"
 #include "render/BubbleBackground.h"
 
 int main(int argc, char *argv[])
@@ -42,6 +43,8 @@ int main(int argc, char *argv[])
 
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
+    qmlRegisterType<OpenChat::AvatarArtwork>(
+        "OpenChat.Native", 1, 0, "AvatarArtwork");
 
     OpenChat::ChatController chatController;
     QQmlApplicationEngine engine;

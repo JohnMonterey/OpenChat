@@ -63,7 +63,7 @@ Window {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                height: Theme.composerHeight
+                height: implicitHeight
                 controller: root.chatController
                 onMessageSent: history.positionAtEnd()
             }

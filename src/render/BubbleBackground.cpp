@@ -169,12 +169,15 @@ void BubbleBackground::paint(QPainter *painter)
 QPainterPath BubbleBackground::makePath(const QRectF &bounds, bool outgoing, qreal radius,
                                         qreal tailWidth, qreal tailHeight)
 {
-    const QPainterPath incoming = incomingPath(bounds, radius, tailWidth, tailHeight);
+    // QPainter centers a 1 px cosmetic pen on the path. Keeping the path half a
+    // pixel inside the item prevents any side of the outline from being clipped.
+    const QRectF strokeSafeBounds = bounds.normalized().adjusted(0.5, 0.5, -0.5, -0.5);
+    const QPainterPath incoming = incomingPath(strokeSafeBounds, radius, tailWidth, tailHeight);
     if (!outgoing)
         return incoming;
 
     QTransform mirror;
-    mirror.translate(bounds.left() + bounds.right(), 0.0);
+    mirror.translate(strokeSafeBounds.left() + strokeSafeBounds.right(), 0.0);
     mirror.scale(-1.0, 1.0);
     return mirror.map(incoming);
 }

@@ -44,3 +44,12 @@ add_executable(tst_appmetadata tests/tst_appmetadata.cpp)
 target_include_directories(tst_appmetadata PRIVATE src)
 target_link_libraries(tst_appmetadata PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_appmetadata COMMAND tst_appmetadata)
+
+add_executable(tst_models
+    tests/tst_models.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
+)
+target_include_directories(tst_models PRIVATE src)
+target_link_libraries(tst_models PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME tst_models COMMAND tst_models)

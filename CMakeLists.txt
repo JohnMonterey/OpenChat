@@ -7,7 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Svg Test)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Quick QuickControls2 Svg Test)
+find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
+
+include(cmake/dependencies/QtKeychain.cmake)
 
 qt_standard_project_setup(REQUIRES 6.5)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
@@ -78,10 +81,25 @@ add_library(openchat_domain STATIC
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)
 
+add_library(openchat_security STATIC
+    src/security/SecureBuffer.cpp
+    src/security/QtKeychainVault.cpp
+)
+target_include_directories(openchat_security PUBLIC src)
+target_link_libraries(openchat_security
+    PUBLIC openchat_domain Qt6::Core
+    PRIVATE OpenSSL::Crypto qt6keychain
+)
+
 add_executable(tst_domain tests/tst_domain.cpp)
 target_include_directories(tst_domain PRIVATE src)
 target_link_libraries(tst_domain PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_domain COMMAND tst_domain)
+
+add_executable(tst_keyvault tests/tst_keyvault.cpp)
+target_include_directories(tst_keyvault PRIVATE src tests)
+target_link_libraries(tst_keyvault PRIVATE openchat_security Qt6::Core Qt6::Test)
+add_test(NAME tst_keyvault COMMAND tst_keyvault)
 
 add_executable(tst_models
     tests/tst_models.cpp

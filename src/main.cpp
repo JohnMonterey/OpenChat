@@ -1,7 +1,9 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+#include <QQmlContext>
 
 #include "app/AppMetadata.h"
+#include "controllers/ChatController.h"
 
 int main(int argc, char *argv[])
 {
@@ -9,7 +11,9 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
 
+    OpenChat::ChatController chatController;
     QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("chatController"), &chatController);
     QObject::connect(
         &engine,
         &QQmlApplicationEngine::objectCreationFailed,
@@ -23,4 +27,3 @@ int main(int argc, char *argv[])
 
     return application.exec();
 }
-

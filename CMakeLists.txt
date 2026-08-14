@@ -17,6 +17,9 @@ set_source_files_properties(qml/OpenChat/Theme.qml PROPERTIES
 
 qt_add_executable(OpenChat
     src/main.cpp
+    src/controllers/ChatController.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
 )
 
 qt_add_qml_module(OpenChat
@@ -53,3 +56,13 @@ add_executable(tst_models
 target_include_directories(tst_models PRIVATE src)
 target_link_libraries(tst_models PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_models COMMAND tst_models)
+
+add_executable(tst_chatcontroller
+    tests/tst_chatcontroller.cpp
+    src/controllers/ChatController.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
+)
+target_include_directories(tst_chatcontroller PRIVATE src)
+target_link_libraries(tst_chatcontroller PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME tst_chatcontroller COMMAND tst_chatcontroller)

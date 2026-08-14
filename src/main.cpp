@@ -1,15 +1,20 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <qqml.h>
 
 #include "app/AppMetadata.h"
 #include "controllers/ChatController.h"
+#include "render/BubbleBackground.h"
 
 int main(int argc, char *argv[])
 {
     QGuiApplication application(argc, argv);
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
+
+    qmlRegisterType<OpenChat::BubbleBackground>(
+        "OpenChat.Native", 1, 0, "BubbleBackground");
 
     OpenChat::ChatController chatController;
     QQmlApplicationEngine engine;

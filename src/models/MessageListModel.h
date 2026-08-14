@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QDateTime>
 #include <QVector>
 
 #include <optional>
@@ -20,6 +21,8 @@ public:
         BodyRole,
         TimestampRole,
         KindRole,
+        DateLabelRole,
+        ShowDateDividerRole,
     };
     Q_ENUM(Role)
 
@@ -32,6 +35,7 @@ public:
 
     void setMessages(QVector<Message> messages);
     bool appendOutgoing(const QString &body, const QTime &timestamp);
+    bool appendOutgoing(const QString &body, const QDateTime &sentAt);
     [[nodiscard]] std::optional<Message> messageAt(int row) const;
 
 signals:

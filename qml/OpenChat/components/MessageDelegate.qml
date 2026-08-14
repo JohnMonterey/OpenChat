@@ -8,6 +8,8 @@ Item {
     required property string body
     required property string timestamp
     required property int kind
+    required property string dateLabel
+    required property bool showDateDivider
     readonly property bool outgoing: direction === 1
     readonly property real maximumBubbleWidth: Math.min(360, width * 0.68)
     readonly property real directionalLimit: outgoing
@@ -22,13 +24,50 @@ Item {
     readonly property real bubbleWidth: Math.min(maximumBubbleWidth, preferredBubbleWidth)
     readonly property real bubbleHeight: Math.max(kind === 1 ? 54 : 50,
                                                    messageBody.paintedHeight + 24)
+    readonly property real dateSectionHeight: showDateDivider ? 64 : 0
 
-    implicitHeight: bubbleHeight + 20
+    implicitHeight: dateSectionHeight + bubbleHeight + 20
+
+    Item {
+        objectName: "scrollingDateDivider"
+        x: 18
+        y: 20
+        width: parent.width - 36
+        height: 32
+        visible: delegateRoot.showDateDivider
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: dateText.left
+            anchors.rightMargin: 10
+            anchors.verticalCenter: parent.verticalCenter
+            height: 1
+            color: "#d7e1e8"
+        }
+        Text {
+            id: dateText
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.verticalCenter: parent.verticalCenter
+            text: delegateRoot.dateLabel
+            color: Theme.textSecondary
+            font.family: Theme.uiFont
+            font.pixelSize: 14
+            renderType: Text.NativeRendering
+        }
+        Rectangle {
+            anchors.left: dateText.right
+            anchors.leftMargin: 10
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            height: 1
+            color: "#d7e1e8"
+        }
+    }
 
     BubbleBackground {
         id: bubble
         x: delegateRoot.outgoing ? delegateRoot.width - bubble.width - 17 : 16
-        y: 0
+        y: delegateRoot.dateSectionHeight
         width: delegateRoot.bubbleWidth
         height: delegateRoot.bubbleHeight
         outgoing: delegateRoot.outgoing

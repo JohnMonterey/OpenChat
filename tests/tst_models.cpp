@@ -95,6 +95,41 @@ private slots:
         QCOMPARE(model.data(model.index(0), MessageListModel::TimestampRole).toString(), "10:19 AM");
     }
 
+    void datesCreateDividersOnlyAtCalendarDayBoundaries()
+    {
+        MessageListModel model;
+        model.setMessages({
+            {OpenChat::MessageDirection::Incoming, QStringLiteral("First"), QTime(10, 15),
+             OpenChat::MessageKind::Text, QDate(2010, 5, 24)},
+            {OpenChat::MessageDirection::Outgoing, QStringLiteral("Same day"), QTime(10, 16),
+             OpenChat::MessageKind::Text, QDate(2010, 5, 24)},
+            {OpenChat::MessageDirection::Incoming, QStringLiteral("Next day"), QTime(9, 0),
+             OpenChat::MessageKind::Text, QDate(2010, 5, 25)},
+        });
+
+        QCOMPARE(model.data(model.index(0), MessageListModel::DateLabelRole).toString(),
+                 QStringLiteral("May 24, 2010"));
+        QCOMPARE(model.data(model.index(0), MessageListModel::ShowDateDividerRole).toBool(), true);
+        QCOMPARE(model.data(model.index(1), MessageListModel::ShowDateDividerRole).toBool(), false);
+        QCOMPARE(model.data(model.index(2), MessageListModel::DateLabelRole).toString(),
+                 QStringLiteral("May 25, 2010"));
+        QCOMPARE(model.data(model.index(2), MessageListModel::ShowDateDividerRole).toBool(), true);
+    }
+
+    void datedOutgoingMessageRetainsItsCalendarDate()
+    {
+        MessageListModel model;
+
+        QVERIFY(model.appendOutgoing(
+            QStringLiteral("After midnight"),
+            QDateTime(QDate(2026, 8, 15), QTime(0, 1))));
+
+        QCOMPARE(model.data(model.index(0), MessageListModel::DateLabelRole).toString(),
+                 QStringLiteral("August 15, 2026"));
+        QCOMPARE(model.data(model.index(0), MessageListModel::TimestampRole).toString(),
+                 QStringLiteral("12:01 AM"));
+    }
+
     void whitespaceMessageIsRejected()
     {
         MessageListModel model;

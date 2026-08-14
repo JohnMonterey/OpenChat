@@ -1,12 +1,30 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
+#include <QQuickItem>
 #include <QWindow>
 #include <QtTest>
 
 #include "controllers/ChatController.h"
 #include "render/AvatarArtwork.h"
 #include "render/BubbleBackground.h"
+
+namespace {
+
+QQuickItem *findVisualItem(QQuickItem *root, const QString &objectName)
+{
+    if (!root)
+        return nullptr;
+    if (root->objectName() == objectName)
+        return root;
+    for (QQuickItem *child : root->childItems()) {
+        if (QQuickItem *match = findVisualItem(child, objectName))
+            return match;
+    }
+    return nullptr;
+}
+
+} // namespace
 
 class QmlLoadTest final : public QObject
 {
@@ -85,6 +103,43 @@ private slots:
         QTRY_VERIFY(messageList->property("atYEnd").toBool());
     }
 
+    void messageListStartsAtHistoryTopWithoutStationaryDivider()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QObject *history = root->findChild<QObject *>(QStringLiteral("messageHistory"));
+        QObject *messageList = root->findChild<QObject *>(QStringLiteral("messageList"));
+        QVERIFY(history);
+        QVERIFY(messageList);
+        QCOMPARE(messageList->property("y").toReal(), 0.0);
+
+        auto *listItem = qobject_cast<QQuickItem *>(messageList);
+        QVERIFY(listItem);
+        QTRY_VERIFY(findVisualItem(listItem, QStringLiteral("scrollingDateDivider")));
+        QQuickItem *divider =
+            findVisualItem(listItem, QStringLiteral("scrollingDateDivider"));
+        root->setProperty("height", 560);
+        QTRY_VERIFY(messageList->property("atYEnd").toBool());
+        const qreal maximumContentY = messageList->property("contentHeight").toReal()
+            - messageList->property("height").toReal();
+        QVERIFY(maximumContentY > 0.0);
+        QVERIFY(QMetaObject::invokeMethod(messageList, "positionViewAtBeginning"));
+        QTRY_VERIFY(messageList->property("atYBeginning").toBool());
+        const qreal dividerAtBeginning = divider->mapToItem(listItem, QPointF()).y();
+
+        QVERIFY(QMetaObject::invokeMethod(messageList, "positionViewAtEnd"));
+        QTRY_VERIFY(messageList->property("atYEnd").toBool());
+        const qreal dividerAtEnd = divider->mapToItem(listItem, QPointF()).y();
+        QVERIFY(dividerAtEnd < dividerAtBeginning);
+    }
+
     void composerUsesUnifiedAdaptiveInputFrame()
     {
         OpenChat::ChatController controller;
@@ -137,6 +192,8 @@ private slots:
              {QStringLiteral("body"), QStringLiteral("Hello")},
              {QStringLiteral("timestamp"), QStringLiteral("10:15 AM")},
              {QStringLiteral("kind"), 0},
+             {QStringLiteral("dateLabel"), QStringLiteral("May 24, 2010")},
+             {QStringLiteral("showDateDivider"), false},
              {QStringLiteral("width"), 540}}));
         QVERIFY(delegate);
         QObject *timestamp =
@@ -201,6 +258,8 @@ private slots:
                  {QStringLiteral("body"), body},
                  {QStringLiteral("timestamp"), QStringLiteral("10:15 AM")},
                  {QStringLiteral("kind"), 0},
+                 {QStringLiteral("dateLabel"), QStringLiteral("May 24, 2010")},
+                 {QStringLiteral("showDateDivider"), false},
                  {QStringLiteral("width"), 540}}));
             return delegate ? delegate->property("bubbleWidth").toDouble() : -1.0;
         };

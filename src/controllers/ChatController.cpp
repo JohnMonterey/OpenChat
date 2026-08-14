@@ -1,6 +1,6 @@
 #include "controllers/ChatController.h"
 
-#include <QTime>
+#include <QDateTime>
 
 namespace OpenChat {
 
@@ -20,16 +20,18 @@ QVector<Contact> referenceContacts()
 
 QVector<Message> michaelConversation()
 {
+    const QDate referenceDate(2010, 5, 24);
     return {
-        {MessageDirection::Incoming, "Hey Daniel!", QTime(10, 15), MessageKind::Text},
+        {MessageDirection::Incoming, "Hey Daniel!", QTime(10, 15), MessageKind::Text,
+         referenceDate},
         {MessageDirection::Outgoing, "Hey Michael, how’s it going?", QTime(10, 16),
-         MessageKind::Text},
+         MessageKind::Text, referenceDate},
         {MessageDirection::Incoming, "Pretty good, just working on some stuff. You?",
-         QTime(10, 17), MessageKind::Text},
+         QTime(10, 17), MessageKind::Text, referenceDate},
         {MessageDirection::Outgoing, "Same here. Almost done for the day thankfully.",
-         QTime(10, 18), MessageKind::Text},
+         QTime(10, 18), MessageKind::Text, referenceDate},
         {MessageDirection::Incoming, QString::fromUtf8("🙂"), QTime(10, 18),
-         MessageKind::Emoji},
+         MessageKind::Emoji, referenceDate},
     };
 }
 
@@ -139,12 +141,12 @@ bool ChatController::sendMessage()
     if (body.isEmpty())
         return false;
 
-    const QTime timestamp = QTime::currentTime();
-    if (!m_messages.appendOutgoing(body, timestamp))
+    const QDateTime sentAt = QDateTime::currentDateTime();
+    if (!m_messages.appendOutgoing(body, sentAt))
         return false;
 
     m_messagesByContact[m_currentContactId].append(
-        {MessageDirection::Outgoing, body, timestamp, MessageKind::Text});
+        {MessageDirection::Outgoing, body, sentAt.time(), MessageKind::Text, sentAt.date()});
     setComposerText({});
     return true;
 }

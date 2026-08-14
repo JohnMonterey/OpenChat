@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDate>
 #include <QString>
 #include <QTime>
 
@@ -20,6 +21,7 @@ struct Message {
     QString body;
     QTime timestamp;
     MessageKind kind = MessageKind::Text;
+    QDate date;
 };
 
 } // namespace OpenChat

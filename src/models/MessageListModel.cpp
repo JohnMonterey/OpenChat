@@ -1,5 +1,7 @@
 #include "models/MessageListModel.h"
 
+#include <QLocale>
+
 namespace OpenChat {
 
 MessageListModel::MessageListModel(QObject *parent)
@@ -29,6 +31,13 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         return message.timestamp.toString(QStringLiteral("h:mm AP"));
     case KindRole:
         return static_cast<int>(message.kind);
+    case DateLabelRole:
+        return message.date.isValid()
+            ? QLocale(QLocale::English).toString(message.date, QStringLiteral("MMMM d, yyyy"))
+            : QString();
+    case ShowDateDividerRole:
+        return message.date.isValid()
+            && (index.row() == 0 || m_messages.at(index.row() - 1).date != message.date);
     default:
         return {};
     }
@@ -41,6 +50,8 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {BodyRole, "body"},
         {TimestampRole, "timestamp"},
         {KindRole, "kind"},
+        {DateLabelRole, "dateLabel"},
+        {ShowDateDividerRole, "showDateDivider"},
     };
 }
 
@@ -61,13 +72,19 @@ void MessageListModel::setMessages(QVector<Message> messages)
 
 bool MessageListModel::appendOutgoing(const QString &body, const QTime &timestamp)
 {
+    return appendOutgoing(body, QDateTime(QDate::currentDate(), timestamp));
+}
+
+bool MessageListModel::appendOutgoing(const QString &body, const QDateTime &sentAt)
+{
     const QString trimmedBody = body.trimmed();
-    if (trimmedBody.isEmpty())
+    if (trimmedBody.isEmpty() || !sentAt.isValid())
         return false;
 
     const int row = m_messages.size();
     beginInsertRows({}, row, row);
-    m_messages.append({MessageDirection::Outgoing, trimmedBody, timestamp, MessageKind::Text});
+    m_messages.append({MessageDirection::Outgoing, trimmedBody, sentAt.time(), MessageKind::Text,
+                       sentAt.date()});
     endInsertRows();
     emit countChanged();
     return true;

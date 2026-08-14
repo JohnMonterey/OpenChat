@@ -1,8 +1,8 @@
-# ClearChat Interface Design
+# OpenChat Interface Design
 
 ## Objective
 
-Build a cross-platform C++ desktop chat prototype that faithfully reproduces the supplied ClearChat reference. The application uses Windows 7 Aero visual language and a compact two-pane contacts/conversation layout. It is a local interactive prototype: it does not implement accounts, networking, persistence, voice, or video.
+Build a cross-platform C++ desktop chat prototype named OpenChat that faithfully reproduces the supplied reference. The application uses Windows 7 Aero visual language and a compact two-pane contacts/conversation layout. It is a local interactive prototype: it does not implement accounts, networking, persistence, voice, or video.
 
 The supplied PNG is the visual source of truth. The earlier NIMBI brand and Discord-like multi-rail layout are out of scope and must not influence the implementation.
 
@@ -11,7 +11,7 @@ The supplied PNG is the visual source of truth. The earlier NIMBI brand and Disc
 The prototype supports:
 
 - a frameless Aero-style application window with minimize, maximize/restore, close, drag, and resize behavior;
-- the ClearChat title and compact application icon;
+- the OpenChat title and compact application icon;
 - current-user presence and status;
 - Favorites and Contacts categories;
 - contact selection and local search filtering;
@@ -132,7 +132,7 @@ QML does not own application data, fabricate list entries, or duplicate controll
 
 ## Acceptance Criteria
 
-- The running application is recognizably the supplied ClearChat reference at first glance and under close inspection.
+- The running OpenChat application is recognizably the supplied reference at first glance and under close inspection.
 - There are no lines between individual contact rows; only category boundaries divide the list.
 - Bubble tails are part of the bubble path, remain connected at every tested size, and mirror correctly by direction.
 - Long messages wrap within the defined cap and expand the bubble vertically.
@@ -140,4 +140,3 @@ QML does not own application data, fabricate list entries, or duplicate controll
 - Search, contact selection, typing, and sending work with local data.
 - The application builds and launches on the current Linux environment using Qt 6, with no architecture that prevents Windows or macOS builds.
 - Automated tests pass and the final running-window screenshot has been visually checked against the supplied reference.
-

@@ -16,7 +16,7 @@ private slots:
 
         QCOMPARE(controller.currentContactName(), "Michael");
         QCOMPARE(controller.currentStatusText(), "Available");
-        QCOMPARE(controller.currentAvatarKey(), "landscape");
+        QCOMPARE(controller.currentAvatarKey(), "michael");
         QCOMPARE(controller.messages()->rowCount(), 5);
         QCOMPARE(controller.messages()->data(controller.messages()->index(0),
                                               MessageListModel::BodyRole).toString(),

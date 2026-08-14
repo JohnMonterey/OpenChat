@@ -27,17 +27,25 @@ Item {
         width: parent.width
         height: 88
 
-        PresenceBead { x: 17; y: 30; beadSize: 13; presence: 0 }
+        Avatar {
+            objectName: "localUserAvatar"
+            x: 13
+            y: 22
+            width: 44
+            height: 44
+            avatarKey: "userpfp_none"
+        }
         Text {
-            x: 41; y: 24
+            x: 67; y: 22
             text: "Daniel"
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 17
             renderType: Text.NativeRendering
         }
+        PresenceBead { x: 67; y: 51; beadSize: 11; presence: 0 }
         Text {
-            x: 41; y: 48
+            x: 84; y: 46
             text: "Available"
             color: Theme.textSecondary
             font.family: Theme.uiFont
@@ -45,7 +53,7 @@ Item {
             renderType: Text.NativeRendering
         }
         Text {
-            x: 116; y: 29
+            x: 159; y: 28
             text: "▾"
             color: Theme.iconInk
             font.pixelSize: 13

@@ -1,11 +1,61 @@
 #include "render/AvatarArtwork.h"
 
 #include <QLinearGradient>
+#include <QImage>
 #include <QPainter>
 
 #include <algorithm>
 
 namespace OpenChat {
+
+namespace {
+
+QString photoResourcePath(const QString &avatarKey)
+{
+    if (avatarKey == QStringLiteral("michael"))
+        return QStringLiteral(":/qt/qml/OpenChat/assets/michael.png");
+    if (avatarKey == QStringLiteral("jessica"))
+        return QStringLiteral(":/qt/qml/OpenChat/assets/Jessica.png");
+    if (avatarKey == QStringLiteral("alex"))
+        return QStringLiteral(":/qt/qml/OpenChat/assets/alex.png");
+    if (avatarKey == QStringLiteral("ryan"))
+        return QStringLiteral(":/qt/qml/OpenChat/assets/ryan.png");
+    if (avatarKey == QStringLiteral("userpfp_none"))
+        return QStringLiteral(":/qt/qml/OpenChat/assets/userpfp_none.png");
+    return {};
+}
+
+QRectF centeredCrop(const QSize &imageSize, const QSizeF &targetSize)
+{
+    QRectF source(QPointF(), imageSize);
+    if (imageSize.isEmpty() || targetSize.isEmpty())
+        return source;
+
+    const qreal sourceAspect = source.width() / source.height();
+    const qreal targetAspect = targetSize.width() / targetSize.height();
+    if (sourceAspect > targetAspect) {
+        const qreal croppedWidth = source.height() * targetAspect;
+        source.setLeft((source.width() - croppedWidth) / 2.0);
+        source.setWidth(croppedWidth);
+    } else if (sourceAspect < targetAspect) {
+        const qreal croppedHeight = source.width() / targetAspect;
+        source.setTop((source.height() - croppedHeight) / 2.0);
+        source.setHeight(croppedHeight);
+    }
+    return source;
+}
+
+QRectF photoSourceRect(const QString &avatarKey, const QSize &imageSize,
+                       const QSizeF &targetSize)
+{
+    if (avatarKey == QStringLiteral("userpfp_none"))
+        return centeredCrop(imageSize, targetSize);
+
+    const qreal side = std::min(imageSize.width(), imageSize.height()) * 0.62;
+    return QRectF((imageSize.width() - side) / 2.0, 0.0, side, side);
+}
+
+} // namespace
 
 AvatarArtwork::AvatarArtwork(QQuickItem *parent) : QQuickPaintedItem(parent)
 {
@@ -55,6 +105,16 @@ void AvatarArtwork::paint(QPainter *painter)
     const QRectF rect = boundingRect();
     painter->setRenderHint(QPainter::Antialiasing, true);
     painter->setClipPath(makeClipPath(rect, m_cornerRadius), Qt::IntersectClip);
+
+    QImage photo;
+    const QString resourcePath = photoResourcePath(m_avatarKey);
+    if (!resourcePath.isEmpty())
+        photo.load(resourcePath);
+    if (!photo.isNull()) {
+        painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter->drawImage(rect, photo, photoSourceRect(m_avatarKey, photo.size(), rect.size()));
+        return;
+    }
 
     QColor top("#e9c9ae");
     QColor bottom("#a86e4c");

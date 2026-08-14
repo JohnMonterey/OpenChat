@@ -45,6 +45,11 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
     RESOURCES
+        assets/Jessica.png
+        assets/alex.png
+        assets/michael.png
+        assets/ryan.png
+        assets/userpfp_none.png
         assets/icons/video-call.svg
         assets/icons/phone-call.svg
         assets/icons/chevron-down.svg

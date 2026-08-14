@@ -9,11 +9,11 @@ namespace {
 QVector<Contact> referenceContacts()
 {
     return {
-        {"michael", "Michael", Presence::Available, true, "landscape"},
+        {"michael", "Michael", Presence::Available, true, "michael"},
         {"sarah", "Sarah", Presence::Away, true, "sarah"},
         {"alex", "Alex", Presence::Available, false, "alex"},
         {"jessica", "Jessica", Presence::Available, false, "jessica"},
-        {"ryan", "Ryan", Presence::Away, false, "beach"},
+        {"ryan", "Ryan", Presence::Away, false, "ryan"},
         {"tom", "Tom", Presence::Offline, false, "mono"},
     };
 }

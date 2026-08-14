@@ -100,7 +100,7 @@ Item {
         x: delegateRoot.kind === 1
             ? bubble.x + delegateRoot.contentLeftInset
             : bubble.x + delegateRoot.contentLeftInset
-              + (bubble.width - delegateRoot.horizontalContentInset - width) / 2
+              + (bubble.width - delegateRoot.horizontalContentInset - paintedWidth) / 2
         y: bubble.y + (delegateRoot.kind === 1 ? 10 : 11)
         width: delegateRoot.kind === 1
             ? bubble.width - messageTime.implicitWidth - (delegateRoot.outgoing ? 49 : 58)

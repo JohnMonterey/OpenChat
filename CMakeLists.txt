@@ -72,6 +72,17 @@ target_include_directories(tst_appmetadata PRIVATE src)
 target_link_libraries(tst_appmetadata PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_appmetadata COMMAND tst_appmetadata)
 
+add_library(openchat_domain STATIC
+    src/domain/Identifiers.cpp
+)
+target_include_directories(openchat_domain PUBLIC src)
+target_link_libraries(openchat_domain PUBLIC Qt6::Core)
+
+add_executable(tst_domain tests/tst_domain.cpp)
+target_include_directories(tst_domain PRIVATE src)
+target_link_libraries(tst_domain PRIVATE openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_domain COMMAND tst_domain)
+
 add_executable(tst_models
     tests/tst_models.cpp
     src/models/ContactListModel.cpp

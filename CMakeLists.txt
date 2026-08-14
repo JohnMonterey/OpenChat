@@ -31,7 +31,6 @@ qt_add_qml_module(OpenChat
     QML_FILES
         qml/OpenChat/Main.qml
         qml/OpenChat/Theme.qml
-        qml/OpenChat/components/AeroWindowFrame.qml
         qml/OpenChat/components/PresenceBead.qml
         qml/OpenChat/components/Avatar.qml
         qml/OpenChat/components/ContactSidebar.qml
@@ -45,6 +44,7 @@ qt_add_qml_module(OpenChat
         assets/icons/video-call.svg
         assets/icons/phone-call.svg
         assets/icons/chevron-down.svg
+        assets/icons/openchat.svg
 )
 
 target_include_directories(OpenChat PRIVATE src)
@@ -112,3 +112,12 @@ add_test(NAME tst_qmlload COMMAND tst_qmlload)
 set_tests_properties(tst_qmlload PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
 )
+
+add_test(
+    NAME capture_smoke
+    COMMAND ${CMAKE_COMMAND}
+        -DOPENCHAT_EXECUTABLE=$<TARGET_FILE:OpenChat>
+        -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/openchat-capture.png
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
+)
+set_tests_properties(capture_smoke PROPERTIES TIMEOUT 5)

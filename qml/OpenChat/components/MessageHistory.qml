@@ -1,13 +1,18 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import OpenChat
 
 Item {
     id: history
     objectName: "messageHistory"
+    required property var controller
 
     function positionAtEnd() {
         messageList.positionViewAtEnd()
     }
+
+    onHeightChanged: Qt.callLater(positionAtEnd)
 
     Item {
         id: dateDivider
@@ -46,23 +51,20 @@ Item {
 
     ListView {
         id: messageList
+        objectName: "messageList"
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: dateDivider.bottom
-        anchors.topMargin: 4
+        anchors.topMargin: 12
         anchors.bottom: parent.bottom
-        model: chatController.messages
+        model: history.controller.messages
         clip: true
         interactive: contentHeight > height
         boundsBehavior: Flickable.StopAtBounds
         spacing: 0
 
         delegate: MessageDelegate {
-            width: messageList.width
-            messageDirection: model.direction
-            body: model.body
-            timestamp: model.timestamp
-            messageKind: model.kind
+            width: ListView.view.width
         }
 
         onCountChanged: Qt.callLater(positionViewAtEnd)

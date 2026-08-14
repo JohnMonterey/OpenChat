@@ -1,6 +1,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
-#include <QQmlContext>
+#include <QQmlComponent>
+#include <QWindow>
 #include <QtTest>
 
 #include "controllers/ChatController.h"
@@ -15,26 +16,38 @@ private slots:
     {
         OpenChat::ChatController controller;
         QQmlApplicationEngine engine;
-        engine.rootContext()->setContextProperty(QStringLiteral("chatController"), &controller);
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
         engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
         engine.loadFromModule("OpenChat", "Main");
 
         QCOMPARE(engine.rootObjects().size(), 1);
         QObject *root = engine.rootObjects().constFirst();
+        auto *window = qobject_cast<QWindow *>(root);
+        QVERIFY(window);
         QCOMPARE(root->property("minimumWidth").toInt(), 720);
         QCOMPARE(root->property("minimumHeight").toInt(), 560);
-        QVERIFY(root->findChild<QObject *>(QStringLiteral("aeroWindowFrame")));
-        QVERIFY(root->findChild<QObject *>(QStringLiteral("contactSidebar")));
+        QVERIFY(!(window->flags() & Qt::FramelessWindowHint));
+        QVERIFY(!root->findChild<QObject *>(QStringLiteral("aeroWindowFrame")));
+        QObject *sidebar =
+            root->findChild<QObject *>(QStringLiteral("contactSidebar"));
+        QVERIFY(sidebar);
         QVERIFY(root->findChild<QObject *>(QStringLiteral("favoritesCategory")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("contactsCategory")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("contactSearch")));
+
+        window->setHeight(560);
+        QCoreApplication::processEvents();
+        QVERIFY(sidebar->property("contactRowHeight").toDouble() >= 44.0);
+        QVERIFY(sidebar->property("contactRowHeight").toDouble() <= 47.0);
     }
 
     void conversationStructureAndSending()
     {
         OpenChat::ChatController controller;
         QQmlApplicationEngine engine;
-        engine.rootContext()->setContextProperty(QStringLiteral("chatController"), &controller);
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
         engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
         engine.loadFromModule("OpenChat", "Main");
 
@@ -60,6 +73,34 @@ private slots:
         QCoreApplication::processEvents();
         QCOMPARE(controller.messages()->rowCount(), before + 1);
         QCOMPARE(controller.composerText(), QString());
+
+        root->setProperty("height", 560);
+        QCoreApplication::processEvents();
+        QObject *messageList =
+            root->findChild<QObject *>(QStringLiteral("messageList"));
+        QVERIFY(messageList);
+        QTRY_VERIFY(messageList->property("atYEnd").toBool());
+    }
+
+    void messageTimestampFormatting()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        QScopedPointer<QObject> delegate(component.createWithInitialProperties(
+            {{QStringLiteral("direction"), 0},
+             {QStringLiteral("body"), QStringLiteral("Hello")},
+             {QStringLiteral("timestamp"), QStringLiteral("10:15 AM")},
+             {QStringLiteral("kind"), 0},
+             {QStringLiteral("width"), 540}}));
+        QVERIFY(delegate);
+        QObject *timestamp =
+            delegate->findChild<QObject *>(QStringLiteral("messageTimestamp"));
+        QVERIFY(timestamp);
+        QCOMPARE(timestamp->property("text").toString(), QStringLiteral("10:15 AM"));
     }
 };
 

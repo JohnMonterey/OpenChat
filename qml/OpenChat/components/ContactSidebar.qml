@@ -4,6 +4,8 @@ import OpenChat
 Item {
     id: sidebar
     objectName: "contactSidebar"
+    required property var controller
+    readonly property real contactRowHeight: Math.max(44, Math.min(65, (height - 290) / 6))
 
     Rectangle {
         anchors.fill: parent
@@ -78,7 +80,7 @@ Item {
                 font.pixelSize: 14
                 clip: true
                 selectByMouse: true
-                onTextEdited: chatController.setSearchQuery(text)
+                onTextEdited: sidebar.controller.setSearchQuery(text)
 
                 Text {
                     anchors.fill: parent
@@ -118,7 +120,9 @@ Item {
             width: parent.width
             label: "Favorites"
             favoriteCategory: true
-            contactModel: chatController.contacts
+            contactModel: sidebar.controller.contacts
+            controller: sidebar.controller
+            rowHeight: sidebar.contactRowHeight
         }
 
         ContactCategory {
@@ -126,7 +130,9 @@ Item {
             width: parent.width
             label: "Contacts"
             favoriteCategory: false
-            contactModel: chatController.contacts
+            contactModel: sidebar.controller.contacts
+            controller: sidebar.controller
+            rowHeight: sidebar.contactRowHeight
         }
     }
 

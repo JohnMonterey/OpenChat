@@ -36,7 +36,7 @@
 - `src/render/BubbleBackground.{h,cpp}` — single-path bubble/tail geometry and painting.
 - `qml/OpenChat/Main.qml` — transparent top-level window and pane composition.
 - `qml/OpenChat/Theme.qml` — centralized geometry, palette, typography, and gradient values.
-- `qml/OpenChat/components/AeroWindowFrame.qml` — title chrome, caption controls, move, and resize behavior.
+- System window decorations — supplied by the active platform theme (AeroThemePlasma on the development machine), not painted in QML.
 - `qml/OpenChat/components/ContactSidebar.qml` — current user, search, groups, and bottom actions.
 - `qml/OpenChat/components/ContactCategory.qml` — category boundary and rows without per-row rules.
 - `qml/OpenChat/components/ContactRow.qml` — contact thumbnail, presence, labels, and selection wash.
@@ -319,10 +319,9 @@ git add CMakeLists.txt src/main.cpp src/render tests/tst_bubblebackground.cpp
 git commit -m "feat: draw seamless message bubbles"
 ```
 
-### Task 5: Aero window chrome and contact pane
+### Task 5: System window chrome and contact pane
 
 **Files:**
-- Create: `qml/OpenChat/components/AeroWindowFrame.qml`
 - Create: `qml/OpenChat/components/PresenceBead.qml`
 - Create: `qml/OpenChat/components/Avatar.qml`
 - Create: `qml/OpenChat/components/ContactSidebar.qml`
@@ -335,7 +334,7 @@ git commit -m "feat: draw seamless message bubbles"
 
 **Interfaces:**
 - Consumes: `chatController.contacts`, `selectContact`, and `setSearchQuery`.
-- Produces object names: `openChatWindow`, `aeroWindowFrame`, `contactSidebar`, `favoritesCategory`, `contactsCategory`, `contactSearch`.
+- Produces object names: `openChatWindow`, `contactSidebar`, `favoritesCategory`, `contactsCategory`, `contactSearch`.
 
 - [ ] **Step 1: Write the failing QML-load smoke test**
 
@@ -349,6 +348,7 @@ void QmlLoadTest::requiredStructure() {
     auto *root = engine.rootObjects().constFirst();
     QCOMPARE(root->property("minimumWidth").toInt(), 720);
     QCOMPARE(root->property("minimumHeight").toInt(), 560);
+    QVERIFY(!(qobject_cast<QWindow *>(root)->flags() & Qt::FramelessWindowHint));
     QVERIFY(root->findChild<QObject *>("contactSidebar"));
     QVERIFY(root->findChild<QObject *>("favoritesCategory"));
     QVERIFY(root->findChild<QObject *>("contactsCategory"));
@@ -361,17 +361,17 @@ Give this QtTest target a manual `QGuiApplication` main and set its CTest enviro
 
 Run: `ctest --test-dir build -R tst_qmlload --output-on-failure`
 
-Expected: failure because required component object names do not exist.
+Expected: failure because required contact-pane component object names do not exist.
 
 - [ ] **Step 3: Implement the frame and contact pane**
 
-Use `Window.TransparentForInput` nowhere; all controls remain interactive. Bind title drag to `window.startSystemMove()`, caption buttons to window actions, and use one painted glass frame independent of platform theme. Implement category header rules only. `ContactRow` has `border.width: 0` and no bottom rule; its selected wash is a two-stop horizontal gradient.
+Use a normal decorated `Window`; do not set `FramelessWindowHint` and do not draw caption buttons in QML. The active platform theme owns movement, resizing, window actions, border, and shadow. Implement category header rules only. `ContactRow` has `border.width: 0` and no bottom rule; its selected wash is a two-stop horizontal gradient.
 
 - [ ] **Step 4: Run tests and launch the shell**
 
 Run: `cmake --build build -j2 && ctest --test-dir build --output-on-failure && ./build/OpenChat`
 
-Expected: the real Qt window opens with exact frame, search, six contacts, category-only separators, and functional selection/filtering.
+Expected: the real Qt window opens with the system frame, search, six contacts, category-only separators, and functional selection/filtering.
 
 - [ ] **Step 5: Commit**
 

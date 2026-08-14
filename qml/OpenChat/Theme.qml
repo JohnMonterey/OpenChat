@@ -5,18 +5,9 @@ import QtQuick
 QtObject {
     readonly property string uiFont: "Segoe UI"
 
-    readonly property int frameInset: 11
-    readonly property int titleBarHeight: 44
     readonly property int sidebarWidth: 268
     readonly property int conversationHeaderHeight: 111
     readonly property int composerHeight: 104
-
-    readonly property color glassTop: "#a7d8f2"
-    readonly property color glassMid: "#4f9dce"
-    readonly property color glassBottom: "#78bfdf"
-    readonly property color frameOuter: "#205d7f"
-    readonly property color frameInner: "#d8f1fc"
-    readonly property color titleText: "#17243a"
 
     readonly property color sidebarTop: "#f0f9fd"
     readonly property color sidebarBottom: "#e5f2f9"

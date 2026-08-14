@@ -1,0 +1,16 @@
+import QtQuick.tooling 1.2
+
+Module {
+    Component {
+        name: "BubbleBackground"
+        prototype: "QQuickPaintedItem"
+        exports: ["OpenChat.Native/BubbleBackground 1.0"]
+        Property { name: "outgoing"; type: "bool" }
+        Property { name: "radius"; type: "double" }
+        Property { name: "tailWidth"; type: "double" }
+        Property { name: "tailHeight"; type: "double" }
+        Property { name: "fillTop"; type: "QColor" }
+        Property { name: "fillBottom"; type: "QColor" }
+        Property { name: "strokeColor"; type: "QColor" }
+    }
+}

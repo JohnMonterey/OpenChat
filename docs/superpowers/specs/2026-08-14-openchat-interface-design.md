@@ -10,7 +10,7 @@ The supplied PNG is the visual source of truth. The earlier NIMBI brand and Disc
 
 The prototype supports:
 
-- a frameless Aero-style application window with minimize, maximize/restore, close, drag, and resize behavior;
+- a system-decorated application window so AeroThemePlasma or the active desktop theme owns the frame, title bar, shadow, and window actions;
 - the OpenChat title and compact application icon;
 - current-user presence and status;
 - Favorites and Contacts categories;
@@ -26,14 +26,14 @@ The prototype does not support:
 - real authentication, servers, sockets, delivery, synchronization, or message persistence;
 - real voice or video calls;
 - editable profiles, contact creation, or settings screens;
-- platform-native Windows 7 theme APIs. The Aero appearance is painted by the app so it remains consistent on Windows, macOS, and Linux.
+- custom title-bar or window-frame painting. The host platform theme supplies the decoration.
 
 ## Visual Contract
 
 ### Window and Geometry
 
 - The reference logical window size is 860 × 680 pixels, with a 720 × 560 minimum.
-- The outer frame uses a translucent blue Aero border, a 45-pixel title bar, a 10-pixel content inset, fine white inner highlights, and a cool blue drop shadow.
+- The top-level window uses normal system decorations. On the development desktop, AeroThemePlasma supplies the Aero border, caption buttons, title bar, and shadow.
 - The content uses a two-pane split. The contact pane is 270 logical pixels at the reference size; the conversation pane consumes the remaining width.
 - The title bar uses Segoe UI where available. Segoe UI is installed in the development environment; the runtime falls back to Noto Sans on systems without it.
 - All dimensions, colors, borders, and gradients derive from centralized QML tokens. Components must not invent local variants.
@@ -85,8 +85,7 @@ All seed data is deterministic and lives in a focused prototype-data unit, not i
 
 ### QML Layer
 
-- `Main.qml` owns the transparent top-level window and the high-level split.
-- `AeroWindowFrame.qml` owns title chrome and window actions.
+- `Main.qml` owns a normally decorated top-level window and the high-level split.
 - `ContactSidebar.qml`, `ContactCategory.qml`, and `ContactRow.qml` own the left pane.
 - `ConversationHeader.qml`, `MessageHistory.qml`, `MessageDelegate.qml`, and `Composer.qml` own the right pane.
 - Reusable visual primitives include `PresenceBead.qml`, `AeroButton.qml`, and `Avatar.qml`.
@@ -127,7 +126,7 @@ QML does not own application data, fabricate list entries, or duplicate controll
 
 - Launch the actual binary on the user's computer after each coherent visual pass.
 - Capture the running Qt window at the reference size.
-- Compare the capture beside the supplied PNG for: outer frame geometry, split ratio, category-only separators, row density, header alignment, bubble tail joins, wrapping, composer geometry, and button silhouettes.
+- Compare the content capture beside the supplied PNG for: split ratio, category-only separators, row density, header alignment, bubble tail joins, wrapping, composer geometry, and button silhouettes. Verify the system-managed outer frame directly on AeroThemePlasma.
 - Repeat until no material visual mismatch remains. Do not use the HTML mockup as the comparison target.
 
 ## Acceptance Criteria

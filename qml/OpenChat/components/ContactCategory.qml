@@ -1,14 +1,18 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import OpenChat
 
 Item {
     id: category
-    property string label
-    property bool favoriteCategory
-    property var contactModel
+    required property string label
+    required property bool favoriteCategory
+    required property var contactModel
+    required property var controller
+    property real rowHeight: 60
     property int visibleCount: favoriteCategory ? contactModel.favoriteCount : contactModel.regularCount
 
-    implicitHeight: visibleCount > 0 ? 40 + visibleCount * 60 : 0
+    implicitHeight: visibleCount > 0 ? 40 + visibleCount * rowHeight : 0
     visible: visibleCount > 0
 
     Rectangle {
@@ -52,16 +56,12 @@ Item {
             model: category.contactModel
 
             ContactRow {
+                id: contactRowDelegate
+                objectName: "contactRow_" + contactRowDelegate.contactId
                 width: category.width
-                height: model.favorite === category.favoriteCategory ? 60 : 0
+                height: contactRowDelegate.favorite === category.favoriteCategory ? category.rowHeight : 0
                 visible: height > 0
-                contactId: model.contactId
-                contactName: model.name
-                statusText: model.statusText
-                presence: model.presence
-                selected: model.selected
-                avatarKey: model.avatarKey
-                onActivated: contactId => chatController.selectContact(contactId)
+                onActivated: contactId => category.controller.selectContact(contactId)
             }
         }
     }

@@ -1,0 +1,3 @@
+module OpenChat.Native
+typeinfo plugins.qmltypes
+depends QtQuick auto

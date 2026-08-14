@@ -5,6 +5,7 @@ import OpenChat
 Window {
     id: root
     objectName: "openChatWindow"
+    required property var chatController
 
     width: 860
     height: 680
@@ -12,25 +13,17 @@ Window {
     minimumHeight: 560
     visible: true
     title: "OpenChat"
-    color: "transparent"
-    flags: Qt.Window | Qt.FramelessWindowHint
-
-    AeroWindowFrame {
-        anchors.fill: parent
-        window: root
-    }
+    color: Theme.contentBackground
 
     Item {
         id: applicationSurface
-        x: Theme.frameInset + 1
-        y: Theme.titleBarHeight + 1
-        width: parent.width - (Theme.frameInset + 1) * 2
-        height: parent.height - Theme.titleBarHeight - Theme.frameInset - 2
+        anchors.fill: parent
         clip: true
 
         ContactSidebar {
             width: Theme.sidebarWidth
             height: parent.height
+            controller: root.chatController
         }
 
         Item {
@@ -51,6 +44,7 @@ Window {
                 id: conversationHeader
                 width: parent.width
                 height: Theme.conversationHeaderHeight
+                controller: root.chatController
             }
 
             MessageHistory {
@@ -59,6 +53,7 @@ Window {
                 anchors.right: parent.right
                 anchors.top: conversationHeader.bottom
                 anchors.bottom: messageComposer.top
+                controller: root.chatController
             }
 
             Composer {
@@ -67,6 +62,7 @@ Window {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: Theme.composerHeight
+                controller: root.chatController
                 onMessageSent: history.positionAtEnd()
             }
         }

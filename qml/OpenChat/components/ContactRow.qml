@@ -3,12 +3,14 @@ import OpenChat
 
 Item {
     id: row
-    property string contactId
-    property string contactName
-    property string statusText
-    property int presence
-    property bool selected
-    property string avatarKey
+    required property string contactId
+    required property string name
+    required property string statusText
+    required property int presence
+    required property bool favorite
+    required property bool selected
+    required property string avatarKey
+    readonly property bool compact: height < 55
     signal activated(string contactId)
 
     implicitHeight: 60
@@ -29,22 +31,22 @@ Item {
         id: avatarImage
         x: 13
         anchors.verticalCenter: parent.verticalCenter
-        width: 44
-        height: 44
+        width: Math.min(44, row.height - 6)
+        height: width
         avatarKey: row.avatarKey
     }
 
     PresenceBead {
         x: avatarImage.x + avatarImage.width + 10
-        y: avatarImage.y + 20
+        anchors.verticalCenter: parent.verticalCenter
         beadSize: 12
         presence: row.presence
     }
 
     Text {
         x: 84
-        y: 11
-        text: row.contactName
+        y: row.compact ? 3 : 11
+        text: row.name
         color: Theme.textPrimary
         font.family: Theme.uiFont
         font.pixelSize: 16
@@ -53,7 +55,7 @@ Item {
 
     Text {
         x: 84
-        y: 34
+        y: row.compact ? 26 : 34
         text: row.statusText
         color: Theme.textSecondary
         font.family: Theme.uiFont

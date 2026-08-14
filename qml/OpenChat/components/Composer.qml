@@ -4,6 +4,7 @@ import OpenChat
 Item {
     id: composer
     objectName: "messageComposer"
+    required property var controller
     signal messageSent
 
     Rectangle {
@@ -36,7 +37,7 @@ Item {
             y: 10
             width: parent.width - 56
             height: parent.height - 20
-            text: chatController.composerText
+            text: composer.controller.composerText
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 16
@@ -44,12 +45,12 @@ Item {
             selectByMouse: true
             clip: true
             onTextChanged: {
-                if (text !== chatController.composerText)
-                    chatController.setComposerText(text)
+                if (text !== composer.controller.composerText)
+                    composer.controller.setComposerText(text)
             }
             Keys.onReturnPressed: event => {
-                if (!(event.modifiers & Qt.ShiftModifier) && chatController.canSend) {
-                    chatController.sendMessage()
+                if (!(event.modifiers & Qt.ShiftModifier) && composer.controller.canSend) {
+                    composer.controller.sendMessage()
                     composer.messageSent()
                     event.accepted = true
                 }
@@ -75,7 +76,7 @@ Item {
                 anchors.centerIn: parent
                 width: 11
                 height: 7
-                source: "qrc:/qt/qml/OpenChat/assets/icons/chevron-down.svg"
+                source: Qt.resolvedUrl("../../../assets/icons/chevron-down.svg")
             }
             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
         }
@@ -84,7 +85,7 @@ Item {
     Item {
         id: send
         objectName: "sendButton"
-        property bool enabled: chatController.canSend
+        property bool enabled: composer.controller.canSend
         signal clicked
         x: inputFrame.x + inputFrame.width + 17
         y: 32
@@ -115,7 +116,7 @@ Item {
             onClicked: send.clicked()
         }
         onClicked: {
-            if (send.enabled && chatController.sendMessage())
+            if (send.enabled && composer.controller.sendMessage())
                 composer.messageSent()
         }
     }

@@ -4,6 +4,7 @@ import OpenChat
 Item {
     id: header
     objectName: "conversationHeader"
+    required property var controller
     implicitHeight: Theme.conversationHeaderHeight
 
     Rectangle {
@@ -21,13 +22,13 @@ Item {
         width: 68
         height: 68
         cornerRadius: 6
-        avatarKey: chatController.currentAvatarKey
+        avatarKey: header.controller.currentAvatarKey
     }
 
     Text {
         x: 110
         y: 31
-        text: chatController.currentContactName
+        text: header.controller.currentContactName
         color: Theme.textPrimary
         font.family: Theme.uiFont
         font.pixelSize: 20
@@ -38,14 +39,14 @@ Item {
         x: 110
         y: 63
         beadSize: 11
-        presence: chatController.currentStatusText === "Available" ? 0
-                : chatController.currentStatusText === "Away" ? 1 : 2
+        presence: header.controller.currentStatusText === "Available" ? 0
+                : header.controller.currentStatusText === "Away" ? 1 : 2
     }
 
     Text {
         x: 127
         y: 58
-        text: chatController.currentStatusText
+        text: header.controller.currentStatusText
         color: Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 14
@@ -65,7 +66,7 @@ Item {
             anchors.centerIn: parent
             width: 28
             height: 22
-            source: "qrc:/qt/qml/OpenChat/assets/icons/video-call.svg"
+            source: Qt.resolvedUrl("../../../assets/icons/video-call.svg")
             sourceSize: Qt.size(width * 2, height * 2)
         }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
@@ -84,7 +85,7 @@ Item {
             anchors.centerIn: parent
             width: 28
             height: 28
-            source: "qrc:/qt/qml/OpenChat/assets/icons/phone-call.svg"
+            source: Qt.resolvedUrl("../../../assets/icons/phone-call.svg")
             sourceSize: Qt.size(width * 2, height * 2)
         }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
@@ -102,7 +103,7 @@ Item {
             anchors.centerIn: parent
             width: 13
             height: 9
-            source: "qrc:/qt/qml/OpenChat/assets/icons/chevron-down.svg"
+            source: Qt.resolvedUrl("../../../assets/icons/chevron-down.svg")
         }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
     }

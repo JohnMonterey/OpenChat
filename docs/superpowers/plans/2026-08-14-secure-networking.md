@@ -31,6 +31,7 @@
 
 ### Client domain and orchestration
 
+- `src/core/Result.h` — C++20 success/error result type used across trust boundaries.
 - `src/domain/Identifiers.{h,cpp}` — strongly typed random 128-bit account, device, conversation, message, envelope, and attachment IDs.
 - `src/domain/ChatTypes.h` — conversation kind, message kind, delivery state, verification state, and durable value records.
 - `src/domain/Clock.h` — injectable UTC clock boundary.
@@ -90,6 +91,7 @@
 ### Task 1: Stable domain model and repository boundaries
 
 **Files:**
+- Create: `src/core/Result.h`
 - Create: `src/domain/Identifiers.h`
 - Create: `src/domain/Identifiers.cpp`
 - Create: `src/domain/ChatTypes.h`
@@ -102,10 +104,11 @@
 
 **Interfaces:**
 - Produces: `template<class Tag> class StrongId` with `generate()`, `fromBytes(QByteArrayView)`, `bytes()`, `toHex()`, equality, ordering, and `qHash`.
-- Produces: `AccountId`, `DeviceId`, `ConversationId`, `MessageId`, `EnvelopeId`, `AttachmentId` aliases.
+- Produces: C++20 `Result<T, E>` and `Result<void, E>` with `hasValue()`, `value()`, and `error()`; no exceptions cross repository boundaries.
+- Produces: `ProfileId`, `AccountId`, `DeviceId`, `ConversationId`, `MessageId`, `EnvelopeId`, and `AttachmentId` aliases.
 - Produces: `DeliveryState { Draft, Queued, Sending, Sent, Delivered, Read, Failed }` with monotonic transition validation.
 - Produces: repository records `ConversationRecord`, `MessageRecord`, `OutboxRecord`, `SyncCursor`.
-- Produces: transaction-oriented pure virtual repository APIs returning `std::expected<T, RepositoryError>`.
+- Produces: transaction-oriented pure virtual repository APIs returning `Result<T, RepositoryError>`.
 
 - [ ] **Step 1: Add invariant tests**
 
@@ -140,12 +143,12 @@ Use `QRandomGenerator::system()->generate()` only for non-cryptographic IDs. Rej
 class ChatRepository {
 public:
     virtual ~ChatRepository() = default;
-    virtual std::expected<QVector<ConversationRecord>, RepositoryError> conversations() = 0;
-    virtual std::expected<QVector<MessageRecord>, RepositoryError>
+    virtual Result<QVector<ConversationRecord>, RepositoryError> conversations() = 0;
+    virtual Result<QVector<MessageRecord>, RepositoryError>
         messages(const ConversationId &, int limit, const std::optional<MessageId> &before) = 0;
-    virtual std::expected<void, RepositoryError>
+    virtual Result<void, RepositoryError>
         saveOutgoing(const MessageRecord &, const OutboxRecord &) = 0;
-    virtual std::expected<void, RepositoryError>
+    virtual Result<void, RepositoryError>
         applyIncoming(const MessageRecord &, const EnvelopeId &, quint64 watermark) = 0;
 };
 ```
@@ -159,7 +162,7 @@ Expected: all domain invariants pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add CMakeLists.txt src/domain src/repositories tests/tst_domain.cpp
+git add CMakeLists.txt src/core src/domain src/repositories tests/tst_domain.cpp
 git commit -m "feat: define secure chat domain boundaries"
 ```
 
@@ -406,7 +409,7 @@ git commit -m "feat: add bounded ciphertext envelope protocol"
 **Interfaces:**
 - Consumes: opaque SQLCipher storage callbacks and canonical application payload bytes.
 - Produces C ABI: `oc_mls_client_create/free`, `oc_mls_generate_key_package`, `oc_mls_create_group`, `oc_mls_join_group`, `oc_mls_add_members`, `oc_mls_remove_members`, `oc_mls_encrypt`, `oc_mls_process`, and `oc_mls_free_buffer`.
-- Produces C++ RAII `MlsClient` with `std::expected` results and no raw ownership.
+- Produces C++ RAII `MlsClient` with `Result<T, MlsError>` results and no raw ownership.
 
 - [ ] **Step 1: Pin OpenMLS and disable secret-debug features**
 
@@ -431,10 +434,10 @@ Wrap every exported function in `catch_unwind`, validate pointer/length pairs be
 - [ ] **Step 4: Add the C++ RAII facade**
 
 ```cpp
-std::expected<MlsCiphertext, MlsError>
+Result<MlsCiphertext, MlsError>
 MlsClient::encrypt(const ConversationId &conversation, QByteArrayView plaintext);
 
-std::expected<MlsProcessResult, MlsError>
+Result<MlsProcessResult, MlsError>
 MlsClient::process(const ConversationId &conversation, QByteArrayView mlsMessage);
 ```
 

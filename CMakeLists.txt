@@ -31,6 +31,12 @@ qt_add_qml_module(OpenChat
     QML_FILES
         qml/OpenChat/Main.qml
         qml/OpenChat/Theme.qml
+        qml/OpenChat/components/AeroWindowFrame.qml
+        qml/OpenChat/components/PresenceBead.qml
+        qml/OpenChat/components/Avatar.qml
+        qml/OpenChat/components/ContactSidebar.qml
+        qml/OpenChat/components/ContactCategory.qml
+        qml/OpenChat/components/ContactRow.qml
 )
 
 target_include_directories(OpenChat PRIVATE src)
@@ -75,3 +81,25 @@ add_executable(tst_bubblebackground
 target_include_directories(tst_bubblebackground PRIVATE src)
 target_link_libraries(tst_bubblebackground PRIVATE Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
 add_test(NAME tst_bubblebackground COMMAND tst_bubblebackground)
+
+add_executable(tst_qmlload
+    tests/tst_qmlload.cpp
+    src/controllers/ChatController.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
+)
+target_include_directories(tst_qmlload PRIVATE src)
+target_compile_definitions(tst_qmlload PRIVATE
+    OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(tst_qmlload PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Quick
+    Qt6::QuickControls2
+    Qt6::Test
+)
+add_test(NAME tst_qmlload COMMAND tst_qmlload)
+set_tests_properties(tst_qmlload PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
+)

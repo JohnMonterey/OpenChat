@@ -1,0 +1,9 @@
+module OpenChat
+Main 1.0 Main.qml
+singleton Theme 1.0 Theme.qml
+AeroWindowFrame 1.0 components/AeroWindowFrame.qml
+PresenceBead 1.0 components/PresenceBead.qml
+Avatar 1.0 components/Avatar.qml
+ContactSidebar 1.0 components/ContactSidebar.qml
+ContactCategory 1.0 components/ContactCategory.qml
+ContactRow 1.0 components/ContactRow.qml

@@ -34,7 +34,7 @@
 - `src/models/MessageListModel.{h,cpp}` — Qt message roles and append behavior.
 - `src/controllers/ChatController.{h,cpp}` — selected contact, query, composer, send action, and seeded prototype data.
 - `src/render/BubbleBackground.{h,cpp}` — single-path bubble/tail geometry and painting.
-- `qml/OpenChat/Main.qml` — transparent top-level window and pane composition.
+- `qml/OpenChat/Main.qml` — system-decorated top-level window and pane composition.
 - `qml/OpenChat/Theme.qml` — centralized geometry, palette, typography, and gradient values.
 - System window decorations — supplied by the active platform theme (AeroThemePlasma on the development machine), not painted in QML.
 - `qml/OpenChat/components/ContactSidebar.qml` — current user, search, groups, and bottom actions.
@@ -69,7 +69,7 @@
 - Produces: `OpenChat::AppMetadata::{name, defaultWidth, defaultHeight, minimumWidth, minimumHeight}`.
 - Produces: QML module `OpenChat` and executable target `OpenChat`.
 
-- [ ] **Step 1: Write the failing metadata test**
+- [x] **Step 1: Write the failing metadata test**
 
 ```cpp
 #include <QtTest>
@@ -90,13 +90,13 @@ QTEST_MAIN(AppMetadataTest)
 #include "tst_appmetadata.moc"
 ```
 
-- [ ] **Step 2: Configure and verify failure**
+- [x] **Step 2: Configure and verify failure**
 
 Run: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j2`
 
 Expected: compilation fails because `app/AppMetadata.h` does not exist.
 
-- [ ] **Step 3: Add the minimal project and metadata**
+- [x] **Step 3: Add the minimal project and metadata**
 
 ```cpp
 namespace OpenChat::AppMetadata {
@@ -110,17 +110,17 @@ inline constexpr int minimumHeight = 560;
 
 Configure CMake with `qt_standard_project_setup(REQUIRES 6.5)`, one `qt_add_executable(OpenChat ...)`, one `qt_add_qml_module` with URI `OpenChat`, Qt resources, `enable_testing()`, and QtTest targets.
 
-- [ ] **Step 4: Add startup and a minimal transparent window**
+- [x] **Step 4: Add startup and a minimal system-decorated window**
 
 `main.cpp` creates `QGuiApplication`, sets organization/application names, registers later C++ types under `OpenChat.Native 1.0`, loads `qrc:/qt/qml/OpenChat/Main.qml`, and returns `EXIT_FAILURE` if no root object exists. `Main.qml` binds all size constants and displays the approved product name.
 
-- [ ] **Step 5: Build and run tests**
+- [x] **Step 5: Build and run tests**
 
 Run: `cmake --build build -j2 && ctest --test-dir build --output-on-failure`
 
 Expected: build succeeds and `tst_appmetadata` passes.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add CMakeLists.txt src/app/AppMetadata.h src/main.cpp qml/OpenChat/Main.qml qml/OpenChat/Theme.qml tests/tst_appmetadata.cpp
@@ -144,7 +144,7 @@ git commit -m "feat: create OpenChat Qt application shell"
 - Produces: `ContactListModel::{setContacts, setQuery, selectContact, contactAt}` and roles `name`, `statusText`, `presence`, `favorite`, `selected`, `avatarKey`.
 - Produces: `MessageListModel::{setMessages, appendOutgoing, messageAt}` and roles `direction`, `body`, `timestamp`, `kind`.
 
-- [ ] **Step 1: Write failing model tests**
+- [x] **Step 1: Write failing model tests**
 
 ```cpp
 void ModelsTest::contactsExposeApprovedGroups() {
@@ -174,23 +174,23 @@ void ModelsTest::outgoingMessageAppends() {
 }
 ```
 
-- [ ] **Step 2: Build and verify failures**
+- [x] **Step 2: Build and verify failures**
 
 Run: `cmake --build build -j2`
 
 Expected: compilation fails because the model types do not exist.
 
-- [ ] **Step 3: Implement value types and `QAbstractListModel` roles**
+- [x] **Step 3: Implement value types and `QAbstractListModel` roles**
 
 Implement explicit `roleNames()`, bounds-checked `data()`, reset notifications for filtering, and targeted `dataChanged` notifications for selection. `appendOutgoing` rejects trimmed-empty bodies and stores the trimmed result.
 
-- [ ] **Step 4: Run model tests**
+- [x] **Step 4: Run model tests**
 
 Run: `ctest --test-dir build -R tst_models --output-on-failure`
 
 Expected: all model tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CMakeLists.txt src/models tests/tst_models.cpp
@@ -211,7 +211,7 @@ git commit -m "feat: add contact and message models"
 - Produces: QML properties `contacts`, `messages`, `currentContactName`, `currentStatusText`, `currentAvatarKey`, `composerText`, `canSend`, `searchQuery`.
 - Produces invokables `selectContact(QString)`, `setSearchQuery(QString)`, `setComposerText(QString)`, and `sendMessage()`.
 
-- [ ] **Step 1: Write failing controller tests**
+- [x] **Step 1: Write failing controller tests**
 
 ```cpp
 void ChatControllerTest::startsOnMichael() {
@@ -237,23 +237,23 @@ void ChatControllerTest::sendTrimsAndClears() {
 }
 ```
 
-- [ ] **Step 2: Build and verify failure**
+- [x] **Step 2: Build and verify failure**
 
 Run: `cmake --build build -j2`
 
 Expected: compilation fails because `ChatController` does not exist.
 
-- [ ] **Step 3: Implement the controller and exact seed content**
+- [x] **Step 3: Implement the controller and exact seed content**
 
 Seed Daniel as the local user; Favorites Michael and Sarah; Contacts Alex, Jessica, Ryan, and Tom; and the five reference messages dated May 24, 2010. Emit one property notification per actual change. Expose the controller as context property `chatController` before QML loads.
 
-- [ ] **Step 4: Run controller and full tests**
+- [x] **Step 4: Run controller and full tests**
 
 Run: `ctest --test-dir build --output-on-failure`
 
 Expected: metadata, model, and controller tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CMakeLists.txt src/main.cpp src/controllers tests/tst_chatcontroller.cpp
@@ -273,7 +273,7 @@ git commit -m "feat: add local OpenChat controller"
 - Produces: `BubbleBackground : QQuickPaintedItem` with QML properties `outgoing`, `radius`, `tailWidth`, `tailHeight`, `fillTop`, `fillBottom`, and `strokeColor`.
 - Produces: `static QPainterPath makePath(QRectF bounds, bool outgoing, qreal radius, qreal tailWidth, qreal tailHeight)` for deterministic tests.
 
-- [ ] **Step 1: Write failing path tests**
+- [x] **Step 1: Write failing path tests**
 
 ```cpp
 void BubbleBackgroundTest::pathStaysInsideBounds() {
@@ -296,23 +296,23 @@ void BubbleBackgroundTest::tinyAndTallPathsRemainValid() {
 }
 ```
 
-- [ ] **Step 2: Build and verify failure**
+- [x] **Step 2: Build and verify failure**
 
 Run: `cmake --build build -j2`
 
 Expected: compilation fails because `BubbleBackground` does not exist.
 
-- [ ] **Step 3: Implement one closed body-and-tail path**
+- [x] **Step 3: Implement one closed body-and-tail path**
 
 Build the path clockwise from the tail-side top corner. Incoming paths reserve `tailWidth` on the left and join the tail at `height - radius - tailHeight`; outgoing paths mirror the x coordinates. Close the subpath once. Paint the same path once with a vertical `QLinearGradient` and once with a 1-pixel cosmetic pen.
 
-- [ ] **Step 4: Register and test the painted item**
+- [x] **Step 4: Register and test the painted item**
 
 Register with `qmlRegisterType<BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground")` and run `ctest --test-dir build -R tst_bubblebackground --output-on-failure`.
 
 Expected: all path tests pass at minimum, typical, maximum, and wrapped heights.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CMakeLists.txt src/main.cpp src/render tests/tst_bubblebackground.cpp
@@ -336,7 +336,7 @@ git commit -m "feat: draw seamless message bubbles"
 - Consumes: `chatController.contacts`, `selectContact`, and `setSearchQuery`.
 - Produces object names: `openChatWindow`, `contactSidebar`, `favoritesCategory`, `contactsCategory`, `contactSearch`.
 
-- [ ] **Step 1: Write the failing QML-load smoke test**
+- [x] **Step 1: Write the failing QML-load smoke test**
 
 ```cpp
 void QmlLoadTest::requiredStructure() {
@@ -357,23 +357,23 @@ void QmlLoadTest::requiredStructure() {
 
 Give this QtTest target a manual `QGuiApplication` main and set its CTest environment to `QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software`.
 
-- [ ] **Step 2: Run QML test and verify failure**
+- [x] **Step 2: Run QML test and verify failure**
 
 Run: `ctest --test-dir build -R tst_qmlload --output-on-failure`
 
 Expected: failure because required contact-pane component object names do not exist.
 
-- [ ] **Step 3: Implement the frame and contact pane**
+- [x] **Step 3: Implement the frame and contact pane**
 
 Use a normal decorated `Window`; do not set `FramelessWindowHint` and do not draw caption buttons in QML. The active platform theme owns movement, resizing, window actions, border, and shadow. Implement category header rules only. `ContactRow` has `border.width: 0` and no bottom rule; its selected wash is a two-stop horizontal gradient.
 
-- [ ] **Step 4: Run tests and launch the shell**
+- [x] **Step 4: Run tests and launch the shell**
 
 Run: `cmake --build build -j2 && ctest --test-dir build --output-on-failure && ./build/OpenChat`
 
 Expected: the real Qt window opens with the system frame, search, six contacts, category-only separators, and functional selection/filtering.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CMakeLists.txt qml/OpenChat tests/tst_qmlload.cpp
@@ -398,7 +398,7 @@ git commit -m "feat: build Aero frame and contact pane"
 - Consumes: all current-contact properties, `chatController.messages`, `composerText`, `canSend`, and `sendMessage()`.
 - Produces object names: `conversationHeader`, `videoCallButton`, `phoneCallButton`, `messageHistory`, `messageComposer`, `messageInput`, `sendButton`.
 
-- [ ] **Step 1: Extend the failing QML test**
+- [x] **Step 1: Extend the failing QML test**
 
 ```cpp
 void QmlLoadTest::conversationStructure() {
@@ -419,31 +419,31 @@ void QmlLoadTest::conversationStructure() {
 }
 ```
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `ctest --test-dir build -R tst_qmlload --output-on-failure`
 
 Expected: failure because conversation components do not exist.
 
-- [ ] **Step 3: Implement the exact header and SVG controls**
+- [x] **Step 3: Implement the exact header and SVG controls**
 
 Create 24 × 18 video and 25 × 25 handset silhouettes in view boxes with `fill="#415570"`. Keep each SVG file isolated so the user's final assets can replace it without QML changes. Match reference spacing: 68-pixel avatar, 18-pixel gap, right controls separated by 28 pixels.
 
-- [ ] **Step 4: Implement wrapping message delegates**
+- [x] **Step 4: Implement wrapping message delegates**
 
 Set content width with `Math.min(messageText.implicitWidth + horizontalPadding * 2, Math.min(360, history.width * 0.68))`; set `Text.wrapMode: Text.Wrap`; let implicit height derive from painted text plus vertical padding. Bind the `BubbleBackground` to the delegate's complete width and height.
 
-- [ ] **Step 5: Implement and test composer behavior**
+- [x] **Step 5: Implement and test composer behavior**
 
 Bind input text and Send enabled state to the controller. Enter and Send invoke `sendMessage()`, then position the history at the end. Extend `tst_qmlload.cpp` to call `input->setProperty("text", "Hello")`, verify `send->property("enabled")`, invoke `send.clicked()`, and compare the controller message count increase.
 
-- [ ] **Step 6: Run full tests and launch**
+- [x] **Step 6: Run full tests and launch**
 
 Run: `cmake --build build -j2 && ctest --test-dir build --output-on-failure && ./build/OpenChat`
 
 Expected: exact seeded conversation, connected bubble tails, correct call silhouettes, text wrapping, and functional local sending.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add CMakeLists.txt qml/OpenChat assets/icons tests/tst_qmlload.cpp
@@ -462,7 +462,7 @@ git commit -m "feat: complete OpenChat conversation interface"
 - Produces CLI: `OpenChat --capture /absolute/output.png --capture-delay 500`.
 - Produces command: `./tools/capture_openchat.sh build/openchat-reference.png`.
 
-- [ ] **Step 1: Add a failing capture-mode test**
+- [x] **Step 1: Add a failing capture-mode test**
 
 Add CTest `capture_smoke` that runs:
 
@@ -472,37 +472,37 @@ OpenChat --capture ${CMAKE_BINARY_DIR}/openchat-capture.png --capture-delay 100
 
 and a CMake script that fails unless the PNG exists and is larger than 10 KiB.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `ctest --test-dir build -R capture_smoke --output-on-failure`
 
 Expected: failure because capture arguments are not implemented and no PNG is created.
 
-- [ ] **Step 3: Implement capture mode**
+- [x] **Step 3: Implement capture mode**
 
 Parse arguments with `QCommandLineParser`. After QML loads, cast the root object to `QQuickWindow`, wait for the requested delay with `QTimer::singleShot`, save `window->grabWindow()` to the absolute path, and exit with code 0 only when `QImage::save()` succeeds.
 
-- [ ] **Step 4: Run automated capture**
+- [x] **Step 4: Run automated capture**
 
 Run: `cmake --build build -j2 && ctest --test-dir build -R capture_smoke --output-on-failure && ./tools/capture_openchat.sh build/openchat-reference.png`
 
 Expected: a nonempty 860 × 680 PNG of the actual Qt application.
 
-- [ ] **Step 5: Compare against the supplied reference and refine**
+- [x] **Step 5: Compare against the supplied reference and refine**
 
 Inspect both images side by side and record/fix discrepancies in this order: outer frame and title bar; pane split; vertical regions; category-only separators; contact density; header alignment; date rule; bubble dimensions and tails; composer; call icons; shadows and color. After every patch, rebuild, capture, and inspect again.
 
-- [ ] **Step 6: Validate resize boundaries**
+- [x] **Step 6: Validate resize boundaries**
 
 Capture 720 × 560 and 1024 × 768 variants by adding `--width` and `--height` capture arguments. Verify both panes remain visible, text wraps, category rules stay intact, and no control clips.
 
-- [ ] **Step 7: Run final verification and launch on the computer**
+- [x] **Step 7: Run final verification and launch on the computer**
 
 Run: `git diff --check && cmake --build build -j2 && ctest --test-dir build --output-on-failure && ./build/OpenChat`
 
 Expected: all tests pass and the user sees the actual running Qt application.
 
-- [ ] **Step 8: Commit the verified state**
+- [x] **Step 8: Commit the verified state**
 
 ```bash
 git add CMakeLists.txt src/main.cpp tools tests/visual

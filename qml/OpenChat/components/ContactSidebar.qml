@@ -136,6 +136,20 @@ Item {
         }
     }
 
+    Text {
+        objectName: "noContactsFound"
+        anchors.top: searchArea.bottom
+        anchors.topMargin: 30
+        anchors.horizontalCenter: parent.horizontalCenter
+        visible: sidebar.controller.contacts.favoriteCount
+                 + sidebar.controller.contacts.regularCount === 0
+        text: "No contacts found"
+        color: Theme.textSecondary
+        font.family: Theme.uiFont
+        font.pixelSize: 14
+        renderType: Text.NativeRendering
+    }
+
     Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right

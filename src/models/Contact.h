@@ -32,4 +32,3 @@ inline QString presenceText(Presence presence)
 }
 
 } // namespace OpenChat
-

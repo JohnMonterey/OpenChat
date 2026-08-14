@@ -11,4 +11,3 @@ inline constexpr int minimumWidth = 720;
 inline constexpr int minimumHeight = 560;
 
 } // namespace OpenChat::AppMetadata
-

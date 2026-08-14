@@ -12,6 +12,7 @@ namespace OpenChat {
 class MessageListModel final : public QAbstractListModel
 {
     Q_OBJECT
+    Q_PROPERTY(int count READ count NOTIFY countChanged)
 
 public:
     enum Role {
@@ -27,14 +28,17 @@ public:
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
+    [[nodiscard]] int count() const;
 
     void setMessages(QVector<Message> messages);
     bool appendOutgoing(const QString &body, const QTime &timestamp);
     [[nodiscard]] std::optional<Message> messageAt(int row) const;
+
+signals:
+    void countChanged();
 
 private:
     QVector<Message> m_messages;
 };
 
 } // namespace OpenChat
-

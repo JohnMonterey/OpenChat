@@ -23,4 +23,3 @@ struct Message {
 };
 
 } // namespace OpenChat
-

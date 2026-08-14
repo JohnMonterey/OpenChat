@@ -44,11 +44,19 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
     };
 }
 
+int MessageListModel::count() const
+{
+    return m_messages.size();
+}
+
 void MessageListModel::setMessages(QVector<Message> messages)
 {
+    const int previousCount = m_messages.size();
     beginResetModel();
     m_messages = std::move(messages);
     endResetModel();
+    if (previousCount != m_messages.size())
+        emit countChanged();
 }
 
 bool MessageListModel::appendOutgoing(const QString &body, const QTime &timestamp)
@@ -61,6 +69,7 @@ bool MessageListModel::appendOutgoing(const QString &body, const QTime &timestam
     beginInsertRows({}, row, row);
     m_messages.append({MessageDirection::Outgoing, trimmedBody, timestamp, MessageKind::Text});
     endInsertRows();
+    emit countChanged();
     return true;
 }
 

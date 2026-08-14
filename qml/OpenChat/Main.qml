@@ -6,6 +6,8 @@ Window {
     id: root
     objectName: "openChatWindow"
     required property var chatController
+    readonly property int sidebarWidth: Math.round(
+        Math.max(250, Math.min(300, width * Theme.sidebarWidth / 860)))
 
     width: 860
     height: 680
@@ -21,15 +23,15 @@ Window {
         clip: true
 
         ContactSidebar {
-            width: Theme.sidebarWidth
+            width: root.sidebarWidth
             height: parent.height
             controller: root.chatController
         }
 
         Item {
             id: conversationPane
-            x: Theme.sidebarWidth
-            width: parent.width - Theme.sidebarWidth
+            x: root.sidebarWidth
+            width: parent.width - root.sidebarWidth
             height: parent.height
 
             Rectangle {

@@ -56,6 +56,8 @@ private slots:
         QVERIFY(root->findChild<QObject *>(QStringLiteral("conversationHeader")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("videoCallButton")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("phoneCallButton")));
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("videoCallFallback")));
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("phoneCallFallback")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("messageHistory")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("messageComposer")));
 
@@ -101,6 +103,96 @@ private slots:
             delegate->findChild<QObject *>(QStringLiteral("messageTimestamp"));
         QVERIFY(timestamp);
         QCOMPARE(timestamp->property("text").toString(), QStringLiteral("10:15 AM"));
+    }
+
+    void emptyStatesAndResponsiveSidebar()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        auto *window = qobject_cast<QWindow *>(root);
+        QVERIFY(window);
+
+        window->setWidth(720);
+        QCoreApplication::processEvents();
+        QCOMPARE(root->property("sidebarWidth").toInt(), 250);
+        window->setWidth(860);
+        QCoreApplication::processEvents();
+        QCOMPARE(root->property("sidebarWidth").toInt(), 268);
+        window->setWidth(1024);
+        QCoreApplication::processEvents();
+        QCOMPARE(root->property("sidebarWidth").toInt(), 300);
+
+        QObject *noContacts =
+            root->findChild<QObject *>(QStringLiteral("noContactsFound"));
+        QObject *noMessages =
+            root->findChild<QObject *>(QStringLiteral("noMessagesYet"));
+        QVERIFY(noContacts);
+        QVERIFY(noMessages);
+        QVERIFY(!noContacts->property("visible").toBool());
+        QVERIFY(!noMessages->property("visible").toBool());
+
+        controller.setSearchQuery(QStringLiteral("does-not-exist"));
+        QCoreApplication::processEvents();
+        QVERIFY(noContacts->property("visible").toBool());
+
+        QVERIFY(controller.selectContact(QStringLiteral("sarah")));
+        QCoreApplication::processEvents();
+        QVERIFY(noMessages->property("visible").toBool());
+    }
+
+    void bubbleWidthFollowsContentWithinLimits()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        const auto bubbleWidth = [&component](const QString &body) {
+            QScopedPointer<QObject> delegate(component.createWithInitialProperties(
+                {{QStringLiteral("direction"), 0},
+                 {QStringLiteral("body"), body},
+                 {QStringLiteral("timestamp"), QStringLiteral("10:15 AM")},
+                 {QStringLiteral("kind"), 0},
+                 {QStringLiteral("width"), 540}}));
+            return delegate ? delegate->property("bubbleWidth").toDouble() : -1.0;
+        };
+
+        const qreal shortWidth = bubbleWidth(QStringLiteral("Hi"));
+        const qreal referenceWidth = bubbleWidth(QStringLiteral("Hey Daniel!"));
+        const qreal wrappedWidth = bubbleWidth(
+            QStringLiteral("Pretty good, just working on some stuff. You?"));
+        QVERIFY(shortWidth >= 158.0);
+        QVERIFY(shortWidth < referenceWidth);
+        QVERIFY(referenceWidth < wrappedWidth);
+        QVERIFY(wrappedWidth <= 360.0);
+        QVERIFY(wrappedWidth <= 540.0 * 0.68);
+    }
+
+    void unknownAvatarUsesNeutralFallback()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "Avatar");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        QScopedPointer<QObject> avatar(component.createWithInitialProperties(
+            {{QStringLiteral("avatarKey"), QStringLiteral("unknown")},
+             {QStringLiteral("width"), 44},
+             {QStringLiteral("height"), 44}}));
+        QVERIFY(avatar);
+        QObject *fallback =
+            avatar->findChild<QObject *>(QStringLiteral("neutralAvatarFallback"));
+        QVERIFY(fallback);
+        QVERIFY(fallback->property("visible").toBool());
     }
 };
 

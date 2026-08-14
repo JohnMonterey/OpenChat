@@ -5,11 +5,14 @@ project(OpenChat VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Svg Test)
 
 qt_standard_project_setup(REQUIRES 6.5)
-qt_policy(SET QTP0004 NEW)
+if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
+    qt_policy(SET QTP0004 NEW)
+endif()
 
 set_source_files_properties(qml/OpenChat/Theme.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
@@ -113,11 +116,19 @@ set_tests_properties(tst_qmlload PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
 )
 
-add_test(
-    NAME capture_smoke
-    COMMAND ${CMAKE_COMMAND}
-        -DOPENCHAT_EXECUTABLE=$<TARGET_FILE:OpenChat>
-        -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/openchat-capture.png
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
-)
-set_tests_properties(capture_smoke PROPERTIES TIMEOUT 5)
+function(add_openchat_capture_test test_name capture_width capture_height)
+    add_test(
+        NAME ${test_name}
+        COMMAND ${CMAKE_COMMAND}
+            -DOPENCHAT_EXECUTABLE=$<TARGET_FILE:OpenChat>
+            -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/${test_name}.png
+            -DCAPTURE_WIDTH=${capture_width}
+            -DCAPTURE_HEIGHT=${capture_height}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
+    )
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 5)
+endfunction()
+
+add_openchat_capture_test(capture_smoke 860 680)
+add_openchat_capture_test(capture_minimum 720 560)
+add_openchat_capture_test(capture_large 1024 768)

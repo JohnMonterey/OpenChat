@@ -144,4 +144,3 @@ const Contact *ContactListModel::visibleContact(int row) const
 }
 
 } // namespace OpenChat
-

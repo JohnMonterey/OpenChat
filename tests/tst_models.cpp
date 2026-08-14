@@ -102,6 +102,23 @@ private slots:
         QVERIFY(!model.appendOutgoing(" \t\n ", QTime(10, 19)));
         QCOMPARE(model.rowCount(), 0);
     }
+
+    void messageCountNotifies()
+    {
+        MessageListModel model;
+        QSignalSpy countChanged(&model, &MessageListModel::countChanged);
+
+        model.setMessages({
+            {OpenChat::MessageDirection::Incoming, QStringLiteral("Seed"), QTime(10, 15),
+             OpenChat::MessageKind::Text},
+        });
+        QCOMPARE(model.count(), 1);
+        QCOMPARE(countChanged.count(), 1);
+
+        QVERIFY(model.appendOutgoing(QStringLiteral("Reply"), QTime(10, 16)));
+        QCOMPARE(model.count(), 2);
+        QCOMPARE(countChanged.count(), 2);
+    }
 };
 
 QTEST_MAIN(ModelsTest)

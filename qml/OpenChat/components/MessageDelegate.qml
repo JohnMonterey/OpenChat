@@ -13,12 +13,12 @@ Item {
     readonly property real directionalLimit: outgoing
         ? Math.min(338, maximumBubbleWidth)
         : Math.min(290, maximumBubbleWidth)
-    readonly property real minimumBubbleWidth: outgoing ? 338 : 270
+    readonly property real minimumBubbleWidth: kind === 1 ? 158 : 190
     readonly property real preferredBubbleWidth: kind === 1
         ? 158
         : Math.max(Math.min(minimumBubbleWidth, directionalLimit),
                    Math.min(directionalLimit,
-                            messageBody.implicitWidth + messageTime.implicitWidth + 55))
+                            messageBody.implicitWidth + messageTime.implicitWidth + 140))
     readonly property real bubbleWidth: Math.min(maximumBubbleWidth, preferredBubbleWidth)
     readonly property real bubbleHeight: Math.max(kind === 1 ? 54 : 50,
                                                    messageBody.paintedHeight + 24)

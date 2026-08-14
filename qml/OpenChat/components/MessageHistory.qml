@@ -70,4 +70,17 @@ Item {
         onCountChanged: Qt.callLater(positionViewAtEnd)
         Component.onCompleted: positionViewAtEnd()
     }
+
+    Text {
+        objectName: "noMessagesYet"
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: dateDivider.bottom
+        anchors.topMargin: 32
+        visible: history.controller.messages.count === 0
+        text: "No messages yet."
+        color: Theme.textSecondary
+        font.family: Theme.uiFont
+        font.pixelSize: 14
+        renderType: Text.NativeRendering
+    }
 }

@@ -4,6 +4,12 @@ Item {
     id: avatar
     property string avatarKey: "neutral"
     property real cornerRadius: 5
+    readonly property bool knownArtwork: avatarKey === "landscape"
+                                         || avatarKey === "beach"
+                                         || avatarKey === "mono"
+                                         || avatarKey === "sarah"
+                                         || avatarKey === "jessica"
+                                         || avatarKey === "alex"
 
     implicitWidth: 44
     implicitHeight: 44
@@ -84,6 +90,29 @@ Item {
             radius: width / 2
             color: avatar.avatarKey === "alex" ? "#353535"
                  : avatar.avatarKey === "jessica" ? "#6ba3a5" : "#e3a58a"
+        }
+    }
+
+    Item {
+        objectName: "neutralAvatarFallback"
+        anchors.fill: parent
+        visible: !avatar.knownArtwork
+
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: parent.height * 0.18
+            width: parent.width * 0.38
+            height: width
+            radius: width / 2
+            color: "#7f8c97"
+        }
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: parent.height * 0.56
+            width: parent.width * 0.70
+            height: parent.height * 0.42
+            radius: width / 2
+            color: "#6e7b86"
         }
     }
 

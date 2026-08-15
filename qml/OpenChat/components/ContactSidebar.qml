@@ -1,5 +1,6 @@
 import QtQuick
 import OpenChat
+import OpenChat.Native
 
 Item {
     id: sidebar
@@ -158,32 +159,217 @@ Item {
         renderType: Text.NativeRendering
     }
 
+    // Bottom navigation. Three equal columns switch the main pane between the
+    // conversation view (Chat) and the Call / Settings placeholders. The active
+    // section is owned by the controller so this highlight and the pane shown on
+    // the right stay in agreement; the badge counts are model-backed and a badge
+    // only appears while its count is greater than zero.
     Rectangle {
+        id: bottomNav
+        objectName: "bottomNav"
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: 45
-        color: "#e7f2f8"
-        border.width: 0
-
-        Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
+        height: 64
+        color: Theme.contentBottom
 
         Row {
-            anchors.centerIn: parent
-            spacing: 31
+            anchors.fill: parent
 
-            Text {
-                text: "♟  Add Contact"
-                color: "#6f8eac"
-                font.family: Theme.uiFont
-                font.pixelSize: 13
+            Item {
+                id: callTab
+                objectName: "callTab"
+                width: bottomNav.width / 3
+                height: bottomNav.height
+                readonly property bool active:
+                    sidebar.controller.navSection === ChatController.NavSection.Call
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: callTab.active ? "#e7f2f8" : "transparent"
+                }
+
+                Item {
+                    id: callIcon
+                    width: 26
+                    height: 26
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 10
+
+                    Image {
+                        anchors.centerIn: parent
+                        width: 24
+                        height: 24
+                        source: Qt.resolvedUrl("../../../assets/icons/phone-call.svg")
+                        sourceSize: Qt.size(width * 2, height * 2)
+                    }
+
+                    Rectangle {
+                        objectName: "callBadge"
+                        anchors.right: parent.right
+                        anchors.rightMargin: -4
+                        anchors.top: parent.top
+                        anchors.topMargin: -3
+                        visible: sidebar.controller.callMissedCount > 0
+                        height: 15
+                        width: Math.max(15, callBadgeLabel.implicitWidth + 8)
+                        radius: height / 2
+                        color: "#e0503d"
+
+                        Text {
+                            id: callBadgeLabel
+                            objectName: "callBadgeLabel"
+                            anchors.centerIn: parent
+                            text: sidebar.controller.callMissedCount
+                            color: "white"
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                            font.bold: true
+                        }
+                    }
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 10
+                    text: "Call"
+                    color: callTab.active ? Theme.categoryText : "#6f8eac"
+                    font.family: Theme.uiFont
+                    font.pixelSize: 13
+                    renderType: Text.NativeRendering
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: sidebar.controller.setNavSection(ChatController.NavSection.Call)
+                }
             }
-            Text {
-                text: "⚙  Settings"
-                color: "#6f8eac"
-                font.family: Theme.uiFont
-                font.pixelSize: 13
+
+            Item {
+                id: chatTab
+                objectName: "chatTab"
+                width: bottomNav.width / 3
+                height: bottomNav.height
+                readonly property bool active:
+                    sidebar.controller.navSection === ChatController.NavSection.Chat
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: chatTab.active ? "#e7f2f8" : "transparent"
+                }
+
+                Item {
+                    id: chatIcon
+                    width: 26
+                    height: 26
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 10
+
+                    // Speech bubble drawn from primitives, matching the house
+                    // style of the search magnifier and presence beads.
+                    Rectangle {
+                        x: 2
+                        y: 2
+                        width: 22
+                        height: 16
+                        radius: 6
+                        color: Theme.iconInk
+                    }
+                    Rectangle {
+                        x: 5
+                        y: 13
+                        width: 7
+                        height: 7
+                        rotation: 45
+                        color: Theme.iconInk
+                    }
+
+                    Rectangle {
+                        objectName: "chatBadge"
+                        anchors.right: parent.right
+                        anchors.rightMargin: -4
+                        anchors.top: parent.top
+                        anchors.topMargin: -3
+                        visible: sidebar.controller.chatUnreadCount > 0
+                        height: 15
+                        width: Math.max(15, chatBadgeLabel.implicitWidth + 8)
+                        radius: height / 2
+                        color: "#e0503d"
+
+                        Text {
+                            id: chatBadgeLabel
+                            objectName: "chatBadgeLabel"
+                            anchors.centerIn: parent
+                            text: sidebar.controller.chatUnreadCount
+                            color: "white"
+                            font.family: Theme.uiFont
+                            font.pixelSize: 10
+                            font.bold: true
+                        }
+                    }
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 10
+                    text: "Chat"
+                    color: chatTab.active ? Theme.categoryText : "#6f8eac"
+                    font.family: Theme.uiFont
+                    font.pixelSize: 13
+                    renderType: Text.NativeRendering
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: sidebar.controller.setNavSection(ChatController.NavSection.Chat)
+                }
+            }
+
+            Item {
+                id: settingsTab
+                objectName: "settingsTab"
+                width: bottomNav.width / 3
+                height: bottomNav.height
+                readonly property bool active:
+                    sidebar.controller.navSection === ChatController.NavSection.Settings
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: settingsTab.active ? "#e7f2f8" : "transparent"
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 8
+                    text: "⚙"
+                    color: Theme.iconInk
+                    font.family: Theme.uiFont
+                    font.pixelSize: 24
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 10
+                    text: "Settings"
+                    color: settingsTab.active ? Theme.categoryText : "#6f8eac"
+                    font.family: Theme.uiFont
+                    font.pixelSize: 13
+                    renderType: Text.NativeRendering
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: sidebar.controller.setNavSection(ChatController.NavSection.Settings)
+                }
             }
         }
+
+        Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
     }
 }

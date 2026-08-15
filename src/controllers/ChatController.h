@@ -23,6 +23,9 @@ class ChatController final : public QObject
     Q_PROPERTY(QString sessionStateText READ sessionStateText NOTIFY sessionStateChanged)
     Q_PROPERTY(bool plaintextVisible READ plaintextVisible NOTIFY sessionStateChanged)
     Q_PROPERTY(QString securityNoticeText READ securityNoticeText NOTIFY sessionStateChanged)
+    Q_PROPERTY(NavSection navSection READ navSection NOTIFY navSectionChanged)
+    Q_PROPERTY(int chatUnreadCount READ chatUnreadCount CONSTANT)
+    Q_PROPERTY(int callMissedCount READ callMissedCount CONSTANT)
 
 public:
     // Connection/security posture of the conversation surface. Ready is the only
@@ -40,6 +43,16 @@ public:
     };
     Q_ENUM(SessionState)
 
+    // Which top-level section the sidebar navigation is showing. Chat is the
+    // default and renders the approved conversation interface unchanged; Call
+    // and Settings swap in placeholder panes while the chat pane is hidden.
+    enum class NavSection {
+        Chat,
+        Call,
+        Settings,
+    };
+    Q_ENUM(NavSection)
+
     explicit ChatController(QObject *parent = nullptr);
 
     [[nodiscard]] ContactListModel *contacts();
@@ -54,12 +67,16 @@ public:
     [[nodiscard]] QString sessionStateText() const;
     [[nodiscard]] bool plaintextVisible() const;
     [[nodiscard]] QString securityNoticeText() const;
+    [[nodiscard]] NavSection navSection() const;
+    [[nodiscard]] int chatUnreadCount() const;
+    [[nodiscard]] int callMissedCount() const;
 
     Q_INVOKABLE bool selectContact(const QString &id);
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setComposerText(const QString &text);
     Q_INVOKABLE bool sendMessage();
     Q_INVOKABLE void setSessionState(SessionState state);
+    Q_INVOKABLE void setNavSection(NavSection section);
 
 signals:
     void currentContactChanged();
@@ -67,6 +84,7 @@ signals:
     void canSendChanged();
     void searchQueryChanged();
     void sessionStateChanged();
+    void navSectionChanged();
 
 private:
     [[nodiscard]] std::optional<Contact> currentContact() const;
@@ -84,6 +102,7 @@ private:
     QString m_composerText;
     QString m_searchQuery;
     SessionState m_sessionState = SessionState::Ready;
+    NavSection m_navSection = NavSection::Chat;
 };
 
 } // namespace OpenChat

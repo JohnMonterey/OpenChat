@@ -223,6 +223,32 @@ void ChatController::setSessionState(SessionState state)
         emit canSendChanged();
 }
 
+ChatController::NavSection ChatController::navSection() const
+{
+    return m_navSection;
+}
+
+int ChatController::chatUnreadCount() const
+{
+    // Static mock until the sync engine feeds real unread counts.
+    return 3;
+}
+
+int ChatController::callMissedCount() const
+{
+    // Static mock until call history is wired in.
+    return 1;
+}
+
+void ChatController::setNavSection(NavSection section)
+{
+    if (m_navSection == section)
+        return;
+
+    m_navSection = section;
+    emit navSectionChanged();
+}
+
 std::optional<Contact> ChatController::currentContact() const
 {
     return m_contacts.contactById(m_currentContactId);

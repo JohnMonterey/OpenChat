@@ -45,6 +45,9 @@ int main(int argc, char *argv[])
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::AvatarArtwork>(
         "OpenChat.Native", 1, 0, "AvatarArtwork");
+    qmlRegisterUncreatableType<OpenChat::ChatController>(
+        "OpenChat.Native", 1, 0, "ChatController",
+        QStringLiteral("ChatController is provided by the application"));
 
     OpenChat::ChatController chatController;
     QQmlApplicationEngine engine;

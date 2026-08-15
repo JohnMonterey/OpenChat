@@ -103,6 +103,86 @@ private slots:
         QTRY_VERIFY(messageList->property("atYEnd").toBool());
     }
 
+    void bottomNavigationSwitchesMainPane()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        QObject *bottomNav = root->findChild<QObject *>(QStringLiteral("bottomNav"));
+        QObject *callTab = root->findChild<QObject *>(QStringLiteral("callTab"));
+        QObject *chatTab = root->findChild<QObject *>(QStringLiteral("chatTab"));
+        QObject *settingsTab = root->findChild<QObject *>(QStringLiteral("settingsTab"));
+        QObject *conversationPane =
+            root->findChild<QObject *>(QStringLiteral("conversationPane"));
+        QObject *callView = root->findChild<QObject *>(QStringLiteral("callView"));
+        QObject *settingsView = root->findChild<QObject *>(QStringLiteral("settingsView"));
+        QVERIFY(bottomNav);
+        QVERIFY(callTab);
+        QVERIFY(chatTab);
+        QVERIFY(settingsTab);
+        QVERIFY(conversationPane);
+        QVERIFY(callView);
+        QVERIFY(settingsView);
+
+        // Chat is active by default: the conversation pane and its content are
+        // present and shown, both placeholder panes are hidden, and only the
+        // chat tab reads as active.
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("conversationHeader")));
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("messageHistory")));
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("messageComposer")));
+        QVERIFY(conversationPane->property("visible").toBool());
+        QVERIFY(!callView->property("visible").toBool());
+        QVERIFY(!settingsView->property("visible").toBool());
+        QVERIFY(chatTab->property("active").toBool());
+        QVERIFY(!callTab->property("active").toBool());
+        QVERIFY(!settingsTab->property("active").toBool());
+
+        // Badge labels are backed by the controller's counts, not hardcoded.
+        QObject *chatBadge = root->findChild<QObject *>(QStringLiteral("chatBadgeLabel"));
+        QObject *callBadge = root->findChild<QObject *>(QStringLiteral("callBadgeLabel"));
+        QVERIFY(chatBadge);
+        QVERIFY(callBadge);
+        QCOMPARE(chatBadge->property("text").toString(),
+                 QString::number(controller.chatUnreadCount()));
+        QCOMPARE(callBadge->property("text").toString(),
+                 QString::number(controller.callMissedCount()));
+        QCOMPARE(chatBadge->property("text").toString(), QStringLiteral("3"));
+        QCOMPARE(callBadge->property("text").toString(), QStringLiteral("1"));
+
+        // Call: the call placeholder replaces the chat pane exclusively.
+        controller.setNavSection(OpenChat::ChatController::NavSection::Call);
+        QCoreApplication::processEvents();
+        QVERIFY(callView->property("visible").toBool());
+        QVERIFY(!conversationPane->property("visible").toBool());
+        QVERIFY(!settingsView->property("visible").toBool());
+        QVERIFY(callTab->property("active").toBool());
+        QVERIFY(!chatTab->property("active").toBool());
+
+        // Settings: the settings placeholder replaces the chat pane exclusively.
+        controller.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        QCoreApplication::processEvents();
+        QVERIFY(settingsView->property("visible").toBool());
+        QVERIFY(!conversationPane->property("visible").toBool());
+        QVERIFY(!callView->property("visible").toBool());
+        QVERIFY(settingsTab->property("active").toBool());
+        QVERIFY(!callTab->property("active").toBool());
+
+        // Back to Chat restores the conversation pane.
+        controller.setNavSection(OpenChat::ChatController::NavSection::Chat);
+        QCoreApplication::processEvents();
+        QVERIFY(conversationPane->property("visible").toBool());
+        QVERIFY(!callView->property("visible").toBool());
+        QVERIFY(!settingsView->property("visible").toBool());
+        QVERIFY(chatTab->property("active").toBool());
+    }
+
     void messageListStartsAtHistoryTopWithoutStationaryDivider()
     {
         OpenChat::ChatController controller;
@@ -376,6 +456,9 @@ int main(int argc, char **argv)
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::AvatarArtwork>(
         "OpenChat.Native", 1, 0, "AvatarArtwork");
+    qmlRegisterUncreatableType<OpenChat::ChatController>(
+        "OpenChat.Native", 1, 0, "ChatController",
+        QStringLiteral("ChatController is provided by the application"));
     QmlLoadTest test;
     return QTest::qExec(&test, argc, argv);
 }

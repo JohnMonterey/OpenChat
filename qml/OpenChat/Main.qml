@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Window
 import OpenChat
+import OpenChat.Native
 
 Window {
     id: root
@@ -28,11 +29,17 @@ Window {
             controller: root.chatController
         }
 
+        // The three navigation sections share the pane to the right of the
+        // sidebar and are mutually exclusive. Chat is the default and renders
+        // the approved conversation interface exactly as before; Call and
+        // Settings are placeholder stubs shown only when selected.
         Item {
             id: conversationPane
+            objectName: "conversationPane"
             x: root.sidebarWidth
             width: parent.width - root.sidebarWidth
             height: parent.height
+            visible: root.chatController.navSection === ChatController.NavSection.Chat
 
             Rectangle {
                 anchors.fill: parent
@@ -108,6 +115,58 @@ Window {
                 height: implicitHeight
                 controller: root.chatController
                 onMessageSent: history.positionAtEnd()
+            }
+        }
+
+        Item {
+            id: callView
+            objectName: "callView"
+            x: root.sidebarWidth
+            width: parent.width - root.sidebarWidth
+            height: parent.height
+            visible: root.chatController.navSection === ChatController.NavSection.Call
+
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Theme.contentBackground }
+                    GradientStop { position: 1; color: Theme.contentBottom }
+                }
+            }
+
+            Text {
+                anchors.centerIn: parent
+                text: "Calls"
+                color: Theme.textPrimary
+                font.family: Theme.uiFont
+                font.pixelSize: 22
+                renderType: Text.NativeRendering
+            }
+        }
+
+        Item {
+            id: settingsView
+            objectName: "settingsView"
+            x: root.sidebarWidth
+            width: parent.width - root.sidebarWidth
+            height: parent.height
+            visible: root.chatController.navSection === ChatController.NavSection.Settings
+
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Theme.contentBackground }
+                    GradientStop { position: 1; color: Theme.contentBottom }
+                }
+            }
+
+            Text {
+                anchors.centerIn: parent
+                text: "Settings"
+                color: Theme.textPrimary
+                font.family: Theme.uiFont
+                font.pixelSize: 22
+                renderType: Text.NativeRendering
             }
         }
     }

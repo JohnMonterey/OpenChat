@@ -124,6 +124,33 @@ private slots:
         QCOMPARE(controller.messages()->rowCount(), 5);
     }
 
+    void navigationDefaultsToChatAndTransitionsOnce()
+    {
+        ChatController controller;
+
+        QCOMPARE(controller.navSection(), ChatController::NavSection::Chat);
+        QCOMPARE(controller.chatUnreadCount(), 3);
+        QCOMPARE(controller.callMissedCount(), 1);
+
+        QSignalSpy navSpy(&controller, &ChatController::navSectionChanged);
+
+        controller.setNavSection(ChatController::NavSection::Call);
+        QCOMPARE(controller.navSection(), ChatController::NavSection::Call);
+        QCOMPARE(navSpy.count(), 1);
+
+        // Re-selecting the current section is a no-op and emits nothing further.
+        controller.setNavSection(ChatController::NavSection::Call);
+        QCOMPARE(navSpy.count(), 1);
+
+        controller.setNavSection(ChatController::NavSection::Settings);
+        QCOMPARE(controller.navSection(), ChatController::NavSection::Settings);
+        QCOMPARE(navSpy.count(), 2);
+
+        controller.setNavSection(ChatController::NavSection::Chat);
+        QCOMPARE(controller.navSection(), ChatController::NavSection::Chat);
+        QCOMPARE(navSpy.count(), 3);
+    }
+
     void quarantineAndDeviceChangeWithholdPlaintext()
     {
         ChatController controller;

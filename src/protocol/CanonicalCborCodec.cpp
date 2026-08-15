@@ -212,17 +212,23 @@ public:
                 return false;
             }
             QByteArrayView previousKey;
+            bool havePrevious = false;
             for (quint64 index = 0; index < head->value; ++index) {
                 const qsizetype keyStart = m_position;
                 if (!skipValue(depth + 1))
                     return false;
                 const QByteArrayView key = m_input.sliced(keyStart, m_position - keyStart);
-                if (!previousKey.isEmpty() && !isCanonicalKeyOrder(previousKey, key)) {
+                // Track "have a previous key" explicitly rather than inferring it
+                // from a non-empty slice: an encoded key is never zero length, but
+                // the intent (skip the check only on the first key) should not
+                // depend on that.
+                if (havePrevious && !isCanonicalKeyOrder(previousKey, key)) {
                     fail(previousKey == key ? DecodeError::DuplicateField
                                             : DecodeError::NonCanonical);
                     return false;
                 }
                 previousKey = key;
+                havePrevious = true;
                 if (!skipValue(depth + 1))
                     return false;
             }

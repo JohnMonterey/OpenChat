@@ -128,6 +128,9 @@ private slots:
     void concurrentClaimWithTwoPackagesGivesDistinct();
     void sameIdempotencyKeyDifferentSendersBothDelivered();
     void watermarkAdvancesAndBoundsCatchUp();
+    void catchUpIsBoundedByResponseBytes();
+    void expiredEnvelopeRejectedAtSubmit();
+    void acknowledgePrunesDeliveredInbox();
     void revokedDeviceIsRejectedEverywhere();
 
 private:
@@ -532,6 +535,99 @@ void RelayServicesTest::watermarkAdvancesAndBoundsCatchUp()
     // Watermarks never regress.
     QVERIFY(envelopes.acknowledge(recipient.device, 1).hasValue());
     QCOMPARE(envelopes.watermarkFor(recipient.device), all.value().newWatermark);
+}
+
+void RelayServicesTest::catchUpIsBoundedByResponseBytes()
+{
+    const auto sender = registerDevice(QStringLiteral("nora"));
+    const auto recipient = registerDevice(QStringLiteral("otis"));
+    // A page cap that only admits about one ~1 KiB envelope at a time.
+    EnvelopeService envelopes(*m_store, EnvelopeService::Policy{512, 1500});
+
+    constexpr int total = 4;
+    for (int i = 0; i < total; ++i) {
+        const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device,
+                                             recipient.device, QByteArray(1024, 'x'), m_now);
+        QVERIFY(envelopes.submit(AuthenticatedDevice{sender.account, sender.device},
+                                 encodeCanonical(envelope))
+                    .hasValue());
+    }
+
+    // Each page is byte-bounded (fewer than all four, at least one), and paging
+    // from the returned watermark eventually drains every message exactly once.
+    int drained = 0;
+    int pages = 0;
+    quint64 cursor = 0;
+    while (true) {
+        const auto page = envelopes.fetchSince(recipient.device, cursor, 100);
+        QVERIFY(page.hasValue());
+        if (page.value().items.isEmpty())
+            break;
+        QVERIFY(page.value().items.size() < total); // response byte cap took effect
+        drained += page.value().items.size();
+        cursor = page.value().newWatermark;
+        if (++pages > total + 2)
+            QFAIL("catch-up did not terminate");
+    }
+    QCOMPARE(drained, total);
+    QVERIFY(pages >= 2); // more than one page was required
+}
+
+void RelayServicesTest::expiredEnvelopeRejectedAtSubmit()
+{
+    const auto sender = registerDevice(QStringLiteral("pia"));
+    const auto recipient = registerDevice(QStringLiteral("quill"));
+    EnvelopeService envelopes(*m_store);
+
+    // A validly-formed envelope whose expiry is already in the past.
+    CiphertextEnvelopeV1 envelope{
+        1,
+        EnvelopeId::generate(),
+        sender.account,
+        sender.device,
+        recipient.device,
+        ConversationId::generate(),
+        EnvelopeMessageKind::MlsPrivateMessage,
+        m_now - 120'000,
+        m_now - 60'000,
+        EnvelopeId::generate(),
+        QByteArray("stale"),
+        QCryptographicHash::hash(QByteArray("stale"), QCryptographicHash::Sha256),
+        QByteArray(64, '\0')};
+    envelope.senderSignature = signWith(sender.key.pkey, envelopeSigningInput(envelope));
+
+    const auto submitted = envelopes.submit(AuthenticatedDevice{sender.account, sender.device},
+                                            encodeCanonical(envelope));
+    QVERIFY(!submitted.hasValue());
+    QCOMPARE(submitted.error(), RelayError::InvalidRequest);
+    QCOMPARE(envelopes.fetchSince(recipient.device, 0, 100).value().items.size(), 0);
+}
+
+void RelayServicesTest::acknowledgePrunesDeliveredInbox()
+{
+    const auto sender = registerDevice(QStringLiteral("ruth"));
+    const auto recipient = registerDevice(QStringLiteral("saul"));
+    EnvelopeService envelopes(*m_store);
+
+    for (int i = 0; i < 2; ++i) {
+        const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device,
+                                             recipient.device, QByteArray("m").repeated(i + 1), m_now);
+        QVERIFY(envelopes.submit(AuthenticatedDevice{sender.account, sender.device},
+                                 encodeCanonical(envelope))
+                    .hasValue());
+    }
+
+    const auto before = envelopes.fetchSince(recipient.device, 0, 100);
+    QVERIFY(before.hasValue());
+    QCOMPARE(before.value().items.size(), 2);
+
+    QVERIFY(envelopes.acknowledge(recipient.device, before.value().newWatermark).hasValue());
+
+    // Delivered-and-acked rows are physically removed, not merely filtered by the
+    // cursor: a fetch from zero now finds nothing.
+    const auto after = envelopes.fetchSince(recipient.device, 0, 100);
+    QVERIFY(after.hasValue());
+    QCOMPARE(after.value().items.size(), 0);
 }
 
 void RelayServicesTest::revokedDeviceIsRejectedEverywhere()

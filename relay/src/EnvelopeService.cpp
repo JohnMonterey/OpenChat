@@ -40,6 +40,12 @@ EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArr
         || envelope.senderAccountId != authenticatedDevice.accountId)
         return Result<SubmitResult, RelayError>::failure(RelayError::Unauthorized);
 
+    // Reject an envelope that has already expired. The codec bounds the
+    // created/expiry range but not against the wall clock, so a replayed old
+    // envelope would otherwise be stored and re-delivered until manual cleanup.
+    if (envelope.expiresAtMs <= m_store.nowMs())
+        return Result<SubmitResult, RelayError>::failure(RelayError::InvalidRequest);
+
     QSqlDatabase &db = m_store.database();
 
     // Load the sender's signing key and verify the envelope signature over the
@@ -155,10 +161,19 @@ Result<FetchResult, RelayError> EnvelopeService::fetchSince(const DeviceId &devi
 
     FetchResult result;
     result.newWatermark = since;
+    qint64 pageBytes = 0;
     while (rows.next()) {
         InboxItem item;
         item.serverSequence = static_cast<quint64>(rows.value(0).toLongLong());
         item.envelope = rows.value(1).toByteArray();
+        // Bound the cumulative page size. Always include at least one item so a
+        // single large envelope can still make progress; stop before a further
+        // item would push the page past the cap, leaving the watermark at the
+        // last included item so the client fetches the remainder next round.
+        if (!result.items.isEmpty()
+            && pageBytes + item.envelope.size() > m_policy.maxResponseBytes)
+            break;
+        pageBytes += item.envelope.size();
         result.newWatermark = std::max(result.newWatermark, item.serverSequence);
         result.items.append(item);
     }
@@ -179,6 +194,19 @@ Result<void, RelayError> EnvelopeService::acknowledge(const DeviceId &deviceId, 
     upsert.addBindValue(static_cast<qlonglong>(watermark));
     upsert.addBindValue(m_store.nowMs());
     if (!upsert.exec())
+        return Result<void, RelayError>::failure(RelayError::Internal);
+
+    // Retention: an acknowledged envelope has been durably received, so drop it
+    // (and any expired envelope for this device) instead of letting the inbox
+    // grow without bound and re-serve the same rows on every catch-up.
+    QSqlQuery prune(db);
+    prune.prepare(QStringLiteral(
+        "DELETE FROM inbox_messages WHERE recipient_device_id = ? "
+        "AND (server_sequence <= ? OR expires_at_ms < ?)"));
+    prune.addBindValue(deviceId.bytes());
+    prune.addBindValue(static_cast<qlonglong>(watermark));
+    prune.addBindValue(m_store.nowMs());
+    if (!prune.exec())
         return Result<void, RelayError>::failure(RelayError::Internal);
     return Result<void, RelayError>::success();
 }

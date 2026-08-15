@@ -74,6 +74,7 @@ private slots:
     void rejectsInvalidLocalExtensionEncoding();
     void rejectsExtensionPastDepthLimit();
     void encodeAndDecodeAgreeOnExtensionDepthLimit();
+    void rejectsDuplicateEmptyKeysInExtensionSubmap();
     void encodeForSignatureClearsSignatureField();
     void rejectsOversizeCiphertext();
     void honorsTighterDecodeLimits();
@@ -259,6 +260,21 @@ void EnvelopeCodecTest::encodeAndDecodeAgreeOnExtensionDepthLimit()
     hostile[0] = char(0xae); // 14 map entries: the 13 required plus one extension
     hostile.append(QByteArray::fromHex("18808181818181818100"));
     QCOMPARE(decodeEnvelope(hostile).error(), DecodeError::DepthLimitExceeded);
+}
+
+void EnvelopeCodecTest::rejectsDuplicateEmptyKeysInExtensionSubmap()
+{
+    // A noncritical extension whose value is a map with two empty-bstr keys
+    // (a2 40 00 40 01) must be rejected: the encoded key slice is never empty, so
+    // the ordering/duplication check still fires on the second empty key.
+    const auto fixture = goldenFixture();
+    QVERIFY2(fixture.error.isEmpty(), qPrintable(fixture.error));
+    QByteArray hostile = fixture.bytes;
+    hostile[0] = char(0xae); // 14 map entries: 13 required plus one extension
+    // Extension key 128 (18 80) → value map a2 { 40:00, 40:01 } with duplicate
+    // empty-bstr keys.
+    hostile.append(QByteArray::fromHex("1880a240004001"));
+    QCOMPARE(decodeEnvelope(hostile).error(), DecodeError::DuplicateField);
 }
 
 void EnvelopeCodecTest::encodeForSignatureClearsSignatureField()

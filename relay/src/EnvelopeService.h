@@ -34,6 +34,11 @@ class EnvelopeService final
 public:
     struct Policy final {
         int maxFetch = 512;
+        // Cap the cumulative encoded size of one catch-up page. A single
+        // envelope is bounded to 1 MiB by the schema, so this keeps a page well
+        // under the client's HTTP body limit no matter how large maxFetch is,
+        // preventing a ~maxFetch × 1 MiB response allocation.
+        qint64 maxResponseBytes = 4 * 1024 * 1024;
     };
 
     explicit EnvelopeService(PostgresStore &store);

@@ -80,10 +80,14 @@ QByteArray sessionCbor(const QByteArray &access, const QByteArray &refresh, qint
 
 QByteArray catchUpCbor(quint64 watermark, const QList<CiphertextEnvelopeV1> &envelopes)
 {
+    // Flat [watermark, seq, envelope, seq, envelope, ...].
     QCborArray array;
     array.append(static_cast<qint64>(watermark));
-    for (const CiphertextEnvelopeV1 &envelope : envelopes)
+    qint64 sequence = 1;
+    for (const CiphertextEnvelopeV1 &envelope : envelopes) {
+        array.append(sequence++);
         array.append(encodeCanonical(envelope));
+    }
     return array.toCborValue().toCbor();
 }
 
@@ -103,9 +107,10 @@ struct Observer final {
         , connects(client, &RelayClient::connected)
     {
         QObject::connect(client, &RelayClient::envelopeReceived, client,
-                         [this](const CiphertextEnvelopeV1 &envelope) {
+                         [this](const CiphertextEnvelopeV1 &envelope, quint64 serverSequence) {
                              ++envelopeCount;
                              lastEnvelope = envelope;
+                             lastSequence = serverSequence;
                          });
         QObject::connect(client, &RelayClient::relayAccepted, client,
                          [this](const EnvelopeId &id, quint64 sequence) {
@@ -123,9 +128,20 @@ struct Observer final {
     QSignalSpy connects;
     int envelopeCount = 0;
     std::optional<CiphertextEnvelopeV1> lastEnvelope;
+    quint64 lastSequence = 0;
     QList<QByteArray> acceptedIds;
     QList<quint64> acceptedSequences;
 };
+
+// Builds a server -> client Delivery control frame: [4, seq, canonicalEnvelope].
+QByteArray deliveryFrame(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence)
+{
+    QCborArray frame;
+    frame.append(4);
+    frame.append(static_cast<qint64>(serverSequence));
+    frame.append(encodeCanonical(envelope));
+    return frame.toCborValue().toCbor();
+}
 
 } // namespace
 
@@ -333,9 +349,13 @@ void RelayClientTest::malformedCborIsRejected()
     RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
                                     {QString::fromLatin1(relaySubprotocol)});
     server.onConnected = [](QWebSocket *socket) {
-        QCborMap notAnEnvelope;
-        notAnEnvelope.insert(1, 2);
-        socket->sendBinaryMessage(notAnEnvelope.toCborValue().toCbor());
+        // A well-formed Delivery frame carrying a payload that is not a valid
+        // envelope: the bounded decoder rejects it as malformed.
+        QCborArray frame;
+        frame.append(4);
+        frame.append(qint64(1));
+        frame.append(QByteArray("not-a-canonical-envelope"));
+        socket->sendBinaryMessage(frame.toCborValue().toCbor());
     };
     QVERIFY(server.isListening());
 
@@ -357,7 +377,7 @@ void RelayClientTest::wrongRecipientIsRejected()
                                     {QString::fromLatin1(relaySubprotocol)});
     const DeviceId someoneElse = DeviceId::generate();
     server.onConnected = [someoneElse](QWebSocket *socket) {
-        socket->sendBinaryMessage(encodeCanonical(makeEnvelope(someoneElse)));
+        socket->sendBinaryMessage(deliveryFrame(makeEnvelope(someoneElse), 7));
     };
     QVERIFY(server.isListening());
 
@@ -382,7 +402,7 @@ void RelayClientTest::validCiphertextIsDelivered()
     const DeviceId localDevice = DeviceId::generate();
     const CiphertextEnvelopeV1 envelope = makeEnvelope(localDevice, "ciphertext-payload");
     server.onConnected = [envelope](QWebSocket *socket) {
-        socket->sendBinaryMessage(encodeCanonical(envelope));
+        socket->sendBinaryMessage(deliveryFrame(envelope, 42));
     };
     QVERIFY(server.isListening());
 
@@ -398,6 +418,7 @@ void RelayClientTest::validCiphertextIsDelivered()
     QVERIFY(client.isConnected());
     QVERIFY(observer.lastEnvelope.has_value());
     QCOMPARE(*observer.lastEnvelope, envelope);
+    QCOMPARE(observer.lastSequence, quint64(42));
 }
 
 void RelayClientTest::connectLiveResumesFromWatermark()

@@ -258,10 +258,15 @@ void RelayServer::registerRoutes()
                 m_envelopes.fetchSince(identity->deviceId, since, m_limits.syncLimit);
             if (!fetched.hasValue())
                 return errorResponse(fetched.error());
+            // Flat [watermark, seq, envelope, seq, envelope, ...] so each
+            // delivered envelope carries the per-recipient sequence the client
+            // needs for a watermark-consistent durable receive.
             QCborArray array;
             array.append(static_cast<qint64>(fetched.value().newWatermark));
-            for (const InboxItem &item : fetched.value().items)
+            for (const InboxItem &item : fetched.value().items) {
+                array.append(static_cast<qint64>(item.serverSequence));
                 array.append(item.envelope);
+            }
             return cbor(array.toCborValue());
         });
 
@@ -368,10 +373,16 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
         ack.append(static_cast<qint64>(submitted.value().serverSequence));
         socket->sendBinaryMessage(ack.toCborValue().toCbor());
 
-        // Best-effort real-time delivery to a connected recipient.
+        // Best-effort real-time delivery to a connected recipient, carrying the
+        // recipient's inbox sequence: [4 (Delivery), seq, envelope].
         const QByteArray recipientKey = decoded.value().recipientDeviceId.bytes().toHex();
-        if (QWebSocket *recipient = m_liveByDevice.value(recipientKey))
-            recipient->sendBinaryMessage(message);
+        if (QWebSocket *recipient = m_liveByDevice.value(recipientKey)) {
+            QCborArray delivery;
+            delivery.append(4);
+            delivery.append(static_cast<qint64>(submitted.value().serverSequence));
+            delivery.append(message);
+            recipient->sendBinaryMessage(delivery.toCborValue().toCbor());
+        }
         return;
     }
     if (major == 4) {

@@ -171,7 +171,9 @@ signals:
     void authenticated(const RelaySession &session);
     void connected();
     void disconnected();
-    void envelopeReceived(const CiphertextEnvelopeV1 &envelope);
+    // Delivered ciphertext plus its per-recipient relay sequence, which the
+    // durable receive path uses as the inbox watermark.
+    void envelopeReceived(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);
     void relayAccepted(const EnvelopeId &envelopeId, quint64 serverSequence);
     // Emitted after a successful refresh so the caller can persist rotated
     // tokens; RelayClient itself does not store them.

@@ -32,6 +32,7 @@ enum class ControlType : int {
     RelayAccepted = 1, // server -> client: [1, bstr envelopeId(16), uint sequence]
     AuthExpired = 2,   // server -> client: [2]
     Acknowledge = 3,   // client -> server: [3, bstr envelopeId(16), uint watermark]
+    Delivery = 4,      // server -> client: [4, uint serverSequence, bstr canonicalEnvelope]
 };
 
 [[nodiscard]] bool isSecureScheme(const QUrl &url, QLatin1StringView scheme)
@@ -355,35 +356,32 @@ public:
             return;
         }
 
-        const int major = cborMajorType(message);
-        if (major == 5) {
-            handleEnvelopeFrame(message);
+        // All server -> client frames are top-level CBOR arrays (control frames):
+        // envelope deliveries carry their server sequence, and acks/notices are
+        // small typed arrays. A bare envelope map is never expected inbound.
+        if (cborMajorType(message) != 4) {
+            emit q->transportError(RelayTransportError::InvalidControlFrame);
             return;
         }
-        if (major == 4) {
-            handleControlFrame(message);
-            return;
-        }
-        emit q->transportError(RelayTransportError::InvalidControlFrame);
+        handleControlFrame(message);
     }
 
-    void handleEnvelopeFrame(const QByteArray &message)
+    // Decodes an envelope payload through the bounded canonical decoder only,
+    // checks the recipient, and surfaces it with its relay sequence.
+    void deliverEnvelope(const QByteArray &envelopeBytes, quint64 serverSequence)
     {
         DecodeLimits decodeLimits;
         decodeLimits.envelopeBytes = static_cast<qsizetype>(limits.maxIncomingMessageBytes);
-        const auto decoded = decodeEnvelope(message, decodeLimits);
+        const auto decoded = decodeEnvelope(envelopeBytes, decodeLimits);
         if (!decoded.hasValue()) {
             emit q->transportError(RelayTransportError::MalformedEnvelope);
             return;
         }
-
-        const CiphertextEnvelopeV1 &envelope = decoded.value();
-        if (envelope.recipientDeviceId != localDeviceId) {
+        if (decoded.value().recipientDeviceId != localDeviceId) {
             emit q->transportError(RelayTransportError::WrongRecipient);
             return;
         }
-
-        emit q->envelopeReceived(envelope);
+        emit q->envelopeReceived(decoded.value(), serverSequence);
     }
 
     void handleControlFrame(const QByteArray &message)
@@ -408,6 +406,19 @@ public:
                 return;
             }
             emit q->relayAccepted(*id, static_cast<quint64>(sequence));
+            return;
+        }
+        case ControlType::Delivery: {
+            if (array->size() != 3 || !array->at(1).isInteger() || !array->at(2).isByteArray()) {
+                emit q->transportError(RelayTransportError::InvalidControlFrame);
+                return;
+            }
+            const qint64 sequence = array->at(1).toInteger();
+            if (sequence < 0) {
+                emit q->transportError(RelayTransportError::InvalidControlFrame);
+                return;
+            }
+            deliverEnvelope(array->at(2).toByteArray(), static_cast<quint64>(sequence));
             return;
         }
         case ControlType::AuthExpired:
@@ -806,8 +817,8 @@ void RelayClient::deliverCatchUp(const QByteArray &body)
 {
     // Stream the batch rather than materializing the whole CBOR array: the item
     // count is enforced before each element is allocated, so a body full of tiny
-    // elements cannot amplify into a large transient DOM. Layout is
-    // [ uint watermark, bstr envelope, bstr envelope, ... ].
+    // elements cannot amplify into a large transient DOM. Layout is flat:
+    // [ uint watermark, uint seq, bstr envelope, uint seq, bstr envelope, ... ].
     QCborStreamReader reader(body);
     if (reader.lastError() != QCborError::NoError || !reader.isArray()) {
         emit transportError(RelayTransportError::MalformedEnvelope);
@@ -828,7 +839,8 @@ void RelayClient::deliverCatchUp(const QByteArray &body)
     QPointer<RelayClient> guard(this);
     int count = 0;
     while (reader.hasNext()) {
-        if (reader.lastError() != QCborError::NoError || !reader.isByteArray()) {
+        // Each item is a (sequence, envelope) pair.
+        if (reader.lastError() != QCborError::NoError || !reader.isUnsignedInteger()) {
             emit transportError(RelayTransportError::MalformedEnvelope);
             return;
         }
@@ -837,7 +849,13 @@ void RelayClient::deliverCatchUp(const QByteArray &body)
             return;
         }
         ++count;
+        const quint64 sequence = reader.toUnsignedInteger();
+        reader.next();
 
+        if (reader.lastError() != QCborError::NoError || !reader.isByteArray()) {
+            emit transportError(RelayTransportError::MalformedEnvelope);
+            return;
+        }
         QByteArray envelopeBytes;
         auto chunk = reader.readByteArray();
         while (chunk.status == QCborStreamReader::Ok) {
@@ -862,7 +880,7 @@ void RelayClient::deliverCatchUp(const QByteArray &body)
             emit transportError(RelayTransportError::WrongRecipient);
             return;
         }
-        emit envelopeReceived(decoded.value());
+        emit envelopeReceived(decoded.value(), sequence);
         if (!guard) // a consumer slot destroyed us mid-delivery
             return;
     }

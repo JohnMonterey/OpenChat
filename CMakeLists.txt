@@ -64,6 +64,7 @@ qt_add_qml_module(OpenChat
 
 target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
+    openchat_app
     Qt6::Core
     Qt6::Gui
     Qt6::Quick
@@ -103,6 +104,8 @@ target_link_libraries(openchat_crypto
 add_library(openchat_security STATIC
     src/security/SecureBuffer.cpp
     src/security/QtKeychainVault.cpp
+    src/security/DeviceIdentity.cpp
+    src/security/RecoveryCode.cpp
 )
 
 add_library(openchat_storage STATIC
@@ -114,7 +117,7 @@ add_library(openchat_storage STATIC
 target_include_directories(openchat_storage PUBLIC src)
 target_link_libraries(openchat_storage
     PUBLIC openchat_security Qt6::Core
-    PRIVATE openchat_sqlcipher
+    PRIVATE OpenSSL::Crypto openchat_sqlcipher
 )
 qt_add_resources(openchat_storage "openchat_migrations"
     PREFIX "/openchat"
@@ -123,11 +126,20 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/001_initial.sql
         src/storage/migrations/002_indexes.sql
         src/storage/migrations/003_domain_alignment.sql
+        src/storage/migrations/004_profile_identity.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
     PUBLIC openchat_domain Qt6::Core
     PRIVATE OpenSSL::Crypto qt6keychain
+)
+
+add_library(openchat_app STATIC
+    src/app/ProfileSession.cpp
+)
+target_include_directories(openchat_app PUBLIC src)
+target_link_libraries(openchat_app
+    PUBLIC openchat_crypto openchat_storage openchat_security Qt6::Core
 )
 
 add_executable(tst_domain tests/tst_domain.cpp)
@@ -162,6 +174,11 @@ add_executable(tst_mlsbridge tests/tst_mlsbridge.cpp)
 target_include_directories(tst_mlsbridge PRIVATE src)
 target_link_libraries(tst_mlsbridge PRIVATE openchat_crypto Qt6::Core Qt6::Test)
 add_test(NAME tst_mlsbridge COMMAND tst_mlsbridge)
+
+add_executable(tst_profilesession tests/tst_profilesession.cpp)
+target_include_directories(tst_profilesession PRIVATE src)
+target_link_libraries(tst_profilesession PRIVATE openchat_app Qt6::Core Qt6::Test)
+add_test(NAME tst_profilesession COMMAND tst_profilesession)
 
 add_executable(tst_models
     tests/tst_models.cpp

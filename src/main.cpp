@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
         QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.svg")));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("OpenChat local interface prototype"));
+    parser.setApplicationDescription(QStringLiteral("OpenChat secure chat client"));
     parser.addHelpOption();
     const QCommandLineOption captureOption(
         QStringLiteral("capture"), QStringLiteral("Save a rendered window capture to <path>."),

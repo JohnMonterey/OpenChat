@@ -29,6 +29,12 @@ public:
   createProfileKey(const ProfileId &profileId) = 0;
   [[nodiscard]] virtual Result<void, KeyVaultError>
   deleteProfileKey(const ProfileId &profileId) = 0;
+  [[nodiscard]] virtual Result<SecureBuffer, KeyVaultError>
+  readDeviceWrappingKey(const ProfileId &profileId) = 0;
+  [[nodiscard]] virtual Result<SecureBuffer, KeyVaultError>
+  createDeviceWrappingKey(const ProfileId &profileId) = 0;
+  [[nodiscard]] virtual Result<void, KeyVaultError>
+  deleteDeviceWrappingKey(const ProfileId &profileId) = 0;
 };
 
 } // namespace OpenChat

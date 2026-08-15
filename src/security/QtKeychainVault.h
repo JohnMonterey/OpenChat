@@ -13,9 +13,13 @@ public:
   createProfileKey(const ProfileId &profileId) override;
   [[nodiscard]] Result<void, KeyVaultError>
   deleteProfileKey(const ProfileId &profileId) override;
+  [[nodiscard]] Result<SecureBuffer, KeyVaultError>
+  readDeviceWrappingKey(const ProfileId &profileId) override;
+  [[nodiscard]] Result<SecureBuffer, KeyVaultError>
+  createDeviceWrappingKey(const ProfileId &profileId) override;
+  [[nodiscard]] Result<void, KeyVaultError>
+  deleteDeviceWrappingKey(const ProfileId &profileId) override;
 
-private:
-  static constexpr auto serviceName = "org.openchat.OpenChat";
 };
 
 } // namespace OpenChat

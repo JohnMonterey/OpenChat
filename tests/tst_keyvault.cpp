@@ -46,9 +46,42 @@ public:
     return Result<void, KeyVaultError>::success();
   }
 
+  Result<SecureBuffer, KeyVaultError>
+  readDeviceWrappingKey(const ProfileId &) override {
+    if (m_availability != KeyVaultAvailability::Available)
+      return Result<SecureBuffer, KeyVaultError>::failure(
+          KeyVaultError::Unavailable);
+    if (!m_wrappingKey.has_value())
+      return Result<SecureBuffer, KeyVaultError>::failure(KeyVaultError::NotFound);
+    return Result<SecureBuffer, KeyVaultError>::success(
+        SecureBuffer::fromBytes(m_wrappingKey->view()));
+  }
+
+  Result<SecureBuffer, KeyVaultError>
+  createDeviceWrappingKey(const ProfileId &) override {
+    if (m_availability != KeyVaultAvailability::Available)
+      return Result<SecureBuffer, KeyVaultError>::failure(
+          KeyVaultError::Unavailable);
+    if (m_wrappingKey.has_value())
+      return Result<SecureBuffer, KeyVaultError>::failure(
+          KeyVaultError::AlreadyExists);
+    m_wrappingKey = SecureBuffer::random(32);
+    return Result<SecureBuffer, KeyVaultError>::success(
+        SecureBuffer::fromBytes(m_wrappingKey->view()));
+  }
+
+  Result<void, KeyVaultError>
+  deleteDeviceWrappingKey(const ProfileId &) override {
+    if (m_availability != KeyVaultAvailability::Available)
+      return Result<void, KeyVaultError>::failure(KeyVaultError::Unavailable);
+    m_wrappingKey.reset();
+    return Result<void, KeyVaultError>::success();
+  }
+
 private:
   KeyVaultAvailability m_availability;
   std::optional<SecureBuffer> m_key;
+  std::optional<SecureBuffer> m_wrappingKey;
 };
 
 class KeyVaultTest : public QObject {

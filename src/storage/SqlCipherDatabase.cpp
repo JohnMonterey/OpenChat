@@ -3,14 +3,137 @@
 #include <QFile>
 #include <QFileInfo>
 
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+
 #include <sqlite3.h>
 
+#include <memory>
 #include <utility>
 
 namespace OpenChat {
 namespace {
 
 constexpr qsizetype profileKeySize = 32;
+constexpr qsizetype devicePrivateKeySize = 32;
+constexpr qsizetype devicePublicKeySize = 32;
+constexpr qsizetype wrappingKeySize = 32;
+constexpr qsizetype nonceSize = 12;
+constexpr qsizetype tagSize = 16;
+constexpr qsizetype maximumMlsStateSize = qsizetype{8} * 1024 * 1024;
+
+using CipherContextPointer =
+    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
+
+QByteArray identityAad(const ProfileId &profileId, const DeviceId &deviceId,
+                       QByteArrayView publicKey) {
+  QByteArray aad("OpenChat wrapped device identity v1", 35);
+  aad.append(profileId.bytes());
+  aad.append(deviceId.bytes());
+  aad.append(publicKey.data(), publicKey.size());
+  return aad;
+}
+
+struct WrappedSecret final {
+  QByteArray nonce;
+  QByteArray ciphertext;
+  QByteArray tag;
+};
+
+Result<WrappedSecret, StorageError>
+wrapSecret(const SecureBuffer &plaintext, const SecureBuffer &key,
+           QByteArrayView aad) {
+  if (key.size() != wrappingKeySize || plaintext.isEmpty())
+    return Result<WrappedSecret, StorageError>::failure(StorageError::InvalidKey);
+  WrappedSecret wrapped{QByteArray(nonceSize, Qt::Uninitialized),
+                        QByteArray(plaintext.size(), Qt::Uninitialized),
+                        QByteArray(tagSize, Qt::Uninitialized)};
+  if (RAND_bytes(reinterpret_cast<unsigned char *>(wrapped.nonce.data()),
+                 static_cast<int>(wrapped.nonce.size())) != 1)
+    return Result<WrappedSecret, StorageError>::failure(StorageError::QueryFailed);
+
+  CipherContextPointer context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+  int written = 0;
+  int total = 0;
+  if (!context ||
+      EVP_EncryptInit_ex(context.get(), EVP_aes_256_gcm(), nullptr, nullptr,
+                         nullptr) != 1 ||
+      EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_GCM_SET_IVLEN,
+                          static_cast<int>(wrapped.nonce.size()), nullptr) != 1 ||
+      EVP_EncryptInit_ex(
+          context.get(), nullptr, nullptr,
+          reinterpret_cast<const unsigned char *>(key.view().data()),
+          reinterpret_cast<const unsigned char *>(wrapped.nonce.constData())) != 1 ||
+      EVP_EncryptUpdate(context.get(), nullptr, &written,
+                        reinterpret_cast<const unsigned char *>(aad.data()),
+                        static_cast<int>(aad.size())) != 1 ||
+      EVP_EncryptUpdate(
+          context.get(),
+          reinterpret_cast<unsigned char *>(wrapped.ciphertext.data()), &written,
+          reinterpret_cast<const unsigned char *>(plaintext.view().data()),
+          static_cast<int>(plaintext.size())) != 1)
+    return Result<WrappedSecret, StorageError>::failure(StorageError::QueryFailed);
+  total = written;
+  if (EVP_EncryptFinal_ex(
+          context.get(),
+          reinterpret_cast<unsigned char *>(wrapped.ciphertext.data()) + total,
+          &written) != 1 ||
+      EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_GCM_GET_TAG,
+                          static_cast<int>(wrapped.tag.size()),
+                          wrapped.tag.data()) != 1)
+    return Result<WrappedSecret, StorageError>::failure(StorageError::QueryFailed);
+  wrapped.ciphertext.resize(total + written);
+  return Result<WrappedSecret, StorageError>::success(std::move(wrapped));
+}
+
+Result<SecureBuffer, StorageError>
+unwrapSecret(QByteArrayView ciphertext, QByteArrayView nonce, QByteArrayView tag,
+             const SecureBuffer &key, QByteArrayView aad) {
+  if (key.size() != wrappingKeySize || ciphertext.isEmpty() ||
+      nonce.size() != nonceSize || tag.size() != tagSize)
+    return Result<SecureBuffer, StorageError>::failure(
+        StorageError::AuthenticationFailed);
+  QByteArray plaintext(ciphertext.size(), Qt::Uninitialized);
+  CipherContextPointer context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+  int written = 0;
+  int total = 0;
+  const bool initialized =
+      context &&
+      EVP_DecryptInit_ex(context.get(), EVP_aes_256_gcm(), nullptr, nullptr,
+                         nullptr) == 1 &&
+      EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_GCM_SET_IVLEN,
+                          static_cast<int>(nonce.size()), nullptr) == 1 &&
+      EVP_DecryptInit_ex(
+          context.get(), nullptr, nullptr,
+          reinterpret_cast<const unsigned char *>(key.view().data()),
+          reinterpret_cast<const unsigned char *>(nonce.data())) == 1 &&
+      EVP_DecryptUpdate(context.get(), nullptr, &written,
+                        reinterpret_cast<const unsigned char *>(aad.data()),
+                        static_cast<int>(aad.size())) == 1 &&
+      EVP_DecryptUpdate(
+          context.get(), reinterpret_cast<unsigned char *>(plaintext.data()),
+          &written,
+          reinterpret_cast<const unsigned char *>(ciphertext.data()),
+          static_cast<int>(ciphertext.size())) == 1;
+  total = written;
+  if (!initialized ||
+      EVP_CIPHER_CTX_ctrl(context.get(), EVP_CTRL_GCM_SET_TAG,
+                          static_cast<int>(tag.size()),
+                          const_cast<char *>(tag.data())) != 1 ||
+      EVP_DecryptFinal_ex(
+          context.get(),
+          reinterpret_cast<unsigned char *>(plaintext.data()) + total,
+          &written) != 1) {
+    OPENSSL_cleanse(plaintext.data(), static_cast<std::size_t>(plaintext.size()));
+    return Result<SecureBuffer, StorageError>::failure(
+        StorageError::AuthenticationFailed);
+  }
+  plaintext.resize(total + written);
+  auto secret = SecureBuffer::fromBytes(plaintext);
+  OPENSSL_cleanse(plaintext.data(), static_cast<std::size_t>(plaintext.size()));
+  return Result<SecureBuffer, StorageError>::success(std::move(secret));
+}
 
 void removeNewDatabaseFiles(const QString &path) {
   QFile::remove(path);
@@ -134,7 +257,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
                                  ? sqlite3_column_int(versionStatement, 0)
                                  : -1;
   sqlite3_finalize(versionStatement);
-  constexpr int latestVersion = 3;
+  constexpr int latestVersion = 4;
   if (currentVersion < 0 || currentVersion > latestVersion)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
 
@@ -146,6 +269,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
       {1, ":/openchat/001_initial.sql"},
       {2, ":/openchat/002_indexes.sql"},
       {3, ":/openchat/003_domain_alignment.sql"},
+      {4, ":/openchat/004_profile_identity.sql"},
   };
 
   if (!execute("BEGIN IMMEDIATE;").hasValue())
@@ -233,6 +357,155 @@ SqlCipherDatabase::hasVerificationMarker(QByteArrayView marker) {
   if (step != SQLITE_ROW && step != SQLITE_DONE)
     return Result<bool, StorageError>::failure(StorageError::QueryFailed);
   return Result<bool, StorageError>::success(step == SQLITE_ROW);
+}
+
+Result<void, StorageError> SqlCipherDatabase::storeDeviceIdentity(
+    const ProfileId &profileId, const DeviceId &deviceId,
+    QByteArrayView publicKey, const SecureBuffer &privateKey,
+    const SecureBuffer &wrappingKey, qint64 createdAtMs) {
+  if (!m_database || publicKey.size() != devicePublicKeySize ||
+      privateKey.size() != devicePrivateKeySize ||
+      wrappingKey.size() != wrappingKeySize || createdAtMs < 0)
+    return Result<void, StorageError>::failure(StorageError::InvalidKey);
+  const auto aad = identityAad(profileId, deviceId, publicKey);
+  auto wrapped = wrapSecret(privateKey, wrappingKey, aad);
+  if (!wrapped.hasValue())
+    return Result<void, StorageError>::failure(wrapped.error());
+
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql =
+      "INSERT INTO local_profiles(profile_id, device_id, signing_public_key, "
+      "private_nonce, private_ciphertext, private_tag, created_at_ms) "
+      "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  const auto deviceBytes = deviceId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()),
+                    SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 2, deviceBytes.constData(),
+                    static_cast<int>(deviceBytes.size()),
+                    SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 3, publicKey.data(),
+                    static_cast<int>(publicKey.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 4, wrapped.value().nonce.constData(),
+                    static_cast<int>(wrapped.value().nonce.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 5, wrapped.value().ciphertext.constData(),
+                    static_cast<int>(wrapped.value().ciphertext.size()),
+                    SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 6, wrapped.value().tag.constData(),
+                    static_cast<int>(wrapped.value().tag.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_int64(statement, 7, createdAtMs);
+  const int step = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  if (step != SQLITE_DONE)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  return Result<void, StorageError>::success();
+}
+
+Result<StoredDeviceIdentity, StorageError>
+SqlCipherDatabase::loadDeviceIdentity(const ProfileId &profileId,
+                                      const SecureBuffer &wrappingKey) {
+  if (!m_database || wrappingKey.size() != wrappingKeySize)
+    return Result<StoredDeviceIdentity, StorageError>::failure(
+        StorageError::InvalidKey);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql =
+      "SELECT device_id, signing_public_key, private_nonce, private_ciphertext, "
+      "private_tag FROM local_profiles WHERE profile_id = ?1";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<StoredDeviceIdentity, StorageError>::failure(
+        StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()),
+                    SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  if (step != SQLITE_ROW) {
+    sqlite3_finalize(statement);
+    return Result<StoredDeviceIdentity, StorageError>::failure(
+        step == SQLITE_DONE ? StorageError::NotFound : StorageError::QueryFailed);
+  }
+  const auto column = [statement](int index) {
+    const auto *data = static_cast<const char *>(sqlite3_column_blob(statement, index));
+    const int size = sqlite3_column_bytes(statement, index);
+    return data && size > 0 ? QByteArray(data, size) : QByteArray{};
+  };
+  const QByteArray deviceBytes = column(0);
+  const QByteArray publicKey = column(1);
+  const QByteArray nonce = column(2);
+  const QByteArray ciphertext = column(3);
+  const QByteArray tag = column(4);
+  sqlite3_finalize(statement);
+
+  const auto deviceId = DeviceId::fromBytes(deviceBytes);
+  if (!deviceId || publicKey.size() != devicePublicKeySize ||
+      ciphertext.size() != devicePrivateKeySize)
+    return Result<StoredDeviceIdentity, StorageError>::failure(
+        StorageError::AuthenticationFailed);
+  const auto aad = identityAad(profileId, *deviceId, publicKey);
+  auto privateKey = unwrapSecret(ciphertext, nonce, tag, wrappingKey, aad);
+  if (!privateKey.hasValue())
+    return Result<StoredDeviceIdentity, StorageError>::failure(privateKey.error());
+  return Result<StoredDeviceIdentity, StorageError>::success(
+      StoredDeviceIdentity{*deviceId, publicKey, std::move(privateKey).value()});
+}
+
+Result<QByteArray, StorageError>
+SqlCipherDatabase::loadMlsState(const ProfileId &profileId) {
+  if (!m_database)
+    return Result<QByteArray, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql = "SELECT state_blob FROM local_mls_state WHERE profile_id = ?1";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<QByteArray, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()),
+                    SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  if (step == SQLITE_DONE) {
+    sqlite3_finalize(statement);
+    return Result<QByteArray, StorageError>::success({});
+  }
+  if (step != SQLITE_ROW) {
+    sqlite3_finalize(statement);
+    return Result<QByteArray, StorageError>::failure(StorageError::QueryFailed);
+  }
+  const auto *data = static_cast<const char *>(sqlite3_column_blob(statement, 0));
+  const int size = sqlite3_column_bytes(statement, 0);
+  QByteArray state = data && size > 0 ? QByteArray(data, size) : QByteArray{};
+  sqlite3_finalize(statement);
+  if (state.size() > maximumMlsStateSize)
+    return Result<QByteArray, StorageError>::failure(StorageError::AuthenticationFailed);
+  return Result<QByteArray, StorageError>::success(std::move(state));
+}
+
+Result<void, StorageError>
+SqlCipherDatabase::storeMlsState(const ProfileId &profileId, QByteArrayView state) {
+  if (!m_database || state.size() > maximumMlsStateSize)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql =
+      "INSERT INTO local_mls_state(profile_id, state_blob) VALUES(?1, ?2) "
+      "ON CONFLICT(profile_id) DO UPDATE SET state_blob = excluded.state_blob";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()),
+                    SQLITE_TRANSIENT);
+  if (state.isEmpty())
+    sqlite3_bind_zeroblob(statement, 2, 0);
+  else
+    sqlite3_bind_blob(statement, 2, state.data(), static_cast<int>(state.size()),
+                      SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  if (step != SQLITE_DONE)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  return Result<void, StorageError>::success();
 }
 
 void SqlCipherDatabase::close() noexcept {

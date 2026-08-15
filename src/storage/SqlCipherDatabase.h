@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Result.h"
+#include "domain/Identifiers.h"
 #include "security/SecureBuffer.h"
 
 #include <QByteArrayView>
@@ -23,7 +24,15 @@ enum class StorageError {
   CannotOpen,
   WrongKeyOrCorrupt,
   MigrationFailed,
-  QueryFailed
+  QueryFailed,
+  NotFound,
+  AuthenticationFailed
+};
+
+struct StoredDeviceIdentity final {
+  DeviceId deviceId;
+  QByteArray publicKey;
+  SecureBuffer privateKey;
 };
 
 class SqlCipherDatabase final {
@@ -42,6 +51,17 @@ public:
   storeVerificationMarker(QByteArrayView marker);
   [[nodiscard]] Result<bool, StorageError>
   hasVerificationMarker(QByteArrayView marker);
+  [[nodiscard]] Result<void, StorageError>
+  storeDeviceIdentity(const ProfileId &profileId, const DeviceId &deviceId,
+                      QByteArrayView publicKey, const SecureBuffer &privateKey,
+                      const SecureBuffer &wrappingKey, qint64 createdAtMs);
+  [[nodiscard]] Result<StoredDeviceIdentity, StorageError>
+  loadDeviceIdentity(const ProfileId &profileId,
+                     const SecureBuffer &wrappingKey);
+  [[nodiscard]] Result<QByteArray, StorageError>
+  loadMlsState(const ProfileId &profileId);
+  [[nodiscard]] Result<void, StorageError>
+  storeMlsState(const ProfileId &profileId, QByteArrayView state);
   void close() noexcept;
 
 private:

@@ -463,7 +463,13 @@ git commit -m "integrate OpenMLS encryption"
 - Create: `src/security/DeviceIdentity.cpp`
 - Create: `src/security/RecoveryCode.h`
 - Create: `src/security/RecoveryCode.cpp`
+- Create: `src/storage/migrations/004_profile_identity.sql`
 - Create: `tests/tst_profilesession.cpp`
+- Modify: `src/security/KeyVault.h`
+- Modify: `src/security/QtKeychainVault.h`
+- Modify: `src/security/QtKeychainVault.cpp`
+- Modify: `src/storage/SqlCipherDatabase.h`
+- Modify: `src/storage/SqlCipherDatabase.cpp`
 - Modify: `src/main.cpp`
 - Modify: `CMakeLists.txt`
 
@@ -473,7 +479,7 @@ git commit -m "integrate OpenMLS encryption"
 - Produces: `DeviceIdentity::{generate, signChallenge, publicCredential}`.
 - Produces: one-time `RecoveryCode` with explicit reveal/confirm lifecycle.
 
-- [ ] **Step 1: Add fail-closed lifecycle tests**
+- [x] **Step 1: Add fail-closed lifecycle tests**
 
 ```cpp
 void ProfileSessionTest::missingVaultKeyDoesNotCreateASecondIdentity()
@@ -484,25 +490,25 @@ void ProfileSessionTest::missingVaultKeyDoesNotCreateASecondIdentity()
 }
 ```
 
-- [ ] **Step 2: Implement create/unlock sequencing**
+- [x] **Step 2: Implement create/unlock sequencing**
 
-Create the vault key before the database, roll back the vault entry if DB initialization fails, store the device private identity only inside SQLCipher's additionally wrapped secret table, and wire services only after integrity and migration checks pass.
+Create independent database and device-wrapping vault keys before the database, roll back both vault entries if initialization fails, store the device private identity only inside SQLCipher's additionally wrapped secret table, and wire services only after integrity and migration checks pass.
 
-- [ ] **Step 3: Implement explicit lock and removal**
+- [x] **Step 3: Implement explicit lock and removal**
 
 Lock stops networking, cancels queued decryptions, closes repositories, destroys MLS handles, wipes `SecureBuffer`s, clears QML models, then closes SQLCipher. Removal requires a profile-ID confirmation token and deletes only the resolved profile path.
 
-- [ ] **Step 4: Run lifecycle tests**
+- [x] **Step 4: Run lifecycle tests**
 
 Run: `cmake --build build -j2 --target tst_profilesession && ./build/tst_profilesession`
 
 Expected: rollback, wrong key, lock ordering, and removal target tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CMakeLists.txt src/app src/security src/main.cpp tests/tst_profilesession.cpp
-git commit -m "feat: add secure profile and device lifecycle"
+git commit -m "add secure profile lifecycle"
 ```
 
 ### Task 8: Authenticated HTTPS/WSS relay client

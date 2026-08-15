@@ -22,6 +22,7 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         model: history.controller.messages
+        visible: history.controller.plaintextVisible
         clip: true
         interactive: contentHeight > height
         boundsBehavior: Flickable.StopAtBounds
@@ -40,11 +41,51 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         anchors.topMargin: 32
-        visible: history.controller.messages.count === 0
+        visible: history.controller.plaintextVisible
+            && history.controller.messages.count === 0
         text: "No messages yet."
         color: Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 14
         renderType: Text.NativeRendering
+    }
+
+    // Shown when the current state withholds message plaintext (locked vault,
+    // quarantined conversation, unverified device change). The message model is
+    // emptied by the controller in these states, so no plaintext is present in
+    // the scene graph to display.
+    Item {
+        id: securityNotice
+        objectName: "securityNotice"
+        anchors.fill: parent
+        visible: !history.controller.plaintextVisible
+
+        Column {
+            anchors.centerIn: parent
+            width: Math.min(360, parent.width - 48)
+            spacing: 10
+
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: "Messages hidden"
+                color: Theme.textPrimary
+                font.family: Theme.uiFont
+                font.pixelSize: 16
+                font.bold: true
+                renderType: Text.NativeRendering
+            }
+            Text {
+                objectName: "securityNoticeText"
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                text: history.controller.securityNoticeText
+                color: Theme.textSecondary
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                renderType: Text.NativeRendering
+            }
+        }
     }
 }

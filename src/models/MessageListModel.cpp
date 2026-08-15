@@ -38,6 +38,16 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     case ShowDateDividerRole:
         return message.date.isValid()
             && (index.row() == 0 || m_messages.at(index.row() - 1).date != message.date);
+    case StableIdRole:
+        return message.stableId;
+    case DeliveryStateRole:
+        return static_cast<int>(message.deliveryState);
+    case FailureReasonRole:
+        return static_cast<int>(message.failureReason);
+    case SenderDeviceRole:
+        return message.senderDevice;
+    case SecurityEventRole:
+        return static_cast<int>(message.securityEvent);
     default:
         return {};
     }
@@ -52,6 +62,11 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {KindRole, "kind"},
         {DateLabelRole, "dateLabel"},
         {ShowDateDividerRole, "showDateDivider"},
+        {StableIdRole, "stableId"},
+        {DeliveryStateRole, "deliveryState"},
+        {FailureReasonRole, "failureReason"},
+        {SenderDeviceRole, "senderDevice"},
+        {SecurityEventRole, "securityEvent"},
     };
 }
 

@@ -698,15 +698,15 @@ git commit -m "synchronize durable encrypted messages"
 
 - [ ] **Step 1: Replace constructor seed data with injected services**
 
-`ChatController(ProfileSession&, QObject*)` loads conversations and current messages from repositories. Keep deterministic mock adapters only in tests and capture mode; release mode cannot instantiate seed chats.
+`ChatController(ProfileSession&, QObject*)` loads conversations and current messages from repositories. Keep deterministic mock adapters only in tests and capture mode; release mode cannot instantiate seed chats. **Blocked on the deferred Task 10 app-integration adapters** (SqlCipher-backed `SyncStore`, `CapturingMlsStateStore`, `RelayClient` transport adapter, `ProfileSession` wiring); implemented as its own slice after those exist.
 
 - [ ] **Step 2: Route sending through `SyncEngine`**
 
-Keep composer text until durable enqueue succeeds. Display `Queued`, `Sent`, `Delivered`, `Read`, and retry states without changing bubble dimensions; expose details through accessible labels and a context action.
+Keep composer text until durable enqueue succeeds. Display `Queued`, `Sent`, `Delivered`, `Read`, and retry states without changing bubble dimensions; expose details through accessible labels and a context action. **Model foundation landed** — `MessageListModel` now carries additive `stableId`/`deliveryState`/`failureReason`/`senderDevice`/`securityEvent` roles (delivery-state glyphs in the bubble are a follow-up so geometry stays pixel-stable). Live routing is blocked on the same deferred adapters as Step 1.
 
-- [ ] **Step 3: Add locked/offline/security states**
+- [x] **Step 3: Add locked/offline/security states**
 
-The interface must distinguish vault locked, offline, reconnecting, conversation quarantined, device changed, and storage full. No state displays unverified plaintext.
+`ChatController` exposes a `SessionState` (`Ready`/`Locked`/`Offline`/`Reconnecting`/`Quarantined`/`DeviceChanged`/`StorageFull`) with `sessionStateText`, `plaintextVisible`, and `securityNoticeText`. `Ready` renders the approved Aero interface unchanged (banner collapses to zero height, capture smoke tests unchanged); `Locked`/`Quarantined`/`DeviceChanged` withhold plaintext by emptying the exposed message model and replacing the history with a security notice, and sending is offered only in `Ready`. Verified in `tst_chatcontroller` (state transitions, composer preservation, plaintext suppression) and `tst_qmlload` (`securityStatesHideUnverifiedPlaintext`).
 
 - [ ] **Step 4: Build and run controller/QML tests plus visual capture**
 

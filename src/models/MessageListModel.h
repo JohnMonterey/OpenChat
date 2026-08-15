@@ -23,6 +23,11 @@ public:
         KindRole,
         DateLabelRole,
         ShowDateDividerRole,
+        StableIdRole,
+        DeliveryStateRole,
+        FailureReasonRole,
+        SenderDeviceRole,
+        SecurityEventRole,
     };
     Q_ENUM(Role)
 

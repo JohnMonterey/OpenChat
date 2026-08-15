@@ -49,11 +49,53 @@ Window {
                 controller: root.chatController
             }
 
+            // Connection/security posture strip. Collapses to zero height and is
+            // invisible while the session is Ready, so the approved interface
+            // renders unchanged; it expands only when a state needs explaining.
+            Item {
+                id: securityBanner
+                objectName: "securityBanner"
+                readonly property bool active: root.chatController.sessionStateText.length > 0
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: conversationHeader.bottom
+                height: active ? 30 : 0
+                visible: active
+                clip: true
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: "#fdf3d8"
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 1
+                        color: "#e4d5a3"
+                    }
+                    Text {
+                        objectName: "securityBannerText"
+                        anchors.left: parent.left
+                        anchors.leftMargin: 18
+                        anchors.right: parent.right
+                        anchors.rightMargin: 18
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideRight
+                        text: root.chatController.sessionStateText
+                        color: "#7a6828"
+                        font.family: Theme.uiFont
+                        font.pixelSize: 13
+                        renderType: Text.NativeRendering
+                    }
+                }
+            }
+
             MessageHistory {
                 id: history
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.top: conversationHeader.bottom
+                anchors.top: securityBanner.bottom
                 anchors.bottom: messageComposer.top
                 controller: root.chatController
             }

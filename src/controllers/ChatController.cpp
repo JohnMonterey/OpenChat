@@ -50,7 +50,7 @@ ChatController::ChatController(QObject *parent)
 
     m_currentContactId = QStringLiteral("michael");
     m_contacts.selectContact(m_currentContactId);
-    m_messages.setMessages(m_messagesByContact.value(m_currentContactId));
+    refreshVisibleMessages();
 }
 
 ContactListModel *ChatController::contacts()
@@ -88,12 +88,62 @@ QString ChatController::composerText() const
 
 bool ChatController::canSend() const
 {
-    return !m_composerText.trimmed().isEmpty();
+    return m_sessionState == SessionState::Ready && !m_composerText.trimmed().isEmpty();
 }
 
 QString ChatController::searchQuery() const
 {
     return m_searchQuery;
+}
+
+ChatController::SessionState ChatController::sessionState() const
+{
+    return m_sessionState;
+}
+
+QString ChatController::sessionStateText() const
+{
+    switch (m_sessionState) {
+    case SessionState::Ready:
+        return {};
+    case SessionState::Locked:
+        return QStringLiteral("Locked");
+    case SessionState::Offline:
+        return QStringLiteral("Offline");
+    case SessionState::Reconnecting:
+        return QStringLiteral("Reconnecting…");
+    case SessionState::Quarantined:
+        return QStringLiteral("Conversation paused for a security review");
+    case SessionState::DeviceChanged:
+        return QStringLiteral("This contact's device changed — verification required");
+    case SessionState::StorageFull:
+        return QStringLiteral("Storage full — free space to send messages");
+    }
+    return {};
+}
+
+bool ChatController::plaintextVisible() const
+{
+    return statePermitsPlaintext(m_sessionState);
+}
+
+QString ChatController::securityNoticeText() const
+{
+    switch (m_sessionState) {
+    case SessionState::Locked:
+        return QStringLiteral("Messages are locked. Unlock OpenChat to view this conversation.");
+    case SessionState::Quarantined:
+        return QStringLiteral("This conversation is paused pending a security review.");
+    case SessionState::DeviceChanged:
+        return QStringLiteral(
+            "This contact's device changed. Verify their identity to view messages.");
+    case SessionState::Ready:
+    case SessionState::Offline:
+    case SessionState::Reconnecting:
+    case SessionState::StorageFull:
+        return {};
+    }
+    return {};
 }
 
 bool ChatController::selectContact(const QString &id)
@@ -107,7 +157,7 @@ bool ChatController::selectContact(const QString &id)
 
     m_currentContactId = id;
     m_contacts.selectContact(id);
-    m_messages.setMessages(m_messagesByContact.value(id));
+    refreshVisibleMessages();
     emit currentContactChanged();
     return true;
 }
@@ -137,6 +187,12 @@ void ChatController::setComposerText(const QString &text)
 
 bool ChatController::sendMessage()
 {
+    // Sending is only offered once the session is Ready; other states either
+    // withhold plaintext or lack a durable send path, and must keep the
+    // composer text intact rather than silently drop it.
+    if (m_sessionState != SessionState::Ready)
+        return false;
+
     const QString body = m_composerText.trimmed();
     if (body.isEmpty())
         return false;
@@ -151,9 +207,49 @@ bool ChatController::sendMessage()
     return true;
 }
 
+void ChatController::setSessionState(SessionState state)
+{
+    if (m_sessionState == state)
+        return;
+
+    const bool wasSendable = canSend();
+    const bool visibilityChanged =
+        statePermitsPlaintext(m_sessionState) != statePermitsPlaintext(state);
+    m_sessionState = state;
+    if (visibilityChanged)
+        refreshVisibleMessages();
+    emit sessionStateChanged();
+    if (wasSendable != canSend())
+        emit canSendChanged();
+}
+
 std::optional<Contact> ChatController::currentContact() const
 {
     return m_contacts.contactById(m_currentContactId);
+}
+
+bool ChatController::statePermitsPlaintext(SessionState state)
+{
+    switch (state) {
+    case SessionState::Locked:
+    case SessionState::Quarantined:
+    case SessionState::DeviceChanged:
+        return false;
+    case SessionState::Ready:
+    case SessionState::Offline:
+    case SessionState::Reconnecting:
+    case SessionState::StorageFull:
+        return true;
+    }
+    return false;
+}
+
+void ChatController::refreshVisibleMessages()
+{
+    if (statePermitsPlaintext(m_sessionState))
+        m_messages.setMessages(m_messagesByContact.value(m_currentContactId));
+    else
+        m_messages.setMessages({});
 }
 
 } // namespace OpenChat

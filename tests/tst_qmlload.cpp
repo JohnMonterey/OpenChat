@@ -244,6 +244,58 @@ private slots:
         QVERIFY(noMessages->property("visible").toBool());
     }
 
+    void securityStatesHideUnverifiedPlaintext()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QObject *banner = root->findChild<QObject *>(QStringLiteral("securityBanner"));
+        QObject *messageList = root->findChild<QObject *>(QStringLiteral("messageList"));
+        QObject *notice = root->findChild<QObject *>(QStringLiteral("securityNotice"));
+        QObject *input = root->findChild<QObject *>(QStringLiteral("messageInput"));
+        QObject *send = root->findChild<QObject *>(QStringLiteral("sendButton"));
+        QVERIFY(banner);
+        QVERIFY(messageList);
+        QVERIFY(notice);
+        QVERIFY(input);
+        QVERIFY(send);
+
+        // Ready: the banner is collapsed and invisible, history is shown, and the
+        // security notice is hidden — the approved interface is unchanged.
+        QVERIFY(!banner->property("visible").toBool());
+        QCOMPARE(banner->property("height").toReal(), 0.0);
+        QVERIFY(messageList->property("visible").toBool());
+        QVERIFY(!notice->property("visible").toBool());
+
+        // Locked: the message list is withheld, the notice replaces it, no rows
+        // remain in the model, and sending is disabled even with composer text.
+        controller.setSessionState(OpenChat::ChatController::SessionState::Locked);
+        QVERIFY(input->setProperty("text", QStringLiteral("blocked while locked")));
+        QCoreApplication::processEvents();
+        QVERIFY(banner->property("visible").toBool());
+        QVERIFY(banner->property("height").toReal() > 0.0);
+        QVERIFY(!messageList->property("visible").toBool());
+        QVERIFY(notice->property("visible").toBool());
+        QCOMPARE(controller.messages()->rowCount(), 0);
+        QCOMPARE(send->property("enabled").toBool(), false);
+
+        // Returning to Ready restores the interface and the composer draft is intact.
+        controller.setSessionState(OpenChat::ChatController::SessionState::Ready);
+        QCoreApplication::processEvents();
+        QVERIFY(!banner->property("visible").toBool());
+        QCOMPARE(banner->property("height").toReal(), 0.0);
+        QVERIFY(messageList->property("visible").toBool());
+        QVERIFY(!notice->property("visible").toBool());
+        QCOMPARE(controller.composerText(), QStringLiteral("blocked while locked"));
+        QCOMPARE(send->property("enabled").toBool(), true);
+    }
+
     void bubbleWidthFollowsContentWithinLimits()
     {
         QQmlEngine engine;

@@ -74,6 +74,73 @@ private slots:
         QCOMPARE(controller.contacts()->regularCount(), 1);
         QCOMPARE(controller.searchQuery(), "tom");
     }
+
+    void defaultsToReadyWithVisiblePlaintext()
+    {
+        ChatController controller;
+
+        QCOMPARE(controller.sessionState(), ChatController::SessionState::Ready);
+        QVERIFY(controller.plaintextVisible());
+        QVERIFY(controller.sessionStateText().isEmpty());
+        QVERIFY(controller.securityNoticeText().isEmpty());
+        QCOMPARE(controller.messages()->rowCount(), 5);
+    }
+
+    void lockWithholdsPlaintextAndPreservesComposer()
+    {
+        ChatController controller;
+        controller.setComposerText("draft that must survive a lock");
+        QVERIFY(controller.canSend());
+
+        QSignalSpy stateSpy(&controller, &ChatController::sessionStateChanged);
+        controller.setSessionState(ChatController::SessionState::Locked);
+
+        QCOMPARE(stateSpy.count(), 1);
+        QVERIFY(!controller.plaintextVisible());
+        QCOMPARE(controller.messages()->rowCount(), 0);
+        QVERIFY(!controller.securityNoticeText().isEmpty());
+        QVERIFY(!controller.canSend());
+        QVERIFY(!controller.sendMessage());
+        QCOMPARE(controller.composerText(), "draft that must survive a lock");
+
+        controller.setSessionState(ChatController::SessionState::Ready);
+        QVERIFY(controller.plaintextVisible());
+        QCOMPARE(controller.messages()->rowCount(), 5);
+        QVERIFY(controller.canSend());
+    }
+
+    void offlineShowsHistoryButDefersSending()
+    {
+        ChatController controller;
+
+        controller.setSessionState(ChatController::SessionState::Offline);
+        QVERIFY(controller.plaintextVisible());
+        QCOMPARE(controller.messages()->rowCount(), 5);
+        QVERIFY(!controller.sessionStateText().isEmpty());
+
+        controller.setComposerText("not sent while offline");
+        QVERIFY(!controller.canSend());
+        QVERIFY(!controller.sendMessage());
+        QCOMPARE(controller.messages()->rowCount(), 5);
+    }
+
+    void quarantineAndDeviceChangeWithholdPlaintext()
+    {
+        ChatController controller;
+
+        for (const auto state : {ChatController::SessionState::Quarantined,
+                                 ChatController::SessionState::DeviceChanged}) {
+            controller.setSessionState(state);
+            QVERIFY(!controller.plaintextVisible());
+            QCOMPARE(controller.messages()->rowCount(), 0);
+            QVERIFY(!controller.securityNoticeText().isEmpty());
+        }
+
+        controller.setSessionState(ChatController::SessionState::Ready);
+        QVERIFY(controller.plaintextVisible());
+        QCOMPARE(controller.messages()->rowCount(), 5);
+        QVERIFY(controller.securityNoticeText().isEmpty());
+    }
 };
 
 QTEST_MAIN(ChatControllerTest)

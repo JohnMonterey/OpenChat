@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Network Quick QuickControls2 Svg Test WebSockets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui HttpServer Network Quick QuickControls2 Sql Svg Test WebSockets)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 include(cmake/dependencies/QtKeychain.cmake)
@@ -183,6 +183,8 @@ add_executable(tst_mlsbridge tests/tst_mlsbridge.cpp)
 target_include_directories(tst_mlsbridge PRIVATE src)
 target_link_libraries(tst_mlsbridge PRIVATE openchat_crypto Qt6::Core Qt6::Test)
 add_test(NAME tst_mlsbridge COMMAND tst_mlsbridge)
+
+add_subdirectory(relay)
 
 add_executable(tst_relayclient
     tests/tst_relayclient.cpp

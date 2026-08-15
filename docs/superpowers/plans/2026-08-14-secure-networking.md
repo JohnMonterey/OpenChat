@@ -579,34 +579,36 @@ git commit -m "add authenticated relay client"
 - Produces WSS endpoint: `/v1/live` with send, acknowledgement, ping, and server-draining frames.
 - Produces PostgreSQL transactions for idempotent fan-out and monotonic per-device sequences.
 
-- [ ] **Step 1: Create schema with ciphertext-only constraints**
+- [x] **Step 1: Create schema with ciphertext-only constraints**
 
-Use `BYTEA` for credentials, hashes, KeyPackages, and envelopes; prohibit any `body`, `plaintext`, `message_text`, or decrypted attachment column through a schema-policy test.
+`BYTEA`/opaque for credentials, hashes, KeyPackages, and envelopes; a schema-policy test rejects any `body`/`plaintext`/`message_text`/`decrypted`/`secret`/`private_key` column. Device metadata (display names) is deliberately not stored, keeping the relay content-blind.
 
-- [ ] **Step 2: Implement signed device challenge authentication**
+- [x] **Step 2: Implement signed device challenge authentication**
 
-Challenges are 32 random bytes, single-use, expire in 120 seconds, and bind account/device IDs plus protocol version. Store refresh tokens as SHA-256 hashes with family IDs, rotate on every use, and revoke the entire family on reuse.
+Challenges are 32 random bytes, single-use (consumed guard + rows-affected), expire in 120 seconds, and bind account/device IDs plus protocol version. The relay verifies the Ed25519 signature over exactly the bytes `DeviceIdentity::signChallenge` produces. Refresh tokens are stored as SHA-256 hashes with family IDs, rotate on use, and reuse revokes the whole family.
 
-- [ ] **Step 3: Implement idempotent envelope fan-out**
+- [x] **Step 3: Implement idempotent envelope fan-out**
 
-Validate schema/size/hash/signature without decrypting MLS content. Insert one inbox row per active recipient device and return the existing acceptance result for duplicate idempotency keys.
+Envelopes are validated (schema/size/hash via the bounded canonical decoder, sender signature, sender==authenticated device) without decrypting MLS content. Each envelope routes to its recipient device's inbox; duplicate `(recipient, idempotency_key)` returns the original acceptance idempotently. (Group fan-out is client-side per the single-recipient envelope type.)
 
-- [ ] **Step 4: Implement one-time KeyPackage claim**
+- [x] **Step 4: Implement one-time KeyPackage claim**
 
-Claim and delete KeyPackages in one serializable transaction. Reject expired, reused, oversized, or device-revoked packages.
+Claim consumes one unclaimed, unexpired KeyPackage inside a serializable transaction (`UPDATE ... WHERE claimed_at_ms IS NULL` + rows-affected). Rejects expired, duplicate-upload, oversized, and device-revoked packages; a concurrent-claim test asserts exactly one winner.
 
-- [ ] **Step 5: Run service tests against disposable PostgreSQL**
+- [x] **Step 5: Run service tests against disposable PostgreSQL**
 
 Run: `ctest --test-dir build -R relay --output-on-failure`
 
-Expected: challenge replay, refresh reuse, duplicate send, concurrent KeyPackage claim, watermark, and revoked-device tests pass.
+Result: 12/12 relay service cases pass against a disposable PostgreSQL database (challenge replay/expiry, refresh reuse family revocation, duplicate send idempotency, concurrent KeyPackage claim, watermark bounds, revoked-device rejection, ciphertext-only schema policy). Full CTest suite: 17/17.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add CMakeLists.txt relay
-git commit -m "feat: add ciphertext-only OpenChat relay"
+git commit -m "add ciphertext-only relay"
 ```
+
+**Independent security review outcome:** no Critical/High findings; SQL injection, plaintext/secret storage, secret logging, signature/auth bypass, and cross-device inbox access were all verified absent. Addressed in this slice: per-sender idempotency scoping, `FOR UPDATE SKIP LOCKED` one-time claim (correct under concurrent multi-package claims), refresh error-vs-reuse disambiguation, bounded challenge context, opportunistic expired-challenge sweep, catch-up cursor clamping, and refresh-expiry in responses. **Deferred hardening (tracked for Task 17 / Task 13):** application-level request rate limiting (currently proxy-enforced), one-time-KeyPackage exhaustion controls / last-resort KeyPackages, live-socket max-lifetime and per-device connection caps, and cryptographic binding of the protocol version. The relay's in-process request-body bound is defense-in-depth; the hard pre-read cap is enforced by the TLS-terminating reverse proxy.
 
 ### Task 10: Durable sync engine and MLS transaction coordination
 

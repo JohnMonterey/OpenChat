@@ -93,7 +93,7 @@ Item {
                 Text {
                     anchors.fill: parent
                     visible: !searchInput.text && !searchInput.activeFocus
-                    text: "Search contacts..."
+                    text: "Search & Find"
                     color: "#98a7ba"
                     font: searchInput.font
                     verticalAlignment: Text.AlignVCenter
@@ -126,7 +126,7 @@ Item {
         ContactCategory {
             objectName: "favoritesCategory"
             width: parent.width
-            label: "Favorites"
+            label: "Requests"
             favoriteCategory: true
             contactModel: sidebar.controller.contacts
             controller: sidebar.controller
@@ -136,7 +136,7 @@ Item {
         ContactCategory {
             objectName: "contactsCategory"
             width: parent.width
-            label: "Contacts"
+            label: "Chats"
             favoriteCategory: false
             contactModel: sidebar.controller.contacts
             controller: sidebar.controller

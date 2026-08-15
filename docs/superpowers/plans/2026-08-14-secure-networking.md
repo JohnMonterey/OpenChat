@@ -359,7 +359,7 @@ git commit -m "feat: persist chats and durable outbox"
 - Produces: `encodeCanonical(const CiphertextEnvelopeV1&)` and `decodeEnvelope(QByteArrayView, DecodeLimits)`.
 - Produces: constants `maxEnvelopeBytes=1_MiB`, `maxCiphertextBytes=960_KiB`, `maxCborDepth=8`.
 
-- [ ] **Step 1: Add golden and hostile-input tests**
+- [x] **Step 1: Add golden and hostile-input tests**
 
 ```cpp
 void EnvelopeCodecTest::canonicalEncodingMatchesGoldenFixture()
@@ -374,17 +374,17 @@ void EnvelopeCodecTest::rejectsOversizeBeforeParsing()
 }
 ```
 
-- [ ] **Step 2: Verify failure and implement strict decoder**
+- [x] **Step 2: Verify failure and implement strict decoder**
 
 Reject duplicate map keys, indefinite lengths, noncanonical integer encodings, wrong field sizes, unknown critical fields, invalid expiry ranges, mismatched hashes, and trailing bytes.
 
-- [ ] **Step 3: Run codec tests**
+- [x] **Step 3: Run codec tests**
 
 Run: `cmake --build build -j2 --target tst_envelopecodec && ./build/tst_envelopecodec`
 
 Expected: golden round-trip and every rejection table case passes.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add CMakeLists.txt src/protocol tests/fixtures tests/tst_envelopecodec.cpp

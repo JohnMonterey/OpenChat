@@ -82,6 +82,13 @@ add_library(openchat_domain STATIC
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)
 
+add_library(openchat_protocol STATIC
+    src/protocol/CiphertextEnvelope.cpp
+    src/protocol/CanonicalCborCodec.cpp
+)
+target_include_directories(openchat_protocol PUBLIC src)
+target_link_libraries(openchat_protocol PUBLIC openchat_domain Qt6::Core)
+
 add_library(openchat_security STATIC
     src/security/SecureBuffer.cpp
     src/security/QtKeychainVault.cpp
@@ -131,6 +138,14 @@ add_executable(tst_repositories tests/tst_repositories.cpp)
 target_include_directories(tst_repositories PRIVATE src)
 target_link_libraries(tst_repositories PRIVATE openchat_storage Qt6::Core Qt6::Test)
 add_test(NAME tst_repositories COMMAND tst_repositories)
+
+add_executable(tst_envelopecodec tests/tst_envelopecodec.cpp)
+target_include_directories(tst_envelopecodec PRIVATE src)
+target_compile_definitions(tst_envelopecodec PRIVATE
+    OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(tst_envelopecodec PRIVATE openchat_protocol Qt6::Core Qt6::Test)
+add_test(NAME tst_envelopecodec COMMAND tst_envelopecodec)
 
 add_executable(tst_models
     tests/tst_models.cpp

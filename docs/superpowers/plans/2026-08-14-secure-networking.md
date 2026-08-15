@@ -526,29 +526,31 @@ git commit -m "add secure profile lifecycle"
 - Produces: `RelayClient::{authenticateDevice, connectLive, sendEnvelope, acknowledge, fetchSince, disconnect}`.
 - Produces signals with typed results: `connected`, `disconnected`, `envelopeReceived`, `relayAccepted`, and `authExpired`.
 
-- [ ] **Step 1: Add TLS and frame-limit tests using a local fake server**
+- [x] **Step 1: Add TLS and frame-limit tests using a local fake server**
 
-Verify hostname mismatch, untrusted CA, expired certificate, oversized frame, invalid subprotocol, and invalid CBOR all disconnect without invoking envelope callbacks.
+Verify hostname mismatch, untrusted CA, expired certificate, oversized frame, invalid subprotocol, and invalid CBOR all disconnect without invoking envelope callbacks. Implemented in `tests/tst_relayclient.cpp` with runtime-minted test-only certificates and local `QSslServer`/`QWebSocketServer` fixtures (`tests/relay/RelayTestSupport.{h,cpp}`).
 
-- [ ] **Step 2: Implement strict TLS configuration**
+- [x] **Step 2: Implement strict TLS configuration**
 
-Set peer verification to `VerifyPeer`, require `SecureProtocols`, set read buffer and HTTP response limits, bind the WebSocket subprotocol to `openchat.ciphertext.v1`, and make the SSL-error signal terminal. No production code references `ignoreSslErrors`.
+Set peer verification to `VerifyPeer`, require `SecureProtocols`, set read buffer and HTTP response limits, bind the WebSocket subprotocol to `openchat.ciphertext.v1`, and make the SSL-error signal terminal. No production code references `ignoreSslErrors`. The client re-asserts `VerifyPeer`/`SecureProtocols` on top of any injected configuration so a test CA cannot weaken verification.
 
-- [ ] **Step 3: Implement token refresh and reconnect state machine**
+- [x] **Step 3: Implement token refresh and reconnect state machine**
 
-Allow one serialized refresh attempt, queue no plaintext in the network object, resume with the durable watermark, and apply full-jitter backoff capped at five minutes.
+Allow one serialized refresh attempt, queue no plaintext in the network object, resume with the durable watermark, and apply full-jitter backoff capped at five minutes (`src/network/BackoffPolicy.{h,cpp}`, injectable jitter for tests).
 
-- [ ] **Step 4: Run network tests**
+- [x] **Step 4: Run network tests**
 
-Run: `cmake --build build -j2 --target tst_relayclient && ./build/tst_relayclient`
+Run: `cmake --build build --target tst_relayclient && ./build/tst_relayclient`
 
-Expected: valid TLS path succeeds; every invalid certificate/frame/auth path fails closed.
+Expected: valid TLS path succeeds; every invalid certificate/frame/auth path fails closed. Result: 20/20 passing; full CTest suite 16/16.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
+
+Committed after an independent security review (findings addressed: inbound-frame subprotocol guard, per-reply oversize tracking, refresh-cycle reset, read-buffer sizing, streaming bounded catch-up decode, TLS diagnostics on the HTTPS path).
 
 ```bash
-git add CMakeLists.txt src/network tests/tst_relayclient.cpp
-git commit -m "feat: add authenticated ciphertext relay client"
+git add CMakeLists.txt src/network tests/relay tests/tst_relayclient.cpp
+git commit -m "add authenticated relay client"
 ```
 
 ### Task 9: Relay schema, device authentication, and ciphertext inbox

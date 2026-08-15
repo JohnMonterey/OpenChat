@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Quick QuickControls2 Svg Test)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui Network Quick QuickControls2 Svg Test WebSockets)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 include(cmake/dependencies/QtKeychain.cmake)
@@ -92,6 +92,15 @@ add_library(openchat_protocol STATIC
 target_include_directories(openchat_protocol PUBLIC src)
 target_link_libraries(openchat_protocol PUBLIC openchat_domain Qt6::Core)
 
+add_library(openchat_network STATIC
+    src/network/BackoffPolicy.cpp
+    src/network/RelayClient.cpp
+)
+target_include_directories(openchat_network PUBLIC src)
+target_link_libraries(openchat_network
+    PUBLIC openchat_protocol openchat_domain Qt6::Core Qt6::Network Qt6::WebSockets
+)
+
 add_library(openchat_crypto STATIC
     src/crypto/MlsClient.cpp
 )
@@ -174,6 +183,24 @@ add_executable(tst_mlsbridge tests/tst_mlsbridge.cpp)
 target_include_directories(tst_mlsbridge PRIVATE src)
 target_link_libraries(tst_mlsbridge PRIVATE openchat_crypto Qt6::Core Qt6::Test)
 add_test(NAME tst_mlsbridge COMMAND tst_mlsbridge)
+
+add_executable(tst_relayclient
+    tests/tst_relayclient.cpp
+    tests/relay/RelayTestSupport.cpp
+)
+target_include_directories(tst_relayclient PRIVATE src tests)
+target_link_libraries(tst_relayclient PRIVATE
+    openchat_network
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test
+    OpenSSL::Crypto
+)
+add_test(NAME tst_relayclient COMMAND tst_relayclient)
+set_tests_properties(tst_relayclient PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_profilesession tests/tst_profilesession.cpp)
 target_include_directories(tst_profilesession PRIVATE src)

@@ -625,6 +625,16 @@ git commit -m "add ciphertext-only relay"
 - Produces: `SyncEngine::{start, stop, enqueueText, acknowledgeRead, handleEnvelope}`.
 - Produces conversation-scoped MLS serialization so two operations never mutate one MLS group concurrently.
 
+**Design decision — MLS-state / durable-store atomicity and crash recovery (locked before implementation):**
+
+The MLS ratchet is a single per-profile opaque blob (`local_mls_state`), and `MlsClient::encrypt`/`process` mutate the in-memory Rust ratchet, which a SQLite rollback cannot undo. To make "advance MLS state and persist the message/outbox in the same logical transaction" real (spec lines 179, 192), the engine uses **capture-then-persist**, not the current write-through `DatabaseMlsStateStore`:
+
+1. A `CapturingMlsStateStore` gives `MlsClient` its initial state via `load()` (from `local_mls_state`) but on `store()` only **captures** the new blob in memory — it does not write the DB. So `encrypt`/`process` advance the in-memory ratchet and hand the engine the new state blob without persisting it yet.
+2. The engine persists that blob **inside the same repository transaction** as the message/outbox (send) or the replay/message/watermark (receive), via additive atomic methods `saveOutgoing(message, outbox, mlsState)` and `applyIncoming(message, envelopeId, watermark, mlsState)` that add an `local_mls_state` UPSERT to the existing single transaction (the 2/3-arg forms stay for existing callers).
+3. On commit success the captured state is now durable and authoritative. On commit failure the engine is **fail-closed**: it stops (locks networking, keeps composer text in memory per spec "disk full") because the in-memory ratchet is now ahead of the DB; the next profile unlock reconstructs `MlsClient` from the last committed blob, so re-send/re-receive re-encrypts/re-processes from a consistent state with no crypto reuse and no duplicate visible message. `applyIncoming`'s existing `INSERT OR IGNORE` replay-cache guard makes a re-delivered envelope idempotent, and the durable outbox drives resend of the already-encrypted envelope (never re-encrypting a committed message).
+
+`MlsTransactionCoordinator` provides per-`ConversationId` serialization (a keyed queue) so two operations never mutate one group concurrently. To keep the engine unit-testable without a live relay or real SQLCipher, `SyncEngine` depends on the repository interfaces plus a narrow transport interface (adapter over `RelayClient`) and an MLS-session interface (adapter over `MlsClient` + the capturing store); tests drive fakes. Real wiring lives in `ProfileSession`.
+
 - [ ] **Step 1: Add offline and crash-recovery tests**
 
 ```cpp

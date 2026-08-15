@@ -4,9 +4,9 @@
 
 **Goal:** Replace OpenChat's mock in-memory chats with durable, offline-capable, end-to-end encrypted conversations delivered through a ciphertext-only relay.
 
-**Architecture:** The Qt/C++ client retains the approved QML interface and gains domain services, an OS-backed key vault, SQLCipher repositories, a durable outbox, and authenticated Qt WebSocket transport. A narrow Rust static library wraps OpenMLS 0.8.1 for both direct and group E2EE; a separate C++ relay authenticates devices and stores only opaque envelopes in PostgreSQL.
+**Architecture:** The Qt/C++ client retains the approved QML interface and gains domain services, an OS-backed key vault, SQLCipher repositories, a durable outbox, and authenticated Qt WebSocket transport. A narrow Rust static library wraps OpenMLS 0.9.0-rc.2 for both direct and group E2EE; a separate C++ relay authenticates devices and stores only opaque envelopes in PostgreSQL.
 
-**Tech Stack:** C++20, CMake 3.21+, Qt 6.5+ Core/Network/WebSockets/HttpServer/Sql/Concurrent/DBus, Rust 1.85+ with Cargo, OpenMLS 0.8.1, SQLCipher 4.17.0, qtkeychain 0.16.0, OpenSSL 3.x, PostgreSQL 16+, canonical CBOR, Docker Compose
+**Tech Stack:** C++20, CMake 3.21+, Qt 6.5+ Core/Network/WebSockets/HttpServer/Sql/Concurrent/DBus, Rust 1.91+ with Cargo, OpenMLS 0.9.0-rc.2, SQLCipher 4.17.0, qtkeychain 0.16.0, OpenSSL 3.x, PostgreSQL 16+, canonical CBOR, Docker Compose
 
 **Spec:** `docs/superpowers/specs/2026-08-14-secure-networking-design.md`
 
@@ -14,7 +14,7 @@
 
 - The visible product name remains exactly `OpenChat`; preserve the approved native-window Aero interface.
 - QML owns presentation only; repositories, encryption, networking, and state machines live outside QML.
-- Never implement a custom ratchet or key agreement; direct and group chats use RFC 9420 MLS through pinned OpenMLS 0.8.1.
+- Never implement a custom ratchet or key agreement; direct and group chats use RFC 9420 MLS through pinned OpenMLS 0.9.0-rc.2, with release blocked until its pre-release dependency status is cleared.
 - Never send or store message/attachment plaintext on the relay.
 - Never open a plaintext client database or fall back to a file/environment/argument key.
 - Never call `ignoreSslErrors()` or provide a TLS bypass.
@@ -411,27 +411,27 @@ git commit -m "feat: add bounded ciphertext envelope protocol"
 - Produces C ABI: `oc_mls_client_create/free`, `oc_mls_generate_key_package`, `oc_mls_create_group`, `oc_mls_join_group`, `oc_mls_add_members`, `oc_mls_remove_members`, `oc_mls_encrypt`, `oc_mls_process`, and `oc_mls_free_buffer`.
 - Produces C++ RAII `MlsClient` with `Result<T, MlsError>` results and no raw ownership.
 
-- [ ] **Step 1: Pin OpenMLS and disable secret-debug features**
+- [x] **Step 1: Pin OpenMLS and disable secret-debug features**
 
 ```toml
 [dependencies]
-openmls = { version = "=0.8.1", default-features = false }
-openmls_rust_crypto = { version = "=0.5.1" }
-tls_codec = "=0.4.2"
-zeroize = { version = "=1.8.1", features = ["derive"] }
+openmls = { version = "=0.9.0-rc.2", default-features = false }
+openmls_rust_crypto = { version = "=0.6.0-rc.2", default-features = false }
+tls_codec = "=0.5.0"
+zeroize = { version = "=1.9.0", features = ["derive"] }
 ```
 
 Generate and commit `Cargo.lock`. CI rejects `content-debug`, `crypto-debug`, git dependencies, and yanked/advisory-affected crates.
 
-- [ ] **Step 2: Add Rust two-client and epoch tests**
+- [x] **Step 2: Add Rust two-client and epoch tests**
 
 Create Alice/Bob credentials, publish/consume KeyPackages, create a two-member group, exchange application messages, reject a tampered ciphertext, remove Bob, and prove Bob cannot decrypt the next epoch.
 
-- [ ] **Step 3: Implement panic-contained C ABI**
+- [x] **Step 3: Implement panic-contained C ABI**
 
 Wrap every exported function in `catch_unwind`, validate pointer/length pairs before slice creation, cap inputs, return stable numeric error codes, and zeroize all returned secret buffers on free.
 
-- [ ] **Step 4: Add the C++ RAII facade**
+- [x] **Step 4: Add the C++ RAII facade**
 
 ```cpp
 Result<MlsCiphertext, MlsError>
@@ -441,17 +441,17 @@ Result<MlsProcessResult, MlsError>
 MlsClient::process(const ConversationId &conversation, QByteArrayView mlsMessage);
 ```
 
-- [ ] **Step 5: Run Rust and C++ bridge verification**
+- [x] **Step 5: Run Rust and C++ bridge verification**
 
 Run: `cargo test --manifest-path rust/openchat-mls/Cargo.toml --locked && cmake --build build -j2 --target tst_mlsbridge && ./build/tst_mlsbridge`
 
 Expected: direct/group flows, tamper rejection, removal, reordered application messages, and panic containment pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add CMakeLists.txt cmake/OpenChatRust.cmake rust/openchat-mls src/crypto tests/tst_mlsbridge.cpp
-git commit -m "feat: integrate OpenMLS encryption engine"
+git commit -m "integrate OpenMLS encryption"
 ```
 
 ### Task 7: Profile session, device identity, and account bootstrap

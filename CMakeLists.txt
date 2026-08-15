@@ -12,6 +12,8 @@ find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 include(cmake/dependencies/QtKeychain.cmake)
 include(cmake/dependencies/SqlCipher.cmake)
+include(cmake/OpenChatRust.cmake)
+add_openchat_rust_library()
 
 qt_standard_project_setup(REQUIRES 6.5)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
@@ -89,6 +91,15 @@ add_library(openchat_protocol STATIC
 target_include_directories(openchat_protocol PUBLIC src)
 target_link_libraries(openchat_protocol PUBLIC openchat_domain Qt6::Core)
 
+add_library(openchat_crypto STATIC
+    src/crypto/MlsClient.cpp
+)
+target_include_directories(openchat_crypto PUBLIC src)
+target_link_libraries(openchat_crypto
+    PUBLIC openchat_domain Qt6::Core
+    PRIVATE openchat_mls_rust
+)
+
 add_library(openchat_security STATIC
     src/security/SecureBuffer.cpp
     src/security/QtKeychainVault.cpp
@@ -146,6 +157,11 @@ target_compile_definitions(tst_envelopecodec PRIVATE
 )
 target_link_libraries(tst_envelopecodec PRIVATE openchat_protocol Qt6::Core Qt6::Test)
 add_test(NAME tst_envelopecodec COMMAND tst_envelopecodec)
+
+add_executable(tst_mlsbridge tests/tst_mlsbridge.cpp)
+target_include_directories(tst_mlsbridge PRIVATE src)
+target_link_libraries(tst_mlsbridge PRIVATE openchat_crypto Qt6::Core Qt6::Test)
+add_test(NAME tst_mlsbridge COMMAND tst_mlsbridge)
 
 add_executable(tst_models
     tests/tst_models.cpp

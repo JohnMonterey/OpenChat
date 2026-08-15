@@ -8,6 +8,15 @@
 
 namespace OpenChat {
 
+[[nodiscard]] constexpr qint64 retryDelayMs(int attemptCount, int jitterMs) noexcept
+{
+    const int safeAttempt = attemptCount < 0 ? 0 : attemptCount;
+    const qint64 exponential = safeAttempt >= 9 ? 300'000 : (qint64(1'000) << safeAttempt);
+    const qint64 capped = exponential > 300'000 ? 300'000 : exponential;
+    const int safeJitter = jitterMs < 0 ? 0 : (jitterMs > 1'000 ? 1'000 : jitterMs);
+    return capped + safeJitter;
+}
+
 class OutboxRepository
 {
 public:

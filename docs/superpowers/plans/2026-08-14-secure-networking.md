@@ -302,7 +302,7 @@ git commit -m "feat: add encrypted SQLCipher profile database"
 - Consumes: Task 1 repository contracts and Task 3 database transactions.
 - Produces: atomic `saveOutgoing`, `applyIncoming`, `advanceDeliveryState`, `claimDueOutbox`, `recordReplay`, and `advanceWatermark` operations.
 
-- [ ] **Step 1: Add crash-consistency and deduplication tests**
+- [x] **Step 1: Add crash-consistency and deduplication tests**
 
 ```cpp
 void RepositoryTest::messageAndOutboxCommitAtomically()
@@ -320,17 +320,17 @@ void RepositoryTest::incomingEnvelopeIsIdempotent()
 }
 ```
 
-- [ ] **Step 2: Verify failure, then implement parameterized SQL only**
+- [x] **Step 2: Verify failure, then implement parameterized SQL only**
 
 Run: `cmake --build build -j2 --target tst_repositories`
 
 Expected before implementation: compile failure. Use prepared statements for every value and explicit transactions for multi-table state changes.
 
-- [ ] **Step 3: Enforce delivery-state monotonicity and retry leases**
+- [x] **Step 3: Enforce delivery-state monotonicity and retry leases**
 
 `claimDueOutbox` marks rows with a bounded lease so a crash makes them retryable. Attempts use `min(300s, 1s * 2^attempt) + random(0..1000ms)` and never delete an envelope until relay acceptance is durable.
 
-- [ ] **Step 4: Run focused storage tests**
+- [x] **Step 4: Run focused storage tests**
 
 Run: `cmake --build build -j2 --target tst_repositories && ./build/tst_repositories`
 

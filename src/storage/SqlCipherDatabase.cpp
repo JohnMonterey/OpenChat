@@ -29,13 +29,14 @@ Result<QByteArray, StorageError> readMigration(const QString &resourcePath) {
 } // namespace
 
 SqlCipherDatabase::SqlCipherDatabase(sqlite3 *database, QString path)
-    : m_database(database), m_path(std::move(path)) {}
+    : m_database(database), m_path(std::move(path)),
+      m_mutex(std::make_unique<QRecursiveMutex>()) {}
 
 SqlCipherDatabase::~SqlCipherDatabase() { close(); }
 
 SqlCipherDatabase::SqlCipherDatabase(SqlCipherDatabase &&other) noexcept
     : m_database(std::exchange(other.m_database, nullptr)),
-      m_path(std::move(other.m_path)) {}
+      m_path(std::move(other.m_path)), m_mutex(std::move(other.m_mutex)) {}
 
 SqlCipherDatabase &
 SqlCipherDatabase::operator=(SqlCipherDatabase &&other) noexcept {
@@ -44,6 +45,7 @@ SqlCipherDatabase::operator=(SqlCipherDatabase &&other) noexcept {
   close();
   m_database = std::exchange(other.m_database, nullptr);
   m_path = std::move(other.m_path);
+  m_mutex = std::move(other.m_mutex);
   return *this;
 }
 
@@ -123,19 +125,39 @@ Result<void, StorageError> SqlCipherDatabase::configure() {
 }
 
 Result<void, StorageError> SqlCipherDatabase::migrate() {
-  const auto first =
-      readMigration(QStringLiteral(":/openchat/001_initial.sql"));
-  const auto second =
-      readMigration(QStringLiteral(":/openchat/002_indexes.sql"));
-  if (!first.hasValue() || !second.hasValue())
+  sqlite3_stmt *versionStatement = nullptr;
+  if (sqlite3_prepare_v2(m_database, "PRAGMA user_version", -1,
+                         &versionStatement, nullptr) != SQLITE_OK)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
+  const int versionStep = sqlite3_step(versionStatement);
+  const int currentVersion = versionStep == SQLITE_ROW
+                                 ? sqlite3_column_int(versionStatement, 0)
+                                 : -1;
+  sqlite3_finalize(versionStatement);
+  constexpr int latestVersion = 3;
+  if (currentVersion < 0 || currentVersion > latestVersion)
+    return Result<void, StorageError>::failure(StorageError::MigrationFailed);
+
+  struct Migration {
+    int version;
+    const char *resource;
+  };
+  constexpr Migration migrations[] = {
+      {1, ":/openchat/001_initial.sql"},
+      {2, ":/openchat/002_indexes.sql"},
+      {3, ":/openchat/003_domain_alignment.sql"},
+  };
 
   if (!execute("BEGIN IMMEDIATE;").hasValue())
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
-  if (!execute(first.value()).hasValue() ||
-      !execute(second.value()).hasValue()) {
-    (void)execute("ROLLBACK;");
-    return Result<void, StorageError>::failure(StorageError::MigrationFailed);
+  for (const auto &migration : migrations) {
+    if (migration.version <= currentVersion)
+      continue;
+    const auto sql = readMigration(QString::fromLatin1(migration.resource));
+    if (!sql.hasValue() || !execute(sql.value()).hasValue()) {
+      (void)execute("ROLLBACK;");
+      return Result<void, StorageError>::failure(StorageError::MigrationFailed);
+    }
   }
   if (!execute("COMMIT;").hasValue()) {
     (void)execute("ROLLBACK;");

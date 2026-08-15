@@ -89,6 +89,9 @@ add_library(openchat_security STATIC
 
 add_library(openchat_storage STATIC
     src/storage/SqlCipherDatabase.cpp
+    src/storage/SqlCipherChatRepository.cpp
+    src/storage/SqlCipherOutboxRepository.cpp
+    src/storage/SqlCipherSyncRepository.cpp
 )
 target_include_directories(openchat_storage PUBLIC src)
 target_link_libraries(openchat_storage
@@ -101,6 +104,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
     FILES
         src/storage/migrations/001_initial.sql
         src/storage/migrations/002_indexes.sql
+        src/storage/migrations/003_domain_alignment.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -122,6 +126,11 @@ add_executable(tst_sqlcipherstorage tests/tst_sqlcipherstorage.cpp)
 target_include_directories(tst_sqlcipherstorage PRIVATE src)
 target_link_libraries(tst_sqlcipherstorage PRIVATE openchat_storage Qt6::Core Qt6::Test)
 add_test(NAME tst_sqlcipherstorage COMMAND tst_sqlcipherstorage)
+
+add_executable(tst_repositories tests/tst_repositories.cpp)
+target_include_directories(tst_repositories PRIVATE src)
+target_link_libraries(tst_repositories PRIVATE openchat_storage Qt6::Core Qt6::Test)
+add_test(NAME tst_repositories COMMAND tst_repositories)
 
 add_executable(tst_models
     tests/tst_models.cpp

@@ -17,6 +17,8 @@ public:
 
     [[nodiscard]] virtual Result<QVector<ConversationRecord>, RepositoryError>
         conversations() = 0;
+    [[nodiscard]] virtual Result<void, RepositoryError>
+        upsertConversation(const ConversationRecord &conversation) = 0;
     [[nodiscard]] virtual Result<QVector<MessageRecord>, RepositoryError>
         messages(const ConversationId &conversationId, int limit,
                  const std::optional<MessageId> &before) = 0;

@@ -248,6 +248,7 @@ private slots:
     void neverReEncryptsOnResend();
     void duplicateIncomingIsAckedNotReprocessed();
     void staleMessageIsDroppedWithoutAckOrCallback();
+    void expiredIncomingIsAckedNotProcessed();
     void retryExhaustionMarksFailed();
     void commitFailureFailsClosed();
 
@@ -405,6 +406,27 @@ void SyncEngineTest::staleMessageIsDroppedWithoutAckOrCallback()
     QCOMPARE(receivedSpy.count(), 0);
     QCOMPARE(store.received.size(), 0);
     QCOMPARE(transport.acks.size(), 0); // not acknowledged; nothing durably applied
+}
+
+void SyncEngineTest::expiredIncomingIsAckedNotProcessed()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy receivedSpy(&engine, &SyncEngine::messageReceived);
+    engine.start();
+
+    const CiphertextEnvelopeV1 envelope =
+        incomingEnvelope(ConversationId::generate(), DeviceId::generate(), QByteArray("ENC:old"));
+    m_now = envelope.expiresAtMs + 1; // withheld past expiry, then (re)delivered
+
+    engine.handleEnvelope(envelope, 12);
+
+    QCOMPARE(receivedSpy.count(), 0);
+    QCOMPARE(store.received.size(), 0);
+    QCOMPARE(mls.processCount, 0);      // ratchet never touched for an expired envelope
+    QCOMPARE(transport.acks.size(), 1); // acknowledged so the relay stops redelivering
 }
 
 void SyncEngineTest::retryExhaustionMarksFailed()

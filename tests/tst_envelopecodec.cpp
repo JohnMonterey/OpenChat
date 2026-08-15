@@ -73,6 +73,8 @@ private slots:
     void preservesNoncriticalExtensionOnRoundTrip();
     void rejectsInvalidLocalExtensionEncoding();
     void rejectsExtensionPastDepthLimit();
+    void encodeAndDecodeAgreeOnExtensionDepthLimit();
+    void encodeForSignatureClearsSignatureField();
     void rejectsOversizeCiphertext();
     void honorsTighterDecodeLimits();
 };
@@ -230,6 +232,52 @@ void EnvelopeCodecTest::rejectsExtensionPastDepthLimit()
     encoded[0] = char(0xae);
     encoded.append(QByteArray::fromHex("188081818181818181818100"));
     QCOMPARE(decodeEnvelope(encoded).error(), DecodeError::DepthLimitExceeded);
+}
+
+void EnvelopeCodecTest::encodeAndDecodeAgreeOnExtensionDepthLimit()
+{
+    // Six nested arrays around an integer put the innermost value exactly at the
+    // decoder's depth budget: it round-trips through both sides.
+    auto accepted = fixedEnvelope();
+    accepted.noncriticalExtensions.insert(128, QByteArray::fromHex("81818181818100"));
+    const QByteArray encoded = encodeCanonical(accepted);
+    QVERIFY(!encoded.isEmpty());
+    const auto decoded = decodeEnvelope(encoded);
+    QVERIFY(decoded.hasValue());
+    QCOMPARE(decoded.value(), accepted);
+
+    // Seven nested arrays exceed that budget. The encoder must now reject it too
+    // (previously it emitted a frame every decoder rejects), and a hand-built
+    // frame with the same extension is rejected on decode — the two sides agree.
+    auto rejected = fixedEnvelope();
+    rejected.noncriticalExtensions.insert(128, QByteArray::fromHex("8181818181818100"));
+    QVERIFY(encodeCanonical(rejected).isEmpty());
+
+    const auto fixture = goldenFixture();
+    QVERIFY2(fixture.error.isEmpty(), qPrintable(fixture.error));
+    QByteArray hostile = fixture.bytes;
+    hostile[0] = char(0xae); // 14 map entries: the 13 required plus one extension
+    hostile.append(QByteArray::fromHex("18808181818181818100"));
+    QCOMPARE(decodeEnvelope(hostile).error(), DecodeError::DepthLimitExceeded);
+}
+
+void EnvelopeCodecTest::encodeForSignatureClearsSignatureField()
+{
+    const auto signed_ = fixedEnvelope();
+    auto unsigned_ = signed_;
+    unsigned_.senderSignature.clear();
+
+    // The signed input is the canonical encoding with the signature field empty,
+    // regardless of whatever signature the envelope currently carries.
+    QCOMPARE(encodeForSignature(signed_), encodeCanonical(unsigned_));
+    QVERIFY(encodeForSignature(signed_) != encodeCanonical(signed_));
+
+    // An envelope signed over that input still decodes and round-trips.
+    auto resigned = unsigned_;
+    resigned.senderSignature = signed_.senderSignature;
+    const auto decoded = decodeEnvelope(encodeCanonical(resigned));
+    QVERIFY(decoded.hasValue());
+    QCOMPARE(decoded.value(), resigned);
 }
 
 void EnvelopeCodecTest::rejectsOversizeCiphertext()

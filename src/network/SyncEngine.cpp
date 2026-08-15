@@ -70,8 +70,9 @@ public:
             QByteArray()};
 
         // Sign the canonical encoding with the signature field cleared — the same
-        // input the relay and recipients verify.
-        const QByteArray signingInput = encodeCanonical(envelope);
+        // input the relay and recipients verify, derived from the one shared
+        // codec definition so signer and verifier cannot drift apart.
+        const QByteArray signingInput = encodeForSignature(envelope);
         if (signingInput.isEmpty() || !signer)
             return std::nullopt;
         const QByteArray signature = signer(signingInput);
@@ -209,6 +210,14 @@ public:
         // the ratchet — reprocessing a consumed message would fail decryption.
         const auto seen = store.hasSeen(envelope.envelopeId);
         if (seen.hasValue() && seen.value()) {
+            transport.acknowledge(envelope.envelopeId, serverSequence);
+            return;
+        }
+
+        // Expired in transit (e.g. a relay that withheld then replayed a very old
+        // envelope): acknowledge so it stops being redelivered, but never advance
+        // the ratchet for it. Bounds how far back a relay can resurrect traffic.
+        if (envelope.expiresAtMs <= now()) {
             transport.acknowledge(envelope.envelopeId, serverSequence);
             return;
         }

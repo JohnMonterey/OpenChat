@@ -74,9 +74,9 @@ QByteArray challengeSigningMessage(QByteArrayView challenge, QByteArrayView cont
 
 QByteArray envelopeSigningInput(const CiphertextEnvelopeV1 &envelope)
 {
-    CiphertextEnvelopeV1 copy = envelope;
-    copy.senderSignature.clear();
-    return encodeCanonical(copy);
+    // Delegate to the shared codec definition so the relay's verifier and the
+    // client's signer can never diverge on what bytes are covered.
+    return encodeForSignature(envelope);
 }
 
 } // namespace OpenChat::Relay

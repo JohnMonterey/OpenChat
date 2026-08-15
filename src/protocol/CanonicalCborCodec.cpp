@@ -287,8 +287,12 @@ QByteArray encodeCanonical(const CiphertextEnvelopeV1 &envelope)
         if (extension.key() < criticalFieldLimit || extension.value().isEmpty())
             return {};
 
+        // Validate the extension value at the SAME nesting depth the decoder
+        // starts from (a map value sits one level inside the envelope map, i.e.
+        // depth 2). Using depth 1 here would accept one extra level that every
+        // decoder then rejects, letting a sender emit envelopes no peer can read.
         Reader reader(extension.value(), {});
-        if (!reader.skipValue(1) || !reader.atEnd())
+        if (!reader.skipValue(2) || !reader.atEnd())
             return {};
     }
 
@@ -332,6 +336,13 @@ QByteArray encodeCanonical(const CiphertextEnvelopeV1 &envelope)
         output.append(extension.value());
     }
     return output;
+}
+
+QByteArray encodeForSignature(const CiphertextEnvelopeV1 &envelope)
+{
+    CiphertextEnvelopeV1 unsignedEnvelope = envelope;
+    unsignedEnvelope.senderSignature.clear();
+    return encodeCanonical(unsignedEnvelope);
 }
 
 Result<CiphertextEnvelopeV1, DecodeError> decodeEnvelope(QByteArrayView encoded,

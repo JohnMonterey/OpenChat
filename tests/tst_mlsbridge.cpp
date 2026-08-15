@@ -73,6 +73,8 @@ void MlsBridgeTest::exchangesAndRejectsTampering()
     QVERIFY(plaintext);
     QCOMPARE(plaintext.value().kind, MlsProcessKind::Application);
     QCOMPARE(plaintext.value().applicationData, QByteArray("hello bob"));
+    // The bridge surfaces the sender's MLS-authenticated credential.
+    QCOMPARE(plaintext.value().senderIdentity, QByteArray("alice-device"));
 }
 
 void MlsBridgeTest::restoresOpaqueStateThroughCallbacks()

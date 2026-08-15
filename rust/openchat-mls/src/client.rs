@@ -276,7 +276,7 @@ impl MlsClient {
         &mut self,
         conversation: [u8; 16],
         message: &[u8],
-    ) -> Result<ProcessResult, MlsError> {
+    ) -> Result<(ProcessResult, Vec<u8>), MlsError> {
         bounded(message, MAX_INPUT_BYTES)?;
         let message = deserialize_message(message)?
             .try_into_protocol_message()
@@ -295,6 +295,12 @@ impl MlsClient {
                 return Err(MlsError::InvalidMessage);
             }
         };
+        // The credential the group cryptographically bound to this sender. The
+        // caller uses it to bind the plaintext to an authenticated identity
+        // instead of trusting any relay-supplied envelope metadata.
+        let sender_identity = BasicCredential::try_from(processed.credential().clone())
+            .map(|credential| credential.identity().to_vec())
+            .map_err(|_| MlsError::InvalidMessage)?;
         let result = match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(application) => {
                 let mut plaintext = application.into_bytes();
@@ -318,10 +324,13 @@ impl MlsClient {
             ProcessedMessageContent::OwnPendingCommit
             | ProcessedMessageContent::OwnPrivateMessage => Err(MlsError::InvalidMessage),
         };
-        if result.is_err() {
-            previous_storage.restore(&self.provider)?;
+        match result {
+            Ok(value) => Ok((value, sender_identity)),
+            Err(error) => {
+                previous_storage.restore(&self.provider)?;
+                Err(error)
+            }
         }
-        result
     }
 
     fn load_group(&self, conversation: [u8; 16]) -> Result<MlsGroup, MlsError> {

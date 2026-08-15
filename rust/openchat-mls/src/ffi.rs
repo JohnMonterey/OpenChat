@@ -44,6 +44,9 @@ pub struct OcMlsAddResult {
 pub struct OcMlsProcessResult {
     pub kind: u32,
     pub payload: OcMlsBuffer,
+    // MLS-authenticated sender credential for an application message; empty for
+    // proposals/commits. Freed by the caller like payload.
+    pub sender: OcMlsBuffer,
 }
 
 pub type LoadCallback = unsafe extern "C" fn(
@@ -291,13 +294,14 @@ pub unsafe extern "C" fn oc_mls_process(
         let conversation = unsafe { conversation_id_from_ptr(conversation_id)? };
         // SAFETY: pointer/length validation happens inside required_slice.
         let message = unsafe { required_slice(message, message_len, MAX_INPUT_BYTES)? };
-        let output = mutate(handle, |client| client.process(conversation, message))?;
+        let (output, sender) = mutate(handle, |client| client.process(conversation, message))?;
         // SAFETY: out_result remains valid for this call.
         unsafe {
             match output {
                 ProcessResult::Application(payload) => {
                     (*out_result).kind = 1;
                     (*out_result).payload = into_buffer(payload);
+                    (*out_result).sender = into_buffer(sender);
                 }
                 ProcessResult::Proposal => (*out_result).kind = 2,
                 ProcessResult::Commit => (*out_result).kind = 3,

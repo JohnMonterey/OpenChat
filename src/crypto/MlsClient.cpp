@@ -270,10 +270,11 @@ MlsClient::process(const ConversationId &conversation, QByteArrayView mlsMessage
         break;
     default:
         oc_mls_free_buffer(output.payload);
+        oc_mls_free_buffer(output.sender);
         return Result<MlsProcessResult, MlsError>::failure(MlsError::Internal);
     }
     return Result<MlsProcessResult, MlsError>::success(
-        MlsProcessResult{kind, takeBuffer(output.payload)});
+        MlsProcessResult{kind, takeBuffer(output.payload), takeBuffer(output.sender)});
 }
 
 } // namespace OpenChat

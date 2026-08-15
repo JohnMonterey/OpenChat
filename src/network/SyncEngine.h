@@ -24,6 +24,10 @@ namespace OpenChat {
 struct SyncProcessOutcome final {
     enum class Kind { Application, Control } kind = Kind::Application;
     QByteArray applicationData; // plaintext, only for Application
+    // MLS-authenticated sender credential (version || deviceId || signingKey).
+    // The engine binds the message to this identity, not to the relay-supplied
+    // envelope sender field.
+    QByteArray senderIdentity;
 };
 
 // Narrow MLS surface the engine needs, adapting MlsClient plus a capturing state

@@ -41,6 +41,9 @@ typedef struct oc_mls_add_result {
 typedef struct oc_mls_process_result {
     uint32_t kind;
     oc_mls_buffer payload;
+    /* MLS-authenticated sender credential for an application message; empty for
+     * proposals/commits. Freed by the caller like payload. */
+    oc_mls_buffer sender;
 } oc_mls_process_result;
 
 /*

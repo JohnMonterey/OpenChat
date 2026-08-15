@@ -13,6 +13,23 @@ namespace {
 
 constexpr qint64 envelopeLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
 
+// DevicePublicCredential serializes as: version(1) || deviceId(16) || key(32).
+constexpr char credentialVersion = 1;
+constexpr qsizetype credentialDeviceIdOffset = 1;
+
+// True iff the MLS-authenticated credential names exactly the device the
+// envelope claims as its sender. A relay cannot forge the credential (MLS binds
+// it), so a mismatch means the relay is trying to misattribute the plaintext.
+[[nodiscard]] bool credentialNamesDevice(QByteArrayView credential, const DeviceId &claimed)
+{
+    if (credential.size() < credentialDeviceIdOffset + DeviceId::byteCount)
+        return false;
+    if (credential.at(0) != credentialVersion)
+        return false;
+    return credential.sliced(credentialDeviceIdOffset, DeviceId::byteCount)
+        == QByteArrayView(claimed.bytes());
+}
+
 } // namespace
 
 class SyncEngine::Private
@@ -230,6 +247,13 @@ public:
         }
 
         if (processed.value().kind == SyncProcessOutcome::Kind::Application) {
+            // The envelope's senderDeviceId is untrusted relay metadata. Only
+            // accept the plaintext if the MLS-authenticated credential names the
+            // same device; otherwise a relay is misattributing a decrypted
+            // message. Drop without surfacing or acknowledging.
+            if (!credentialNamesDevice(processed.value().senderIdentity, envelope.senderDeviceId))
+                return;
+
             const MessageRecord message{MessageId::generate(),
                                         envelope.conversationId,
                                         envelope.senderDeviceId,

@@ -53,6 +53,10 @@ enum class MlsProcessKind {
 struct MlsProcessResult final {
     MlsProcessKind kind = MlsProcessKind::Application;
     QByteArray applicationData;
+    // MLS-authenticated sender credential for an application message (empty for
+    // proposals/commits). The caller binds the plaintext to this identity rather
+    // than to any relay-supplied envelope field.
+    QByteArray senderIdentity;
 };
 
 class MlsClient final

@@ -13,8 +13,20 @@ Q_DECLARE_METATYPE(OpenChat::DeliveryState)
 
 namespace {
 
+// Serialized device credential the MLS layer authenticates:
+// version(1) || deviceId(16) || signingKey(32).
+QByteArray credentialBytes(const DeviceId &device)
+{
+    QByteArray credential;
+    credential.append(char{1});
+    credential.append(device.bytes());
+    credential.append(QByteArray(32, 'k'));
+    return credential;
+}
+
 // Deterministic MLS stand-in: encrypt prefixes "ENC:", process strips it (and
-// reports Application), and an unknown payload is a stale/invalid message.
+// reports Application), and an unknown payload is a stale/invalid message. The
+// authenticated sender it reports is `senderDevice`.
 class FakeMls final : public SyncMlsSession
 {
 public:
@@ -36,6 +48,7 @@ public:
         SyncProcessOutcome outcome;
         outcome.kind = SyncProcessOutcome::Kind::Application;
         outcome.applicationData = bytes.mid(4);
+        outcome.senderIdentity = credentialBytes(senderDevice);
         return Result<SyncProcessOutcome, MlsError>::success(outcome);
     }
 
@@ -44,6 +57,7 @@ public:
         return QByteArray("state-") + QByteArray::number(stateVersion);
     }
 
+    DeviceId senderDevice = DeviceId::generate();
     int encryptCount = 0;
     int processCount = 0;
     int stateVersion = 0;
@@ -248,6 +262,7 @@ private slots:
     void neverReEncryptsOnResend();
     void duplicateIncomingIsAckedNotReprocessed();
     void staleMessageIsDroppedWithoutAckOrCallback();
+    void forgedSenderIsDroppedNotAttributed();
     void expiredIncomingIsAckedNotProcessed();
     void retryExhaustionMarksFailed();
     void commitFailureFailsClosed();
@@ -371,8 +386,9 @@ void SyncEngineTest::duplicateIncomingIsAckedNotReprocessed()
     engine.start();
 
     const ConversationId conversation = ConversationId::generate();
+    // Envelope's claimed sender matches the MLS-authenticated credential.
     const CiphertextEnvelopeV1 envelope =
-        incomingEnvelope(conversation, DeviceId::generate(), QByteArray("ENC:world"));
+        incomingEnvelope(conversation, mls.senderDevice, QByteArray("ENC:world"));
 
     engine.handleEnvelope(envelope, 9);
     QCOMPARE(receivedSpy.count(), 1);
@@ -406,6 +422,27 @@ void SyncEngineTest::staleMessageIsDroppedWithoutAckOrCallback()
     QCOMPARE(receivedSpy.count(), 0);
     QCOMPARE(store.received.size(), 0);
     QCOMPARE(transport.acks.size(), 0); // not acknowledged; nothing durably applied
+}
+
+void SyncEngineTest::forgedSenderIsDroppedNotAttributed()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy receivedSpy(&engine, &SyncEngine::messageReceived);
+    engine.start();
+
+    // The relay claims a different sender device than the MLS credential names.
+    const CiphertextEnvelopeV1 envelope = incomingEnvelope(
+        ConversationId::generate(), DeviceId::generate(), QByteArray("ENC:forged"));
+    QVERIFY(envelope.senderDeviceId != mls.senderDevice);
+
+    engine.handleEnvelope(envelope, 7);
+
+    QCOMPARE(receivedSpy.count(), 0);   // never surfaced under a forged sender
+    QCOMPARE(store.received.size(), 0); // nothing durably applied
+    QCOMPARE(transport.acks.size(), 0); // and not acknowledged
 }
 
 void SyncEngineTest::expiredIncomingIsAckedNotProcessed()

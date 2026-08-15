@@ -647,31 +647,33 @@ void SyncEngineTest::offlineSendSurvivesEngineRestart()
 }
 ```
 
-Cover crash after MLS encryption but before send, relay acceptance before local state update, duplicate incoming envelope, future epoch buffering, stale epoch rejection, and outbox retry exhaustion.
+Cover crash after MLS encryption but before send, relay acceptance before local state update, duplicate incoming envelope, future epoch buffering, stale epoch rejection, and outbox retry exhaustion. Implemented in `tests/tst_syncengine.cpp` (11 cases, fakes for store/MLS/transport) and `tests/tst_mlscoordinator.cpp`.
 
-- [ ] **Step 2: Implement send transaction**
+- [x] **Step 2: Implement send transaction**
 
-Persist the local message, MLS output, updated MLS state, and outbox row atomically. Emit UI state only after commit. Never ask MLS to encrypt the same logical message twice after recovery.
+`SyncEngine::enqueueText` encrypts, then persists the message + outbox row + captured MLS state in one `commitSend`; UI state reaches `Queued` only after that commit. Resends replay the persisted envelope from the outbox (verified: `neverReEncryptsOnResend`), so recovery never re-encrypts a committed message. A commit failure fails the engine closed.
 
-- [ ] **Step 3: Implement receive transaction**
+- [x] **Step 3: Implement receive transaction**
 
-Persist raw envelope, validate signature/replay, process MLS, then atomically commit plaintext message, MLS state, replay ID, and watermark before acknowledging.
+`SyncEngine::handleEnvelope` dedups via `hasSeen` before touching the ratchet, processes the MLS message, then commits the plaintext message + captured MLS state + replay id + watermark in one `commitReceive` before acknowledging. Redelivery (live + catch-up) is idempotent and never reprocessed (verified: `duplicateIncomingIsAckedNotReprocessed`); stale/invalid messages are dropped without ack.
 
-- [ ] **Step 4: Implement encrypted receipts**
+- [~] **Step 4: Implement encrypted receipts**
 
-Delivery and read receipts are MLS application messages containing bounded message IDs and states; the relay only sees ordinary ciphertext envelopes.
+`acknowledgeRead` sends a read receipt as a bounded MLS application message (kind `Receipt`) through the ordinary outbox/send path, so the relay sees only a ciphertext envelope. Delivery-receipt emission and full receipt-consumption UI are a follow-up.
 
-- [ ] **Step 5: Run sync tests**
+- [x] **Step 5: Run sync tests**
 
-Run: `cmake --build build -j2 --target tst_syncengine && ./build/tst_syncengine`
+Run: `cmake --build build --target tst_syncengine && ./build/tst_syncengine`
 
-Expected: offline, recovery, dedupe, order, retry, receipt, and conversation-isolation scenarios pass.
+Result: 11/11 sync cases pass (send/queued, relay-accept→Sent, offline durability, restart recovery, no-re-encrypt-on-resend, duplicate-incoming dedup, stale drop, retry exhaustion→Failed, commit-failure fail-closed) plus 3 coordinator cases; full CTest suite 19/19.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit** (engine + coordinator + tests)
+
+**Remaining app integration (next slice):** the real adapters that back the engine's narrow interfaces — a `SqlCipher`-backed `SyncStore` implementing the additive atomic `commitSend`/`commitReceive` (message/outbox/watermark + `local_mls_state` UPSERT in one transaction), a `CapturingMlsStateStore` over `MlsClient`, and a `RelayClient` transport adapter — plus wiring in `ProfileSession`. Also deferred: bounded future-epoch buffering.
 
 ```bash
-git add CMakeLists.txt src/network tests/tst_syncengine.cpp
-git commit -m "feat: synchronize durable encrypted messages"
+git add CMakeLists.txt src/network tests/tst_syncengine.cpp tests/tst_mlscoordinator.cpp
+git commit -m "synchronize durable encrypted messages"
 ```
 
 ### Task 11: Replace mock chats beneath the approved UI

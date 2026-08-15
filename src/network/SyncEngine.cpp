@@ -1,0 +1,336 @@
+#include "network/SyncEngine.h"
+
+#include "protocol/CanonicalCborCodec.h"
+#include "repositories/OutboxRepository.h" // for retryDelayMs
+
+#include <QCryptographicHash>
+
+#include <utility>
+
+namespace OpenChat {
+
+namespace {
+
+constexpr qint64 envelopeLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
+
+} // namespace
+
+class SyncEngine::Private
+{
+public:
+    Private(Config config, SyncStore &store, SyncMlsSession &mls, SyncTransport &transport,
+            Signer signer, Clock clock, SyncEngine *owner)
+        : q(owner)
+        , config(std::move(config))
+        , store(store)
+        , mls(mls)
+        , transport(transport)
+        , signer(std::move(signer))
+        , clock(std::move(clock))
+    {
+    }
+
+    [[nodiscard]] qint64 now() const { return clock ? clock() : 0; }
+
+    [[nodiscard]] OutboxRecord makeOutbox(const EnvelopeId &envelopeId, const MessageId &messageId,
+                                          const ConversationId &conversation,
+                                          const QByteArray &envelopeBytes) const
+    {
+        return OutboxRecord{envelopeId, messageId, conversation, envelopeBytes,
+                            0,          now(),     0,            OutboxState::Pending};
+    }
+
+    void failClosed()
+    {
+        if (failed)
+            return;
+        failed = true;
+        emit q->failedClosed();
+    }
+
+    // Builds and signs a canonical envelope for a ciphertext payload.
+    [[nodiscard]] std::optional<CiphertextEnvelopeV1>
+    buildEnvelope(const ConversationId &conversation, const DeviceId &recipient,
+                  const QByteArray &ciphertext, EnvelopeMessageKind kind)
+    {
+        const qint64 created = now();
+        CiphertextEnvelopeV1 envelope{
+            1,
+            EnvelopeId::generate(),
+            config.localAccountId,
+            config.localDeviceId,
+            recipient,
+            conversation,
+            kind,
+            created,
+            created + envelopeLifetimeMs,
+            EnvelopeId::generate(),
+            ciphertext,
+            QCryptographicHash::hash(ciphertext, QCryptographicHash::Sha256),
+            QByteArray()};
+
+        // Sign the canonical encoding with the signature field cleared — the same
+        // input the relay and recipients verify.
+        const QByteArray signingInput = encodeCanonical(envelope);
+        if (signingInput.isEmpty() || !signer)
+            return std::nullopt;
+        const QByteArray signature = signer(signingInput);
+        if (signature.size() != 64)
+            return std::nullopt;
+        envelope.senderSignature = signature;
+        return envelope;
+    }
+
+    void doEnqueueText(const ConversationId &conversation, const DeviceId &recipient,
+                       const QString &text)
+    {
+        if (failed)
+            return;
+        const auto ciphertext = mls.encrypt(conversation, text.toUtf8());
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        const auto envelope =
+            buildEnvelope(conversation, recipient, ciphertext.value(),
+                          EnvelopeMessageKind::MlsPrivateMessage);
+        if (!envelope) {
+            failClosed();
+            return;
+        }
+        const QByteArray envelopeBytes = encodeCanonical(*envelope);
+
+        const MessageRecord message{MessageId::generate(),
+                                    conversation,
+                                    config.localDeviceId,
+                                    MessageFlow::Outgoing,
+                                    ContentKind::Text,
+                                    text,
+                                    now(),
+                                    DeliveryState::Queued,
+                                    std::nullopt,
+                                    std::nullopt};
+
+        const OutboxRecord outbox =
+            makeOutbox(envelope->envelopeId, message.id, conversation, envelopeBytes);
+
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitSend(message, outbox, mlsState).hasValue()) {
+            failClosed(); // in-memory ratchet may be ahead of the store; stop.
+            return;
+        }
+        emit q->messageStateChanged(message.id, DeliveryState::Queued);
+        drainOutbox();
+    }
+
+    void doAcknowledgeRead(const ConversationId &conversation, const DeviceId &recipient,
+                           const MessageId &messageId)
+    {
+        if (failed)
+            return;
+        // Receipt payload is bounded and contains only the message id being
+        // acknowledged; it is an ordinary MLS application message to the relay.
+        QByteArray payload("R", 1);
+        payload.append(messageId.bytes());
+        const auto ciphertext = mls.encrypt(conversation, payload);
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        const auto envelope =
+            buildEnvelope(conversation, recipient, ciphertext.value(), EnvelopeMessageKind::Receipt);
+        if (!envelope) {
+            failClosed();
+            return;
+        }
+
+        // No visible message row for a receipt.
+        const OutboxRecord outbox = makeOutbox(envelope->envelopeId, MessageId::generate(),
+                                               conversation, encodeCanonical(*envelope));
+
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitControlSend(outbox, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        drainOutbox();
+    }
+
+    void drainOutbox()
+    {
+        if (failed || !transport.isConnected())
+            return;
+        const qint64 nowMs = now();
+        const auto due = store.claimDue(nowMs, config.drainBatch, nowMs + config.leaseMs);
+        if (!due.hasValue())
+            return;
+        for (const OutboxRecord &record : due.value()) {
+            if (record.attemptCount >= config.maxSendAttempts) {
+                (void)store.advanceDeliveryState(record.messageId, DeliveryState::Failed);
+                emit q->messageStateChanged(record.messageId, DeliveryState::Failed);
+                // Park so it is not re-claimed.
+                (void)store.scheduleRetry(record.envelopeId, record.attemptCount,
+                                          nowMs + envelopeLifetimeMs);
+                continue;
+            }
+            const auto decoded = decodeEnvelope(record.envelope);
+            if (!decoded.hasValue()) {
+                (void)store.advanceDeliveryState(record.messageId, DeliveryState::Failed);
+                (void)store.scheduleRetry(record.envelopeId, record.attemptCount,
+                                          nowMs + envelopeLifetimeMs);
+                continue;
+            }
+            inflight.insert(record.envelopeId.bytes(), record.messageId);
+            transport.sendEnvelope(decoded.value());
+            (void)store.advanceDeliveryState(record.messageId, DeliveryState::Sending);
+            // Schedule the next attempt; relay acceptance cancels it via markAccepted.
+            const qint64 nextMs = nowMs + retryDelayMs(record.attemptCount, 0);
+            (void)store.scheduleRetry(record.envelopeId, record.attemptCount + 1, nextMs);
+        }
+    }
+
+    void onAccepted(const EnvelopeId &envelopeId, quint64 /*serverSequence*/)
+    {
+        (void)store.markAccepted(envelopeId);
+        const auto it = inflight.constFind(envelopeId.bytes());
+        if (it != inflight.cend()) {
+            const MessageId messageId = it.value();
+            inflight.erase(it);
+            if (store.advanceDeliveryState(messageId, DeliveryState::Sent).hasValue())
+                emit q->messageStateChanged(messageId, DeliveryState::Sent);
+        }
+    }
+
+    void doHandleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence)
+    {
+        if (failed)
+            return;
+        // Idempotent redelivery (live + catch-up): ack and skip without touching
+        // the ratchet — reprocessing a consumed message would fail decryption.
+        const auto seen = store.hasSeen(envelope.envelopeId);
+        if (seen.hasValue() && seen.value()) {
+            transport.acknowledge(envelope.envelopeId, serverSequence);
+            return;
+        }
+
+        const auto processed = mls.process(envelope.conversationId, envelope.ciphertext);
+        if (!processed.hasValue()) {
+            // Stale/invalid or unbuffered future epoch: drop without surfacing
+            // anything. (Bounded future-epoch buffering is a follow-up.)
+            return;
+        }
+
+        if (processed.value().kind == SyncProcessOutcome::Kind::Application) {
+            const MessageRecord message{MessageId::generate(),
+                                        envelope.conversationId,
+                                        envelope.senderDeviceId,
+                                        MessageFlow::Incoming,
+                                        ContentKind::Text,
+                                        QString::fromUtf8(processed.value().applicationData),
+                                        envelope.createdAtMs,
+                                        DeliveryState::Delivered,
+                                        std::optional<quint64>(serverSequence),
+                                        std::nullopt};
+
+            const QByteArray mlsState = mls.takePendingState();
+            const auto committed =
+                store.commitReceive(message, envelope.envelopeId, serverSequence, mlsState);
+            if (!committed.hasValue()) {
+                failClosed();
+                return;
+            }
+            transport.acknowledge(envelope.envelopeId, serverSequence);
+            if (committed.value())
+                emit q->messageReceived(message);
+        } else {
+            const QByteArray mlsState = mls.takePendingState();
+            const auto committed = store.commitControlReceive(
+                envelope.envelopeId, envelope.senderDeviceId, serverSequence, mlsState);
+            if (!committed.hasValue()) {
+                failClosed();
+                return;
+            }
+            transport.acknowledge(envelope.envelopeId, serverSequence);
+        }
+    }
+
+    SyncEngine *q;
+    Config config;
+    SyncStore &store;
+    SyncMlsSession &mls;
+    SyncTransport &transport;
+    Signer signer;
+    Clock clock;
+    MlsTransactionCoordinator coordinator;
+    QHash<QByteArray, MessageId> inflight;
+    bool failed = false;
+    bool started = false;
+};
+
+SyncEngine::SyncEngine(Config config, SyncStore &store, SyncMlsSession &mls,
+                       SyncTransport &transport, Signer signer, Clock clock, QObject *parent)
+    : QObject(parent)
+    , d(std::make_unique<Private>(std::move(config), store, mls, transport, std::move(signer),
+                                  std::move(clock), this))
+{
+}
+
+SyncEngine::~SyncEngine() = default;
+
+void SyncEngine::start()
+{
+    if (d->started)
+        return;
+    d->started = true;
+    d->transport.onRelayAccepted = [this](const EnvelopeId &id, quint64 seq) {
+        d->onAccepted(id, seq);
+    };
+    d->transport.onEnvelope = [this](const CiphertextEnvelopeV1 &envelope, quint64 seq) {
+        handleEnvelope(envelope, seq);
+    };
+    d->transport.onConnected = [this] {
+        // Resume: drain the durable outbox once the link is up.
+        d->drainOutbox();
+    };
+    // Kick an initial drain (e.g. offline items queued before start / on restart).
+    d->drainOutbox();
+}
+
+void SyncEngine::stop()
+{
+    d->started = false;
+    d->transport.onRelayAccepted = nullptr;
+    d->transport.onEnvelope = nullptr;
+    d->transport.onConnected = nullptr;
+}
+
+void SyncEngine::enqueueText(const ConversationId &conversation, const DeviceId &recipientDevice,
+                            const QString &text)
+{
+    d->coordinator.run(conversation,
+                       [this, conversation, recipientDevice, text] {
+                           d->doEnqueueText(conversation, recipientDevice, text);
+                       });
+}
+
+void SyncEngine::acknowledgeRead(const ConversationId &conversation, const DeviceId &recipientDevice,
+                                 const MessageId &messageId)
+{
+    d->coordinator.run(conversation, [this, conversation, recipientDevice, messageId] {
+        d->doAcknowledgeRead(conversation, recipientDevice, messageId);
+    });
+}
+
+void SyncEngine::handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence)
+{
+    d->coordinator.run(envelope.conversationId, [this, envelope, serverSequence] {
+        d->doHandleEnvelope(envelope, serverSequence);
+    });
+}
+
+bool SyncEngine::isFailedClosed() const noexcept
+{
+    return d->failed;
+}
+
+} // namespace OpenChat

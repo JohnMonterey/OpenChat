@@ -96,6 +96,7 @@ add_library(openchat_network STATIC
     src/network/BackoffPolicy.cpp
     src/network/RelayClient.cpp
     src/network/MlsTransactionCoordinator.cpp
+    src/network/SyncEngine.cpp
 )
 target_include_directories(openchat_network PUBLIC src)
 target_link_libraries(openchat_network
@@ -209,6 +210,12 @@ add_executable(tst_mlscoordinator tests/tst_mlscoordinator.cpp)
 target_include_directories(tst_mlscoordinator PRIVATE src)
 target_link_libraries(tst_mlscoordinator PRIVATE openchat_network openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_mlscoordinator COMMAND tst_mlscoordinator)
+
+add_executable(tst_syncengine tests/tst_syncengine.cpp)
+target_include_directories(tst_syncengine PRIVATE src)
+target_link_libraries(tst_syncengine PRIVATE
+    openchat_network openchat_protocol openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_syncengine COMMAND tst_syncengine)
 
 add_executable(tst_profilesession tests/tst_profilesession.cpp)
 target_include_directories(tst_profilesession PRIVATE src)

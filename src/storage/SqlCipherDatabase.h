@@ -18,6 +18,7 @@ namespace OpenChat {
 class SqlCipherChatRepository;
 class SqlCipherOutboxRepository;
 class SqlCipherSyncRepository;
+class SqlCipherSyncStore;
 
 enum class StorageError {
   InvalidKey,
@@ -68,6 +69,7 @@ private:
   friend class SqlCipherChatRepository;
   friend class SqlCipherOutboxRepository;
   friend class SqlCipherSyncRepository;
+  friend class SqlCipherSyncStore;
 
   explicit SqlCipherDatabase(sqlite3 *database, QString path);
 

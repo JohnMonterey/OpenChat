@@ -26,6 +26,7 @@ class ChatController final : public QObject
     Q_PROPERTY(NavSection navSection READ navSection NOTIFY navSectionChanged)
     Q_PROPERTY(int chatUnreadCount READ chatUnreadCount CONSTANT)
     Q_PROPERTY(int callMissedCount READ callMissedCount CONSTANT)
+    Q_PROPERTY(int callCount READ callCount CONSTANT)
 
 public:
     // Connection/security posture of the conversation surface. Ready is the only
@@ -70,6 +71,7 @@ public:
     [[nodiscard]] NavSection navSection() const;
     [[nodiscard]] int chatUnreadCount() const;
     [[nodiscard]] int callMissedCount() const;
+    [[nodiscard]] int callCount() const;
 
     Q_INVOKABLE bool selectContact(const QString &id);
     Q_INVOKABLE void setSearchQuery(const QString &query);

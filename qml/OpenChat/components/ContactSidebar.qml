@@ -120,43 +120,83 @@ Item {
         }
     }
 
-    Column {
+    // The region between the search field and the bottom navigation swaps its
+    // content with the active section. Exactly one container is visible at a
+    // time; each fills the same middle band so the panes line up. Chat keeps the
+    // approved contact list unchanged; Call shows the (currently empty) call
+    // history list.
+    Item {
+        id: chatContactArea
+        objectName: "chatContactArea"
+        anchors.left: parent.left
+        anchors.right: parent.right
         anchors.top: searchArea.bottom
-        width: parent.width
+        anchors.bottom: bottomNav.top
+        visible: sidebar.controller.navSection === ChatController.NavSection.Chat
 
-        ContactCategory {
-            objectName: "favoritesCategory"
+        Column {
+            anchors.top: parent.top
             width: parent.width
-            label: "Requests"
-            favoriteCategory: true
-            contactModel: sidebar.controller.contacts
-            controller: sidebar.controller
-            rowHeight: sidebar.contactRowHeight
+
+            ContactCategory {
+                objectName: "favoritesCategory"
+                width: parent.width
+                label: "Requests"
+                favoriteCategory: true
+                contactModel: sidebar.controller.contacts
+                controller: sidebar.controller
+                rowHeight: sidebar.contactRowHeight
+            }
+
+            ContactCategory {
+                objectName: "contactsCategory"
+                width: parent.width
+                label: "Chats"
+                favoriteCategory: false
+                contactModel: sidebar.controller.contacts
+                controller: sidebar.controller
+                rowHeight: sidebar.contactRowHeight
+            }
         }
 
-        ContactCategory {
-            objectName: "contactsCategory"
-            width: parent.width
-            label: "Chats"
-            favoriteCategory: false
-            contactModel: sidebar.controller.contacts
-            controller: sidebar.controller
-            rowHeight: sidebar.contactRowHeight
+        Text {
+            objectName: "noContactsFound"
+            anchors.top: parent.top
+            anchors.topMargin: 30
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: sidebar.controller.contacts.favoriteCount
+                     + sidebar.controller.contacts.regularCount === 0
+            text: "No contacts found"
+            color: Theme.textSecondary
+            font.family: Theme.uiFont
+            font.pixelSize: 14
+            renderType: Text.NativeRendering
         }
     }
 
-    Text {
-        objectName: "noContactsFound"
+    Item {
+        id: sidebarCallList
+        objectName: "sidebarCallList"
+        anchors.left: parent.left
+        anchors.right: parent.right
         anchors.top: searchArea.bottom
-        anchors.topMargin: 30
-        anchors.horizontalCenter: parent.horizontalCenter
-        visible: sidebar.controller.contacts.favoriteCount
-                 + sidebar.controller.contacts.regularCount === 0
-        text: "No contacts found"
-        color: Theme.textSecondary
-        font.family: Theme.uiFont
-        font.pixelSize: 14
-        renderType: Text.NativeRendering
+        anchors.bottom: bottomNav.top
+        visible: sidebar.controller.navSection === ChatController.NavSection.Call
+
+        // Empty state until call history exists. When callCount grows, a call
+        // ListView slots in here in place of this placeholder.
+        Text {
+            objectName: "noCallsYet"
+            anchors.top: parent.top
+            anchors.topMargin: 30
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: sidebar.controller.callCount === 0
+            text: "No calls yet."
+            color: Theme.textSecondary
+            font.family: Theme.uiFont
+            font.pixelSize: 14
+            renderType: Text.NativeRendering
+        }
     }
 
     // Bottom navigation. Three equal columns switch the main pane between the

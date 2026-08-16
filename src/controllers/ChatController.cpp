@@ -240,6 +240,13 @@ int ChatController::callMissedCount() const
     return 1;
 }
 
+int ChatController::callCount() const
+{
+    // No call history exists yet, so the call list is empty. A real
+    // CallListModel will replace this once call data is available.
+    return 0;
+}
+
 void ChatController::setNavSection(NavSection section)
 {
     if (m_navSection == section)

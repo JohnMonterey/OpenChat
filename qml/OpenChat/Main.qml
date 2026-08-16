@@ -118,6 +118,9 @@ Window {
             }
         }
 
+        // Neutral no-selection pane for the Call section. Call history lives in
+        // the sidebar; until a call is picked there is nothing to show here, so
+        // this stays an empty gradient pane matching the conversation backdrop.
         Item {
             id: callView
             objectName: "callView"
@@ -132,15 +135,6 @@ Window {
                     GradientStop { position: 0; color: Theme.contentBackground }
                     GradientStop { position: 1; color: Theme.contentBottom }
                 }
-            }
-
-            Text {
-                anchors.centerIn: parent
-                text: "Calls"
-                color: Theme.textPrimary
-                font.family: Theme.uiFont
-                font.pixelSize: 22
-                renderType: Text.NativeRendering
             }
         }
 

@@ -131,6 +131,7 @@ private slots:
         QCOMPARE(controller.navSection(), ChatController::NavSection::Chat);
         QCOMPARE(controller.chatUnreadCount(), 3);
         QCOMPARE(controller.callMissedCount(), 1);
+        QCOMPARE(controller.callCount(), 0);
 
         QSignalSpy navSpy(&controller, &ChatController::navSectionChanged);
 

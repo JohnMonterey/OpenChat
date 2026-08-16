@@ -123,6 +123,10 @@ private slots:
             root->findChild<QObject *>(QStringLiteral("conversationPane"));
         QObject *callView = root->findChild<QObject *>(QStringLiteral("callView"));
         QObject *settingsView = root->findChild<QObject *>(QStringLiteral("settingsView"));
+        QObject *chatContactArea =
+            root->findChild<QObject *>(QStringLiteral("chatContactArea"));
+        QObject *sidebarCallList =
+            root->findChild<QObject *>(QStringLiteral("sidebarCallList"));
         QVERIFY(bottomNav);
         QVERIFY(callTab);
         QVERIFY(chatTab);
@@ -130,6 +134,8 @@ private slots:
         QVERIFY(conversationPane);
         QVERIFY(callView);
         QVERIFY(settingsView);
+        QVERIFY(chatContactArea);
+        QVERIFY(sidebarCallList);
 
         // Chat is active by default: the conversation pane and its content are
         // present and shown, both placeholder panes are hidden, and only the
@@ -144,6 +150,11 @@ private slots:
         QVERIFY(!callTab->property("active").toBool());
         QVERIFY(!settingsTab->property("active").toBool());
 
+        // The sidebar's middle band swaps with the section: Chat shows the
+        // contact list, the call history list is hidden.
+        QVERIFY(chatContactArea->property("visible").toBool());
+        QVERIFY(!sidebarCallList->property("visible").toBool());
+
         // Badge labels are backed by the controller's counts, not hardcoded.
         QObject *chatBadge = root->findChild<QObject *>(QStringLiteral("chatBadgeLabel"));
         QObject *callBadge = root->findChild<QObject *>(QStringLiteral("callBadgeLabel"));
@@ -156,7 +167,9 @@ private slots:
         QCOMPARE(chatBadge->property("text").toString(), QStringLiteral("3"));
         QCOMPARE(callBadge->property("text").toString(), QStringLiteral("1"));
 
-        // Call: the call placeholder replaces the chat pane exclusively.
+        // Call: the call placeholder replaces the chat pane exclusively, and the
+        // sidebar swaps the contact list for the call history list with its
+        // empty state showing.
         controller.setNavSection(OpenChat::ChatController::NavSection::Call);
         QCoreApplication::processEvents();
         QVERIFY(callView->property("visible").toBool());
@@ -164,6 +177,11 @@ private slots:
         QVERIFY(!settingsView->property("visible").toBool());
         QVERIFY(callTab->property("active").toBool());
         QVERIFY(!chatTab->property("active").toBool());
+        QVERIFY(!chatContactArea->property("visible").toBool());
+        QVERIFY(sidebarCallList->property("visible").toBool());
+        QObject *noCallsYet = root->findChild<QObject *>(QStringLiteral("noCallsYet"));
+        QVERIFY(noCallsYet);
+        QCOMPARE(noCallsYet->property("text").toString(), QStringLiteral("No calls yet."));
 
         // Settings: the settings placeholder replaces the chat pane exclusively.
         controller.setNavSection(OpenChat::ChatController::NavSection::Settings);
@@ -174,13 +192,15 @@ private slots:
         QVERIFY(settingsTab->property("active").toBool());
         QVERIFY(!callTab->property("active").toBool());
 
-        // Back to Chat restores the conversation pane.
+        // Back to Chat restores the conversation pane and the contact list.
         controller.setNavSection(OpenChat::ChatController::NavSection::Chat);
         QCoreApplication::processEvents();
         QVERIFY(conversationPane->property("visible").toBool());
         QVERIFY(!callView->property("visible").toBool());
         QVERIFY(!settingsView->property("visible").toBool());
         QVERIFY(chatTab->property("active").toBool());
+        QVERIFY(chatContactArea->property("visible").toBool());
+        QVERIFY(!sidebarCallList->property("visible").toBool());
     }
 
     void messageListStartsAtHistoryTopWithoutStationaryDivider()

@@ -97,6 +97,8 @@ add_library(openchat_network STATIC
     src/network/RelayClient.cpp
     src/network/MlsTransactionCoordinator.cpp
     src/network/SyncEngine.cpp
+    src/network/MlsSyncSession.cpp
+    src/network/RelayTransport.cpp
 )
 target_include_directories(openchat_network PUBLIC src)
 target_link_libraries(openchat_network
@@ -226,6 +228,22 @@ target_include_directories(tst_syncengine PRIVATE src)
 target_link_libraries(tst_syncengine PRIVATE
     openchat_network openchat_protocol openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_syncengine COMMAND tst_syncengine)
+
+add_executable(tst_syncadapters tests/tst_syncadapters.cpp)
+target_include_directories(tst_syncadapters PRIVATE src)
+target_link_libraries(tst_syncadapters PRIVATE
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test)
+add_test(NAME tst_syncadapters COMMAND tst_syncadapters)
+set_tests_properties(tst_syncadapters PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_profilesession tests/tst_profilesession.cpp)
 target_include_directories(tst_profilesession PRIVATE src)

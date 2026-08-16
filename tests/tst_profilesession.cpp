@@ -105,6 +105,7 @@ private slots:
   void lockRunsTheFailClosedOrder();
   void removalRequiresExactProfileAndPathConfirmation();
   void recoveryCodeIsRevealedAndConsumedOnce();
+  void createPersistsAStableAccountId();
 };
 
 void ProfileSessionTest::missingVaultKeyDoesNotCreateASecondIdentity() {
@@ -291,6 +292,31 @@ void ProfileSessionTest::recoveryCodeIsRevealedAndConsumedOnce() {
   QCOMPARE(secret.value().size(), 32);
   QVERIFY(!code.takeSecret().hasValue());
   QVERIFY(!created.value()->takeRecoveryCode().hasValue());
+}
+
+void ProfileSessionTest::createPersistsAStableAccountId() {
+  QTemporaryDir directory;
+  SessionVault vault;
+  const auto profileId = ProfileId::generate();
+  const auto paths = ProfilePaths::forProfile(directory.path(), profileId);
+
+  auto created = ProfileSession::create(profileId, vault, paths);
+  QVERIFY(created.hasValue());
+  auto first = std::move(created).value();
+  const auto firstAccount = first->accountId();
+  QVERIFY(firstAccount.hasValue());
+  QCOMPARE(firstAccount.value().bytes().size(), qsizetype(16));
+
+  first->lock();
+  auto lockedAccount = first->accountId();
+  QVERIFY(!lockedAccount.hasValue());
+  QCOMPARE(lockedAccount.error(), ProfileSessionError::NotUnlocked);
+
+  auto reopened = ProfileSession::unlock(profileId, vault, paths);
+  QVERIFY(reopened.hasValue());
+  const auto secondAccount = reopened.value()->accountId();
+  QVERIFY(secondAccount.hasValue());
+  QCOMPARE(secondAccount.value().bytes(), firstAccount.value().bytes());
 }
 
 QTEST_GUILESS_MAIN(ProfileSessionTest)

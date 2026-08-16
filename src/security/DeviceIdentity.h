@@ -37,6 +37,8 @@ public:
 
   [[nodiscard]] Result<QByteArray, DeviceIdentityError>
   signChallenge(QByteArrayView challenge, QByteArrayView context) const;
+  [[nodiscard]] Result<QByteArray, DeviceIdentityError>
+  signEnvelope(QByteArrayView signingInput) const;
   [[nodiscard]] DevicePublicCredential publicCredential() const;
   [[nodiscard]] SecureBuffer privateKeyForStorage() const;
 

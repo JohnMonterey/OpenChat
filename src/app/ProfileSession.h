@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace OpenChat {
 
@@ -74,6 +75,7 @@ public:
   publicCredential() const;
   [[nodiscard]] Result<QByteArray, ProfileSessionError>
   signChallenge(QByteArrayView challenge, QByteArrayView context) const;
+  [[nodiscard]] Result<AccountId, ProfileSessionError> accountId() const;
   [[nodiscard]] Result<RecoveryCode, ProfileSessionError> takeRecoveryCode();
 
   [[nodiscard]] SqlCipherChatRepository *chats() const noexcept;
@@ -89,7 +91,7 @@ private:
   [[nodiscard]] Result<void, ProfileSessionError>
   activate(std::unique_ptr<SqlCipherDatabase> database,
            SecureBuffer databaseKey, SecureBuffer wrappingKey,
-           std::unique_ptr<DeviceIdentity> identity);
+           std::unique_ptr<DeviceIdentity> identity, AccountId accountId);
 
   ProfileId m_profileId;
   KeyVault &m_vault;
@@ -102,6 +104,7 @@ private:
   std::unique_ptr<DatabaseMlsStateStore> m_mlsStateStore;
   std::unique_ptr<MlsClient> m_mls;
   std::unique_ptr<DeviceIdentity> m_identity;
+  std::optional<AccountId> m_accountId;
   SecureBuffer m_databaseKey;
   SecureBuffer m_wrappingKey;
   std::unique_ptr<RecoveryCode> m_recoveryCode;

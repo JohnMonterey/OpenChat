@@ -136,6 +136,35 @@ DeviceIdentity::signChallenge(QByteArrayView challenge,
   return Result<QByteArray, DeviceIdentityError>::success(std::move(signature));
 }
 
+Result<QByteArray, DeviceIdentityError>
+DeviceIdentity::signEnvelope(QByteArrayView signingInput) const {
+  // A RAW Ed25519 signature over exactly signingInput: no domain-separation
+  // label and no length framing, so it is byte-for-byte verifiable by the
+  // relay's verifyEd25519(publicKey, signingInput, signature). The private key
+  // stays inside the SecureBuffer and is handed straight to OpenSSL.
+  if (signingInput.isEmpty())
+    return Result<QByteArray, DeviceIdentityError>::failure(
+        DeviceIdentityError::InvalidInput);
+
+  auto key = pkeyFromSeed(m_privateKey.view());
+  MdContextPointer md(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+  if (!key || !md ||
+      EVP_DigestSignInit(md.get(), nullptr, nullptr, nullptr, key.get()) != 1)
+    return Result<QByteArray, DeviceIdentityError>::failure(
+        DeviceIdentityError::SigningFailed);
+
+  QByteArray signature(signatureSize, Qt::Uninitialized);
+  std::size_t length = static_cast<std::size_t>(signature.size());
+  if (EVP_DigestSign(
+          md.get(), reinterpret_cast<unsigned char *>(signature.data()), &length,
+          reinterpret_cast<const unsigned char *>(signingInput.data()),
+          static_cast<std::size_t>(signingInput.size())) != 1 ||
+      length != static_cast<std::size_t>(signatureSize))
+    return Result<QByteArray, DeviceIdentityError>::failure(
+        DeviceIdentityError::SigningFailed);
+  return Result<QByteArray, DeviceIdentityError>::success(std::move(signature));
+}
+
 DevicePublicCredential DeviceIdentity::publicCredential() const {
   return DevicePublicCredential{m_deviceId, m_publicKey};
 }

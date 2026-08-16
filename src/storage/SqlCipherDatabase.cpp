@@ -257,7 +257,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
                                  ? sqlite3_column_int(versionStatement, 0)
                                  : -1;
   sqlite3_finalize(versionStatement);
-  constexpr int latestVersion = 5;
+  constexpr int latestVersion = 6;
   if (currentVersion < 0 || currentVersion > latestVersion)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
 
@@ -271,6 +271,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
       {3, ":/openchat/003_domain_alignment.sql"},
       {4, ":/openchat/004_profile_identity.sql"},
       {5, ":/openchat/005_outbox_control.sql"},
+      {6, ":/openchat/006_account_identity.sql"},
   };
 
   if (!execute("BEGIN IMMEDIATE;").hasValue())
@@ -507,6 +508,60 @@ SqlCipherDatabase::storeMlsState(const ProfileId &profileId, QByteArrayView stat
   if (step != SQLITE_DONE)
     return Result<void, StorageError>::failure(StorageError::QueryFailed);
   return Result<void, StorageError>::success();
+}
+
+Result<void, StorageError>
+SqlCipherDatabase::storeAccountId(const ProfileId &profileId,
+                                 const AccountId &accountId) {
+  if (!m_database)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql =
+      "INSERT INTO local_account_identity(profile_id, account_id) "
+      "VALUES(?1, ?2)";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  const auto accountBytes = accountId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 2, accountBytes.constData(),
+                    static_cast<int>(accountBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  if (step != SQLITE_DONE)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  return Result<void, StorageError>::success();
+}
+
+Result<AccountId, StorageError>
+SqlCipherDatabase::loadAccountId(const ProfileId &profileId) {
+  if (!m_database)
+    return Result<AccountId, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql =
+      "SELECT account_id FROM local_account_identity WHERE profile_id = ?1";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<AccountId, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  if (step != SQLITE_ROW) {
+    sqlite3_finalize(statement);
+    return Result<AccountId, StorageError>::failure(
+        step == SQLITE_DONE ? StorageError::NotFound : StorageError::QueryFailed);
+  }
+  const auto *data = static_cast<const char *>(sqlite3_column_blob(statement, 0));
+  const int size = sqlite3_column_bytes(statement, 0);
+  const QByteArray accountBytes =
+      data && size > 0 ? QByteArray(data, size) : QByteArray{};
+  sqlite3_finalize(statement);
+  const auto accountId = AccountId::fromBytes(accountBytes);
+  if (!accountId)
+    return Result<AccountId, StorageError>::failure(
+        StorageError::AuthenticationFailed);
+  return Result<AccountId, StorageError>::success(*accountId);
 }
 
 void SqlCipherDatabase::close() noexcept {

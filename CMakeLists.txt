@@ -143,6 +143,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/003_domain_alignment.sql
         src/storage/migrations/004_profile_identity.sql
         src/storage/migrations/005_outbox_control.sql
+        src/storage/migrations/006_account_identity.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -217,6 +218,18 @@ target_link_libraries(tst_relayclient PRIVATE
 )
 add_test(NAME tst_relayclient COMMAND tst_relayclient)
 set_tests_properties(tst_relayclient PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(tst_deviceidentity tests/tst_deviceidentity.cpp)
+target_include_directories(tst_deviceidentity PRIVATE src relay/src)
+target_link_libraries(tst_deviceidentity PRIVATE
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    openchat_relay_core
+    Qt6::Core
+    Qt6::Test
+)
+add_test(NAME tst_deviceidentity COMMAND tst_deviceidentity)
 
 add_executable(tst_mlscoordinator tests/tst_mlscoordinator.cpp)
 target_include_directories(tst_mlscoordinator PRIVATE src)

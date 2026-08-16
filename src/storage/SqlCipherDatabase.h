@@ -63,6 +63,10 @@ public:
   loadMlsState(const ProfileId &profileId);
   [[nodiscard]] Result<void, StorageError>
   storeMlsState(const ProfileId &profileId, QByteArrayView state);
+  [[nodiscard]] Result<void, StorageError>
+  storeAccountId(const ProfileId &profileId, const AccountId &accountId);
+  [[nodiscard]] Result<AccountId, StorageError>
+  loadAccountId(const ProfileId &profileId);
   void close() noexcept;
 
 private:

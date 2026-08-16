@@ -171,6 +171,14 @@ ProfileSession::create(const ProfileId &profileId, KeyVault &vault,
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::DatabaseFailure);
   }
+  const auto accountId = AccountId::generate();
+  auto storedAccount = database->storeAccountId(profileId, accountId);
+  if (!storedAccount.hasValue()) {
+    database->close();
+    rollBack();
+    return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
+        ProfileSessionError::DatabaseFailure);
+  }
   auto recoveryCode = RecoveryCode::generate();
   if (!recoveryCode.hasValue()) {
     database->close();
@@ -183,7 +191,7 @@ ProfileSession::create(const ProfileId &profileId, KeyVault &vault,
       new ProfileSession(profileId, vault, paths, std::move(hooks)));
   auto activated = session->activate(
       std::move(database), std::move(databaseKey).value(),
-      std::move(wrappingKey).value(), std::move(identity));
+      std::move(wrappingKey).value(), std::move(identity), accountId);
   if (!activated.hasValue()) {
     session->lock();
     rollBack();
@@ -232,13 +240,18 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
   if (!restored.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::IdentityFailure);
+  auto storedAccount = database->loadAccountId(profileId);
+  if (!storedAccount.hasValue())
+    return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
+        ProfileSessionError::DatabaseFailure);
 
   auto session = std::unique_ptr<ProfileSession>(
       new ProfileSession(profileId, vault, paths, std::move(hooks)));
   auto identity = std::make_unique<DeviceIdentity>(std::move(restored).value());
   auto activated = session->activate(
       std::move(database), std::move(databaseKey).value(),
-      std::move(wrappingKey).value(), std::move(identity));
+      std::move(wrappingKey).value(), std::move(identity),
+      std::move(storedAccount).value());
   if (!activated.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         activated.error());
@@ -248,11 +261,13 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
 
 Result<void, ProfileSessionError> ProfileSession::activate(
     std::unique_ptr<SqlCipherDatabase> database, SecureBuffer databaseKey,
-    SecureBuffer wrappingKey, std::unique_ptr<DeviceIdentity> identity) {
+    SecureBuffer wrappingKey, std::unique_ptr<DeviceIdentity> identity,
+    AccountId accountId) {
   m_database = std::move(database);
   m_databaseKey = std::move(databaseKey);
   m_wrappingKey = std::move(wrappingKey);
   m_identity = std::move(identity);
+  m_accountId = std::move(accountId);
   m_chats = std::make_unique<SqlCipherChatRepository>(*m_database);
   m_outbox = std::make_unique<SqlCipherOutboxRepository>(*m_database);
   m_sync = std::make_unique<SqlCipherSyncRepository>(*m_database);
@@ -285,6 +300,7 @@ void ProfileSession::lock() noexcept {
   m_mls.reset();
   m_mlsStateStore.reset();
   m_identity.reset();
+  m_accountId.reset();
   m_databaseKey = {};
   m_wrappingKey = {};
   m_recoveryCode.reset();
@@ -319,6 +335,13 @@ ProfileSession::signChallenge(QByteArrayView challenge,
         ProfileSessionError::IdentityFailure);
   return Result<QByteArray, ProfileSessionError>::success(
       std::move(signature).value());
+}
+
+Result<AccountId, ProfileSessionError> ProfileSession::accountId() const {
+  if (!m_unlocked || !m_accountId)
+    return Result<AccountId, ProfileSessionError>::failure(
+        ProfileSessionError::NotUnlocked);
+  return Result<AccountId, ProfileSessionError>::success(*m_accountId);
 }
 
 Result<RecoveryCode, ProfileSessionError> ProfileSession::takeRecoveryCode() {

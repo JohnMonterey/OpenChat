@@ -156,7 +156,7 @@ add_library(openchat_app STATIC
 )
 target_include_directories(openchat_app PUBLIC src)
 target_link_libraries(openchat_app
-    PUBLIC openchat_crypto openchat_storage openchat_security Qt6::Core
+    PUBLIC openchat_network openchat_crypto openchat_storage openchat_security Qt6::Core
 )
 
 add_executable(tst_domain tests/tst_domain.cpp)

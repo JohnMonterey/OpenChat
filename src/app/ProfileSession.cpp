@@ -1,14 +1,18 @@
 #include "app/ProfileSession.h"
 
 #include "crypto/MlsClient.h"
+#include "network/MlsSyncSession.h"
+#include "network/SyncEngine.h"
 #include "repositories/ChatRepository.h"
 #include "repositories/OutboxRepository.h"
 #include "repositories/SyncRepository.h"
 #include "security/KeyVault.h"
+#include "storage/CapturingMlsStateStore.h"
 #include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherDatabase.h"
 #include "storage/SqlCipherOutboxRepository.h"
 #include "storage/SqlCipherSyncRepository.h"
+#include "storage/SqlCipherSyncStore.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -56,29 +60,6 @@ bool invokeNoThrow(const std::function<void()> &callback) noexcept {
 }
 
 } // namespace
-
-class ProfileSession::DatabaseMlsStateStore final : public MlsStateStore {
-public:
-  DatabaseMlsStateStore(SqlCipherDatabase &database, ProfileId profileId)
-      : m_database(database), m_profileId(std::move(profileId)) {}
-
-  Result<QByteArray, MlsError> load() override {
-    auto loaded = m_database.loadMlsState(m_profileId);
-    if (!loaded.hasValue())
-      return Result<QByteArray, MlsError>::failure(MlsError::Storage);
-    return Result<QByteArray, MlsError>::success(std::move(loaded).value());
-  }
-
-  Result<void, MlsError> store(QByteArrayView state) override {
-    if (!m_database.storeMlsState(m_profileId, state).hasValue())
-      return Result<void, MlsError>::failure(MlsError::Storage);
-    return Result<void, MlsError>::success();
-  }
-
-private:
-  SqlCipherDatabase &m_database;
-  ProfileId m_profileId;
-};
 
 ProfilePaths ProfilePaths::forProfile(const QString &profilesRoot,
                                       const ProfileId &profileId) {
@@ -271,8 +252,16 @@ Result<void, ProfileSessionError> ProfileSession::activate(
   m_chats = std::make_unique<SqlCipherChatRepository>(*m_database);
   m_outbox = std::make_unique<SqlCipherOutboxRepository>(*m_database);
   m_sync = std::make_unique<SqlCipherSyncRepository>(*m_database);
+  // MLS state is captured in memory, not written through. load() still returns
+  // the last durably-committed blob so a fresh MlsClient reconstructs from a
+  // consistent state, but store() only captures the new blob; the SyncEngine
+  // then persists it via SqlCipherSyncStore inside the SAME transaction as the
+  // message / outbox / watermark it belongs to (finding F3). CAVEAT: any MLS
+  // mutation that does NOT flow through the SyncEngine's send/receive path — for
+  // example future group setup done directly on mls() — MUST hand its captured
+  // state to the SyncStore, or that ratchet advance is dropped on lock().
   m_mlsStateStore =
-      std::make_unique<DatabaseMlsStateStore>(*m_database, m_profileId);
+      std::make_unique<CapturingMlsStateStore>(*m_database, m_profileId);
   const auto mlsIdentity = m_identity->publicCredential().serialize();
   auto mls = MlsClient::create(mlsIdentity, m_mlsStateStore.get());
   if (!mls.hasValue()) {
@@ -281,6 +270,12 @@ Result<void, ProfileSessionError> ProfileSession::activate(
         ProfileSessionError::MlsFailure);
   }
   m_mls = std::move(mls).value();
+  // Durable sync pieces: the SyncStore owns the atomic commit* combinations, and
+  // the MlsSyncSession adapts this MlsClient plus its capturing store to the
+  // narrow surface the SyncEngine consumes. Both are borrowed by the engine that
+  // startNetworking() builds; both must outlive it (enforced by lock()'s order).
+  m_syncStore = std::make_unique<SqlCipherSyncStore>(*m_database, m_profileId);
+  m_mlsSyncSession = std::make_unique<MlsSyncSession>(*m_mls, *m_mlsStateStore);
   m_unlocked = true;
   return Result<void, ProfileSessionError>::success();
 }
@@ -294,6 +289,16 @@ void ProfileSession::lock() noexcept {
     invokeNoThrow(m_hooks.stopNetworking);
     invokeNoThrow(m_hooks.cancelDecryptions);
   }
+  // Teardown order is load-bearing. The SyncEngine borrows the SyncStore, the
+  // MlsSyncSession, the injected transport and (through its signer) the device
+  // identity, so it MUST be stopped and destroyed before any of them. The
+  // MlsSyncSession borrows the MlsClient + capturing store and the SyncStore
+  // borrows the database, so both are released next, ahead of what they borrow.
+  if (m_syncEngine)
+    m_syncEngine->stop();
+  m_syncEngine.reset();
+  m_mlsSyncSession.reset();
+  m_syncStore.reset();
   m_chats.reset();
   m_outbox.reset();
   m_sync.reset();
@@ -366,6 +371,49 @@ SqlCipherSyncRepository *ProfileSession::sync() const noexcept {
 }
 
 MlsClient *ProfileSession::mls() const noexcept { return m_mls.get(); }
+
+Result<void, ProfileSessionError>
+ProfileSession::startNetworking(SyncTransport &transport) {
+  if (!m_unlocked || !m_identity || !m_accountId || !m_syncStore ||
+      !m_mlsSyncSession)
+    return Result<void, ProfileSessionError>::failure(
+        ProfileSessionError::NotUnlocked);
+  // Idempotent: a second call must not build a second engine over the same
+  // borrowed pieces. The transport passed to the first call stays in effect.
+  if (m_syncEngine)
+    return Result<void, ProfileSessionError>::success();
+
+  // Aggregate-initialize the account/device fields; maxSendAttempts, drainBatch
+  // and leaseMs keep their engine defaults.
+  const SyncEngine::Config config{*m_accountId,
+                                  m_identity->publicCredential().deviceId};
+
+  // The signer keeps the Ed25519 private key inside DeviceIdentity/OpenSSL and
+  // returns the raw 64-byte signature, or an empty QByteArray on failure so the
+  // engine fails closed (it rejects a signature whose size is not 64) rather
+  // than emitting an unsigned envelope. Capturing `this` is safe: the engine —
+  // and therefore this lambda — is destroyed in lock() before m_identity, and
+  // the signer is only invoked synchronously while the session is unlocked.
+  SyncEngine::Signer signer = [this](QByteArrayView signingInput) -> QByteArray {
+    if (!m_identity)
+      return {};
+    auto signature = m_identity->signEnvelope(signingInput);
+    if (!signature.hasValue())
+      return {};
+    return std::move(signature).value();
+  };
+  SyncEngine::Clock clock = [] { return QDateTime::currentMSecsSinceEpoch(); };
+
+  m_syncEngine = std::make_unique<SyncEngine>(
+      config, *m_syncStore, *m_mlsSyncSession, transport, std::move(signer),
+      std::move(clock));
+  m_syncEngine->start();
+  return Result<void, ProfileSessionError>::success();
+}
+
+SyncEngine *ProfileSession::syncEngine() const noexcept {
+  return m_syncEngine.get();
+}
 
 Result<void, ProfileSessionError> ProfileSession::removeLocalProfile(
     const ProfileId &profileId, KeyVault &vault, const ProfilePaths &paths,

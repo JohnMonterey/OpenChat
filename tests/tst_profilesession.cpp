@@ -1,13 +1,39 @@
 #include "app/ProfileSession.h"
+#include "crypto/MlsClient.h"
+#include "domain/ChatTypes.h"
+#include "network/SyncEngine.h"
+#include "protocol/CiphertextEnvelope.h"
 #include "security/KeyVault.h"
+#include "security/SecureBuffer.h"
+#include "storage/CapturingMlsStateStore.h"
+#include "storage/SqlCipherChatRepository.h"
+#include "storage/SqlCipherDatabase.h"
+#include "storage/SqlCipherOutboxRepository.h"
 
+#include <QCoreApplication>
+#include <QDateTime>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QtTest/QTest>
 
+#include <memory>
 #include <optional>
 
 using namespace OpenChat;
+
+// A disconnected ciphertext transport: never connected, and its send/acknowledge
+// calls record nothing beyond a count so the test can assert nothing left the
+// device while offline. The engine short-circuits drainOutbox on !isConnected(),
+// so sendEnvelope must never fire here.
+class DisconnectedTransport final : public SyncTransport {
+public:
+  bool isConnected() const override { return false; }
+  void sendEnvelope(const CiphertextEnvelopeV1 &) override { ++sendCount; }
+  void acknowledge(const EnvelopeId &, quint64) override { ++ackCount; }
+
+  int sendCount = 0;
+  int ackCount = 0;
+};
 
 class SessionVault final : public KeyVault {
 public:
@@ -106,6 +132,7 @@ private slots:
   void removalRequiresExactProfileAndPathConfirmation();
   void recoveryCodeIsRevealedAndConsumedOnce();
   void createPersistsAStableAccountId();
+  void offlineDurableSendSurvivesRestart();
 };
 
 void ProfileSessionTest::missingVaultKeyDoesNotCreateASecondIdentity() {
@@ -317,6 +344,109 @@ void ProfileSessionTest::createPersistsAStableAccountId() {
   const auto secondAccount = reopened.value()->accountId();
   QVERIFY(secondAccount.hasValue());
   QCOMPARE(secondAccount.value().bytes(), firstAccount.value().bytes());
+}
+
+void ProfileSessionTest::offlineDurableSendSurvivesRestart() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  SessionVault vault;
+  const auto profileId = ProfileId::generate();
+  const auto paths = ProfilePaths::forProfile(directory.path(), profileId);
+
+  auto created = ProfileSession::create(profileId, vault, paths);
+  QVERIFY(created.hasValue());
+  auto session = std::move(created).value();
+
+  // A second MLS client gives the profile's group a real member, so the engine's
+  // encrypt() has a committed group to send into.
+  auto bobOpened = SqlCipherDatabase::open(
+      directory.filePath(QStringLiteral("bob.sqlite3")), SecureBuffer::random(32));
+  QVERIFY(bobOpened.hasValue());
+  auto bobDb = std::make_unique<SqlCipherDatabase>(std::move(bobOpened).value());
+  CapturingMlsStateStore bobCapture(*bobDb, ProfileId::generate());
+  auto bobResult = MlsClient::create(QByteArray("bob-device"), &bobCapture);
+  QVERIFY(bobResult.hasValue());
+  auto bob = std::move(bobResult).value();
+  auto bobKeyPackage = bob->generateKeyPackage();
+  QVERIFY(bobKeyPackage.hasValue());
+
+  const auto conversation = ConversationId::generate();
+  QVERIFY(session->mls()->createGroup(conversation).hasValue());
+  QVERIFY(
+      session->mls()->addMembers(conversation, {bobKeyPackage.value()}).hasValue());
+  // The stored message references this conversation row (FK), so it must exist
+  // before the engine commits a send into it.
+  const ConversationRecord conversationRecord{
+      conversation, QByteArray("mls-group"), QStringLiteral("Bob"),
+      ConversationKind::Group, QDateTime::currentMSecsSinceEpoch()};
+  QVERIFY(session->chats()->upsertConversation(conversationRecord).hasValue());
+
+  // Wire the durable engine to the injected (offline) transport.
+  DisconnectedTransport transport;
+  QVERIFY(session->syncEngine() == nullptr);
+  QVERIFY(session->startNetworking(transport).hasValue());
+  QVERIFY(session->syncEngine() != nullptr);
+  // Second call is idempotent and does not build a second engine.
+  QVERIFY(session->startNetworking(transport).hasValue());
+
+  const auto recipient = DeviceId::generate();
+  session->syncEngine()->enqueueText(conversation, recipient,
+                                     QStringLiteral("durable hi"));
+  QCoreApplication::processEvents();
+  QVERIFY(!session->syncEngine()->isFailedClosed());
+
+  // The message committed durably and is queryable, still Queued because the
+  // link is offline.
+  auto messages = session->chats()->messages(conversation, 50, std::nullopt);
+  QVERIFY(messages.hasValue());
+  QCOMPARE(messages.value().size(), qsizetype(1));
+  QCOMPARE(messages.value().first().body, QStringLiteral("durable hi"));
+  QCOMPARE(messages.value().first().flow, MessageFlow::Outgoing);
+  QCOMPARE(messages.value().first().deliveryState, DeliveryState::Queued);
+
+  // The outbox row is present and claimable through the session's repository.
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+  auto due = session->outbox()->claimDue(now, 10, now + 1000);
+  QVERIFY(due.hasValue());
+  QCOMPARE(due.value().size(), qsizetype(1));
+  QVERIFY(!due.value().first().envelope.isEmpty());
+
+  // Nothing crossed the wire while offline.
+  QCOMPARE(transport.sendCount, 0);
+  QCOMPARE(transport.ackCount, 0);
+  QVERIFY(!transport.isConnected());
+
+  session->lock();
+  QVERIFY(session->syncEngine() == nullptr);
+
+  // The MLS ratchet was persisted atomically with the send: the durable blob is
+  // present and loads directly from the store, proving the commit went through
+  // SqlCipherSyncStore rather than a write-through path.
+  auto profileKey = vault.readProfileKey(profileId);
+  QVERIFY(profileKey.hasValue());
+  {
+    auto inspectOpened = SqlCipherDatabase::open(paths.database, profileKey.value());
+    QVERIFY(inspectOpened.hasValue());
+    auto inspect =
+        std::make_unique<SqlCipherDatabase>(std::move(inspectOpened).value());
+    auto state = inspect->loadMlsState(profileId);
+    QVERIFY(state.hasValue());
+    QVERIFY(!state.value().isEmpty());
+  }
+
+  // Restart: unlock the same profile fresh. unlock() reconstructs the MlsClient
+  // from the persisted MLS state, so a successful unlock is itself proof that the
+  // durable ratchet blob loads back.
+  auto reopened = ProfileSession::unlock(profileId, vault, paths);
+  QVERIFY(reopened.hasValue());
+
+  // The outbox row survived the restart. Claim with a far-future clock so the
+  // lease taken above (already expired) does not hide it.
+  const qint64 farFuture = QDateTime::currentMSecsSinceEpoch() + 3'600'000;
+  auto reDue = reopened.value()->outbox()->claimDue(farFuture, 10, farFuture + 1000);
+  QVERIFY(reDue.hasValue());
+  QCOMPARE(reDue.value().size(), qsizetype(1));
+  QVERIFY(!reDue.value().first().envelope.isEmpty());
 }
 
 QTEST_GUILESS_MAIN(ProfileSessionTest)

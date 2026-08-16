@@ -13,13 +13,17 @@
 
 namespace OpenChat {
 
+class CapturingMlsStateStore;
 class KeyVault;
 class MlsClient;
-class MlsStateStore;
+class MlsSyncSession;
 class SqlCipherChatRepository;
 class SqlCipherDatabase;
 class SqlCipherOutboxRepository;
 class SqlCipherSyncRepository;
+class SqlCipherSyncStore;
+class SyncEngine;
+class SyncTransport;
 
 struct ProfilePaths final {
   QString profilesRoot;
@@ -83,9 +87,24 @@ public:
   [[nodiscard]] SqlCipherSyncRepository *sync() const noexcept;
   [[nodiscard]] MlsClient *mls() const noexcept;
 
-private:
-  class DatabaseMlsStateStore;
+  // Constructs and starts the durable SyncEngine over an injected ciphertext
+  // transport, wiring it to the owned SyncStore + MlsSyncSession, a signer over
+  // the device identity and the system UTC clock. Requires the session to be
+  // unlocked. Idempotent: a second call is a no-op while an engine already runs
+  // (it never double-constructs).
+  //
+  // The caller owns `transport` and MUST keep it alive until lock() or session
+  // destruction: the engine borrows it (and the other pieces) by reference. The
+  // live network transport is injected rather than built here because the app
+  // bootstrap that constructs the TLS relay transport is a separate layer; the
+  // session only wires the durable engine to whatever SyncTransport it is given
+  // and never itself constructs a RelayClient/RelayTransport.
+  [[nodiscard]] Result<void, ProfileSessionError>
+  startNetworking(SyncTransport &transport);
+  // Null until startNetworking() succeeds; reset to null on lock().
+  [[nodiscard]] SyncEngine *syncEngine() const noexcept;
 
+private:
   ProfileSession(ProfileId profileId, KeyVault &vault, ProfilePaths paths,
                  ProfileSessionHooks hooks);
   [[nodiscard]] Result<void, ProfileSessionError>
@@ -101,9 +120,17 @@ private:
   std::unique_ptr<SqlCipherChatRepository> m_chats;
   std::unique_ptr<SqlCipherOutboxRepository> m_outbox;
   std::unique_ptr<SqlCipherSyncRepository> m_sync;
-  std::unique_ptr<DatabaseMlsStateStore> m_mlsStateStore;
+  std::unique_ptr<CapturingMlsStateStore> m_mlsStateStore;
   std::unique_ptr<MlsClient> m_mls;
   std::unique_ptr<DeviceIdentity> m_identity;
+  // Durable sync pieces. Declared AFTER what they borrow so member-destruction
+  // order is a safe backstop to lock()'s explicit teardown: m_syncStore borrows
+  // the database, m_mlsSyncSession borrows the MlsClient + capturing store, and
+  // m_syncEngine (last) borrows all of them plus the identity via its signer, so
+  // it is destroyed first.
+  std::unique_ptr<SqlCipherSyncStore> m_syncStore;
+  std::unique_ptr<MlsSyncSession> m_mlsSyncSession;
+  std::unique_ptr<SyncEngine> m_syncEngine;
   std::optional<AccountId> m_accountId;
   SecureBuffer m_databaseKey;
   SecureBuffer m_wrappingKey;

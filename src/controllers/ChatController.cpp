@@ -35,6 +35,48 @@ QVector<Message> michaelConversation()
     };
 }
 
+QStringList settingsCategoryNames()
+{
+    return {
+        QStringLiteral("General"),        QStringLiteral("Account & Profile"),
+        QStringLiteral("Privacy"),        QStringLiteral("Notifications"),
+        QStringLiteral("Audio & Video"),  QStringLiteral("Appearance"),
+        QStringLiteral("About"),
+    };
+}
+
+// Element labels shown in the detail pane for each settings category, indexed
+// to match settingsCategoryNames(). These are presentation stubs; wiring the
+// individual controls to real preferences comes later.
+QStringList settingsElementsForCategory(int index)
+{
+    switch (index) {
+    case 0:
+        return {QStringLiteral("Language"), QStringLiteral("Show in taskbar"),
+                QStringLiteral("Launch on startup"), QStringLiteral("On close, keep running")};
+    case 1:
+        return {QStringLiteral("Display name"), QStringLiteral("Presence status"),
+                QStringLiteral("Profile picture"), QStringLiteral("Manage account")};
+    case 2:
+        return {QStringLiteral("Read receipts"), QStringLiteral("Who can contact me"),
+                QStringLiteral("Blocked contacts"), QStringLiteral("Typing indicators")};
+    case 3:
+        return {QStringLiteral("Message notifications"), QStringLiteral("Call notifications"),
+                QStringLiteral("Notification sounds"), QStringLiteral("Do not disturb")};
+    case 4:
+        return {QStringLiteral("Microphone"), QStringLiteral("Speakers"),
+                QStringLiteral("Camera"), QStringLiteral("Ringtone")};
+    case 5:
+        return {QStringLiteral("Theme"), QStringLiteral("Chat font size"),
+                QStringLiteral("Bubble style"), QStringLiteral("Compact contact list")};
+    case 6:
+        return {QStringLiteral("Version"), QStringLiteral("What's new"),
+                QStringLiteral("Licenses"), QStringLiteral("Check for updates")};
+    default:
+        return {};
+    }
+}
+
 } // namespace
 
 ChatController::ChatController(QObject *parent)
@@ -245,6 +287,39 @@ int ChatController::callCount() const
     // No call history exists yet, so the call list is empty. A real
     // CallListModel will replace this once call data is available.
     return 0;
+}
+
+QStringList ChatController::settingsCategories() const
+{
+    return settingsCategoryNames();
+}
+
+int ChatController::currentSettingsCategory() const
+{
+    return m_currentSettingsCategory;
+}
+
+QString ChatController::currentSettingsCategoryName() const
+{
+    return settingsCategoryNames().value(m_currentSettingsCategory);
+}
+
+QStringList ChatController::currentSettingsElements() const
+{
+    return settingsElementsForCategory(m_currentSettingsCategory);
+}
+
+void ChatController::setCurrentSettingsCategory(int index)
+{
+    // Ignore anything outside the fixed category range so the selection stays
+    // valid; only a genuine change notifies.
+    if (index < 0 || index >= settingsCategoryNames().size())
+        return;
+    if (index == m_currentSettingsCategory)
+        return;
+
+    m_currentSettingsCategory = index;
+    emit currentSettingsCategoryChanged();
 }
 
 void ChatController::setNavSection(NavSection section)

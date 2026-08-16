@@ -183,7 +183,8 @@ private slots:
         QVERIFY(noCallsYet);
         QCOMPARE(noCallsYet->property("text").toString(), QStringLiteral("No calls yet."));
 
-        // Settings: the settings placeholder replaces the chat pane exclusively.
+        // Settings: the detail pane replaces the chat pane, the sidebar swaps in
+        // the category list, and the detail title tracks the selected category.
         controller.setNavSection(OpenChat::ChatController::NavSection::Settings);
         QCoreApplication::processEvents();
         QVERIFY(settingsView->property("visible").toBool());
@@ -191,6 +192,29 @@ private slots:
         QVERIFY(!callView->property("visible").toBool());
         QVERIFY(settingsTab->property("active").toBool());
         QVERIFY(!callTab->property("active").toBool());
+
+        QObject *settingsCategoryList =
+            root->findChild<QObject *>(QStringLiteral("settingsCategoryList"));
+        QObject *settingsDetail =
+            root->findChild<QObject *>(QStringLiteral("settingsDetail"));
+        QObject *settingsDetailTitle =
+            root->findChild<QObject *>(QStringLiteral("settingsDetailTitle"));
+        QVERIFY(settingsCategoryList);
+        QVERIFY(settingsDetail);
+        QVERIFY(settingsDetailTitle);
+        QVERIFY(settingsCategoryList->property("visible").toBool());
+        QVERIFY(!chatContactArea->property("visible").toBool());
+        QVERIFY(!sidebarCallList->property("visible").toBool());
+        QCOMPARE(settingsDetailTitle->property("text").toString(), QStringLiteral("General"));
+
+        controller.setCurrentSettingsCategory(3);
+        QCoreApplication::processEvents();
+        QCOMPARE(settingsDetailTitle->property("text").toString(),
+                 QStringLiteral("Notifications"));
+
+        // Return to the default category so later assertions are unaffected.
+        controller.setCurrentSettingsCategory(0);
+        QCoreApplication::processEvents();
 
         // Back to Chat restores the conversation pane and the contact list.
         controller.setNavSection(OpenChat::ChatController::NavSection::Chat);

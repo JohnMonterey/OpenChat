@@ -138,6 +138,10 @@ Window {
             }
         }
 
+        // Settings detail pane: the title and element rows of the category
+        // selected in the sidebar. The element rows are visual stubs — a label
+        // and a muted disclosure chevron — until the individual controls are
+        // wired to real preferences.
         Item {
             id: settingsView
             objectName: "settingsView"
@@ -154,13 +158,90 @@ Window {
                 }
             }
 
-            Text {
-                anchors.centerIn: parent
-                text: "Settings"
-                color: Theme.textPrimary
-                font.family: Theme.uiFont
-                font.pixelSize: 22
-                renderType: Text.NativeRendering
+            Item {
+                id: settingsDetail
+                objectName: "settingsDetail"
+                anchors.fill: parent
+                anchors.leftMargin: 34
+                anchors.rightMargin: 34
+                anchors.topMargin: 28
+
+                Text {
+                    id: settingsDetailTitle
+                    objectName: "settingsDetailTitle"
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    text: root.chatController.currentSettingsCategoryName
+                    color: Theme.textPrimary
+                    font.family: Theme.uiFont
+                    font.pixelSize: 22
+                    elide: Text.ElideRight
+                    renderType: Text.NativeRendering
+                }
+
+                Rectangle {
+                    id: settingsTitleRule
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: settingsDetailTitle.bottom
+                    anchors.topMargin: 16
+                    height: 1
+                    color: Theme.rule
+                }
+
+                Column {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: settingsTitleRule.bottom
+                    anchors.topMargin: 6
+
+                    Repeater {
+                        model: root.chatController.currentSettingsElements
+
+                        Item {
+                            id: settingsElementRow
+                            property string elementLabel: modelData
+                            width: parent.width
+                            height: 48
+
+                            Text {
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: settingsElementRow.elementLabel
+                                color: Theme.textPrimary
+                                font.family: Theme.uiFont
+                                font.pixelSize: 15
+                                renderType: Text.NativeRendering
+                            }
+
+                            Item {
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 14
+                                height: 14
+
+                                Image {
+                                    anchors.centerIn: parent
+                                    width: 13
+                                    height: 8
+                                    opacity: 0.45
+                                    rotation: -90
+                                    source: Qt.resolvedUrl(
+                                                "../../assets/icons/chevron-down.svg")
+                                    sourceSize: Qt.size(width * 2, height * 2)
+                                }
+                            }
+
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 1
+                                color: "#e4edf3"
+                            }
+                        }
+                    }
+                }
             }
         }
     }

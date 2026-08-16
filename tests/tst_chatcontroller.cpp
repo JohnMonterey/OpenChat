@@ -152,6 +152,45 @@ private slots:
         QCOMPARE(navSpy.count(), 3);
     }
 
+    void settingsCategoriesDriveSelectionAndElements()
+    {
+        ChatController controller;
+
+        const QStringList categories = controller.settingsCategories();
+        QCOMPARE(categories.size(), 7);
+        QCOMPARE(categories.first(), QStringLiteral("General"));
+
+        // Defaults to the first category.
+        QCOMPARE(controller.currentSettingsCategory(), 0);
+        QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("General"));
+        QVERIFY(!controller.currentSettingsElements().isEmpty());
+
+        QSignalSpy categorySpy(&controller,
+                               &ChatController::currentSettingsCategoryChanged);
+
+        // Selecting a different category updates the index, name, and elements
+        // and emits exactly once.
+        controller.setCurrentSettingsCategory(2);
+        QCOMPARE(controller.currentSettingsCategory(), 2);
+        QCOMPARE(categorySpy.count(), 1);
+        QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("Privacy"));
+        const QStringList privacy = controller.currentSettingsElements();
+        QCOMPARE(privacy, (QStringList{QStringLiteral("Read receipts"),
+                                       QStringLiteral("Who can contact me"),
+                                       QStringLiteral("Blocked contacts"),
+                                       QStringLiteral("Typing indicators")}));
+
+        // Re-selecting the same category is a no-op and emits nothing further.
+        controller.setCurrentSettingsCategory(2);
+        QCOMPARE(categorySpy.count(), 1);
+
+        // Out-of-range selections are ignored, leaving the current selection.
+        controller.setCurrentSettingsCategory(-1);
+        controller.setCurrentSettingsCategory(99);
+        QCOMPARE(controller.currentSettingsCategory(), 2);
+        QCOMPARE(categorySpy.count(), 1);
+    }
+
     void quarantineAndDeviceChangeWithholdPlaintext()
     {
         ChatController controller;

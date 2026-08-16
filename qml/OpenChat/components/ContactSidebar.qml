@@ -199,6 +199,61 @@ Item {
         }
     }
 
+    // Settings section: a selectable list of setting categories in the sidebar
+    // list style. The selected category drives the detail pane on the right.
+    Item {
+        id: settingsCategoryList
+        objectName: "settingsCategoryList"
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: searchArea.bottom
+        anchors.bottom: bottomNav.top
+        visible: sidebar.controller.navSection === ChatController.NavSection.Settings
+
+        Column {
+            anchors.top: parent.top
+            width: parent.width
+
+            Repeater {
+                model: sidebar.controller.settingsCategories
+
+                Item {
+                    id: settingsCategoryRow
+                    property int rowIndex: index
+                    objectName: "settingsCategoryRow_" + rowIndex
+                    width: settingsCategoryList.width
+                    height: sidebar.contactRowHeight
+                    readonly property bool selected:
+                        rowIndex === sidebar.controller.currentSettingsCategory
+
+                    Rectangle {
+                        anchors.fill: parent
+                        visible: settingsCategoryRow.selected
+                        color: "#e7f2f8"
+                    }
+
+                    Text {
+                        x: 15
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData
+                        color: settingsCategoryRow.selected ? Theme.categoryText
+                                                            : Theme.textPrimary
+                        font.family: Theme.uiFont
+                        font.pixelSize: 16
+                        renderType: Text.NativeRendering
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: sidebar.controller.setCurrentSettingsCategory(
+                                       settingsCategoryRow.rowIndex)
+                    }
+                }
+            }
+        }
+    }
+
     // Bottom navigation. Three equal columns switch the main pane between the
     // conversation view (Chat) and the Call / Settings placeholders. The active
     // section is owned by the controller so this highlight and the pane shown on

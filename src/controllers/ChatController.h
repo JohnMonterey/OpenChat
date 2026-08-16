@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QStringList>
 
 #include "models/ContactListModel.h"
 #include "models/MessageListModel.h"
@@ -27,6 +28,13 @@ class ChatController final : public QObject
     Q_PROPERTY(int chatUnreadCount READ chatUnreadCount CONSTANT)
     Q_PROPERTY(int callMissedCount READ callMissedCount CONSTANT)
     Q_PROPERTY(int callCount READ callCount CONSTANT)
+    Q_PROPERTY(QStringList settingsCategories READ settingsCategories CONSTANT)
+    Q_PROPERTY(int currentSettingsCategory READ currentSettingsCategory WRITE
+                   setCurrentSettingsCategory NOTIFY currentSettingsCategoryChanged)
+    Q_PROPERTY(QString currentSettingsCategoryName READ currentSettingsCategoryName NOTIFY
+                   currentSettingsCategoryChanged)
+    Q_PROPERTY(QStringList currentSettingsElements READ currentSettingsElements NOTIFY
+                   currentSettingsCategoryChanged)
 
 public:
     // Connection/security posture of the conversation surface. Ready is the only
@@ -72,6 +80,10 @@ public:
     [[nodiscard]] int chatUnreadCount() const;
     [[nodiscard]] int callMissedCount() const;
     [[nodiscard]] int callCount() const;
+    [[nodiscard]] QStringList settingsCategories() const;
+    [[nodiscard]] int currentSettingsCategory() const;
+    [[nodiscard]] QString currentSettingsCategoryName() const;
+    [[nodiscard]] QStringList currentSettingsElements() const;
 
     Q_INVOKABLE bool selectContact(const QString &id);
     Q_INVOKABLE void setSearchQuery(const QString &query);
@@ -79,6 +91,7 @@ public:
     Q_INVOKABLE bool sendMessage();
     Q_INVOKABLE void setSessionState(SessionState state);
     Q_INVOKABLE void setNavSection(NavSection section);
+    Q_INVOKABLE void setCurrentSettingsCategory(int index);
 
 signals:
     void currentContactChanged();
@@ -87,6 +100,7 @@ signals:
     void searchQueryChanged();
     void sessionStateChanged();
     void navSectionChanged();
+    void currentSettingsCategoryChanged();
 
 private:
     [[nodiscard]] std::optional<Contact> currentContact() const;
@@ -105,6 +119,7 @@ private:
     QString m_searchQuery;
     SessionState m_sessionState = SessionState::Ready;
     NavSection m_navSection = NavSection::Chat;
+    int m_currentSettingsCategory = 0;
 };
 
 } // namespace OpenChat

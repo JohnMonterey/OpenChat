@@ -5,7 +5,10 @@
 #include <QWindow>
 #include <QtTest>
 
+#include <optional>
+
 #include "controllers/ChatController.h"
+#include "controllers/OnboardingController.h"
 #include "render/AvatarArtwork.h"
 #include "render/BubbleBackground.h"
 
@@ -452,6 +455,79 @@ private slots:
         QVERIFY(wrappedWidth <= 540.0 * 0.68);
     }
 
+    void onboardingScreensDriveController()
+    {
+        // A Creator that returns a fixed code so the screen surfaces exactly what
+        // account creation produced, independent of any real ProfileSession.
+        OpenChat::OnboardingController controller(
+            [](const QString &, const QString &) -> std::optional<QString> {
+                return QStringLiteral("TEST-CODE-1234-5678");
+            });
+
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "Onboarding");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        QScopedPointer<QObject> root(component.createWithInitialProperties(
+            {{QStringLiteral("controller"), QVariant::fromValue(&controller)}}));
+        QVERIFY(root);
+
+        QObject *createView =
+            root->findChild<QObject *>(QStringLiteral("onboardingCreateView"));
+        QObject *recoveryView =
+            root->findChild<QObject *>(QStringLiteral("onboardingRecoveryView"));
+        QObject *displayNameField =
+            root->findChild<QObject *>(QStringLiteral("displayNameField"));
+        QObject *handleField =
+            root->findChild<QObject *>(QStringLiteral("handleField"));
+        QObject *createButton =
+            root->findChild<QObject *>(QStringLiteral("createButton"));
+        QObject *savedButton =
+            root->findChild<QObject *>(QStringLiteral("savedButton"));
+        QObject *recoveryCodeText =
+            root->findChild<QObject *>(QStringLiteral("recoveryCodeText"));
+        QVERIFY(createView);
+        QVERIFY(recoveryView);
+        QVERIFY(displayNameField);
+        QVERIFY(handleField);
+        QVERIFY(createButton);
+        QVERIFY(savedButton);
+        QVERIFY(recoveryCodeText);
+
+        // Create is shown first; the button is disabled until both fields are set.
+        QVERIFY(createView->property("visible").toBool());
+        QVERIFY(!recoveryView->property("visible").toBool());
+        QCOMPARE(createButton->property("enabled").toBool(), false);
+
+        QVERIFY(displayNameField->setProperty("text", QStringLiteral("Ada Lovelace")));
+        QCoreApplication::processEvents();
+        QCOMPARE(createButton->property("enabled").toBool(), false);
+        QVERIFY(handleField->setProperty("text", QStringLiteral("ada")));
+        QCoreApplication::processEvents();
+        QCOMPARE(controller.displayName(), QStringLiteral("Ada Lovelace"));
+        QCOMPARE(controller.handle(), QStringLiteral("ada"));
+        QCOMPARE(createButton->property("enabled").toBool(), true);
+
+        QSignalSpy completedSpy(&controller, &OpenChat::OnboardingController::completed);
+
+        // Create advances to the recovery view, which reveals the returned code.
+        QVERIFY(QMetaObject::invokeMethod(createButton, "clicked"));
+        QCoreApplication::processEvents();
+        QCOMPARE(controller.step(), OpenChat::OnboardingController::Step::Recovery);
+        QVERIFY(!createView->property("visible").toBool());
+        QVERIFY(recoveryView->property("visible").toBool());
+        QCOMPARE(recoveryCodeText->property("text").toString(),
+                 QStringLiteral("TEST-CODE-1234-5678"));
+
+        // Confirming the code completes onboarding exactly once.
+        QVERIFY(QMetaObject::invokeMethod(savedButton, "clicked"));
+        QCoreApplication::processEvents();
+        QCOMPARE(controller.step(), OpenChat::OnboardingController::Step::Done);
+        QCOMPARE(completedSpy.count(), 1);
+    }
+
     void unknownAvatarUsesNeutralFallback()
     {
         QQmlEngine engine;
@@ -503,6 +579,9 @@ int main(int argc, char **argv)
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
         QStringLiteral("ChatController is provided by the application"));
+    qmlRegisterUncreatableType<OpenChat::OnboardingController>(
+        "OpenChat.Native", 1, 0, "OnboardingController",
+        QStringLiteral("OnboardingController is provided by the application"));
     QmlLoadTest test;
     return QTest::qExec(&test, argc, argv);
 }

@@ -27,6 +27,7 @@ set_source_files_properties(qml/OpenChat/Theme.qml PROPERTIES
 qt_add_executable(OpenChat
     src/main.cpp
     src/controllers/ChatController.cpp
+    src/controllers/OnboardingController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/render/BubbleBackground.cpp
@@ -40,6 +41,7 @@ qt_add_qml_module(OpenChat
     OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/qml/OpenChat
     QML_FILES
         qml/OpenChat/Main.qml
+        qml/OpenChat/Onboarding.qml
         qml/OpenChat/Theme.qml
         qml/OpenChat/components/PresenceBead.qml
         qml/OpenChat/components/Avatar.qml
@@ -282,6 +284,14 @@ target_include_directories(tst_chatcontroller PRIVATE src)
 target_link_libraries(tst_chatcontroller PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_chatcontroller COMMAND tst_chatcontroller)
 
+add_executable(tst_onboardingcontroller
+    tests/tst_onboardingcontroller.cpp
+    src/controllers/OnboardingController.cpp
+)
+target_include_directories(tst_onboardingcontroller PRIVATE src)
+target_link_libraries(tst_onboardingcontroller PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME tst_onboardingcontroller COMMAND tst_onboardingcontroller)
+
 add_executable(tst_bubblebackground
     tests/tst_bubblebackground.cpp
     src/render/BubbleBackground.cpp
@@ -294,6 +304,7 @@ add_test(NAME tst_bubblebackground COMMAND tst_bubblebackground)
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp
     src/controllers/ChatController.cpp
+    src/controllers/OnboardingController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/render/BubbleBackground.cpp

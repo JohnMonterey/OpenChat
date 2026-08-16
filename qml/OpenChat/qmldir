@@ -1,5 +1,6 @@
 module OpenChat
 Main 1.0 Main.qml
+Onboarding 1.0 Onboarding.qml
 singleton Theme 1.0 Theme.qml
 PresenceBead 1.0 components/PresenceBead.qml
 Avatar 1.0 components/Avatar.qml

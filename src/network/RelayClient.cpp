@@ -97,10 +97,12 @@ bool RelayEndpoints::isSecure() const
 class RelayClient::Private
 {
 public:
-    Private(DeviceId localDeviceId, RelayEndpoints endpoints, RelayCredentials credentials,
-            RelayLimits limits, BackoffPolicy backoff, RelayClient *owner)
+    Private(DeviceId localDeviceId, AccountId localAccountId, RelayEndpoints endpoints,
+            RelayCredentials credentials, RelayLimits limits, BackoffPolicy backoff,
+            RelayClient *owner)
         : q(owner)
         , localDeviceId(std::move(localDeviceId))
+        , localAccountId(std::move(localAccountId))
         , endpoints(std::move(endpoints))
         , credentials(std::move(credentials))
         , limits(limits)
@@ -533,6 +535,7 @@ public:
 
     RelayClient *q;
     DeviceId localDeviceId;
+    AccountId localAccountId;
     RelayEndpoints endpoints;
     RelayCredentials credentials;
     RelayLimits limits;
@@ -558,12 +561,13 @@ public:
 
 // ---------------------------------------------------------------------------
 
-RelayClient::RelayClient(DeviceId localDeviceId, RelayEndpoints endpoints,
+RelayClient::RelayClient(DeviceId localDeviceId, AccountId localAccountId, RelayEndpoints endpoints,
                          RelayCredentials credentials, RelayLimits limits,
                          BackoffPolicy backoff, QObject *parent)
     : QObject(parent)
-    , d(std::make_unique<Private>(std::move(localDeviceId), std::move(endpoints),
-                                  std::move(credentials), limits, std::move(backoff), this))
+    , d(std::make_unique<Private>(std::move(localDeviceId), std::move(localAccountId),
+                                  std::move(endpoints), std::move(credentials), limits,
+                                  std::move(backoff), this))
 {
 }
 
@@ -582,6 +586,11 @@ void RelayClient::setTlsConfiguration(const QSslConfiguration &configuration)
 void RelayClient::authenticateDevice(const QByteArray &deviceCredential,
                                      const ChallengeSigner &signer, const QByteArray &context)
 {
+    // The relay reads the device credential only at registration; the challenge
+    // and complete endpoints authenticate by account_id + device_id plus a
+    // signature over the bound context, so the credential is not transmitted here.
+    (void)deviceCredential;
+
     if (!isHttps(d->endpoints.authChallenge) || !isHttps(d->endpoints.authComplete)) {
         emit transportError(RelayTransportError::InsecureEndpoint);
         return;
@@ -590,10 +599,16 @@ void RelayClient::authenticateDevice(const QByteArray &deviceCredential,
         emit authExpired();
         return;
     }
+    // The context is the value the device signs, and the relay rejects an empty
+    // one, so fail closed here rather than emit a request the relay will refuse.
+    if (context.isEmpty()) {
+        emit authExpired();
+        return;
+    }
 
     QCborMap challengeBody;
-    challengeBody.insert(QLatin1StringView("credential"), deviceCredential);
-    challengeBody.insert(QLatin1StringView("context"), context);
+    challengeBody.insert(QLatin1StringView("account_id"), d->localAccountId.bytes());
+    challengeBody.insert(QLatin1StringView("device_id"), d->localDeviceId.bytes());
 
     QNetworkRequest request = d->authorizedRequest(d->endpoints.authChallenge);
     request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
@@ -601,7 +616,7 @@ void RelayClient::authenticateDevice(const QByteArray &deviceCredential,
     d->guardReply(reply);
 
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, deviceCredential, signer, context] {
+            [this, reply, signer, context] {
                 reply->deleteLater();
                 if (reply->error() != QNetworkReply::NoError || !d->bodyWithinBounds(reply)) {
                     emit transportError(Private::httpFailureKind(reply));
@@ -625,7 +640,7 @@ void RelayClient::authenticateDevice(const QByteArray &deviceCredential,
                     emit transportError(RelayTransportError::MalformedEnvelope);
                     return;
                 }
-                completeAuthentication(deviceCredential, challenge, signer, context);
+                completeAuthentication(challenge, signer, context);
             });
 }
 
@@ -737,9 +752,8 @@ bool RelayClient::isConnected() const noexcept
 
 // ---- private helpers implemented on RelayClient for signal access ----------
 
-void RelayClient::completeAuthentication(const QByteArray &deviceCredential,
-                                         const QByteArray &challenge,
-                                         const ChallengeSigner &signer, const QByteArray &context)
+void RelayClient::completeAuthentication(const QByteArray &challenge, const ChallengeSigner &signer,
+                                         const QByteArray &context)
 {
     const QByteArray signature = signer(challenge, context);
     if (signature.isEmpty()) {
@@ -748,7 +762,8 @@ void RelayClient::completeAuthentication(const QByteArray &deviceCredential,
     }
 
     QCborMap body;
-    body.insert(QLatin1StringView("credential"), deviceCredential);
+    body.insert(QLatin1StringView("account_id"), d->localAccountId.bytes());
+    body.insert(QLatin1StringView("device_id"), d->localDeviceId.bytes());
     body.insert(QLatin1StringView("challenge"), challenge);
     body.insert(QLatin1StringView("signature"), signature);
     body.insert(QLatin1StringView("context"), context);

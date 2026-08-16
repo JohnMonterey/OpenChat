@@ -4,6 +4,9 @@
 #include "network/RelayClient.h"
 #include "protocol/CanonicalCborCodec.h"
 #include "protocol/CiphertextEnvelope.h"
+#include "security/DeviceIdentity.h"
+
+#include "RelayCrypto.h"
 
 #include <QCborArray>
 #include <QCborMap>
@@ -168,6 +171,9 @@ private slots:
     void sendEnvelopeIsAcknowledged();
     void sendEnvelopeBeforeConnectFails();
 
+    void authRequestBodiesMatchRelay();
+    void emptyContextFailsClosed();
+
     void serializedRefreshSucceedsOnce();
     void refreshExhaustionExpiresAuth();
     void refreshCycleResetsAfterSuccess();
@@ -194,7 +200,7 @@ void RelayClientTest::hostnameMismatchIsTls()
                                     {QString::fromLatin1(relaySubprotocol)});
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -215,7 +221,7 @@ void RelayClientTest::untrustedCaIsTls()
                                     {QString::fromLatin1(relaySubprotocol)});
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(clientCa.caCertPem()));
     Observer observer(&client);
@@ -234,7 +240,7 @@ void RelayClientTest::expiredCertificateIsTls()
                                     {QString::fromLatin1(relaySubprotocol)});
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -264,7 +270,7 @@ void RelayClientTest::keyCertMismatchIsTls()
     RelayTest::FakeWssServer server(serverCfg, {QString::fromLatin1(relaySubprotocol)});
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -286,7 +292,7 @@ void RelayClientTest::missingSubprotocolIsRejected()
     RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()), {});
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -307,7 +313,7 @@ void RelayClientTest::textFrameIsRejected()
     server.onConnected = [](QWebSocket *socket) { socket->sendTextMessage(QStringLiteral("hi")); };
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -332,7 +338,7 @@ void RelayClientTest::oversizeFrameIsRejected()
     limits.maxIncomingFrameBytes = 4096;
     limits.maxIncomingMessageBytes = 4096;
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), limits, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -359,7 +365,7 @@ void RelayClientTest::malformedCborIsRejected()
     };
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -381,7 +387,7 @@ void RelayClientTest::wrongRecipientIsRejected()
     };
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -406,7 +412,7 @@ void RelayClientTest::validCiphertextIsDelivered()
     };
     QVERIFY(server.isListening());
 
-    RelayClient client(localDevice, wssOnly(server.liveUrl("localhost")),
+    RelayClient client(localDevice, AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("access", "refresh"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -428,7 +434,7 @@ void RelayClientTest::connectLiveResumesFromWatermark()
                                     {QString::fromLatin1(relaySubprotocol)});
     QVERIFY(server.isListening());
 
-    RelayClient client(DeviceId::generate(), wssOnly(server.liveUrl("localhost")),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("access", "refresh"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -461,7 +467,7 @@ void RelayClientTest::sendEnvelopeIsAcknowledged()
     QVERIFY(server.isListening());
 
     const DeviceId localDevice = DeviceId::generate();
-    RelayClient client(localDevice, wssOnly(server.liveUrl("localhost")),
+    RelayClient client(localDevice, AccountId::generate(), wssOnly(server.liveUrl("localhost")),
                        fixedCredentials("access", "refresh"), RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
     Observer observer(&client);
@@ -480,13 +486,156 @@ void RelayClientTest::sendEnvelopeIsAcknowledged()
 
 void RelayClientTest::sendEnvelopeBeforeConnectFails()
 {
-    RelayClient client(DeviceId::generate(),
+    RelayClient client(DeviceId::generate(), AccountId::generate(),
                        wssOnly(QUrl(QStringLiteral("wss://localhost:1/live"))),
                        fixedCredentials("access", "refresh"), RelayLimits{}, slowBackoff());
 
     const auto result = client.sendEnvelope(makeEnvelope(DeviceId::generate()));
     QVERIFY(!result.hasValue());
     QCOMPARE(result.error(), RelayCallError::NotConnected);
+}
+
+// --- Device authentication request composition ------------------------------
+
+void RelayClientTest::authRequestBodiesMatchRelay()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    // A real device identity: the client signs the challenge with it, and the
+    // relay's own verifier must accept the exact bytes the client transmits.
+    auto identityResult = DeviceIdentity::generate();
+    QVERIFY(identityResult.hasValue());
+    const DeviceIdentity identity = std::move(identityResult).value();
+    const DevicePublicCredential credential = identity.publicCredential();
+    const DeviceId localDevice = credential.deviceId;
+    const AccountId localAccount = AccountId::generate();
+
+    // Canned relay responses: a 32-byte challenge, then a token pair.
+    const QByteArray challenge(32, '\x5a');
+    QCborMap challengeResponse;
+    challengeResponse.insert(QLatin1StringView("challenge"), challenge);
+    server.enqueue(QStringLiteral("/auth/challenge"),
+                   {200, challengeResponse.toCborValue().toCbor(), -1});
+    server.enqueue(QStringLiteral("/auth/complete"),
+                   {200, sessionCbor("access-token", "refresh-token", 1'700'000'999'000), -1});
+
+    RelayEndpoints endpoints;
+    endpoints.authChallenge = server.url(QStringLiteral("/auth/challenge"));
+    endpoints.authComplete = server.url(QStringLiteral("/auth/complete"));
+    endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+    endpoints.sync = server.url(QStringLiteral("/sync"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(localDevice, localAccount, endpoints,
+                       fixedCredentials(QByteArray(), QByteArray()), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy authenticated(&client, &RelayClient::authenticated);
+    QSignalSpy errors(&client, &RelayClient::transportError);
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+
+    // The signer is the real device signer over the bound (challenge, context).
+    const ChallengeSigner signer = [&identity](QByteArrayView ch, QByteArrayView ctx) -> QByteArray {
+        auto sig = identity.signChallenge(ch, ctx);
+        return sig.hasValue() ? sig.value() : QByteArray{};
+    };
+    const QByteArray context("account-device-bind");
+
+    client.authenticateDevice(QByteArray("mls-credential"), signer, context);
+
+    QTRY_COMPARE(authenticated.count(), 1);
+    QCOMPARE(errors.count(), 0);
+    QCOMPARE(expired.count(), 0);
+    QCOMPARE(server.requestCount(QStringLiteral("/auth/challenge")), 1);
+    QCOMPARE(server.requestCount(QStringLiteral("/auth/complete")), 1);
+
+    // --- Challenge body: account_id + device_id byte fields, no credential. ---
+    QCborParserError challengeErr{};
+    const QCborValue challengeValue =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/auth/challenge")), &challengeErr);
+    QCOMPARE(challengeErr.error, QCborError::NoError);
+    QVERIFY(challengeValue.isMap());
+    const QCborMap challengeMap = challengeValue.toMap();
+    QVERIFY(challengeMap.value(QLatin1StringView("account_id")).isByteArray());
+    QCOMPARE(challengeMap.value(QLatin1StringView("account_id")).toByteArray(),
+             localAccount.bytes());
+    QVERIFY(challengeMap.value(QLatin1StringView("device_id")).isByteArray());
+    QCOMPARE(challengeMap.value(QLatin1StringView("device_id")).toByteArray(), localDevice.bytes());
+    QVERIFY(challengeMap.value(QLatin1StringView("credential")).isUndefined());
+
+    // --- Complete body: account_id, device_id, challenge, signature, non-empty
+    //     context; no credential. ---
+    QCborParserError completeErr{};
+    const QCborValue completeValue =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/auth/complete")), &completeErr);
+    QCOMPARE(completeErr.error, QCborError::NoError);
+    QVERIFY(completeValue.isMap());
+    const QCborMap completeMap = completeValue.toMap();
+    QCOMPARE(completeMap.value(QLatin1StringView("account_id")).toByteArray(), localAccount.bytes());
+    QCOMPARE(completeMap.value(QLatin1StringView("device_id")).toByteArray(), localDevice.bytes());
+    const QByteArray sentChallenge = completeMap.value(QLatin1StringView("challenge")).toByteArray();
+    const QByteArray sentSignature = completeMap.value(QLatin1StringView("signature")).toByteArray();
+    const QByteArray sentContext = completeMap.value(QLatin1StringView("context")).toByteArray();
+    QVERIFY(completeMap.value(QLatin1StringView("credential")).isUndefined());
+    QCOMPARE(sentChallenge, challenge);
+    QCOMPARE(sentContext, context);
+    QVERIFY(!sentContext.isEmpty());
+    QCOMPARE(sentSignature.size(), qsizetype(64));
+
+    // --- Cross-verify with the relay's own verifier over the relay's own
+    //     signing-message reconstruction: this proves the exact bytes the relay
+    //     will check are what the client signed. ---
+    const QByteArray message = Relay::challengeSigningMessage(sentChallenge, sentContext);
+    QVERIFY(Relay::verifyEd25519(credential.signingPublicKey, message, sentSignature));
+
+    // The authenticated session carries the relay's tokens.
+    const RelaySession session = authenticated.first().at(0).value<RelaySession>();
+    QCOMPARE(session.accessToken, QByteArray("access-token"));
+    QCOMPARE(session.refreshToken, QByteArray("refresh-token"));
+}
+
+void RelayClientTest::emptyContextFailsClosed()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    auto identityResult = DeviceIdentity::generate();
+    QVERIFY(identityResult.hasValue());
+    const DeviceIdentity identity = std::move(identityResult).value();
+
+    RelayEndpoints endpoints;
+    endpoints.authChallenge = server.url(QStringLiteral("/auth/challenge"));
+    endpoints.authComplete = server.url(QStringLiteral("/auth/complete"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(identity.publicCredential().deviceId, AccountId::generate(), endpoints,
+                       fixedCredentials(QByteArray(), QByteArray()), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+    QSignalSpy errors(&client, &RelayClient::transportError);
+
+    bool signerCalled = false;
+    const ChallengeSigner signer = [&](QByteArrayView ch, QByteArrayView ctx) -> QByteArray {
+        signerCalled = true;
+        auto sig = identity.signChallenge(ch, ctx);
+        return sig.hasValue() ? sig.value() : QByteArray{};
+    };
+
+    // An empty context must fail closed: no request issued, signer never invoked.
+    client.authenticateDevice(QByteArray("mls-credential"), signer, QByteArray());
+
+    QCOMPARE(expired.count(), 1); // emitted synchronously by the guard
+    // Give any (erroneously) dispatched request time to reach the server, then
+    // prove none was ever made.
+    QTest::qWait(100);
+    QCOMPARE(server.requestCount(QStringLiteral("/auth/challenge")), 0);
+    QCOMPARE(server.requestCount(QStringLiteral("/auth/complete")), 0);
+    QCOMPARE(errors.count(), 0);
+    QVERIFY(!signerCalled);
 }
 
 // --- HTTPS auth / refresh ---------------------------------------------------
@@ -520,7 +669,7 @@ void RelayClientTest::serializedRefreshSucceedsOnce()
     endpoints.authComplete = server.url(QStringLiteral("/auth/complete"));
     endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
 
-    RelayClient client(localDevice, endpoints, credentials, RelayLimits{}, slowBackoff());
+    RelayClient client(localDevice, AccountId::generate(), endpoints, credentials, RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
 
     QSignalSpy rotated(&client, &RelayClient::tokensRotated);
@@ -565,7 +714,7 @@ void RelayClientTest::refreshExhaustionExpiresAuth()
     endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
     endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
 
-    RelayClient client(DeviceId::generate(), endpoints, credentials, RelayLimits{}, slowBackoff());
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, credentials, RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
 
     QSignalSpy rotated(&client, &RelayClient::tokensRotated);
@@ -610,7 +759,7 @@ void RelayClientTest::refreshCycleResetsAfterSuccess()
     endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
     endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
 
-    RelayClient client(localDevice, endpoints, credentials, RelayLimits{}, slowBackoff());
+    RelayClient client(localDevice, AccountId::generate(), endpoints, credentials, RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
 
     QSignalSpy rotated(&client, &RelayClient::tokensRotated);
@@ -640,7 +789,7 @@ void RelayClientTest::httpsTlsFailureIsTls()
     endpoints.sync = server.url(QStringLiteral("/sync"));
     endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
 
-    RelayClient client(DeviceId::generate(), endpoints, fixedCredentials("a", "r"),
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, fixedCredentials("a", "r"),
                        RelayLimits{}, slowBackoff());
     client.setTlsConfiguration(RelayTest::clientConfigTrusting(clientCa.caCertPem()));
 
@@ -673,7 +822,7 @@ void RelayClientTest::insecureEndpointsAreRejected()
 
     RelayEndpoints httpSync;
     httpSync.sync = QUrl(QStringLiteral("http://relay.example/sync"));
-    RelayClient client(DeviceId::generate(), httpSync, fixedCredentials("a", "r"));
+    RelayClient client(DeviceId::generate(), AccountId::generate(), httpSync, fixedCredentials("a", "r"));
     QSignalSpy errors(&client, &RelayClient::transportError);
     client.fetchSince(0);
     QTRY_COMPARE(errors.count(), 1);

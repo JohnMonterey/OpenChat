@@ -192,11 +192,13 @@ add_executable(tst_relayclient
     tests/tst_relayclient.cpp
     tests/relay/RelayTestSupport.cpp
 )
-target_include_directories(tst_relayclient PRIVATE src tests)
+target_include_directories(tst_relayclient PRIVATE src tests relay/src)
 target_link_libraries(tst_relayclient PRIVATE
     openchat_network
     openchat_protocol
     openchat_domain
+    openchat_security
+    openchat_relay_core
     Qt6::Core
     Qt6::Network
     Qt6::WebSockets

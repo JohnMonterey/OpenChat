@@ -32,8 +32,8 @@ inline constexpr char relaySubprotocol[] = "openchat.ciphertext.v1";
 // Explicit endpoint configuration. Production requires https/wss for every URL;
 // isSecure() gates that and the client refuses to operate insecurely.
 struct RelayEndpoints final {
-    QUrl authChallenge; // POST -> canonical CBOR { challenge }
-    QUrl authComplete;  // POST { credential, challenge, signature } -> tokens
+    QUrl authChallenge; // POST { account_id, device_id } -> canonical CBOR { challenge }
+    QUrl authComplete;  // POST { account_id, device_id, challenge, signature, context } -> tokens
     QUrl authRefresh;   // POST { refresh } -> rotated tokens
     QUrl sync;          // GET ?since=<watermark> -> bounded envelope batch
     QUrl live;          // wss:// live envelope stream
@@ -123,7 +123,7 @@ class RelayClient final : public QObject
     Q_OBJECT
 
 public:
-    RelayClient(DeviceId localDeviceId, RelayEndpoints endpoints,
+    RelayClient(DeviceId localDeviceId, AccountId localAccountId, RelayEndpoints endpoints,
                 RelayCredentials credentials, RelayLimits limits = {},
                 BackoffPolicy backoff = BackoffPolicy{}, QObject *parent = nullptr);
     ~RelayClient() override;
@@ -183,8 +183,8 @@ signals:
     void catchUpComplete(quint64 newWatermark);
 
 private:
-    void completeAuthentication(const QByteArray &deviceCredential, const QByteArray &challenge,
-                                const ChallengeSigner &signer, const QByteArray &context);
+    void completeAuthentication(const QByteArray &challenge, const ChallengeSigner &signer,
+                                const QByteArray &context);
     void refreshThenRetryFetch(quint64 watermark);
     void deliverCatchUp(const QByteArray &body);
 

@@ -1,0 +1,42 @@
+# Caddy dev config: terminate TLS with the mounted dev server certificate and
+# reverse-proxy the OpenChat relay API (HTTP + the /v1/live WebSocket upgrade).
+#
+# DEV ONLY. The certificate is generated locally by deploy/dev-ca/gen-certs.sh
+# and pinned/trusted by the client via the dev root CA. Do not use in production.
+
+{
+	# No ACME, no admin socket, no automatic HTTP->HTTPS redirect: the TLS
+	# certificate is supplied explicitly below, so Caddy must not try to manage
+	# certificates for these local hostnames.
+	admin off
+	auto_https disable_redirects
+	log {
+		output stdout
+		format console
+	}
+}
+
+# Served on :443 for the dev hostnames covered by the mounted certificate's SANs.
+https://localhost, https://relay.localhost {
+	tls /etc/caddy/certs/server.crt /etc/caddy/certs/server.key
+
+	# Defense-in-depth ceiling above the relay's own 1 MiB request-body bound
+	# (RelayServer::Limits::maxRequestBytes / maxFrameBytes). The relay enforces
+	# the exact limit; this rejects absurd bodies before they reach it.
+	request_body {
+		max_size 2MB
+	}
+
+	# reverse_proxy transparently forwards the Upgrade/Connection headers, so the
+	# /v1/live WebSocket upgrade and the plain /v1/* HTTP routes are all proxied
+	# to the relay's plain HTTP/WS listener on the private network. handle blocks
+	# are mutually exclusive and evaluated top-to-bottom, so intent is explicit.
+	handle /v1/* {
+		reverse_proxy relay:8443
+	}
+
+	# Anything outside the relay API surface is not served.
+	handle {
+		respond 404
+	}
+}

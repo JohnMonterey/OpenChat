@@ -1,0 +1,75 @@
+# OpenChat local dev / integration stack.
+#
+#   caddy  ── TLS terminator on :443, reverse-proxies /v1/* (HTTP + the
+#             /v1/live WebSocket upgrade) to the relay over the private network.
+#   relay  ── ciphertext-only relay, plain HTTP/WS, internal network only.
+#   postgres ─ backing store; the relay applies its migrations at startup.
+#
+# The relay reads all its configuration from the environment (see
+# relay/src/main.cpp). It never receives secrets on the command line.
+#
+# DEV ONLY. The Postgres password and the mounted TLS certificate are
+# throwaway development material; never reuse them in production.
+
+name: openchat-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ocrelay
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: openchat_relay
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocrelay -d openchat_relay"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - internal
+
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    environment:
+      OPENCHAT_RELAY_PG_HOST: postgres
+      OPENCHAT_RELAY_PG_PORT: "5432"
+      OPENCHAT_RELAY_PG_USER: ocrelay
+      OPENCHAT_RELAY_PG_PASSWORD: devpassword
+      OPENCHAT_RELAY_PG_DATABASE: openchat_relay
+      OPENCHAT_RELAY_BIND: "0.0.0.0"
+      OPENCHAT_RELAY_PORT: "8443"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Internal only: the relay's plain HTTP/WS port is never published to the
+    # host. Only Caddy (below) reaches it, and only over the private network.
+    expose:
+      - "8443"
+    networks:
+      - internal
+    restart: on-failure
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - relay
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - ./dev-ca/out/server.crt:/etc/caddy/certs/server.crt:ro
+      - ./dev-ca/out/server.key:/etc/caddy/certs/server.key:ro
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:

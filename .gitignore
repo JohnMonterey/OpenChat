@@ -4,3 +4,17 @@ build/
 build-*/
 rust/openchat-mls/target/
 clearchat-reference-recreation.png
+
+# Generated dev TLS material for the deploy stack. Private keys and
+# certificates are produced locally by deploy/dev-ca/gen-certs.sh and must
+# never be committed.
+deploy/dev-ca/out/
+deploy/**/*.key
+deploy/**/*.crt
+deploy/**/*.pem
+deploy/**/*.csr
+deploy/**/*.srl
+
+# Local compose volume data (only present if a bind mount is used; the default
+# stack uses a Docker-managed named volume that lives outside the repo).
+deploy/**/pgdata/

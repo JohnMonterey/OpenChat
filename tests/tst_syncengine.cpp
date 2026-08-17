@@ -52,13 +52,21 @@ public:
         return Result<SyncProcessOutcome, MlsError>::success(outcome);
     }
 
-    Result<QList<QByteArray>, MlsError> inspectWelcome(QByteArrayView) override
+    Result<QList<QByteArray>, MlsError> inspectWelcome(QByteArrayView welcome) override
     {
-        return Result<QList<QByteArray>, MlsError>::success({});
+        ++inspectWelcomeCount;
+        lastInspectedWelcome = welcome.toByteArray();
+        if (failInspect)
+            return Result<QList<QByteArray>, MlsError>::failure(MlsError::InvalidMessage);
+        return Result<QList<QByteArray>, MlsError>::success(inspectMembers);
     }
 
-    Result<void, MlsError> joinGroup(const ConversationId &, QByteArrayView) override
+    Result<void, MlsError> joinGroup(const ConversationId &, QByteArrayView welcome) override
     {
+        ++joinGroupCount;
+        lastJoinedWelcome = welcome.toByteArray();
+        if (failJoin)
+            return Result<void, MlsError>::failure(MlsError::InvalidMessage);
         ++stateVersion;
         return Result<void, MlsError>::success();
     }
@@ -72,6 +80,15 @@ public:
     int encryptCount = 0;
     int processCount = 0;
     int stateVersion = 0;
+    // inspectWelcome returns these members (default: one credential naming
+    // senderDevice, so authentication passes); set failInspect to reject.
+    QList<QByteArray> inspectMembers{credentialBytes(senderDevice)};
+    bool failInspect = false;
+    bool failJoin = false;
+    int inspectWelcomeCount = 0;
+    int joinGroupCount = 0;
+    QByteArray lastInspectedWelcome;
+    QByteArray lastJoinedWelcome;
 };
 
 struct StoredOutbox final {
@@ -136,16 +153,35 @@ public:
     }
 
     Result<HandshakeReceiveOutcome, RepositoryError>
-    commitHandshakeReceive(const EnvelopeId &, const AccountId &, const DeviceId &,
-                           const ConversationId &, QByteArrayView, qint64, quint64) override
+    commitHandshakeReceive(const EnvelopeId &envelopeId, const AccountId &senderAccountId,
+                           const DeviceId &senderDeviceId, const ConversationId &conversationId,
+                           QByteArrayView welcome, qint64 receivedAtMs, quint64 watermark) override
     {
-        return Result<HandshakeReceiveOutcome, RepositoryError>::success(
-            HandshakeReceiveOutcome::Stashed);
+        ++commitHandshakeReceiveCount;
+        handshakeReceiveEnvelopeId = envelopeId;
+        handshakeReceiveSenderAccount = senderAccountId;
+        handshakeReceiveSenderDevice = senderDeviceId;
+        handshakeReceiveConversation = conversationId;
+        handshakeReceiveWelcome = welcome.toByteArray();
+        handshakeReceiveReceivedAtMs = receivedAtMs;
+        handshakeReceiveWatermark = watermark;
+        if (failHandshakeReceive)
+            return Result<HandshakeReceiveOutcome, RepositoryError>::failure(error());
+        return Result<HandshakeReceiveOutcome, RepositoryError>::success(handshakeReceiveOutcome);
     }
 
-    Result<void, RepositoryError> commitHandshakeAccept(const AccountId &, const ConversationId &,
-                                                        qint64, QByteArrayView) override
+    Result<void, RepositoryError> commitHandshakeAccept(const AccountId &accountId,
+                                                        const ConversationId &conversationId,
+                                                        qint64 updatedAtMs,
+                                                        QByteArrayView mlsState) override
     {
+        ++commitHandshakeAcceptCount;
+        handshakeAcceptAccount = accountId;
+        handshakeAcceptConversation = conversationId;
+        handshakeAcceptUpdatedAtMs = updatedAtMs;
+        handshakeAcceptMlsState = mlsState.toByteArray();
+        if (failHandshakeAccept)
+            return err();
         return ok();
     }
 
@@ -215,6 +251,26 @@ public:
     bool failSend = false;
     bool failReceive = false;
 
+    // commitHandshakeReceive controls + recorded args.
+    HandshakeReceiveOutcome handshakeReceiveOutcome = HandshakeReceiveOutcome::Stashed;
+    bool failHandshakeReceive = false;
+    int commitHandshakeReceiveCount = 0;
+    std::optional<EnvelopeId> handshakeReceiveEnvelopeId;
+    std::optional<AccountId> handshakeReceiveSenderAccount;
+    std::optional<DeviceId> handshakeReceiveSenderDevice;
+    std::optional<ConversationId> handshakeReceiveConversation;
+    QByteArray handshakeReceiveWelcome;
+    qint64 handshakeReceiveReceivedAtMs = 0;
+    quint64 handshakeReceiveWatermark = 0;
+
+    // commitHandshakeAccept controls + recorded args.
+    bool failHandshakeAccept = false;
+    int commitHandshakeAcceptCount = 0;
+    std::optional<AccountId> handshakeAcceptAccount;
+    std::optional<ConversationId> handshakeAcceptConversation;
+    qint64 handshakeAcceptUpdatedAtMs = 0;
+    QByteArray handshakeAcceptMlsState;
+
 private:
     static RepositoryError error()
     {
@@ -261,6 +317,30 @@ CiphertextEnvelopeV1 incomingEnvelope(const ConversationId &conversation, const 
         QByteArray(64, '\x03')};
 }
 
+// An inbound contact-handshake envelope (messageKind MlsHandshake) whose
+// ciphertext IS the raw Welcome. expiresAtMs sits after the test clock so the
+// expiry check does not fire.
+CiphertextEnvelopeV1 incomingHandshakeEnvelope(const ConversationId &conversation,
+                                               const AccountId &senderAccount,
+                                               const DeviceId &senderDevice,
+                                               const QByteArray &welcome)
+{
+    return CiphertextEnvelopeV1{
+        1,
+        EnvelopeId::generate(),
+        senderAccount,
+        senderDevice,
+        DeviceId::generate(),
+        conversation,
+        EnvelopeMessageKind::MlsHandshake,
+        1'700'000'000'000,
+        1'700'000'060'000,
+        EnvelopeId::generate(),
+        welcome,
+        QByteArray(32, '\x02'),
+        QByteArray(64, '\x03')};
+}
+
 SyncEngine::Config makeConfig(int maxAttempts = 8)
 {
     return SyncEngine::Config{AccountId::generate(), DeviceId::generate(), maxAttempts, 32, 30'000};
@@ -294,6 +374,14 @@ private slots:
     void sendHandshakeShipsWelcomeWithoutEncrypting();
     void sendHandshakeAcceptanceCancelsRetry();
     void sendHandshakeCommitFailureFailsClosed();
+    void inboundHandshakeStashedAcksAndSurfacesWithoutProcess();
+    void inboundHandshakeAlreadySeenAckedNotSurfaced();
+    void inboundHandshakeDroppedBlockedAckedNotSurfaced();
+    void expiredHandshakeAckedNotStashed();
+    void handshakeReceiveCommitFailureFailsClosedNoAck();
+    void acceptHandshakeAuthenticatesJoinsAndCommits();
+    void acceptHandshakeRejectsMismatchedCredential();
+    void acceptHandshakeCommitFailureFailsClosed();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -619,6 +707,282 @@ void SyncEngineTest::sendHandshakeCommitFailureFailsClosed()
     QCOMPARE(failedSpy.count(), 1);
     QVERIFY(engine.isFailedClosed());
     QCOMPARE(transport.sent.size(), 0); // nothing left the device
+}
+
+void SyncEngineTest::inboundHandshakeStashedAcksAndSurfacesWithoutProcess()
+{
+    m_now = 1'700'000'000'000; // reset: earlier slots advance the shared clock
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+
+    int received = 0;
+    std::optional<AccountId> sawSender;
+    std::optional<DeviceId> sawDevice;
+    std::optional<ConversationId> sawConversation;
+    qint64 sawReceivedAt = 0;
+    connect(&engine, &SyncEngine::handshakeReceived, &engine,
+            [&](const AccountId &s, const DeviceId &d, const ConversationId &c, qint64 at) {
+                ++received;
+                sawSender = s;
+                sawDevice = d;
+                sawConversation = c;
+                sawReceivedAt = at;
+            });
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const AccountId senderAccount = AccountId::generate();
+    const DeviceId senderDevice = DeviceId::generate();
+    const QByteArray welcome("welcome-bytes");
+    const CiphertextEnvelopeV1 envelope =
+        incomingHandshakeEnvelope(conversation, senderAccount, senderDevice, welcome);
+
+    engine.handleEnvelope(envelope, 11);
+
+    // Stashed via commitHandshakeReceive with exactly the envelope's fields.
+    QCOMPARE(store.commitHandshakeReceiveCount, 1);
+    QVERIFY(store.handshakeReceiveEnvelopeId.has_value());
+    QCOMPARE(store.handshakeReceiveEnvelopeId->bytes(), envelope.envelopeId.bytes());
+    QCOMPARE(store.handshakeReceiveSenderAccount->bytes(), senderAccount.bytes());
+    QCOMPARE(store.handshakeReceiveSenderDevice->bytes(), senderDevice.bytes());
+    QCOMPARE(store.handshakeReceiveConversation->bytes(), conversation.bytes());
+    QCOMPARE(store.handshakeReceiveWelcome, welcome);
+    QCOMPARE(store.handshakeReceiveReceivedAtMs, envelope.createdAtMs);
+    QCOMPARE(store.handshakeReceiveWatermark, quint64(11));
+
+    // Acknowledged only after the durable stash, at the relay sequence.
+    QCOMPARE(transport.acks.size(), 1);
+    QCOMPARE(transport.acks.first().second, quint64(11));
+
+    // Surfaced exactly once with the envelope's sender / device / conversation / time.
+    QCOMPARE(received, 1);
+    QCOMPARE(sawSender->bytes(), senderAccount.bytes());
+    QCOMPARE(sawDevice->bytes(), senderDevice.bytes());
+    QCOMPARE(sawConversation->bytes(), conversation.bytes());
+    QCOMPARE(sawReceivedAt, envelope.createdAtMs);
+
+    // A handshake is NEVER fed to mls.process: a Welcome names an unjoined group.
+    QCOMPARE(mls.processCount, 0);
+}
+
+void SyncEngineTest::inboundHandshakeAlreadySeenAckedNotSurfaced()
+{
+    m_now = 1'700'000'000'000; // reset: earlier slots advance the shared clock
+    FakeStore store;
+    store.handshakeReceiveOutcome = HandshakeReceiveOutcome::AlreadySeen;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    int received = 0;
+    connect(&engine, &SyncEngine::handshakeReceived, &engine,
+            [&](const AccountId &, const DeviceId &, const ConversationId &, qint64) { ++received; });
+    engine.start();
+
+    const CiphertextEnvelopeV1 envelope = incomingHandshakeEnvelope(
+        ConversationId::generate(), AccountId::generate(), DeviceId::generate(),
+        QByteArray("welcome"));
+    engine.handleEnvelope(envelope, 4);
+
+    QCOMPARE(store.commitHandshakeReceiveCount, 1);
+    QCOMPARE(transport.acks.size(), 1); // consumed (idempotent redelivery)
+    QCOMPARE(received, 0);              // but nothing surfaced
+    QCOMPARE(mls.processCount, 0);
+}
+
+void SyncEngineTest::inboundHandshakeDroppedBlockedAckedNotSurfaced()
+{
+    m_now = 1'700'000'000'000; // reset: earlier slots advance the shared clock
+    FakeStore store;
+    store.handshakeReceiveOutcome = HandshakeReceiveOutcome::DroppedBlocked;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    int received = 0;
+    connect(&engine, &SyncEngine::handshakeReceived, &engine,
+            [&](const AccountId &, const DeviceId &, const ConversationId &, qint64) { ++received; });
+    engine.start();
+
+    const CiphertextEnvelopeV1 envelope = incomingHandshakeEnvelope(
+        ConversationId::generate(), AccountId::generate(), DeviceId::generate(),
+        QByteArray("welcome"));
+    engine.handleEnvelope(envelope, 5);
+
+    QCOMPARE(store.commitHandshakeReceiveCount, 1);
+    QCOMPARE(transport.acks.size(), 1); // still consumed so the relay stops redelivering
+    QCOMPARE(received, 0);              // a blocked sender surfaces nothing
+    QCOMPARE(mls.processCount, 0);
+}
+
+void SyncEngineTest::expiredHandshakeAckedNotStashed()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    int received = 0;
+    connect(&engine, &SyncEngine::handshakeReceived, &engine,
+            [&](const AccountId &, const DeviceId &, const ConversationId &, qint64) { ++received; });
+    engine.start();
+
+    const CiphertextEnvelopeV1 envelope = incomingHandshakeEnvelope(
+        ConversationId::generate(), AccountId::generate(), DeviceId::generate(),
+        QByteArray("welcome"));
+    m_now = envelope.expiresAtMs + 1; // withheld past expiry, then (re)delivered
+
+    engine.handleEnvelope(envelope, 8);
+
+    QCOMPARE(store.commitHandshakeReceiveCount, 0); // never stashed
+    QCOMPARE(received, 0);
+    QCOMPARE(transport.acks.size(), 1); // acknowledged so the relay stops redelivering
+}
+
+void SyncEngineTest::handshakeReceiveCommitFailureFailsClosedNoAck()
+{
+    m_now = 1'700'000'000'000; // reset: earlier slots advance the shared clock
+    FakeStore store;
+    store.failHandshakeReceive = true;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy failedSpy(&engine, &SyncEngine::failedClosed);
+    int received = 0;
+    connect(&engine, &SyncEngine::handshakeReceived, &engine,
+            [&](const AccountId &, const DeviceId &, const ConversationId &, qint64) { ++received; });
+    engine.start();
+
+    const CiphertextEnvelopeV1 envelope = incomingHandshakeEnvelope(
+        ConversationId::generate(), AccountId::generate(), DeviceId::generate(),
+        QByteArray("welcome"));
+    engine.handleEnvelope(envelope, 6);
+
+    QCOMPARE(store.commitHandshakeReceiveCount, 1);
+    QCOMPARE(failedSpy.count(), 1);
+    QVERIFY(engine.isFailedClosed());
+    QCOMPARE(transport.acks.size(), 0); // fail closed: NOT acked -> relay redelivers
+    QCOMPARE(received, 0);
+}
+
+void SyncEngineTest::acceptHandshakeAuthenticatesJoinsAndCommits()
+{
+    FakeStore store;
+    FakeMls mls;
+    mls.stateVersion = 7; // a pending snapshot to surrender after the join
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    std::optional<ConversationId> accepted;
+    std::optional<AccountId> acceptedSender;
+    int authFailed = 0;
+    connect(&engine, &SyncEngine::handshakeAccepted, &engine,
+            [&](const ConversationId &c, const AccountId &s) {
+                accepted = c;
+                acceptedSender = s;
+            });
+    connect(&engine, &SyncEngine::handshakeAuthFailed, &engine,
+            [&](const ConversationId &, const AccountId &) { ++authFailed; });
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const AccountId senderAccount = AccountId::generate();
+    const DeviceId claimedDevice = DeviceId::generate();
+    const QByteArray welcome("real-welcome");
+    // inspectWelcome returns exactly one credential naming the claimed device.
+    mls.inspectMembers = {credentialBytes(claimedDevice)};
+
+    engine.acceptHandshake(conversation, senderAccount, claimedDevice, welcome);
+
+    // Authenticated read-only, then joined, then committed the post-join state.
+    QCOMPARE(mls.inspectWelcomeCount, 1);
+    QCOMPARE(mls.lastInspectedWelcome, welcome);
+    QCOMPARE(mls.joinGroupCount, 1);
+    QCOMPARE(mls.lastJoinedWelcome, welcome);
+    QCOMPARE(store.commitHandshakeAcceptCount, 1);
+    QCOMPARE(store.handshakeAcceptAccount->bytes(), senderAccount.bytes());
+    QCOMPARE(store.handshakeAcceptConversation->bytes(), conversation.bytes());
+    QCOMPARE(store.handshakeAcceptMlsState, QByteArray("state-8")); // join advanced the ratchet
+    QCOMPARE(authFailed, 0);
+    QVERIFY(accepted.has_value());
+    QCOMPARE(accepted->bytes(), conversation.bytes());
+    QCOMPARE(acceptedSender->bytes(), senderAccount.bytes());
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::acceptHandshakeRejectsMismatchedCredential()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    std::optional<ConversationId> authFailedConversation;
+    std::optional<AccountId> authFailedSender;
+    int accepted = 0;
+    connect(&engine, &SyncEngine::handshakeAccepted, &engine,
+            [&](const ConversationId &, const AccountId &) { ++accepted; });
+    connect(&engine, &SyncEngine::handshakeAuthFailed, &engine,
+            [&](const ConversationId &c, const AccountId &s) {
+                authFailedConversation = c;
+                authFailedSender = s;
+            });
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const AccountId senderAccount = AccountId::generate();
+    const DeviceId claimedDevice = DeviceId::generate();
+    const DeviceId otherDevice = DeviceId::generate();
+    QVERIFY(claimedDevice != otherDevice);
+    // The Welcome's sole member names a DIFFERENT device than the relay claims.
+    mls.inspectMembers = {credentialBytes(otherDevice)};
+
+    engine.acceptHandshake(conversation, senderAccount, claimedDevice, QByteArray("welcome"));
+
+    QCOMPARE(mls.inspectWelcomeCount, 1);
+    QCOMPARE(mls.joinGroupCount, 0);               // NEVER joined -- auth ran first
+    QCOMPARE(store.commitHandshakeAcceptCount, 0); // NEVER committed
+    QCOMPARE(accepted, 0);
+    QVERIFY(authFailedConversation.has_value());
+    QCOMPARE(authFailedConversation->bytes(), conversation.bytes());
+    QCOMPARE(authFailedSender->bytes(), senderAccount.bytes());
+    QVERIFY(!engine.isFailedClosed()); // an auth failure is not a fail-closed
+
+    // A membership size != 1 is likewise rejected without any join or commit.
+    mls.inspectMembers = {credentialBytes(claimedDevice), credentialBytes(otherDevice)};
+    engine.acceptHandshake(conversation, senderAccount, claimedDevice, QByteArray("welcome2"));
+    QCOMPARE(mls.joinGroupCount, 0);
+    QCOMPARE(store.commitHandshakeAcceptCount, 0);
+}
+
+void SyncEngineTest::acceptHandshakeCommitFailureFailsClosed()
+{
+    FakeStore store;
+    store.failHandshakeAccept = true;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy failedSpy(&engine, &SyncEngine::failedClosed);
+    int accepted = 0;
+    int authFailed = 0;
+    connect(&engine, &SyncEngine::handshakeAccepted, &engine,
+            [&](const ConversationId &, const AccountId &) { ++accepted; });
+    connect(&engine, &SyncEngine::handshakeAuthFailed, &engine,
+            [&](const ConversationId &, const AccountId &) { ++authFailed; });
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId claimedDevice = DeviceId::generate();
+    mls.inspectMembers = {credentialBytes(claimedDevice)};
+
+    engine.acceptHandshake(conversation, AccountId::generate(), claimedDevice,
+                           QByteArray("welcome"));
+
+    // Auth passed and the group was joined, but the atomic accept commit failed:
+    // fail closed so the just-joined ratchet is discarded on restart.
+    QCOMPARE(mls.joinGroupCount, 1);
+    QCOMPARE(store.commitHandshakeAcceptCount, 1);
+    QCOMPARE(failedSpy.count(), 1);
+    QVERIFY(engine.isFailedClosed());
+    QCOMPARE(accepted, 0);
+    QCOMPARE(authFailed, 0);
 }
 
 QTEST_MAIN(SyncEngineTest)

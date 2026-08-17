@@ -272,6 +272,13 @@ public:
             return;
         }
 
+        // A contact-handshake Welcome names a group we have not joined; feeding it
+        // to mls.process would fail. Stash it durably instead and never auto-join.
+        if (envelope.messageKind == EnvelopeMessageKind::MlsHandshake) {
+            doHandleHandshake(envelope, serverSequence);
+            return;
+        }
+
         const auto processed = mls.process(envelope.conversationId, envelope.ciphertext);
         if (!processed.hasValue()) {
             // Stale/invalid or unbuffered future epoch: drop without surfacing
@@ -318,6 +325,73 @@ public:
             }
             transport.acknowledge(envelope.envelopeId, serverSequence);
         }
+    }
+
+    void doHandleHandshake(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence)
+    {
+        if (failed)
+            return;
+        // Atomic replay-guard + is-Blocked drop + stash insert + watermark advance.
+        // The ciphertext IS the raw Welcome; nothing is decrypted or joined here.
+        const auto outcome = store.commitHandshakeReceive(
+            envelope.envelopeId, envelope.senderAccountId, envelope.senderDeviceId,
+            envelope.conversationId, /*welcome=*/envelope.ciphertext,
+            /*receivedAtMs=*/envelope.createdAtMs, /*watermark=*/serverSequence);
+        if (!outcome.hasValue()) {
+            // Fail closed: do NOT acknowledge, so the relay redelivers and a later
+            // attempt (or restart) can stash the Welcome durably.
+            failClosed();
+            return;
+        }
+        // Only acknowledge once the stash (or the durable drop/dedup) committed.
+        transport.acknowledge(envelope.envelopeId, serverSequence);
+        // A fresh stash is the only outcome the user must decide on. AlreadySeen and
+        // DroppedBlocked are consumed silently (already acked above).
+        if (outcome.value() == HandshakeReceiveOutcome::Stashed)
+            emit q->handshakeReceived(envelope.senderAccountId, envelope.senderDeviceId,
+                                      envelope.conversationId, envelope.createdAtMs);
+    }
+
+    void doAcceptHandshake(const ConversationId &conversation, const AccountId &senderAccount,
+                           const DeviceId &claimedSenderDevice, const QByteArray &welcome)
+    {
+        if (failed)
+            return;
+        // Authenticate BEFORE joining. inspectWelcome is READ-ONLY (no ratchet
+        // change), so any rejection below leaves NO MLS state to roll back.
+        const auto members = mls.inspectWelcome(welcome);
+        if (!members.hasValue()) {
+            emit q->handshakeAuthFailed(conversation, senderAccount);
+            return;
+        }
+        // A contact handshake is a 2-party group: exactly one other member, whose
+        // MLS-authenticated credential must name the relay-claimed sender device.
+        // credentialNamesDevice is the engine's single source of truth for this
+        // check (reused from the application-message receive path).
+        //
+        // Trust boundary: the MLS credential authenticates the DEVICE only; the
+        // device->account binding is asserted by the authenticated relay directory
+        // that produced this request (the same boundary as the 8a/8b accept paths).
+        if (members.value().size() != 1
+            || !credentialNamesDevice(members.value().front(), claimedSenderDevice)) {
+            emit q->handshakeAuthFailed(conversation, senderAccount); // no MLS mutation happened
+            return;
+        }
+        // Auth passed: join now. joinGroup advances the ratchet and captures the
+        // pending state; a failed join captured no state to discard.
+        if (!mls.joinGroup(conversation, welcome).hasValue()) {
+            emit q->handshakeAuthFailed(conversation, senderAccount);
+            return;
+        }
+        const QByteArray mlsState = mls.takePendingState();
+        // Persist the just-joined ratchet atomically with the PendingIncoming->
+        // Accepted flip and the stash delete. On failure, fail closed so the
+        // in-memory join is discarded on restart rather than left ahead of the store.
+        if (!store.commitHandshakeAccept(senderAccount, conversation, now(), mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        emit q->handshakeAccepted(conversation, senderAccount);
     }
 
     SyncEngine *q;
@@ -392,6 +466,15 @@ void SyncEngine::sendHandshake(const ConversationId &conversation, const DeviceI
 {
     d->coordinator.run(conversation, [this, conversation, recipientDevice, welcome] {
         d->doSendHandshake(conversation, recipientDevice, welcome);
+    });
+}
+
+void SyncEngine::acceptHandshake(const ConversationId &conversation, const AccountId &senderAccount,
+                                 const DeviceId &claimedSenderDevice, const QByteArray &welcome)
+{
+    d->coordinator.run(conversation, [this, conversation, senderAccount, claimedSenderDevice,
+                                      welcome] {
+        d->doAcceptHandshake(conversation, senderAccount, claimedSenderDevice, welcome);
     });
 }
 

@@ -160,6 +160,7 @@ add_library(openchat_app STATIC
     src/app/ProfileSession.cpp
     src/app/AccountBootstrap.cpp
     src/app/AddContactService.cpp
+    src/app/ContactRequestService.cpp
 )
 target_include_directories(openchat_app PUBLIC src)
 target_link_libraries(openchat_app
@@ -323,6 +324,28 @@ target_link_libraries(tst_addcontactservice PRIVATE
 )
 add_test(NAME tst_addcontactservice COMMAND tst_addcontactservice)
 set_tests_properties(tst_addcontactservice PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Real-wiring integration test for the add-contact handshake RECEIVE path: a live
+# ProfileSession (SQLCipher + real MlsClient) plus a second MlsClient standing in
+# for the sender, driving ContactRequestService's accept/decline/block/reconcile
+# through the SyncEngine over a fake ciphertext transport.
+add_executable(tst_contactrequestservice tests/tst_contactrequestservice.cpp)
+target_include_directories(tst_contactrequestservice PRIVATE src tests relay/src)
+target_link_libraries(tst_contactrequestservice PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test
+)
+add_test(NAME tst_contactrequestservice COMMAND tst_contactrequestservice)
+set_tests_properties(tst_contactrequestservice PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_models
     tests/tst_models.cpp

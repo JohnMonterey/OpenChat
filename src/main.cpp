@@ -22,13 +22,16 @@
 #include <optional>
 
 #include "app/AccountBootstrap.h"
+#include "app/AddContactService.h"
 #include "app/AppMetadata.h"
+#include "app/ContactRequestService.h"
 #include "app/ProfileSession.h"
 #include "controllers/ChatController.h"
 #include "controllers/OnboardingController.h"
 #include "domain/Identifiers.h"
 #include "network/RelayClient.h"
 #include "network/RelayTransport.h"
+#include "network/SyncEngine.h"
 #include "render/AvatarArtwork.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
@@ -221,6 +224,7 @@ public:
                 return false;
             }
             m_session = std::move(unlocked).value();
+            enableContactServices();
             loadMainWindow();
             return true;
         }
@@ -256,6 +260,43 @@ private:
         }
         if (auto *window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().constFirst()))
             configureWindow(window);
+    }
+
+    // Brings up the durable SyncEngine over the relay transport for a live unlocked
+    // session, then constructs the long-lived contact services and reconciles any
+    // stashed inbound requests. Builds the relay/transport lazily (the unlock path
+    // has none; the bootstrap path already made them), and is a no-op once the
+    // services exist. The engine tolerates an offline relay: it queues until a link
+    // comes up, so this never blocks or fails startup on connectivity.
+    void enableContactServices()
+    {
+        if (!m_session || m_contactRequests)
+            return;
+        if (!m_relay) {
+            const auto account = m_session->accountId();
+            const auto credential = m_session->publicCredential();
+            if (!account.hasValue() || !credential.hasValue())
+                return;
+            m_relay = std::make_unique<OpenChat::RelayClient>(
+                credential.value().deviceId, account.value(), m_endpoints,
+                OpenChat::RelayCredentials{});
+            if (m_tls)
+                m_relay->setTlsConfiguration(*m_tls);
+        }
+        if (!m_transport)
+            m_transport = std::make_unique<OpenChat::RelayTransport>(*m_relay);
+        if (!m_session->startNetworking(*m_transport).hasValue())
+            return;
+        OpenChat::SyncEngine *engine = m_session->syncEngine();
+        if (engine == nullptr)
+            return;
+        // AddContactService readies the SEND path for the Phase 10 UI; the request
+        // service self-connects to the engine's handshake signals in its ctor.
+        m_addContact =
+            std::make_unique<OpenChat::AddContactService>(*m_session, *m_relay, *engine);
+        m_contactRequests =
+            std::make_unique<OpenChat::ContactRequestService>(*m_session, *engine);
+        m_contactRequests->reconcileOnStartup();
     }
 
     void startOnboarding()
@@ -390,6 +431,7 @@ private:
     // surface on a later event-loop turn (never from inside its own callback).
     void swapToMain()
     {
+        enableContactServices();
         loadMainWindow();
         if (m_onboardingView)
             m_onboardingView->hide();
@@ -412,6 +454,12 @@ private:
     std::unique_ptr<OpenChat::ProfileSession> m_session;
     std::optional<OpenChat::ProfileId> m_pendingProfileId;
     std::unique_ptr<OpenChat::AccountBootstrap> m_bootstrap;
+    // Live-session contact services. Declared AFTER m_session (destroyed before it)
+    // and after m_transport/m_relay (destroyed before those), so they disconnect
+    // from the engine while it, the session, the transport and the relay are all
+    // still alive. Only populated on a live unlocked session (enableContactServices).
+    std::unique_ptr<OpenChat::AddContactService> m_addContact;
+    std::unique_ptr<OpenChat::ContactRequestService> m_contactRequests;
 
     std::unique_ptr<OpenChat::OnboardingController> m_onboardingController;
     std::unique_ptr<OpenChat::ChatController> m_chatController;

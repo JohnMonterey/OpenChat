@@ -162,6 +162,14 @@ public:
     void sendHandshake(const ConversationId &conversation, const DeviceId &recipientDevice,
                        const QByteArray &welcome);
 
+    // Accepts a previously stashed inbound contact-handshake Welcome. Authenticates
+    // the Welcome's sole other member against `claimedSenderDevice` BEFORE any
+    // durable join (inspectWelcome is side-effect-free), then joins the group and
+    // commits the ratchet advance atomically with the PendingIncoming->Accepted
+    // flip and the stash delete. `welcome` is the exact stashed Welcome bytes.
+    void acceptHandshake(const ConversationId &conversation, const AccountId &senderAccount,
+                         const DeviceId &claimedSenderDevice, const QByteArray &welcome);
+
     // Processes an inbound envelope with its relay sequence.
     void handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);
 
@@ -171,6 +179,16 @@ signals:
     void messageStateChanged(const MessageId &messageId, DeliveryState state);
     void messageReceived(const MessageRecord &message);
     void failedClosed();
+    // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
+    void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,
+                           const OpenChat::ConversationId &conversation, qint64 receivedAtMs);
+    // A stashed handshake was authenticated, joined and committed as Accepted.
+    void handshakeAccepted(const OpenChat::ConversationId &conversation,
+                           const OpenChat::AccountId &sender);
+    // A stashed handshake failed authentication (or its join/inspect failed); no
+    // MLS state was mutated. The caller treats this as a decline.
+    void handshakeAuthFailed(const OpenChat::ConversationId &conversation,
+                             const OpenChat::AccountId &sender);
 
 private:
     class Private;

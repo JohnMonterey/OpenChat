@@ -1,4 +1,5 @@
 #include "AuthService.h"
+#include "DirectoryService.h"
 #include "EnvelopeService.h"
 #include "KeyPackageService.h"
 #include "PostgresStore.h"
@@ -132,6 +133,10 @@ private slots:
     void expiredEnvelopeRejectedAtSubmit();
     void acknowledgePrunesDeliveredInbox();
     void revokedDeviceIsRejectedEverywhere();
+    void directoryResolvesHandleToActiveDevices();
+    void directoryExcludesRevokedDevices();
+    void inviteRedeemsOnceAndReturnsInviter();
+    void inviteExpiryRejectsRedemption();
 
 private:
     struct Registered {
@@ -187,7 +192,8 @@ void RelayServicesTest::initTestCase()
 
     const QStringList migrations{QStringLiteral(":/relay/001_accounts_devices.sql"),
                                  QStringLiteral(":/relay/002_tokens_keypackages.sql"),
-                                 QStringLiteral(":/relay/003_inboxes_attachments.sql")};
+                                 QStringLiteral(":/relay/003_inboxes_attachments.sql"),
+                                 QStringLiteral(":/relay/004_invites.sql")};
     QVERIFY2(m_store->applyMigrations(migrations, &error), qPrintable(error));
     m_available = true;
 }
@@ -206,7 +212,7 @@ void RelayServicesTest::init()
     QVERIFY(truncate.exec(QStringLiteral(
         "TRUNCATE accounts, devices, auth_challenges, token_families, refresh_tokens, "
         "access_tokens, key_packages, inbox_messages, device_watermarks, attachments, "
-        "rate_limits RESTART IDENTITY CASCADE")));
+        "rate_limits, invites RESTART IDENTITY CASCADE")));
 }
 
 RelayServicesTest::Registered RelayServicesTest::registerDevice(const QString &handle)
@@ -650,6 +656,92 @@ void RelayServicesTest::revokedDeviceIsRejectedEverywhere()
     QCOMPARE(packages.publish(reg.account, reg.device, QByteArray("kp")).error(),
              RelayError::Revoked);
     QCOMPARE(packages.claim(reg.device, reg.device).error(), RelayError::Revoked);
+}
+
+void RelayServicesTest::directoryResolvesHandleToActiveDevices()
+{
+    const auto dana = registerDevice(QStringLiteral("dana"));
+
+    DirectoryService directory(*m_store);
+    const auto resolved = directory.resolveHandle(QStringLiteral("dana"));
+    QVERIFY(resolved.hasValue());
+    QCOMPARE(resolved.value().accountId, dana.account);
+    QCOMPARE(resolved.value().devices.size(), 1);
+    QCOMPARE(resolved.value().devices.first().deviceId, dana.device);
+    // The published signing key is exactly the device's Ed25519 public key.
+    QCOMPARE(resolved.value().devices.first().signingKey, dana.key.publicKey);
+
+    // Exact match only: an unknown handle discloses nothing.
+    const auto missing = directory.resolveHandle(QStringLiteral("nobody"));
+    QVERIFY(!missing.hasValue());
+    QCOMPARE(missing.error(), RelayError::NotFound);
+
+    // No prefix/substring matching is offered either.
+    const auto prefix = directory.resolveHandle(QStringLiteral("dan"));
+    QVERIFY(!prefix.hasValue());
+    QCOMPARE(prefix.error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::directoryExcludesRevokedDevices()
+{
+    const auto reg = registerDevice(QStringLiteral("edith"));
+    DirectoryService directory(*m_store);
+
+    // Present before revocation.
+    QVERIFY(directory.resolveHandle(QStringLiteral("edith")).hasValue());
+
+    AuthService auth(*m_store);
+    QVERIFY(auth.revokeDevice(reg.device).hasValue());
+
+    // Its only device is revoked, so the handle now resolves to nothing.
+    const auto after = directory.resolveHandle(QStringLiteral("edith"));
+    QVERIFY(!after.hasValue());
+    QCOMPARE(after.error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::inviteRedeemsOnceAndReturnsInviter()
+{
+    const auto inviter = registerDevice(QStringLiteral("fiona"));
+    DirectoryService directory(*m_store);
+
+    const auto created = directory.createInvite(inviter.account);
+    QVERIFY(created.hasValue());
+    QCOMPARE(created.value().size(), 32); // 32-byte plaintext token
+
+    const QByteArray token = created.value();
+    const auto redeemed = directory.redeemInvite(token);
+    QVERIFY(redeemed.hasValue());
+    QCOMPARE(redeemed.value().accountId, inviter.account);
+    QCOMPARE(redeemed.value().devices.size(), 1);
+    QCOMPARE(redeemed.value().devices.first().deviceId, inviter.device);
+    QCOMPARE(redeemed.value().devices.first().signingKey, inviter.key.publicKey);
+
+    // Single-use: a second redemption of the same token is indistinguishable
+    // from an unknown token.
+    const auto again = directory.redeemInvite(token);
+    QVERIFY(!again.hasValue());
+    QCOMPARE(again.error(), RelayError::NotFound);
+
+    // A bogus/unknown token is likewise NotFound (no oracle).
+    const auto bogus = directory.redeemInvite(randomBytes(32));
+    QVERIFY(!bogus.hasValue());
+    QCOMPARE(bogus.error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::inviteExpiryRejectsRedemption()
+{
+    const auto inviter = registerDevice(QStringLiteral("gwen"));
+    DirectoryService directory(*m_store);
+
+    // A short-lived invite that lapses before it is redeemed.
+    const auto created = directory.createInvite(inviter.account, 1'000);
+    QVERIFY(created.hasValue());
+
+    m_now += 2'000; // advance past the 1s TTL
+
+    const auto expired = directory.redeemInvite(created.value());
+    QVERIFY(!expired.hasValue());
+    QCOMPARE(expired.error(), RelayError::NotFound);
 }
 
 QTEST_GUILESS_MAIN(RelayServicesTest)

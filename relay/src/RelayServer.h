@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AuthService.h"
+#include "DirectoryService.h"
 #include "EnvelopeService.h"
 #include "KeyPackageService.h"
 #include "PostgresStore.h"
@@ -34,9 +35,11 @@ public:
     };
 
     RelayServer(PostgresStore &store, AuthService &auth, EnvelopeService &envelopes,
-                KeyPackageService &keyPackages, QObject *parent = nullptr);
+                KeyPackageService &keyPackages, DirectoryService &directory,
+                QObject *parent = nullptr);
     RelayServer(PostgresStore &store, AuthService &auth, EnvelopeService &envelopes,
-                KeyPackageService &keyPackages, Limits limits, QObject *parent);
+                KeyPackageService &keyPackages, DirectoryService &directory, Limits limits,
+                QObject *parent);
     ~RelayServer() override;
 
     // Binds a loopback listener and registers routes. Returns the bound port, or
@@ -53,6 +56,7 @@ private:
     AuthService &m_auth;
     EnvelopeService &m_envelopes;
     KeyPackageService &m_keyPackages;
+    DirectoryService &m_directory;
     Limits m_limits;
 
     QHttpServer m_http;

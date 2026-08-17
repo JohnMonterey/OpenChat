@@ -3,6 +3,7 @@
 #include "domain/Identifiers.h"
 
 #include <QByteArray>
+#include <QList>
 
 namespace OpenChat::Relay {
 
@@ -34,6 +35,20 @@ struct AuthTokens final {
 struct AuthenticatedDevice final {
     AccountId accountId;
     DeviceId deviceId;
+};
+
+// A single active device of an account as surfaced by directory discovery:
+// public routing/verification material only (its id and Ed25519 signing key).
+struct DirectoryDevice final {
+    DeviceId deviceId;
+    QByteArray signingKey;
+};
+
+// The result of resolving a @handle or redeeming an invite: the target account
+// and its currently-active (non-revoked) devices.
+struct AccountDirectoryEntry final {
+    AccountId accountId;
+    QList<DirectoryDevice> devices;
 };
 
 } // namespace OpenChat::Relay

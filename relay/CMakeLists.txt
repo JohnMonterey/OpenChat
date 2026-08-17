@@ -8,6 +8,7 @@ add_library(openchat_relay_core STATIC
     src/AuthService.cpp
     src/KeyPackageService.cpp
     src/EnvelopeService.cpp
+    src/DirectoryService.cpp
 )
 target_include_directories(openchat_relay_core PUBLIC src)
 target_link_libraries(openchat_relay_core
@@ -21,6 +22,7 @@ qt_add_resources(openchat_relay_core "openchat_relay_migrations"
         migrations/001_accounts_devices.sql
         migrations/002_tokens_keypackages.sql
         migrations/003_inboxes_attachments.sql
+        migrations/004_invites.sql
 )
 
 add_library(openchat_relay_server STATIC

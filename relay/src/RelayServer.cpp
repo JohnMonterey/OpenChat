@@ -117,21 +117,42 @@ int cborMajorType(const QByteArray &frame)
     return (static_cast<unsigned char>(frame.at(0)) >> 5) & 0x07;
 }
 
+// Serializes a resolved directory entry to the shared discovery wire shape:
+// { account_id, devices: [ { device_id, signing_key }, ... ] }. Only public
+// routing/verification material is ever emitted.
+QCborValue directoryCbor(const AccountDirectoryEntry &entry)
+{
+    QCborArray devices;
+    for (const DirectoryDevice &device : entry.devices) {
+        QCborMap deviceMap;
+        deviceMap.insert(QLatin1StringView("device_id"), device.deviceId.bytes());
+        deviceMap.insert(QLatin1StringView("signing_key"), device.signingKey);
+        devices.append(deviceMap);
+    }
+    QCborMap response;
+    response.insert(QLatin1StringView("account_id"), entry.accountId.bytes());
+    response.insert(QLatin1StringView("devices"), devices);
+    return response.toCborValue();
+}
+
 } // namespace
 
 RelayServer::RelayServer(PostgresStore &store, AuthService &auth, EnvelopeService &envelopes,
-                         KeyPackageService &keyPackages, QObject *parent)
-    : RelayServer(store, auth, envelopes, keyPackages, Limits{}, parent)
+                         KeyPackageService &keyPackages, DirectoryService &directory,
+                         QObject *parent)
+    : RelayServer(store, auth, envelopes, keyPackages, directory, Limits{}, parent)
 {
 }
 
 RelayServer::RelayServer(PostgresStore &store, AuthService &auth, EnvelopeService &envelopes,
-                         KeyPackageService &keyPackages, Limits limits, QObject *parent)
+                         KeyPackageService &keyPackages, DirectoryService &directory, Limits limits,
+                         QObject *parent)
     : QObject(parent)
     , m_store(store)
     , m_auth(auth)
     , m_envelopes(envelopes)
     , m_keyPackages(keyPackages)
+    , m_directory(directory)
     , m_limits(limits)
 {
 }
@@ -306,6 +327,66 @@ void RelayServer::registerRoutes()
             QCborMap response;
             response.insert(QLatin1StringView("key_package"), claimed.value());
             return cbor(response.toCborValue());
+        });
+
+    // Discovery. All three endpoints require a valid bearer token: authentication
+    // is the primary anti-enumeration control (anonymous lookups are refused), and
+    // resolveHandle is exact-match only, so there is no listing surface to abuse.
+    // Per-account request-rate limiting is enforced upstream at the reverse proxy
+    // and tracked for the hardening phase, matching the auth endpoints' stance.
+    m_http.route(
+        QStringLiteral("/v1/directory"), QHttpServerRequest::Method::Get,
+        [this](const QHttpServerRequest &request) -> QHttpServerResponse {
+            const auto identity = m_auth.authenticate(bearerToken(request));
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const QString handle =
+                QUrlQuery(request.query()).queryItemValue(QStringLiteral("handle"));
+            if (handle.isEmpty())
+                return QHttpServerResponse(StatusCode::BadRequest);
+            const auto resolved = m_directory.resolveHandle(handle);
+            if (!resolved.hasValue())
+                return errorResponse(resolved.error());
+            return cbor(directoryCbor(resolved.value()));
+        });
+
+    m_http.route(
+        QStringLiteral("/v1/invites"), QHttpServerRequest::Method::Post,
+        [this](const QHttpServerRequest &request) -> QHttpServerResponse {
+            const auto identity = m_auth.authenticate(bearerToken(request));
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            // An empty body is allowed; ttl_ms is optional and defaults to policy.
+            const auto map = boundedCborMap(request, m_limits.maxRequestBytes);
+            const qint64 requestedTtl =
+                map ? static_cast<qint64>(map->value(QLatin1StringView("ttl_ms")).toInteger(0)) : 0;
+            const qint64 ttl =
+                requestedTtl > 0 ? requestedTtl : m_directory.defaultInviteTtlMs();
+            const auto token = m_directory.createInvite(identity->accountId, ttl);
+            if (!token.hasValue())
+                return errorResponse(token.error());
+            QCborMap response;
+            response.insert(QLatin1StringView("token"), token.value());
+            // Advisory expiry for the client; the stored expires_at_ms is what
+            // redemption enforces. Same event-loop tick as the insert.
+            response.insert(QLatin1StringView("expires_at_ms"), m_store.nowMs() + ttl);
+            return cbor(response.toCborValue());
+        });
+
+    m_http.route(
+        QStringLiteral("/v1/invites/redeem"), QHttpServerRequest::Method::Post,
+        [this](const QHttpServerRequest &request) -> QHttpServerResponse {
+            const auto identity = m_auth.authenticate(bearerToken(request));
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const auto map = boundedCborMap(request, m_limits.maxRequestBytes);
+            if (!map)
+                return QHttpServerResponse(StatusCode::BadRequest);
+            const QByteArray token = map->value(QLatin1StringView("token")).toByteArray();
+            const auto redeemed = m_directory.redeemInvite(token);
+            if (!redeemed.hasValue())
+                return errorResponse(redeemed.error());
+            return cbor(directoryCbor(redeemed.value()));
         });
 
     m_http.setMissingHandler(this, [](const QHttpServerRequest &, QHttpServerResponder &responder) {

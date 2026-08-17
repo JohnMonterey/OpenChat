@@ -1,4 +1,5 @@
 #include "AuthService.h"
+#include "DirectoryService.h"
 #include "EnvelopeService.h"
 #include "KeyPackageService.h"
 #include "PostgresStore.h"
@@ -50,7 +51,8 @@ int main(int argc, char **argv)
 
     const QStringList migrations{QStringLiteral(":/relay/001_accounts_devices.sql"),
                                  QStringLiteral(":/relay/002_tokens_keypackages.sql"),
-                                 QStringLiteral(":/relay/003_inboxes_attachments.sql")};
+                                 QStringLiteral(":/relay/003_inboxes_attachments.sql"),
+                                 QStringLiteral(":/relay/004_invites.sql")};
     if (!store->applyMigrations(migrations, &error)) {
         qCritical("migration failed");
         return 4;
@@ -59,7 +61,8 @@ int main(int argc, char **argv)
     AuthService auth(*store);
     EnvelopeService envelopes(*store);
     KeyPackageService keyPackages(*store);
-    RelayServer server(*store, auth, envelopes, keyPackages);
+    DirectoryService directory(*store);
+    RelayServer server(*store, auth, envelopes, keyPackages, directory);
 
     const QString bindAddress =
         qEnvironmentVariable("OPENCHAT_RELAY_BIND", QStringLiteral("127.0.0.1"));

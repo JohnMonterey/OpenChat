@@ -126,6 +126,7 @@ add_library(openchat_security STATIC
 add_library(openchat_storage STATIC
     src/storage/SqlCipherDatabase.cpp
     src/storage/SqlCipherChatRepository.cpp
+    src/storage/SqlCipherContactRepository.cpp
     src/storage/SqlCipherOutboxRepository.cpp
     src/storage/SqlCipherSyncRepository.cpp
     src/storage/SqlCipherSyncStore.cpp
@@ -146,6 +147,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/004_profile_identity.sql
         src/storage/migrations/005_outbox_control.sql
         src/storage/migrations/006_account_identity.sql
+        src/storage/migrations/007_contacts.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -186,6 +188,11 @@ add_executable(tst_syncstore tests/tst_syncstore.cpp)
 target_include_directories(tst_syncstore PRIVATE src)
 target_link_libraries(tst_syncstore PRIVATE openchat_storage Qt6::Core Qt6::Test)
 add_test(NAME tst_syncstore COMMAND tst_syncstore)
+
+add_executable(tst_contactrepository tests/tst_contactrepository.cpp)
+target_include_directories(tst_contactrepository PRIVATE src)
+target_link_libraries(tst_contactrepository PRIVATE openchat_storage Qt6::Core Qt6::Test)
+add_test(NAME tst_contactrepository COMMAND tst_contactrepository)
 
 add_executable(tst_envelopecodec tests/tst_envelopecodec.cpp)
 target_include_directories(tst_envelopecodec PRIVATE src)

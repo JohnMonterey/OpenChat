@@ -52,6 +52,17 @@ public:
         return Result<SyncProcessOutcome, MlsError>::success(outcome);
     }
 
+    Result<QList<QByteArray>, MlsError> inspectWelcome(QByteArrayView) override
+    {
+        return Result<QList<QByteArray>, MlsError>::success({});
+    }
+
+    Result<void, MlsError> joinGroup(const ConversationId &, QByteArrayView) override
+    {
+        ++stateVersion;
+        return Result<void, MlsError>::success();
+    }
+
     QByteArray takePendingState() override
     {
         return QByteArray("state-") + QByteArray::number(stateVersion);
@@ -122,6 +133,20 @@ public:
         lastMlsState = mlsState.toByteArray();
         watermarkValue = std::max(watermarkValue, watermark);
         return Result<bool, RepositoryError>::success(true);
+    }
+
+    Result<HandshakeReceiveOutcome, RepositoryError>
+    commitHandshakeReceive(const EnvelopeId &, const AccountId &, const DeviceId &,
+                           const ConversationId &, QByteArrayView, qint64, quint64) override
+    {
+        return Result<HandshakeReceiveOutcome, RepositoryError>::success(
+            HandshakeReceiveOutcome::Stashed);
+    }
+
+    Result<void, RepositoryError> commitHandshakeAccept(const AccountId &, const ConversationId &,
+                                                        qint64, QByteArrayView) override
+    {
+        return ok();
     }
 
     Result<bool, RepositoryError> hasSeen(const EnvelopeId &envelopeId) override

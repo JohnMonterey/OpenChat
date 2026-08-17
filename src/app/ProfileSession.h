@@ -96,6 +96,9 @@ public:
   [[nodiscard]] SqlCipherContactRepository *contacts() const noexcept;
   [[nodiscard]] SqlCipherOutboxRepository *outbox() const noexcept;
   [[nodiscard]] SqlCipherSyncRepository *sync() const noexcept;
+  // The durable SyncStore as its concrete type, so callers can reach the
+  // non-virtual pending-handshake reads/deletes as well as the SyncStore surface.
+  [[nodiscard]] SqlCipherSyncStore *syncStore() const noexcept;
   [[nodiscard]] MlsClient *mls() const noexcept;
 
   // Constructs and starts the durable SyncEngine over an injected ciphertext

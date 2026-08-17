@@ -42,8 +42,22 @@ public:
     encrypt(const ConversationId &conversation, QByteArrayView plaintext) = 0;
     [[nodiscard]] virtual Result<SyncProcessOutcome, MlsError>
     process(const ConversationId &conversation, QByteArrayView mlsMessage) = 0;
+    // Read-only inspection of a Welcome's other members (no ratchet change), used
+    // to authenticate the claimed sender before any durable join.
+    [[nodiscard]] virtual Result<QList<QByteArray>, MlsError>
+    inspectWelcome(QByteArrayView welcome) = 0;
+    // Joins the group named by the Welcome, advancing the ratchet. Like
+    // encrypt/process, the resulting state is captured for the caller to surrender
+    // via takePendingState() and commit atomically; this call does not take it.
+    [[nodiscard]] virtual Result<void, MlsError>
+    joinGroup(const ConversationId &conversation, QByteArrayView welcome) = 0;
     [[nodiscard]] virtual QByteArray takePendingState() = 0;
 };
+
+// Outcome of stashing an inbound contact-handshake Welcome: newly stashed, an
+// idempotent redelivery of an already-seen envelope, or dropped because the
+// sender is blocked (the envelope is still consumed).
+enum class HandshakeReceiveOutcome { Stashed, AlreadySeen, DroppedBlocked };
 
 // Durable persistence with the atomic combinations the engine requires. Each
 // commit* persists the new MLS state blob in the SAME transaction as the message
@@ -67,6 +81,18 @@ public:
     [[nodiscard]] virtual Result<bool, RepositoryError>
     commitControlReceive(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
                          quint64 watermark, QByteArrayView mlsState) = 0;
+
+    // Atomic: replay-guard (idempotency) + minimal is-Blocked guard + stash insert
+    // + watermark advance. Writes NO mls state (receive never joins).
+    [[nodiscard]] virtual Result<HandshakeReceiveOutcome, RepositoryError>
+    commitHandshakeReceive(const EnvelopeId &envelopeId, const AccountId &senderAccountId,
+                           const DeviceId &senderDeviceId, const ConversationId &conversationId,
+                           QByteArrayView welcome, qint64 receivedAtMs, quint64 watermark) = 0;
+
+    // Atomic: upsert mls state + PendingIncoming->Accepted (guarded) + delete stash.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    commitHandshakeAccept(const AccountId &accountId, const ConversationId &conversationId,
+                          qint64 updatedAtMs, QByteArrayView mlsState) = 0;
 
     [[nodiscard]] virtual Result<bool, RepositoryError> hasSeen(const EnvelopeId &envelopeId) = 0;
     [[nodiscard]] virtual Result<QVector<OutboxRecord>, RepositoryError>

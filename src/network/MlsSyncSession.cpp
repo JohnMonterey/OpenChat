@@ -46,6 +46,20 @@ Result<SyncProcessOutcome, MlsError> MlsSyncSession::process(const ConversationI
     return Result<SyncProcessOutcome, MlsError>::success(std::move(outcome));
 }
 
+Result<QList<QByteArray>, MlsError> MlsSyncSession::inspectWelcome(QByteArrayView welcome)
+{
+    return m_mls.inspectWelcome(welcome);
+}
+
+Result<void, MlsError> MlsSyncSession::joinGroup(const ConversationId &conversation,
+                                                 QByteArrayView welcome)
+{
+    // Advances the ratchet; the new state is captured by the state store exactly
+    // like encrypt/process. Leaving it in the capturing store lets the engine
+    // surrender it via takePendingState() and commit it atomically.
+    return m_mls.joinGroup(conversation, welcome);
+}
+
 QByteArray MlsSyncSession::takePendingState()
 {
     return m_stateStore.takePendingState();

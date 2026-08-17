@@ -1,5 +1,6 @@
 #include "storage/CapturingMlsStateStore.h"
 #include "storage/SqlCipherChatRepository.h"
+#include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherDatabase.h"
 #include "storage/SqlCipherSyncRepository.h"
 #include "storage/SqlCipherSyncStore.h"
@@ -66,6 +67,13 @@ OutboxRecord outbox(const EnvelopeId &envelopeId, const MessageId &messageId,
                         dueAtMs,     0,         OutboxState::Pending};
 }
 
+ContactRecord incomingContact(const AccountId &accountId, qint64 nowMs = 1'000)
+{
+    return ContactRecord{accountId,      QStringLiteral("peer"), QStringLiteral("Peer"),
+                         ContactState::PendingIncoming, std::nullopt, nowMs,
+                         nowMs};
+}
+
 } // namespace
 
 class SyncStoreTest final : public QObject
@@ -85,6 +93,12 @@ private slots:
     void deliveryStateIsMonotonic();
     void capturingStoreCapturesWithoutWritingAndSurrendersOnce();
     void commitMlsStatePersistsAloneAndUpdatesFromCapture();
+    void commitHandshakeReceiveStashesAndAdvancesWatermark();
+    void commitHandshakeReceiveIsIdempotentOnRedelivery();
+    void commitHandshakeReceiveDropsBlockedSenderButConsumesEnvelope();
+    void commitHandshakeAcceptPromotesContactAndDeletesStash();
+    void commitHandshakeAcceptRollsBackWhenNotPendingIncoming();
+    void deletePendingHandshakeRemovesRowAndListIsOrdered();
 };
 
 void SyncStoreTest::atomicSendPersistsMessageOutboxAndMlsState()
@@ -480,6 +494,281 @@ void SyncStoreTest::commitMlsStatePersistsAloneAndUpdatesFromCapture()
     QVERIFY(store.commitMlsState(capture.takePendingState()).hasValue());
     QVERIFY(!capture.hasPendingState());
     QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("kp-state-2"));
+}
+
+void SyncStoreTest::commitHandshakeReceiveStashesAndAdvancesWatermark()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherSyncRepository sync(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto envelopeId = EnvelopeId::generate();
+    const auto senderAccountId = AccountId::generate();
+    const auto senderDeviceId = DeviceId::generate();
+    const auto conversationId = ConversationId::generate();
+    const QByteArray welcome("mls-welcome-bytes");
+
+    auto stashed = store.commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId,
+                                                conversationId, welcome, 2'500, 17);
+    QVERIFY(stashed.hasValue());
+    QCOMPARE(stashed.value(), HandshakeReceiveOutcome::Stashed);
+
+    // Queryable by conversation id, with every field round-tripped.
+    auto loaded = store.loadPendingHandshake(conversationId);
+    QVERIFY(loaded.hasValue());
+    QVERIFY(loaded.value().has_value());
+    const PendingHandshakeRecord &record = *loaded.value();
+    QCOMPARE(record.conversationId, conversationId);
+    QCOMPARE(record.senderAccountId, senderAccountId);
+    QCOMPARE(record.senderDeviceId, senderDeviceId);
+    QCOMPARE(record.envelopeId, envelopeId);
+    QCOMPARE(record.welcome, welcome);
+    QCOMPARE(record.receivedAtMs, qint64(2'500));
+
+    auto all = store.pendingHandshakes();
+    QVERIFY(all.hasValue());
+    QCOMPARE(all.value().size(), 1);
+
+    // The envelope was consumed: the sender device cursor advanced to the watermark.
+    QVERIFY(store.hasSeen(envelopeId).value());
+    QCOMPARE(sync.cursor(senderDeviceId).value().serverWatermark, quint64(17));
+
+    // Receive never joins, so no MLS state is written.
+    QVERIFY(database.loadMlsState(profileId).value().isEmpty());
+}
+
+void SyncStoreTest::commitHandshakeReceiveIsIdempotentOnRedelivery()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto envelopeId = EnvelopeId::generate();
+    const auto senderAccountId = AccountId::generate();
+    const auto senderDeviceId = DeviceId::generate();
+    const auto conversationId = ConversationId::generate();
+    const QByteArray welcome("welcome-1");
+
+    auto first = store.commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId,
+                                              conversationId, welcome, 1'000, 3);
+    QVERIFY(first.hasValue());
+    QCOMPARE(first.value(), HandshakeReceiveOutcome::Stashed);
+
+    // A redelivery of the SAME envelope is a no-op: already-seen, no duplicate stash.
+    auto second = store.commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId,
+                                               conversationId, welcome, 1'000, 3);
+    QVERIFY(second.hasValue());
+    QCOMPARE(second.value(), HandshakeReceiveOutcome::AlreadySeen);
+
+    QCOMPARE(store.pendingHandshakes().value().size(), 1);
+}
+
+void SyncStoreTest::commitHandshakeReceiveDropsBlockedSenderButConsumesEnvelope()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherContactRepository contacts(database);
+    SqlCipherSyncRepository sync(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto envelopeId = EnvelopeId::generate();
+    const auto senderAccountId = AccountId::generate();
+    const auto senderDeviceId = DeviceId::generate();
+    const auto conversationId = ConversationId::generate();
+
+    // Pre-block the sender in the roster.
+    QVERIFY(contacts.block(senderAccountId, 500).hasValue());
+
+    auto dropped = store.commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId,
+                                                conversationId, QByteArray("welcome"), 2'000, 9);
+    QVERIFY(dropped.hasValue());
+    QCOMPARE(dropped.value(), HandshakeReceiveOutcome::DroppedBlocked);
+
+    // No stash was left by a blocked peer.
+    QVERIFY(!store.loadPendingHandshake(conversationId).value().has_value());
+    QVERIFY(store.pendingHandshakes().value().isEmpty());
+
+    // The envelope is still consumed so the relay stops redelivering it.
+    QVERIFY(store.hasSeen(envelopeId).value());
+    QCOMPARE(sync.cursor(senderDeviceId).value().serverWatermark, quint64(9));
+}
+
+void SyncStoreTest::commitHandshakeAcceptPromotesContactAndDeletesStash()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherContactRepository contacts(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto envelopeId = EnvelopeId::generate();
+    const auto senderAccountId = AccountId::generate();
+    const auto senderDeviceId = DeviceId::generate();
+    const auto conversationId = ConversationId::generate();
+
+    // A PendingIncoming contact and a stashed Welcome for its group.
+    QVERIFY(contacts.recordIncomingRequest(incomingContact(senderAccountId)).hasValue());
+    QVERIFY(store
+                .commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId, conversationId,
+                                        QByteArray("welcome"), 2'000, 4)
+                .hasValue());
+
+    const QByteArray joinedState("joined-mls-state");
+    auto accepted = store.commitHandshakeAccept(senderAccountId, conversationId, 5'000, joinedState);
+    QVERIFY(accepted.hasValue());
+
+    // All three effects landed atomically: contact flipped to Accepted with the
+    // conversation id, MLS state persisted, stash gone.
+    auto contact = contacts.find(senderAccountId);
+    QVERIFY(contact.hasValue());
+    QVERIFY(contact.value().has_value());
+    QCOMPARE(contact.value()->state, ContactState::Accepted);
+    QVERIFY(contact.value()->conversationId.has_value());
+    QCOMPARE(*contact.value()->conversationId, conversationId);
+    QCOMPARE(database.loadMlsState(profileId).value(), joinedState);
+    QVERIFY(!store.loadPendingHandshake(conversationId).value().has_value());
+}
+
+void SyncStoreTest::commitHandshakeAcceptRollsBackWhenNotPendingIncoming()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherContactRepository contacts(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    // A durably-committed baseline MLS state that a failed accept must never touch.
+    const QByteArray baseline("baseline-state");
+    QVERIFY(store.commitMlsState(baseline).hasValue());
+
+    // Absent contact: no row matches, Conflict, and nothing is written.
+    {
+        const auto conversationId = ConversationId::generate();
+        auto result = store.commitHandshakeAccept(AccountId::generate(), conversationId, 5'000,
+                                                  QByteArray("nope"));
+        QVERIFY(!result.hasValue());
+        QCOMPARE(result.error().code, RepositoryErrorCode::Conflict);
+        QCOMPARE(database.loadMlsState(profileId).value(), baseline);
+    }
+
+    // Blocked contact: a stash exists but the peer was blocked mid-flight. Accept
+    // rolls back wholesale -- MLS state unchanged AND the stash left intact.
+    {
+        const auto envelopeId = EnvelopeId::generate();
+        const auto senderAccountId = AccountId::generate();
+        const auto senderDeviceId = DeviceId::generate();
+        const auto conversationId = ConversationId::generate();
+        QVERIFY(store
+                    .commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId,
+                                            conversationId, QByteArray("welcome"), 2'000, 6)
+                    .hasValue());
+        QVERIFY(contacts.block(senderAccountId, 3'000).hasValue());
+
+        auto result = store.commitHandshakeAccept(senderAccountId, conversationId, 5'000,
+                                                  QByteArray("nope"));
+        QVERIFY(!result.hasValue());
+        QCOMPARE(result.error().code, RepositoryErrorCode::Conflict);
+        QCOMPARE(database.loadMlsState(profileId).value(), baseline);
+        QVERIFY(store.loadPendingHandshake(conversationId).value().has_value());
+    }
+
+    // Already-accepted contact: a second accept is a no-op transition, Conflict.
+    {
+        const auto envelopeId = EnvelopeId::generate();
+        const auto senderAccountId = AccountId::generate();
+        const auto senderDeviceId = DeviceId::generate();
+        const auto conversationId = ConversationId::generate();
+        QVERIFY(contacts.recordIncomingRequest(incomingContact(senderAccountId)).hasValue());
+        QVERIFY(contacts.markAccepted(senderAccountId, ConversationId::generate(), 4'000).hasValue());
+        QVERIFY(store
+                    .commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId,
+                                            conversationId, QByteArray("welcome"), 2'000, 8)
+                    .hasValue());
+
+        auto result = store.commitHandshakeAccept(senderAccountId, conversationId, 5'000,
+                                                  QByteArray("nope"));
+        QVERIFY(!result.hasValue());
+        QCOMPARE(result.error().code, RepositoryErrorCode::Conflict);
+        QCOMPARE(database.loadMlsState(profileId).value(), baseline);
+        QVERIFY(store.loadPendingHandshake(conversationId).value().has_value());
+    }
+}
+
+void SyncStoreTest::deletePendingHandshakeRemovesRowAndListIsOrdered()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto senderAccountId = AccountId::generate();
+    const auto first = ConversationId::generate();
+    const auto middle = ConversationId::generate();
+    const auto last = ConversationId::generate();
+
+    // Insert out of chronological order to prove the ORDER BY received_at_ms ASC.
+    QVERIFY(store
+                .commitHandshakeReceive(EnvelopeId::generate(), senderAccountId, DeviceId::generate(),
+                                        last, QByteArray("w-last"), 3'000, 3)
+                .hasValue());
+    QVERIFY(store
+                .commitHandshakeReceive(EnvelopeId::generate(), senderAccountId, DeviceId::generate(),
+                                        first, QByteArray("w-first"), 1'000, 4)
+                .hasValue());
+    QVERIFY(store
+                .commitHandshakeReceive(EnvelopeId::generate(), senderAccountId, DeviceId::generate(),
+                                        middle, QByteArray("w-middle"), 2'000, 5)
+                .hasValue());
+
+    auto ordered = store.pendingHandshakes();
+    QVERIFY(ordered.hasValue());
+    QCOMPARE(ordered.value().size(), 3);
+    QCOMPARE(ordered.value().at(0).conversationId, first);
+    QCOMPARE(ordered.value().at(1).conversationId, middle);
+    QCOMPARE(ordered.value().at(2).conversationId, last);
+
+    // Deleting one row removes exactly it.
+    QVERIFY(store.deletePendingHandshake(middle).hasValue());
+    QVERIFY(!store.loadPendingHandshake(middle).value().has_value());
+    QCOMPARE(store.pendingHandshakes().value().size(), 2);
+
+    // Deleting an absent conversation is an idempotent no-op success.
+    QVERIFY(store.deletePendingHandshake(middle).hasValue());
+    QCOMPARE(store.pendingHandshakes().value().size(), 2);
 }
 
 QTEST_GUILESS_MAIN(SyncStoreTest)

@@ -394,6 +394,10 @@ SqlCipherSyncRepository *ProfileSession::sync() const noexcept {
   return m_sync.get();
 }
 
+SqlCipherSyncStore *ProfileSession::syncStore() const noexcept {
+  return m_syncStore.get();
+}
+
 MlsClient *ProfileSession::mls() const noexcept { return m_mls.get(); }
 
 Result<void, ProfileSessionError>

@@ -32,6 +32,10 @@ public:
     encrypt(const ConversationId &conversation, QByteArrayView plaintext) override;
     [[nodiscard]] Result<SyncProcessOutcome, MlsError>
     process(const ConversationId &conversation, QByteArrayView mlsMessage) override;
+    [[nodiscard]] Result<QList<QByteArray>, MlsError>
+    inspectWelcome(QByteArrayView welcome) override;
+    [[nodiscard]] Result<void, MlsError>
+    joinGroup(const ConversationId &conversation, QByteArrayView welcome) override;
     [[nodiscard]] QByteArray takePendingState() override;
 
 private:

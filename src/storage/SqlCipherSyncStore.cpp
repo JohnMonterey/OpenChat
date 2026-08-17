@@ -167,6 +167,73 @@ bool advanceCursor(sqlite3 *database, const DeviceId &deviceId, quint64 watermar
            && statement.bindInt64(3, updatedAtMs) && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
+// Contact state integers, mirrored from SqlCipherContactRepository's encoding.
+constexpr int pendingIncomingContactState = 1;
+constexpr int acceptedContactState = 2;
+constexpr int blockedContactState = 3;
+
+// Snapshot of a contact's state read under the current locked connection. found
+// is false for an unknown peer; queryOk is false only on a real query failure.
+struct ContactStateRead final {
+    bool queryOk = false;
+    bool found = false;
+    int state = 0;
+};
+
+// Reads a single contact's state int for the atomic is-Blocked guard. Reuses the
+// same column and encoding as SqlCipherContactRepository::readContactState.
+ContactStateRead readContactState(sqlite3 *database, const AccountId &accountId)
+{
+    Statement statement(database, "SELECT state FROM contacts WHERE account_id=?1");
+    if (!statement.isValid() || !statement.bindBlob(1, accountId.bytes()))
+        return ContactStateRead{false, false, 0};
+    const int step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE)
+        return ContactStateRead{true, false, 0};
+    if (step != SQLITE_ROW)
+        return ContactStateRead{false, false, 0};
+    return ContactStateRead{true, true, sqlite3_column_int(statement.get(), 0)};
+}
+
+// Stash insert. ON CONFLICT(conversation_id) DO NOTHING keeps a redelivered
+// Welcome for a group already stashed from erroring; the envelope-level replay
+// guard is the primary idempotency mechanism, this is a belt-and-braces on the
+// sender-chosen group key.
+bool insertPendingHandshake(sqlite3 *database, const ConversationId &conversationId,
+                            const AccountId &senderAccountId, const DeviceId &senderDeviceId,
+                            const EnvelopeId &envelopeId, QByteArrayView welcome,
+                            qint64 receivedAtMs)
+{
+    Statement statement(database,
+                        "INSERT INTO pending_handshakes(conversation_id, sender_account_id, "
+                        "sender_device_id, envelope_id, welcome, received_at_ms) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6) "
+                        "ON CONFLICT(conversation_id) DO NOTHING");
+    return statement.isValid() && statement.bindBlob(1, conversationId.bytes())
+           && statement.bindBlob(2, senderAccountId.bytes())
+           && statement.bindBlob(3, senderDeviceId.bytes())
+           && statement.bindBlob(4, envelopeId.bytes()) && statement.bindBlob(5, welcome)
+           && statement.bindInt64(6, receivedAtMs) && sqlite3_step(statement.get()) == SQLITE_DONE;
+}
+
+// Defensive decode of a stash row: any bad-length id blob is an integrity fault,
+// in the same style as SqlCipherContactRepository::decodeContact.
+std::optional<PendingHandshakeRecord> decodePendingHandshake(sqlite3_stmt *statement)
+{
+    const auto conversationId = ConversationId::fromBytes(RepositorySql::blob(statement, 0));
+    const auto senderAccountId = AccountId::fromBytes(RepositorySql::blob(statement, 1));
+    const auto senderDeviceId = DeviceId::fromBytes(RepositorySql::blob(statement, 2));
+    const auto envelopeId = EnvelopeId::fromBytes(RepositorySql::blob(statement, 3));
+    if (!conversationId || !senderAccountId || !senderDeviceId || !envelopeId)
+        return std::nullopt;
+    return PendingHandshakeRecord{*conversationId,
+                                  *senderAccountId,
+                                  *senderDeviceId,
+                                  *envelopeId,
+                                  RepositorySql::blob(statement, 4),
+                                  sqlite3_column_int64(statement, 5)};
+}
+
 std::optional<OutboxRecord> decodeOutbox(sqlite3_stmt *statement)
 {
     const auto envelopeId = EnvelopeId::fromBytes(RepositorySql::blob(statement, 0));
@@ -409,6 +476,213 @@ SqlCipherSyncStore::commitControlReceive(const EnvelopeId &envelopeId,
             return Result<bool, RepositoryError>::failure(e);
         }
         return Result<bool, RepositoryError>::success(true);
+    });
+}
+
+Result<HandshakeReceiveOutcome, RepositoryError>
+SqlCipherSyncStore::commitHandshakeReceive(const EnvelopeId &envelopeId,
+                                           const AccountId &senderAccountId,
+                                           const DeviceId &senderDeviceId,
+                                           const ConversationId &conversationId,
+                                           QByteArrayView welcome, qint64 receivedAtMs,
+                                           quint64 watermark)
+{
+    using Ret = Result<HandshakeReceiveOutcome, RepositoryError>;
+    if (welcome.isEmpty() || welcome.size() > maximumMlsStateSize || !fitsSqlInteger(watermark))
+        return Ret::failure(error(RepositoryErrorCode::InvalidInput,
+                                  QStringLiteral("commitHandshakeReceive.invalid")));
+
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Ret::failure(internalError(QStringLiteral("commitHandshakeReceive.begin")));
+
+        if (!insertReplay(database, envelopeId, receivedAtMs, senderDeviceId)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitHandshakeReceive.replay"));
+            rollback(database);
+            return Ret::failure(e);
+        }
+        // Idempotent redelivery: the envelope was already consumed. No duplicate
+        // stash and no watermark regression -- everything is left as the first
+        // delivery committed it.
+        if (sqlite3_changes(database) == 0) {
+            if (!commit(database)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                        QStringLiteral("commitHandshakeReceive.idempotent.commit"));
+                rollback(database);
+                return Ret::failure(e);
+            }
+            return Ret::success(HandshakeReceiveOutcome::AlreadySeen);
+        }
+
+        const auto existing = readContactState(database, senderAccountId);
+        if (!existing.queryOk) {
+            rollback(database);
+            return Ret::failure(internalError(QStringLiteral("commitHandshakeReceive.contact")));
+        }
+        // A blocked peer can never even leave a stash. The envelope is still
+        // consumed (cursor advanced) so the relay stops redelivering it. This is a
+        // single durable state read, not the roster state machine: the full
+        // no-regress/no-resurrect policy stays in ContactRepository.
+        if (existing.found && existing.state == blockedContactState) {
+            if (!advanceCursor(database, senderDeviceId, watermark, receivedAtMs)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                        QStringLiteral("commitHandshakeReceive.blocked.cursor"));
+                rollback(database);
+                return Ret::failure(e);
+            }
+            if (!commit(database)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                        QStringLiteral("commitHandshakeReceive.blocked.commit"));
+                rollback(database);
+                return Ret::failure(e);
+            }
+            return Ret::success(HandshakeReceiveOutcome::DroppedBlocked);
+        }
+
+        if (!insertPendingHandshake(database, conversationId, senderAccountId, senderDeviceId,
+                                    envelopeId, welcome, receivedAtMs)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitHandshakeReceive.stash"));
+            rollback(database);
+            return Ret::failure(e);
+        }
+        if (!advanceCursor(database, senderDeviceId, watermark, receivedAtMs)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitHandshakeReceive.cursor"));
+            rollback(database);
+            return Ret::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitHandshakeReceive.commit"));
+            rollback(database);
+            return Ret::failure(e);
+        }
+        return Ret::success(HandshakeReceiveOutcome::Stashed);
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherSyncStore::commitHandshakeAccept(const AccountId &accountId,
+                                          const ConversationId &conversationId, qint64 updatedAtMs,
+                                          QByteArrayView mlsState)
+{
+    if (mlsState.isEmpty() || mlsState.size() > maximumMlsStateSize)
+        return Result<void, RepositoryError>::failure(
+            error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitHandshakeAccept.invalid")));
+
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("commitHandshakeAccept.begin")));
+
+        if (!upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitHandshakeAccept.mls"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+
+        Statement update(database,
+                         "UPDATE contacts SET state=?2, conversation_id=?3, updated_at_ms=?4 "
+                         "WHERE account_id=?1 AND state=?5");
+        if (!update.isValid() || !update.bindBlob(1, accountId.bytes())
+            || !update.bindInt(2, acceptedContactState) || !update.bindBlob(3, conversationId.bytes())
+            || !update.bindInt64(4, updatedAtMs) || !update.bindInt(5, pendingIncomingContactState)
+            || sqlite3_step(update.get()) != SQLITE_DONE) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitHandshakeAccept.update"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        // Only a still-PendingIncoming contact may be accepted. A blocked, already
+        // accepted, or absent contact matches no row: roll the WHOLE transaction
+        // back so the MLS state is NOT persisted and the stash is left intact -- a
+        // mid-flight block can never half-accept.
+        if (sqlite3_changes(database) == 0) {
+            rollback(database);
+            return Result<void, RepositoryError>::failure(
+                error(RepositoryErrorCode::Conflict, QStringLiteral("accept.not-pending")));
+        }
+
+        Statement remove(database, "DELETE FROM pending_handshakes WHERE conversation_id=?1");
+        if (!remove.isValid() || !remove.bindBlob(1, conversationId.bytes())
+            || sqlite3_step(remove.get()) != SQLITE_DONE) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitHandshakeAccept.delete"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitHandshakeAccept.commit"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<std::optional<PendingHandshakeRecord>, RepositoryError>
+SqlCipherSyncStore::loadPendingHandshake(const ConversationId &conversationId)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        using Ret = Result<std::optional<PendingHandshakeRecord>, RepositoryError>;
+        Statement statement(database,
+                            "SELECT conversation_id, sender_account_id, sender_device_id, "
+                            "envelope_id, welcome, received_at_ms FROM pending_handshakes "
+                            "WHERE conversation_id=?1");
+        if (!statement.isValid() || !statement.bindBlob(1, conversationId.bytes()))
+            return Ret::failure(internalError(QStringLiteral("handshake.load.prepare")));
+        const int step = sqlite3_step(statement.get());
+        if (step == SQLITE_DONE)
+            return Ret::success(std::optional<PendingHandshakeRecord>{});
+        if (step != SQLITE_ROW)
+            return Ret::failure(internalError(QStringLiteral("handshake.load.read")));
+        auto decoded = decodePendingHandshake(statement.get());
+        if (!decoded)
+            return Ret::failure(error(RepositoryErrorCode::IntegrityFailure,
+                                      QStringLiteral("handshake.load.decode")));
+        return Ret::success(std::optional<PendingHandshakeRecord>(std::move(*decoded)));
+    });
+}
+
+Result<QVector<PendingHandshakeRecord>, RepositoryError> SqlCipherSyncStore::pendingHandshakes()
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        using Ret = Result<QVector<PendingHandshakeRecord>, RepositoryError>;
+        Statement statement(database,
+                            "SELECT conversation_id, sender_account_id, sender_device_id, "
+                            "envelope_id, welcome, received_at_ms FROM pending_handshakes "
+                            "ORDER BY received_at_ms ASC, conversation_id ASC");
+        if (!statement.isValid())
+            return Ret::failure(internalError(QStringLiteral("handshake.list.prepare")));
+        QVector<PendingHandshakeRecord> records;
+        int step = SQLITE_ROW;
+        while ((step = sqlite3_step(statement.get())) == SQLITE_ROW) {
+            auto decoded = decodePendingHandshake(statement.get());
+            if (!decoded)
+                return Ret::failure(error(RepositoryErrorCode::IntegrityFailure,
+                                          QStringLiteral("handshake.list.decode")));
+            records.push_back(std::move(*decoded));
+        }
+        if (step != SQLITE_DONE)
+            return Ret::failure(internalError(QStringLiteral("handshake.list.read")));
+        return Ret::success(std::move(records));
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherSyncStore::deletePendingHandshake(const ConversationId &conversationId)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database, "DELETE FROM pending_handshakes WHERE conversation_id=?1");
+        if (!statement.isValid() || !statement.bindBlob(1, conversationId.bytes())
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("handshake.delete")));
+        return Result<void, RepositoryError>::success();
     });
 }
 

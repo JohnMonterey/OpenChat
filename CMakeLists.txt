@@ -127,6 +127,7 @@ add_library(openchat_security STATIC
     src/security/QtKeychainVault.cpp
     src/security/DeviceIdentity.cpp
     src/security/RecoveryCode.cpp
+    src/security/SafetyNumber.cpp
 )
 
 add_library(openchat_storage STATIC
@@ -182,6 +183,11 @@ add_executable(tst_keyvault tests/tst_keyvault.cpp)
 target_include_directories(tst_keyvault PRIVATE src tests)
 target_link_libraries(tst_keyvault PRIVATE openchat_security Qt6::Core Qt6::Test)
 add_test(NAME tst_keyvault COMMAND tst_keyvault)
+
+add_executable(tst_safetynumber tests/tst_safetynumber.cpp)
+target_include_directories(tst_safetynumber PRIVATE src)
+target_link_libraries(tst_safetynumber PRIVATE openchat_security Qt6::Core Qt6::Test)
+add_test(NAME tst_safetynumber COMMAND tst_safetynumber)
 
 add_executable(tst_sqlcipherstorage tests/tst_sqlcipherstorage.cpp)
 target_include_directories(tst_sqlcipherstorage PRIVATE src)

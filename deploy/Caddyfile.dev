@@ -27,6 +27,17 @@ https://localhost, https://relay.localhost {
 		max_size 2MB
 	}
 
+	# The relay accepts the /v1/live upgrade through QHttpServer, which cannot
+	# declare a WebSocket subprotocol, so its 101 response omits
+	# Sec-WebSocket-Protocol. RelayClient, however, requires the server to echo
+	# exactly `openchat.ciphertext.v1` or it rejects the socket. This TLS-
+	# terminating edge is the mandated place to add that echo: inject it on the
+	# upgrade response for the live path so the negotiated subprotocol matches.
+	handle /v1/live {
+		header_down Sec-WebSocket-Protocol openchat.ciphertext.v1
+		reverse_proxy relay:8443
+	}
+
 	# reverse_proxy transparently forwards the Upgrade/Connection headers, so the
 	# /v1/live WebSocket upgrade and the plain /v1/* HTTP routes are all proxied
 	# to the relay's plain HTTP/WS listener on the private network. handle blocks

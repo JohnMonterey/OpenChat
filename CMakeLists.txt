@@ -361,6 +361,40 @@ target_link_libraries(tst_contactrequestservice PRIVATE
 add_test(NAME tst_contactrequestservice COMMAND tst_contactrequestservice)
 set_tests_properties(tst_contactrequestservice PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# Two-client end-to-end integration test over REAL TLS + REAL in-process relay +
+# REAL PostgreSQL. Two bootstrapped ProfileSessions exchange a contact handshake
+# and messages through an in-process TLS-terminating proxy in front of a live
+# RelayServer. Labelled "integration": it QSKIPs cleanly when Postgres is not
+# reachable, so a normal ctest run is unaffected.
+add_executable(tst_e2e
+    tests/tst_e2e.cpp
+    tests/relay/RelayTestSupport.cpp
+)
+target_include_directories(tst_e2e PRIVATE src tests relay/src)
+target_link_libraries(tst_e2e PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    openchat_relay_server
+    openchat_relay_core
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Sql
+    Qt6::HttpServer
+    Qt6::Test
+    OpenSSL::Crypto
+)
+add_test(NAME tst_e2e COMMAND tst_e2e)
+set_tests_properties(tst_e2e PROPERTIES
+    LABELS integration
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OPENCHAT_TEST_PG_PORT=55432;OPENCHAT_TEST_PG_HOST=127.0.0.1;OPENCHAT_TEST_PG_USER=ocrelay;OPENCHAT_TEST_PG_ADMINDB=postgres"
+)
+
 add_executable(tst_contactcontroller
     tests/tst_contactcontroller.cpp
     src/controllers/ContactController.cpp

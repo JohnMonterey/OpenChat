@@ -32,10 +32,12 @@ inline constexpr char relaySubprotocol[] = "openchat.ciphertext.v1";
 // Explicit endpoint configuration. Production requires https/wss for every URL;
 // isSecure() gates that and the client refuses to operate insecurely.
 struct RelayEndpoints final {
+    QUrl accounts;      // POST { account_id, device_id, handle, signing_key, credential } (unauth)
     QUrl authChallenge; // POST { account_id, device_id } -> canonical CBOR { challenge }
     QUrl authComplete;  // POST { account_id, device_id, challenge, signature, context } -> tokens
     QUrl authRefresh;   // POST { refresh } -> rotated tokens
     QUrl sync;          // GET ?since=<watermark> -> bounded envelope batch
+    QUrl keyPackages;   // POST { key_package } -> 200 (authenticated bearer token)
     QUrl live;          // wss:// live envelope stream
 
     [[nodiscard]] bool isSecure() const;
@@ -90,6 +92,16 @@ enum class RelayTransportError {
     BodyTooLarge,      // HTTP body exceeded the configured bound
     AuthRejected,      // credentials rejected and refresh exhausted
     InsecureEndpoint,  // a configured endpoint was not https/wss
+};
+
+// Outcome of an account-registration attempt, reported through
+// accountRegistrationFailed(). HandleUnavailable maps the relay's 409 Conflict
+// (the handle or account is already taken); InvalidRequest maps a 400; Transport
+// covers TLS/network failures and any other non-2xx status.
+enum class RelayRegistrationError {
+    HandleUnavailable,
+    InvalidRequest,
+    Transport,
 };
 
 // Result of a device authentication exchange (Task 8 obtains it; later phases
@@ -162,6 +174,20 @@ public:
     // through envelopeReceived and finishes with catchUpComplete().
     void fetchSince(quint64 watermark);
 
+    // Registers a new account+device over HTTPS. This is the unauthenticated
+    // bootstrap call, so it carries no bearer token even when one is available.
+    // Emits accountRegistered() on a 2xx; a taken handle (relay 409) emits
+    // accountRegistrationFailed(HandleUnavailable), a 400 InvalidRequest, and any
+    // other failure Transport.
+    void registerAccount(const AccountId &account, const DeviceId &device, const QString &handle,
+                         const QByteArray &signingKey, const QByteArray &credential);
+
+    // Publishes one MLS KeyPackage for this device to the authenticated HTTPS
+    // endpoint (bearer access token attached). Emits keyPackagePublished() on a
+    // 2xx; a rejected token drives a single serialized refresh-and-retry and then
+    // authExpired(); any other failure emits keyPackagePublishFailed().
+    void publishKeyPackage(const QByteArray &keyPackage);
+
     // Closes the live stream and cancels any pending reconnect. Idempotent.
     void disconnect();
 
@@ -181,11 +207,19 @@ signals:
     void authExpired();
     void transportError(RelayTransportError error);
     void catchUpComplete(quint64 newWatermark);
+    // Account bootstrap: registration succeeded / failed with a typed reason.
+    void accountRegistered();
+    void accountRegistrationFailed(RelayRegistrationError error);
+    // KeyPackage publish succeeded / failed (non-auth failure; a rejected token
+    // surfaces through authExpired() after the single refresh-and-retry).
+    void keyPackagePublished();
+    void keyPackagePublishFailed();
 
 private:
     void completeAuthentication(const QByteArray &challenge, const ChallengeSigner &signer,
                                 const QByteArray &context);
     void refreshThenRetryFetch(quint64 watermark);
+    void refreshThenRetryPublish(const QByteArray &keyPackage);
     void deliverCatchUp(const QByteArray &body);
 
     class Private;

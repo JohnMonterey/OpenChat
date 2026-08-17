@@ -31,6 +31,7 @@ using namespace std::chrono;
 // CiphertextEnvelopeV1 and StrongId are intentionally not default-constructible,
 // so those signal payloads are captured through lambdas instead of QSignalSpy.
 Q_DECLARE_METATYPE(OpenChat::RelayTransportError)
+Q_DECLARE_METATYPE(OpenChat::RelayRegistrationError)
 Q_DECLARE_METATYPE(OpenChat::RelaySession)
 
 namespace {
@@ -174,6 +175,11 @@ private slots:
     void authRequestBodiesMatchRelay();
     void emptyContextFailsClosed();
 
+    void registerAccountSucceeds();
+    void registerAccountHandleTakenFails();
+    void publishKeyPackageSucceeds();
+    void publishKeyPackageUnauthorizedRefreshExhaustionExpires();
+
     void serializedRefreshSucceedsOnce();
     void refreshExhaustionExpiresAuth();
     void refreshCycleResetsAfterSuccess();
@@ -187,6 +193,7 @@ private slots:
 void RelayClientTest::initTestCase()
 {
     qRegisterMetaType<RelayTransportError>();
+    qRegisterMetaType<RelayRegistrationError>();
     qRegisterMetaType<RelaySession>();
     QVERIFY2(QSslSocket::supportsSsl(), "TLS backend must be available for these tests");
 }
@@ -636,6 +643,186 @@ void RelayClientTest::emptyContextFailsClosed()
     QCOMPARE(server.requestCount(QStringLiteral("/auth/complete")), 0);
     QCOMPARE(errors.count(), 0);
     QVERIFY(!signerCalled);
+}
+
+// --- Account bootstrap: registration + KeyPackage publish -------------------
+
+void RelayClientTest::registerAccountSucceeds()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    server.enqueue(QStringLiteral("/v1/accounts"), {200, {}, -1});
+
+    RelayEndpoints endpoints;
+    endpoints.accounts = server.url(QStringLiteral("/v1/accounts"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    // A non-empty access token is deliberately configured to prove that the
+    // unauthenticated bootstrap call never attaches it.
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy registered(&client, &RelayClient::accountRegistered);
+    QSignalSpy failed(&client, &RelayClient::accountRegistrationFailed);
+    QSignalSpy errors(&client, &RelayClient::transportError);
+
+    const AccountId account = AccountId::generate();
+    const DeviceId device = DeviceId::generate();
+    const QString handle = QStringLiteral("alice");
+    const QByteArray signingKey(32, '\x11');
+    const QByteArray credential("mls-credential-bytes");
+
+    client.registerAccount(account, device, handle, signingKey, credential);
+
+    QTRY_COMPARE(registered.count(), 1);
+    QCOMPARE(failed.count(), 0);
+    QCOMPARE(errors.count(), 0);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/accounts")), 1);
+
+    // The bootstrap POST must carry NO Authorization header.
+    QVERIFY(server.lastAuthorization(QStringLiteral("/v1/accounts")).isEmpty());
+
+    // The body carries exactly the bytes/text passed in.
+    QCborParserError err{};
+    const QCborValue value =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/v1/accounts")), &err);
+    QCOMPARE(err.error, QCborError::NoError);
+    QVERIFY(value.isMap());
+    const QCborMap map = value.toMap();
+    QVERIFY(map.value(QLatin1StringView("account_id")).isByteArray());
+    QCOMPARE(map.value(QLatin1StringView("account_id")).toByteArray(), account.bytes());
+    QVERIFY(map.value(QLatin1StringView("device_id")).isByteArray());
+    QCOMPARE(map.value(QLatin1StringView("device_id")).toByteArray(), device.bytes());
+    QCOMPARE(map.value(QLatin1StringView("handle")).toString(), handle);
+    QVERIFY(map.value(QLatin1StringView("signing_key")).isByteArray());
+    QCOMPARE(map.value(QLatin1StringView("signing_key")).toByteArray(), signingKey);
+    QVERIFY(map.value(QLatin1StringView("credential")).isByteArray());
+    QCOMPARE(map.value(QLatin1StringView("credential")).toByteArray(), credential);
+}
+
+void RelayClientTest::registerAccountHandleTakenFails()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    // The relay maps a unique-handle violation to 409 Conflict.
+    server.enqueue(QStringLiteral("/v1/accounts"), {409, {}, -1});
+
+    RelayEndpoints endpoints;
+    endpoints.accounts = server.url(QStringLiteral("/v1/accounts"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials(QByteArray(), QByteArray()), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy registered(&client, &RelayClient::accountRegistered);
+    QSignalSpy failed(&client, &RelayClient::accountRegistrationFailed);
+
+    client.registerAccount(AccountId::generate(), DeviceId::generate(), QStringLiteral("taken"),
+                           QByteArray(32, '\x22'), QByteArray("cred"));
+
+    QTRY_COMPARE(failed.count(), 1);
+    QCOMPARE(failed.first().at(0).value<RelayRegistrationError>(),
+             RelayRegistrationError::HandleUnavailable);
+    QCOMPARE(registered.count(), 0);
+}
+
+void RelayClientTest::publishKeyPackageSucceeds()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    server.enqueue(QStringLiteral("/v1/key-packages"), {200, {}, -1});
+
+    RelayEndpoints endpoints;
+    endpoints.keyPackages = server.url(QStringLiteral("/v1/key-packages"));
+    endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy published(&client, &RelayClient::keyPackagePublished);
+    QSignalSpy publishFailed(&client, &RelayClient::keyPackagePublishFailed);
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+
+    const QByteArray keyPackage("mls-key-package-bytes");
+    client.publishKeyPackage(keyPackage);
+
+    QTRY_COMPARE(published.count(), 1);
+    QCOMPARE(publishFailed.count(), 0);
+    QCOMPARE(expired.count(), 0);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/key-packages")), 1);
+
+    // The authenticated publish carries the bearer access token.
+    QCOMPARE(server.lastAuthorization(QStringLiteral("/v1/key-packages")),
+             QByteArray("Bearer access-token"));
+
+    // The body is canonical CBOR { key_package: <bytes> }.
+    QCborParserError err{};
+    const QCborValue value =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/v1/key-packages")), &err);
+    QCOMPARE(err.error, QCborError::NoError);
+    QVERIFY(value.isMap());
+    const QCborMap map = value.toMap();
+    QVERIFY(map.value(QLatin1StringView("key_package")).isByteArray());
+    QCOMPARE(map.value(QLatin1StringView("key_package")).toByteArray(), keyPackage);
+}
+
+void RelayClientTest::publishKeyPackageUnauthorizedRefreshExhaustionExpires()
+{
+    // A 401 drives exactly one serialized refresh and one retry; a second 401
+    // must fall through to authExpired() without reporting success and without a
+    // second refresh (no loop).
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    server.enqueue(QStringLiteral("/v1/key-packages"), {401, {}, -1});
+    server.enqueue(QStringLiteral("/auth/refresh"),
+                   {200, sessionCbor("access2", "refresh2", 1'700'000'999'000), -1});
+    server.enqueue(QStringLiteral("/v1/key-packages"), {401, {}, -1});
+
+    int refreshCalls = 0;
+    RelayCredentials credentials;
+    credentials.accessToken = [] { return QByteArray("access1"); };
+    credentials.refreshToken = [&refreshCalls] {
+        ++refreshCalls;
+        return QByteArray("refresh1");
+    };
+
+    RelayEndpoints endpoints;
+    endpoints.keyPackages = server.url(QStringLiteral("/v1/key-packages"));
+    endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, credentials,
+                       RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy published(&client, &RelayClient::keyPackagePublished);
+    QSignalSpy publishFailed(&client, &RelayClient::keyPackagePublishFailed);
+    QSignalSpy rotated(&client, &RelayClient::tokensRotated);
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+
+    client.publishKeyPackage(QByteArray("kp"));
+
+    QTRY_COMPARE(expired.count(), 1);
+    QCOMPARE(published.count(), 0);      // never reports success
+    QCOMPARE(publishFailed.count(), 0);  // a rejected token is not a publish failure
+    QCOMPARE(refreshCalls, 1);           // exactly one refresh, never a second
+    QCOMPARE(rotated.count(), 1);        // the single refresh itself succeeded
+    QCOMPARE(server.requestCount(QStringLiteral("/auth/refresh")), 1);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/key-packages")), 2);
 }
 
 // --- HTTPS auth / refresh ---------------------------------------------------

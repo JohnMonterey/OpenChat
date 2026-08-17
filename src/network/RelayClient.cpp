@@ -132,10 +132,11 @@ public:
         return config;
     }
 
-    // Builds a hardened authorized HTTPS request. The access token is fetched
-    // fresh from the callback and only lives inside this request; RelayClient
-    // keeps no member copy.
-    [[nodiscard]] QNetworkRequest authorizedRequest(const QUrl &url) const
+    // Builds a hardened HTTPS request with no Authorization header. Used for the
+    // unauthenticated bootstrap endpoints (account registration) and as the base
+    // for authorizedRequest(); the same TLS, redirect, cache, and timeout posture
+    // applies to every request the client issues.
+    [[nodiscard]] QNetworkRequest hardenedRequest(const QUrl &url) const
     {
         QNetworkRequest request(url);
         request.setSslConfiguration(hardenedTls());
@@ -146,14 +147,23 @@ public:
                              QNetworkRequest::AlwaysNetwork);
         request.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
         request.setTransferTimeout(limits.transferTimeout);
+        request.setRawHeader(QByteArrayLiteral("Accept"),
+                             QByteArrayLiteral("application/cbor"));
+        return request;
+    }
+
+    // Builds a hardened authorized HTTPS request. The access token is fetched
+    // fresh from the callback and only lives inside this request; RelayClient
+    // keeps no member copy.
+    [[nodiscard]] QNetworkRequest authorizedRequest(const QUrl &url) const
+    {
+        QNetworkRequest request = hardenedRequest(url);
         if (credentials.accessToken) {
             const QByteArray token = credentials.accessToken();
             if (!token.isEmpty())
                 request.setRawHeader(QByteArrayLiteral("Authorization"),
                                      QByteArrayLiteral("Bearer ") + token);
         }
-        request.setRawHeader(QByteArrayLiteral("Accept"),
-                             QByteArrayLiteral("application/cbor"));
         return request;
     }
 
@@ -736,6 +746,90 @@ void RelayClient::fetchSince(quint64 watermark)
     });
 }
 
+void RelayClient::registerAccount(const AccountId &account, const DeviceId &device,
+                                  const QString &handle, const QByteArray &signingKey,
+                                  const QByteArray &credential)
+{
+    if (!isHttps(d->endpoints.accounts)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        return;
+    }
+
+    QCborMap body;
+    body.insert(QLatin1StringView("account_id"), account.bytes());
+    body.insert(QLatin1StringView("device_id"), device.bytes());
+    body.insert(QLatin1StringView("handle"), handle);
+    body.insert(QLatin1StringView("signing_key"), signingKey);
+    body.insert(QLatin1StringView("credential"), credential);
+
+    // Bootstrap registration is unauthenticated: issue the request through the
+    // hardened path that attaches NO bearer token, so no access token ever leaks
+    // onto this public endpoint even when the caller already holds one.
+    QNetworkRequest request = d->hardenedRequest(d->endpoints.accounts);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        reply->deleteLater();
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 409) {
+            emit accountRegistrationFailed(RelayRegistrationError::HandleUnavailable);
+            return;
+        }
+        if (status == 400) {
+            emit accountRegistrationFailed(RelayRegistrationError::InvalidRequest);
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit accountRegistrationFailed(RelayRegistrationError::Transport);
+            return;
+        }
+        emit accountRegistered();
+    });
+}
+
+void RelayClient::publishKeyPackage(const QByteArray &keyPackage)
+{
+    if (!isHttps(d->endpoints.keyPackages)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        return;
+    }
+
+    QCborMap body;
+    body.insert(QLatin1StringView("key_package"), keyPackage);
+
+    QNetworkRequest request = d->authorizedRequest(d->endpoints.keyPackages);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, keyPackage] {
+        reply->deleteLater();
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 401) {
+            // Authorization rejected: attempt exactly one serialized refresh, then
+            // retry this publish once, mirroring the fetch path.
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight) {
+                refreshThenRetryPublish(keyPackage);
+            } else {
+                emit authExpired();
+            }
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit keyPackagePublishFailed();
+            return;
+        }
+        d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
+        emit keyPackagePublished();
+    });
+}
+
 void RelayClient::disconnect()
 {
     d->userClosed = true;
@@ -825,6 +919,47 @@ void RelayClient::refreshThenRetryFetch(quint64 watermark)
         emit tokensRotated(*session);
         // Retry the fetch exactly once with the rotated credentials in place.
         fetchSince(watermark);
+    });
+}
+
+void RelayClient::refreshThenRetryPublish(const QByteArray &keyPackage)
+{
+    if (!d->credentials.refreshToken || !isHttps(d->endpoints.authRefresh)) {
+        emit authExpired();
+        return;
+    }
+    const QByteArray refresh = d->credentials.refreshToken();
+    if (refresh.isEmpty()) {
+        emit authExpired();
+        return;
+    }
+
+    d->refreshAttemptedThisCycle = true;
+    d->refreshInFlight = true;
+
+    QCborMap body;
+    body.insert(QLatin1StringView("refresh"), refresh);
+    QNetworkRequest request = d->authorizedRequest(d->endpoints.authRefresh);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, keyPackage] {
+        d->refreshInFlight = false;
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError || !d->bodyWithinBounds(reply)) {
+            emit authExpired();
+            return;
+        }
+        const auto session = d->parseSession(reply->readAll());
+        if (!session) {
+            emit authExpired();
+            return;
+        }
+        emit tokensRotated(*session);
+        // Retry the publish exactly once; refreshAttemptedThisCycle stays set so a
+        // repeated 401 falls through to authExpired() instead of looping.
+        publishKeyPackage(keyPackage);
     });
 }
 

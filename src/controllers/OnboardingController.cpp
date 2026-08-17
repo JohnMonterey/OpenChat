@@ -6,7 +6,7 @@ namespace OpenChat {
 
 namespace {
 
-// Deterministic placeholder recovery code used until a real Creator is injected.
+// Deterministic placeholder recovery code used until a real Starter is injected.
 // Grouped like the codes the security layer emits so the Recovery screen and its
 // captures read realistically; it carries no cryptographic meaning and only lets
 // the standalone screen and capture path render an account-creation result.
@@ -18,17 +18,13 @@ QString placeholderRecoveryCode()
 } // namespace
 
 OnboardingController::OnboardingController(QObject *parent)
-    : OnboardingController(
-          [](const QString &, const QString &) -> std::optional<QString> {
-              return placeholderRecoveryCode();
-          },
-          parent)
+    : OnboardingController(Starter{}, parent)
 {
 }
 
-OnboardingController::OnboardingController(Creator creator, QObject *parent)
+OnboardingController::OnboardingController(Starter starter, QObject *parent)
     : QObject(parent)
-    , m_creator(std::move(creator))
+    , m_starter(std::move(starter))
 {
 }
 
@@ -50,6 +46,11 @@ QString OnboardingController::handle() const
 bool OnboardingController::canCreate() const
 {
     return !m_displayName.trimmed().isEmpty() && handleIsValid(m_handle);
+}
+
+bool OnboardingController::creating() const
+{
+    return m_creating;
 }
 
 QString OnboardingController::recoveryCode() const
@@ -88,22 +89,50 @@ void OnboardingController::setHandle(const QString &handle)
 
 void OnboardingController::createProfile()
 {
-    // Only the Create step creates, and only when both fields are valid. Guarding
-    // here keeps a disabled button or a stray invocation from advancing the flow.
-    if (m_step != Step::Create || !canCreate())
+    // Only the Create step creates, only when both fields are valid, and only
+    // when no creation is already in flight. Guarding here keeps a disabled
+    // button, a stray invocation, or a double-tap from starting a second flow.
+    if (m_step != Step::Create || !canCreate() || m_creating)
         return;
 
-    const std::optional<QString> code =
-        m_creator ? m_creator(m_displayName.trimmed(), m_handle.trimmed()) : std::nullopt;
-    if (!code) {
-        setErrorText(QStringLiteral("Couldn't create your profile. Please try again."));
-        emit creationFailed();
+    setErrorText({});
+    setCreating(true);
+
+    if (m_starter) {
+        // Real (or test) Starter: the outcome arrives later through the owner's
+        // onCreationSucceeded()/onCreationFailed() callbacks.
+        m_starter(m_displayName.trimmed(), m_handle.trimmed());
         return;
     }
 
+    // No Starter wired (the standalone/preview path): complete immediately with a
+    // deterministic placeholder so the screen and captures render a result.
+    onCreationSucceeded(placeholderRecoveryCode());
+}
+
+void OnboardingController::onCreationSucceeded(const QString &recoveryCode)
+{
+    // Ignore a late or duplicated success: only an in-flight create on the Create
+    // step may advance, and it does so exactly once.
+    if (!m_creating || m_step != Step::Create)
+        return;
+
+    setCreating(false);
     setErrorText({});
-    setRecoveryCode(*code);
+    setRecoveryCode(recoveryCode);
     setStep(Step::Recovery);
+}
+
+void OnboardingController::onCreationFailed(const QString &message)
+{
+    if (!m_creating || m_step != Step::Create)
+        return;
+
+    setCreating(false);
+    setErrorText(message.isEmpty()
+                     ? QStringLiteral("Couldn't create your profile. Please try again.")
+                     : message);
+    emit creationFailed();
 }
 
 void OnboardingController::confirmRecoverySaved()
@@ -135,6 +164,15 @@ void OnboardingController::setStep(Step step)
 
     m_step = step;
     emit stepChanged();
+}
+
+void OnboardingController::setCreating(bool creating)
+{
+    if (m_creating == creating)
+        return;
+
+    m_creating = creating;
+    emit creatingChanged();
 }
 
 void OnboardingController::setRecoveryCode(const QString &code)

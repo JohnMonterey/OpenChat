@@ -457,12 +457,16 @@ private slots:
 
     void onboardingScreensDriveController()
     {
-        // A Creator that returns a fixed code so the screen surfaces exactly what
-        // account creation produced, independent of any real ProfileSession.
+        // An async Starter that reports success with a fixed code, so the screen
+        // surfaces exactly what account creation produced, independent of any real
+        // ProfileSession. The controller pointer is bound after construction; the
+        // Starter is only invoked later, when the Create button is clicked.
+        OpenChat::OnboardingController *controllerPtr = nullptr;
         OpenChat::OnboardingController controller(
-            [](const QString &, const QString &) -> std::optional<QString> {
-                return QStringLiteral("TEST-CODE-1234-5678");
+            [&controllerPtr](const QString &, const QString &) {
+                controllerPtr->onCreationSucceeded(QStringLiteral("TEST-CODE-1234-5678"));
             });
+        controllerPtr = &controller;
 
         QQmlEngine engine;
         engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));

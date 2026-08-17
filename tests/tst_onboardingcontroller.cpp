@@ -1,7 +1,5 @@
 #include <QtTest>
 
-#include <optional>
-
 #include "controllers/OnboardingController.h"
 
 using OpenChat::OnboardingController;
@@ -21,6 +19,7 @@ private slots:
         QVERIFY(controller.recoveryCode().isEmpty());
         QVERIFY(controller.errorText().isEmpty());
         QVERIFY(!controller.canCreate());
+        QVERIFY(!controller.creating());
     }
 
     void canCreateRequiresBothFields()
@@ -44,23 +43,23 @@ private slots:
         QVERIFY(!controller.canCreate());
     }
 
-    void successfulCreatorAdvancesToRecovery()
+    void createStartsAsyncFlowWithoutAdvancing()
     {
-        int calls = 0;
+        int starts = 0;
+        QString startedDisplay;
+        QString startedHandle;
+        // A Starter that records the call but does NOT complete synchronously, so
+        // the in-flight state is observable.
         OnboardingController controller(
-            [&calls](const QString &displayName, const QString &handle)
-                -> std::optional<QString> {
-                ++calls;
-                // The Creator receives trimmed field values.
-                Q_ASSERT(displayName == QStringLiteral("Ada Lovelace"));
-                Q_ASSERT(handle == QStringLiteral("ada"));
-                return QStringLiteral("ABCD-1234-EFGH-5678");
+            [&](const QString &displayName, const QString &handle) {
+                ++starts;
+                startedDisplay = displayName;
+                startedHandle = handle;
             });
 
         QSignalSpy stepSpy(&controller, &OnboardingController::stepChanged);
-        QSignalSpy recoverySpy(&controller, &OnboardingController::recoveryCodeChanged);
+        QSignalSpy creatingSpy(&controller, &OnboardingController::creatingChanged);
         QSignalSpy failedSpy(&controller, &OnboardingController::creationFailed);
-        QSignalSpy completedSpy(&controller, &OnboardingController::completed);
 
         controller.setDisplayName(QStringLiteral("  Ada Lovelace  "));
         controller.setHandle(QStringLiteral("ada"));
@@ -68,68 +67,116 @@ private slots:
 
         controller.createProfile();
 
-        QCOMPARE(calls, 1);
+        // The Starter ran once with trimmed field values, creating is true, and
+        // the flow has NOT advanced away from Create.
+        QCOMPARE(starts, 1);
+        QCOMPARE(startedDisplay, QStringLiteral("Ada Lovelace"));
+        QCOMPARE(startedHandle, QStringLiteral("ada"));
+        QVERIFY(controller.creating());
+        QCOMPARE(controller.step(), OnboardingController::Step::Create);
+        QCOMPARE(creatingSpy.count(), 1);
+        QCOMPARE(stepSpy.count(), 0);
+        QCOMPARE(failedSpy.count(), 0);
+
+        // A second createProfile while a creation is in flight is ignored.
+        controller.createProfile();
+        QCOMPARE(starts, 1);
+    }
+
+    void successCallbackAdvancesToRecovery()
+    {
+        OnboardingController controller(
+            [](const QString &, const QString &) { /* async: no synchronous result */ });
+
+        QSignalSpy stepSpy(&controller, &OnboardingController::stepChanged);
+        QSignalSpy creatingSpy(&controller, &OnboardingController::creatingChanged);
+        QSignalSpy recoverySpy(&controller, &OnboardingController::recoveryCodeChanged);
+        QSignalSpy failedSpy(&controller, &OnboardingController::creationFailed);
+        QSignalSpy completedSpy(&controller, &OnboardingController::completed);
+
+        controller.setDisplayName(QStringLiteral("Ada Lovelace"));
+        controller.setHandle(QStringLiteral("ada"));
+        controller.createProfile();
+        QVERIFY(controller.creating());
+
+        controller.onCreationSucceeded(QStringLiteral("ABCD-1234-EFGH-5678"));
+
+        QVERIFY(!controller.creating());
         QCOMPARE(controller.step(), OnboardingController::Step::Recovery);
         QCOMPARE(controller.recoveryCode(), QStringLiteral("ABCD-1234-EFGH-5678"));
         QCOMPARE(stepSpy.count(), 1);
         QCOMPARE(recoverySpy.count(), 1);
+        QCOMPARE(creatingSpy.count(), 2); // true then false
         QVERIFY(controller.errorText().isEmpty());
-        // Nothing spurious: no failure, and the flow has not completed yet.
         QCOMPARE(failedSpy.count(), 0);
         QCOMPARE(completedSpy.count(), 0);
     }
 
     void createIsIgnoredUntilFieldsValid()
     {
-        int calls = 0;
+        int starts = 0;
         OnboardingController controller(
-            [&calls](const QString &, const QString &) -> std::optional<QString> {
-                ++calls;
-                return QStringLiteral("SHOULD-NOT-RUN");
-            });
+            [&starts](const QString &, const QString &) { ++starts; });
 
-        // No fields set: createProfile must not call the Creator or advance.
+        // No fields set: createProfile must not run the Starter or advance.
         controller.createProfile();
-        QCOMPARE(calls, 0);
+        QCOMPARE(starts, 0);
+        QVERIFY(!controller.creating());
         QCOMPARE(controller.step(), OnboardingController::Step::Create);
         QVERIFY(controller.recoveryCode().isEmpty());
     }
 
-    void failingCreatorStaysOnCreateAndSurfacesError()
+    void failureCallbackStaysOnCreateAndSurfacesError()
     {
         OnboardingController controller(
-            [](const QString &, const QString &) -> std::optional<QString> {
-                return std::nullopt;
-            });
+            [](const QString &, const QString &) { /* async */ });
 
         QSignalSpy stepSpy(&controller, &OnboardingController::stepChanged);
         QSignalSpy failedSpy(&controller, &OnboardingController::creationFailed);
         QSignalSpy errorSpy(&controller, &OnboardingController::errorTextChanged);
+        QSignalSpy creatingSpy(&controller, &OnboardingController::creatingChanged);
 
         controller.setDisplayName(QStringLiteral("Grace"));
         controller.setHandle(QStringLiteral("grace"));
-        QVERIFY(controller.canCreate());
-
         controller.createProfile();
+        QVERIFY(controller.creating());
 
+        controller.onCreationFailed(QStringLiteral("That handle is unavailable."));
+
+        QVERIFY(!controller.creating());
         QCOMPARE(controller.step(), OnboardingController::Step::Create);
         QVERIFY(controller.recoveryCode().isEmpty());
-        QVERIFY(!controller.errorText().isEmpty());
+        QCOMPARE(controller.errorText(), QStringLiteral("That handle is unavailable."));
         QCOMPARE(stepSpy.count(), 0);
         QCOMPARE(failedSpy.count(), 1);
         QVERIFY(errorSpy.count() >= 1);
+        QCOMPARE(creatingSpy.count(), 2); // true then false
+    }
+
+    void ownerCallbacksAreNoOpsWhenNotCreating()
+    {
+        OnboardingController controller(
+            [](const QString &, const QString &) { /* async */ });
+
+        // Neither callback does anything before a create is in flight.
+        controller.onCreationSucceeded(QStringLiteral("STRAY-CODE"));
+        QCOMPARE(controller.step(), OnboardingController::Step::Create);
+        QVERIFY(controller.recoveryCode().isEmpty());
+
+        controller.onCreationFailed(QStringLiteral("stray"));
+        QVERIFY(controller.errorText().isEmpty());
     }
 
     void confirmRecoverySavedCompletesOnce()
     {
-        OnboardingController controller(
-            [](const QString &, const QString &) -> std::optional<QString> {
-                return QStringLiteral("CODE");
-            });
+        // The default (no Starter) controller completes creation immediately with
+        // a placeholder, so it reaches Recovery without an owner callback.
+        OnboardingController controller;
         controller.setDisplayName(QStringLiteral("Alan"));
         controller.setHandle(QStringLiteral("alan"));
         controller.createProfile();
         QCOMPARE(controller.step(), OnboardingController::Step::Recovery);
+        QVERIFY(!controller.creating());
 
         QSignalSpy stepSpy(&controller, &OnboardingController::stepChanged);
         QSignalSpy completedSpy(&controller, &OnboardingController::completed);
@@ -145,10 +192,10 @@ private slots:
         QCOMPARE(completedSpy.count(), 1);
     }
 
-    void defaultCreatorYieldsPlaceholderCode()
+    void defaultStarterYieldsPlaceholderCode()
     {
         // The default-constructed controller must be able to complete a create
-        // without any injected Creator, so the standalone screen and captures
+        // without any injected Starter, so the standalone screen and captures
         // work: it advances to Recovery with a non-empty placeholder code.
         OnboardingController controller;
         controller.setDisplayName(QStringLiteral("Katherine"));
@@ -157,6 +204,7 @@ private slots:
 
         controller.createProfile();
         QCOMPARE(controller.step(), OnboardingController::Step::Recovery);
+        QVERIFY(!controller.creating());
         QVERIFY(!controller.recoveryCode().isEmpty());
     }
 };

@@ -262,8 +262,10 @@ Item {
             OnboardingButton {
                 objectName: "createButton"
                 width: parent.width
-                label: "Create"
-                enabled: onboarding.controller.canCreate
+                // While a bootstrap is in flight the button reads "Creating…" and
+                // is disabled, so the account creation cannot be re-triggered.
+                label: onboarding.controller.creating ? "Creating…" : "Create"
+                enabled: onboarding.controller.canCreate && !onboarding.controller.creating
                 onClicked: onboarding.controller.createProfile()
             }
         }

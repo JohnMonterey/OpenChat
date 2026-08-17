@@ -33,6 +33,7 @@ using namespace std::chrono;
 Q_DECLARE_METATYPE(OpenChat::RelayTransportError)
 Q_DECLARE_METATYPE(OpenChat::RelayRegistrationError)
 Q_DECLARE_METATYPE(OpenChat::RelayDirectoryError)
+Q_DECLARE_METATYPE(OpenChat::RelayClaimError)
 Q_DECLARE_METATYPE(OpenChat::RelaySession)
 
 namespace {
@@ -207,6 +208,10 @@ private slots:
     void redeemInviteSucceeds();
     void redeemInviteNotFoundFails();
 
+    void claimKeyPackageSucceeds();
+    void claimKeyPackageUnavailableFails();
+    void claimKeyPackageMalformedIsRejected();
+
     void serializedRefreshSucceedsOnce();
     void refreshExhaustionExpiresAuth();
     void refreshCycleResetsAfterSuccess();
@@ -222,6 +227,7 @@ void RelayClientTest::initTestCase()
     qRegisterMetaType<RelayTransportError>();
     qRegisterMetaType<RelayRegistrationError>();
     qRegisterMetaType<RelayDirectoryError>();
+    qRegisterMetaType<RelayClaimError>();
     qRegisterMetaType<RelaySession>();
     QVERIFY2(QSslSocket::supportsSsl(), "TLS backend must be available for these tests");
 }
@@ -1122,6 +1128,129 @@ void RelayClientTest::redeemInviteNotFoundFails()
     QCOMPARE(redeemFailed.first().at(0).value<RelayDirectoryError>(),
              RelayDirectoryError::NotFound);
     QCOMPARE(redeemedCount, 0);
+}
+
+// --- KeyPackage claim -------------------------------------------------------
+
+void RelayClientTest::claimKeyPackageSucceeds()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    const QByteArray keyPackage("claimed-mls-key-package-bytes");
+    QCborMap response;
+    response.insert(QLatin1StringView("key_package"), keyPackage);
+    server.enqueue(QStringLiteral("/v1/key-packages/claim"),
+                   {200, response.toCborValue().toCbor(), -1});
+
+    RelayEndpoints endpoints;
+    endpoints.keyPackagesClaim = server.url(QStringLiteral("/v1/key-packages/claim"));
+    endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy claimed(&client, &RelayClient::keyPackageClaimed);
+    QSignalSpy claimFailed(&client, &RelayClient::keyPackageClaimFailed);
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+
+    const DeviceId target = DeviceId::generate();
+    client.claimKeyPackage(target);
+
+    QTRY_COMPARE(claimed.count(), 1);
+    QCOMPARE(claimFailed.count(), 0);
+    QCOMPARE(expired.count(), 0);
+    // The claimed KeyPackage bytes are surfaced exactly.
+    QCOMPARE(claimed.first().at(0).toByteArray(), keyPackage);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/key-packages/claim")), 1);
+
+    // The authenticated POST carries the bearer access token.
+    QCOMPARE(server.lastAuthorization(QStringLiteral("/v1/key-packages/claim")),
+             QByteArray("Bearer access-token"));
+
+    // The body is canonical CBOR { target_device_id: <16 bytes> }.
+    QCborParserError err{};
+    const QCborValue value =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/v1/key-packages/claim")), &err);
+    QCOMPARE(err.error, QCborError::NoError);
+    QVERIFY(value.isMap());
+    const QCborMap map = value.toMap();
+    QVERIFY(map.value(QLatin1StringView("target_device_id")).isByteArray());
+    QCOMPARE(map.value(QLatin1StringView("target_device_id")).toByteArray(), target.bytes());
+    QCOMPARE(map.value(QLatin1StringView("target_device_id")).toByteArray().size(), qsizetype(16));
+}
+
+void RelayClientTest::claimKeyPackageUnavailableFails()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    // The relay's KeyPackageService::claim returns RelayError::NotFound (mapped to
+    // 404 Not Found) when the target device has no unclaimed KeyPackage to hand out.
+    server.enqueue(QStringLiteral("/v1/key-packages/claim"), {404, {}, -1});
+
+    RelayEndpoints endpoints;
+    endpoints.keyPackagesClaim = server.url(QStringLiteral("/v1/key-packages/claim"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy claimed(&client, &RelayClient::keyPackageClaimed);
+    QSignalSpy claimFailed(&client, &RelayClient::keyPackageClaimFailed);
+
+    client.claimKeyPackage(DeviceId::generate());
+
+    QTRY_COMPARE(claimFailed.count(), 1);
+    QCOMPARE(claimFailed.first().at(0).value<RelayClaimError>(), RelayClaimError::Unavailable);
+    QCOMPARE(claimed.count(), 0);
+}
+
+void RelayClientTest::claimKeyPackageMalformedIsRejected()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    // (1) A 200 whose body is a map with no key_package field.
+    server.enqueue(QStringLiteral("/v1/key-packages/claim"),
+                   {200, QCborMap{}.toCborValue().toCbor(), -1});
+    // (2) A 200 whose key_package is present but empty.
+    QCborMap emptyPackage;
+    emptyPackage.insert(QLatin1StringView("key_package"), QByteArray());
+    server.enqueue(QStringLiteral("/v1/key-packages/claim"),
+                   {200, emptyPackage.toCborValue().toCbor(), -1});
+
+    RelayEndpoints endpoints;
+    endpoints.keyPackagesClaim = server.url(QStringLiteral("/v1/key-packages/claim"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy claimed(&client, &RelayClient::keyPackageClaimed);
+    QSignalSpy claimFailed(&client, &RelayClient::keyPackageClaimFailed);
+
+    client.claimKeyPackage(DeviceId::generate());
+    QTRY_COMPARE(claimFailed.count(), 1);
+    QCOMPARE(claimFailed.at(0).at(0).value<RelayClaimError>(), RelayClaimError::Malformed);
+
+    client.claimKeyPackage(DeviceId::generate());
+    QTRY_COMPARE(claimFailed.count(), 2);
+    QCOMPARE(claimFailed.at(1).at(0).value<RelayClaimError>(), RelayClaimError::Malformed);
+
+    // A malformed response never surfaces a claimed KeyPackage.
+    QCOMPARE(claimed.count(), 0);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/key-packages/claim")), 2);
 }
 
 // --- HTTPS auth / refresh ---------------------------------------------------

@@ -1093,6 +1093,79 @@ void RelayClient::redeemInvite(const QByteArray &token)
     });
 }
 
+void RelayClient::claimKeyPackage(const DeviceId &targetDevice)
+{
+    if (!isHttps(d->endpoints.keyPackagesClaim)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        return;
+    }
+
+    QCborMap body;
+    body.insert(QLatin1StringView("target_device_id"), targetDevice.bytes());
+
+    QNetworkRequest request = d->authorizedRequest(d->endpoints.keyPackagesClaim);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, targetDevice] {
+        const bool oversized = reply->property("oc_oversized").toBool();
+        reply->deleteLater();
+        if (oversized) {
+            emit keyPackageClaimFailed(RelayClaimError::Transport);
+            return;
+        }
+
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 401) {
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight)
+                refreshThenRetry([this, targetDevice] { claimKeyPackage(targetDevice); });
+            else
+                emit authExpired();
+            return;
+        }
+        // The relay's KeyPackageService::claim maps a target device with no
+        // unclaimed KeyPackage to RelayError::NotFound, i.e. 404 Not Found.
+        if (status == 404) {
+            emit keyPackageClaimFailed(RelayClaimError::Unavailable);
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit keyPackageClaimFailed(RelayClaimError::Transport);
+            return;
+        }
+
+        const QByteArray rawBody = reply->readAll();
+        if (rawBody.size() > d->limits.maxHttpBodyBytes) {
+            emit keyPackageClaimFailed(RelayClaimError::Transport);
+            return;
+        }
+        QCborParserError error{};
+        const QCborValue value = QCborValue::fromCbor(rawBody, &error);
+        if (error.error != QCborError::NoError || error.offset != rawBody.size()
+            || !value.isMap()) {
+            emit keyPackageClaimFailed(RelayClaimError::Malformed);
+            return;
+        }
+        const QCborValue keyPackageValue = value.toMap().value(QLatin1StringView("key_package"));
+        if (!keyPackageValue.isByteArray()) {
+            emit keyPackageClaimFailed(RelayClaimError::Malformed);
+            return;
+        }
+        // The key_package is bounded by the already-gated body size; only its
+        // non-emptiness needs an explicit check.
+        const QByteArray keyPackage = keyPackageValue.toByteArray();
+        if (keyPackage.isEmpty()) {
+            emit keyPackageClaimFailed(RelayClaimError::Malformed);
+            return;
+        }
+        d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
+        emit keyPackageClaimed(keyPackage);
+    });
+}
+
 void RelayClient::disconnect()
 {
     d->userClosed = true;

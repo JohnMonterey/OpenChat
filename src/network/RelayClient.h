@@ -39,6 +39,7 @@ struct RelayEndpoints final {
     QUrl authRefresh;   // POST { refresh } -> rotated tokens
     QUrl sync;          // GET ?since=<watermark> -> bounded envelope batch
     QUrl keyPackages;   // POST { key_package } -> 200 (authenticated bearer token)
+    QUrl keyPackagesClaim; // POST { target_device_id } -> CBOR { key_package } (authenticated)
     QUrl directory;     // GET ?handle=<h> -> CBOR { account_id, devices } (authenticated)
     QUrl invites;       // POST { ttl_ms? } -> CBOR { token, expires_at_ms } (authenticated)
     QUrl invitesRedeem; // POST { token } -> CBOR { account_id, devices } (authenticated)
@@ -133,6 +134,20 @@ struct RelayDirectoryEntry final {
 // TLS/network failures, an oversize body, and any other non-2xx status.
 enum class RelayDirectoryError {
     NotFound,
+    Malformed,
+    Transport,
+};
+
+// Typed KeyPackage-claim failures surfaced through keyPackageClaimFailed().
+// Unavailable maps the relay's 404 when the target device has no unclaimed
+// KeyPackage left to hand out (KeyPackageService::claim returns
+// RelayError::NotFound, which the relay maps to 404 Not Found); Malformed is a
+// 2xx whose body is not a non-empty key_package byte string within the body
+// bound; Transport covers TLS/network failures, an oversize body, and any other
+// non-2xx status. A rejected token is not one of these: it drives the single
+// refresh-and-retry then authExpired().
+enum class RelayClaimError {
+    Unavailable,
     Malformed,
     Transport,
 };
@@ -257,6 +272,15 @@ public:
     // other failure Transport.
     void redeemInvite(const QByteArray &token);
 
+    // Claims one of a target device's one-time MLS KeyPackages over the
+    // authenticated HTTPS endpoint (bearer access token attached), sending
+    // { target_device_id }. Emits keyPackageClaimed(keyPackage) with the claimed
+    // bytes on a 2xx; a rejected token drives a single serialized
+    // refresh-and-retry and then authExpired(); the relay's none-available status
+    // (404) emits keyPackageClaimFailed(Unavailable); a 2xx whose body is not a
+    // non-empty key_package emits Malformed; any other failure emits Transport.
+    void claimKeyPackage(const DeviceId &targetDevice);
+
     // Closes the live stream and cancels any pending reconnect. Idempotent.
     void disconnect();
 
@@ -293,6 +317,11 @@ signals:
     // One-time invite redemption: the inviter's entry, or a typed failure.
     void inviteRedeemed(const RelayDirectoryEntry &entry);
     void inviteRedemptionFailed(RelayDirectoryError error);
+    // KeyPackage claim: the claimed KeyPackage bytes, or a typed failure (a
+    // rejected token surfaces through authExpired() after the single
+    // refresh-and-retry).
+    void keyPackageClaimed(const QByteArray &keyPackage);
+    void keyPackageClaimFailed(RelayClaimError error);
 
 private:
     void completeAuthentication(const QByteArray &challenge, const ChallengeSigner &signer,

@@ -4,12 +4,21 @@ if(NOT DEFINED OPENCHAT_EXECUTABLE OR NOT DEFINED CAPTURE_OUTPUT
         "OPENCHAT_EXECUTABLE, CAPTURE_OUTPUT, CAPTURE_WIDTH, and CAPTURE_HEIGHT are required")
 endif()
 
+# Optional passthrough: when CAPTURE_EXTRA_ARG is defined and non-empty it is
+# prepended to the OpenChat arguments (e.g. --add-contact to select a sub-mode).
+# When it is undefined the invocation is byte-for-byte the historical one.
+set(openchat_extra_args "")
+if(DEFINED CAPTURE_EXTRA_ARG AND NOT CAPTURE_EXTRA_ARG STREQUAL "")
+    list(APPEND openchat_extra_args "${CAPTURE_EXTRA_ARG}")
+endif()
+
 file(REMOVE "${CAPTURE_OUTPUT}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             QT_QPA_PLATFORM=offscreen
             QT_QUICK_BACKEND=software
             "${OPENCHAT_EXECUTABLE}"
+            ${openchat_extra_args}
             --capture "${CAPTURE_OUTPUT}"
             --capture-delay 100
             --width "${CAPTURE_WIDTH}"

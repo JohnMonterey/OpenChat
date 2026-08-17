@@ -6,6 +6,10 @@ Item {
     id: sidebar
     objectName: "contactSidebar"
     required property var controller
+    // Optional add-contact bridge; null in the default/capture paths. When it is
+    // absent the requests panel below collapses and the favorites category renders
+    // exactly as before.
+    property var contactController: null
     readonly property real contactRowHeight: Math.max(44, Math.min(65, (height - 290) / 6))
 
     Rectangle {
@@ -138,8 +142,115 @@ Item {
             anchors.top: parent.top
             width: parent.width
 
+            // Inbound contact requests, shown above the categories. Present only
+            // when a live/preview ContactController is attached and enabled;
+            // otherwise it collapses to zero height and the Column skips it, so the
+            // categories below render exactly as before.
+            Item {
+                id: requestsPanel
+                objectName: "requestsPanel"
+                width: parent.width
+                readonly property bool hasRequests:
+                    sidebar.contactController && sidebar.contactController.requests.count > 0
+                visible: sidebar.contactController && sidebar.contactController.enabled
+                height: visible ? requestsHeader.height
+                                  + (hasRequests ? requestsColumn.height : 46)
+                                : 0
+                clip: true
+
+                Rectangle {
+                    id: requestsHeader
+                    width: parent.width
+                    height: 40
+                    color: "#27ffffff"
+
+                    Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
+                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.rule }
+
+                    Text {
+                        x: 15
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: 1
+                        text: "Requests"
+                        color: Theme.categoryText
+                        font.family: Theme.uiFont
+                        font.pixelSize: 17
+                        renderType: Text.NativeRendering
+                    }
+
+                    // Primitive "+" affordance drawn from two crossed strokes,
+                    // opening the add-contact dialog.
+                    Item {
+                        objectName: "addContactButton"
+                        anchors.right: parent.right
+                        anchors.rightMargin: 16
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 18
+                        height: 18
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 14
+                            height: 2
+                            radius: 1
+                            color: Theme.categoryText
+                        }
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 2
+                            height: 14
+                            radius: 1
+                            color: Theme.categoryText
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (sidebar.contactController)
+                                    sidebar.contactController.openDialog();
+                            }
+                        }
+                    }
+                }
+
+                Column {
+                    id: requestsColumn
+                    anchors.top: requestsHeader.bottom
+                    width: parent.width
+
+                    Repeater {
+                        objectName: "requestsList"
+                        model: sidebar.contactController ? sidebar.contactController.requests : null
+
+                        RequestRow {
+                            id: requestRowDelegate
+                            objectName: "requestRow_" + requestRowDelegate.requestId
+                            width: requestsColumn.width
+                            controller: sidebar.contactController
+                        }
+                    }
+                }
+
+                Text {
+                    objectName: "noRequests"
+                    anchors.top: requestsHeader.bottom
+                    anchors.topMargin: 14
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    visible: !requestsPanel.hasRequests
+                    text: "No pending requests"
+                    color: Theme.textSecondary
+                    font.family: Theme.uiFont
+                    font.pixelSize: 14
+                    renderType: Text.NativeRendering
+                }
+            }
+
             ContactCategory {
                 objectName: "favoritesCategory"
+                // Superseded by the requests panel above once the contact bridge is
+                // enabled; otherwise it keeps its original visibility.
+                visible: !(sidebar.contactController && sidebar.contactController.enabled)
                 width: parent.width
                 label: "Requests"
                 favoriteCategory: true

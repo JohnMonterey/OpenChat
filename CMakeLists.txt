@@ -47,9 +47,13 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/Theme.qml
         qml/OpenChat/components/PresenceBead.qml
         qml/OpenChat/components/Avatar.qml
+        qml/OpenChat/components/AeroTextField.qml
+        qml/OpenChat/components/AeroButton.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
+        qml/OpenChat/components/AddContactDialog.qml
+        qml/OpenChat/components/RequestRow.qml
         qml/OpenChat/components/ConversationHeader.qml
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
@@ -410,9 +414,11 @@ add_test(NAME tst_bubblebackground COMMAND tst_bubblebackground)
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp
     src/controllers/ChatController.cpp
+    src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
 )
@@ -421,10 +427,19 @@ target_compile_definitions(tst_qmlload PRIVATE
     OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_link_libraries(tst_qmlload PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
     Qt6::Core
     Qt6::Gui
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Network
+    Qt6::WebSockets
     Qt6::Test
 )
 add_test(NAME tst_qmlload COMMAND tst_qmlload)
@@ -448,3 +463,17 @@ endfunction()
 add_openchat_capture_test(capture_smoke 860 680)
 add_openchat_capture_test(capture_minimum 720 560)
 add_openchat_capture_test(capture_large 1024 768)
+
+# The add-contact preview sub-mode: renders the dialog over a populated mock
+# Requests list. Uses the same verify runner with the extra --add-contact argument.
+add_test(
+    NAME capture_add_contact
+    COMMAND ${CMAKE_COMMAND}
+        -DOPENCHAT_EXECUTABLE=$<TARGET_FILE:OpenChat>
+        -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/capture_add_contact.png
+        -DCAPTURE_WIDTH=900
+        -DCAPTURE_HEIGHT=680
+        -DCAPTURE_EXTRA_ARG=--add-contact
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
+)
+set_tests_properties(capture_add_contact PROPERTIES TIMEOUT 5)

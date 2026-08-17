@@ -8,7 +8,9 @@
 #include <optional>
 
 #include "controllers/ChatController.h"
+#include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
+#include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "render/BubbleBackground.h"
 
@@ -569,6 +571,89 @@ private slots:
         QVERIFY(artwork);
         QCOMPARE(artwork->property("cornerRadius").toReal(), 5.0);
     }
+
+    void contactSurfaceRendersWithController()
+    {
+        // A preview ContactController seeded like the --add-contact sub-mode: one
+        // inbound request and a ready invite, injected alongside the chat controller.
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        contactController.addMockRequest(QStringLiteral("New contact request"),
+                                         QStringLiteral("ID abcdef0123"));
+        contactController.setMockInvite(QStringLiteral("OPENCHAT-INV-TEST-0001"));
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        // The requests panel supersedes the favorites "Requests" category, and the
+        // add affordance is present.
+        QObject *requestsPanel =
+            root->findChild<QObject *>(QStringLiteral("requestsPanel"));
+        QObject *favoritesCategory =
+            root->findChild<QObject *>(QStringLiteral("favoritesCategory"));
+        QObject *addContactButton =
+            root->findChild<QObject *>(QStringLiteral("addContactButton"));
+        QObject *noRequests = root->findChild<QObject *>(QStringLiteral("noRequests"));
+        QVERIFY(requestsPanel);
+        QVERIFY(favoritesCategory);
+        QVERIFY(addContactButton);
+        QVERIFY(noRequests);
+        QVERIFY(requestsPanel->property("visible").toBool());
+        QVERIFY(!favoritesCategory->property("visible").toBool());
+        QVERIFY(!noRequests->property("visible").toBool());
+
+        // The seeded request's delegate is keyed by its requestId hex, and each of
+        // its accept / decline / block buttons targets that same id.
+        OpenChat::RequestListModel *model = contactController.requests();
+        QVERIFY(model);
+        QCOMPARE(model->count(), 1);
+        const QString requestId =
+            model->data(model->index(0), OpenChat::RequestListModel::IdRole).toString();
+        QVERIFY(!requestId.isEmpty());
+        // Repeater delegates are visual children of the panel but are not in its
+        // QObject child tree, so they are located through the visual tree.
+        auto *panelItem = qobject_cast<QQuickItem *>(requestsPanel);
+        QVERIFY(panelItem);
+        QVERIFY(findVisualItem(panelItem, QStringLiteral("requestRow_") + requestId));
+        QVERIFY(findVisualItem(panelItem, QStringLiteral("requestAccept_") + requestId));
+        QVERIFY(findVisualItem(panelItem, QStringLiteral("requestDecline_") + requestId));
+        QVERIFY(findVisualItem(panelItem, QStringLiteral("requestBlock_") + requestId));
+
+        // The dialog is present but hidden until the controller opens it.
+        QObject *dialog = root->findChild<QObject *>(QStringLiteral("addContactDialog"));
+        QVERIFY(dialog);
+        QVERIFY(!dialog->property("visible").toBool());
+
+        contactController.openDialog();
+        QCoreApplication::processEvents();
+        QVERIFY(dialog->property("visible").toBool());
+
+        // Every field, action, and the invite/status surfaces are reachable, and the
+        // seeded invite is surfaced read-only in the invite box.
+        QObject *handleField = root->findChild<QObject *>(QStringLiteral("addHandleField"));
+        QObject *inviteField = root->findChild<QObject *>(QStringLiteral("redeemInviteField"));
+        QObject *createInviteButton =
+            root->findChild<QObject *>(QStringLiteral("createInviteButton"));
+        QObject *myInviteText = root->findChild<QObject *>(QStringLiteral("myInviteText"));
+        QObject *addContactStatus =
+            root->findChild<QObject *>(QStringLiteral("addContactStatus"));
+        QVERIFY(handleField);
+        QVERIFY(inviteField);
+        QVERIFY(createInviteButton);
+        QVERIFY(myInviteText);
+        QVERIFY(addContactStatus);
+        QVERIFY(contactController.inviteReady());
+        QCOMPARE(myInviteText->property("text").toString(),
+                 QStringLiteral("OPENCHAT-INV-TEST-0001"));
+    }
 };
 
 int main(int argc, char **argv)
@@ -586,6 +671,9 @@ int main(int argc, char **argv)
     qmlRegisterUncreatableType<OpenChat::OnboardingController>(
         "OpenChat.Native", 1, 0, "OnboardingController",
         QStringLiteral("OnboardingController is provided by the application"));
+    qmlRegisterUncreatableType<OpenChat::ContactController>(
+        "OpenChat.Native", 1, 0, "ContactController",
+        QStringLiteral("ContactController is provided by the application"));
     QmlLoadTest test;
     return QTest::qExec(&test, argc, argv);
 }

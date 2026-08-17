@@ -31,6 +31,7 @@ Window {
             width: root.sidebarWidth
             height: parent.height
             controller: root.chatController
+            contactController: root.contactController
         }
 
         // The three navigation sections share the pane to the right of the
@@ -248,5 +249,12 @@ Window {
                 }
             }
         }
+    }
+
+    // Add-contact overlay: floats above every section, filling the window. It binds
+    // to the optional contactController and self-hides when that is null or its
+    // dialog is closed, so the default and capture paths render unchanged.
+    AddContactDialog {
+        contactController: root.contactController
     }
 }

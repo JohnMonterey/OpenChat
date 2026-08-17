@@ -4,9 +4,13 @@ Onboarding 1.0 Onboarding.qml
 singleton Theme 1.0 Theme.qml
 PresenceBead 1.0 components/PresenceBead.qml
 Avatar 1.0 components/Avatar.qml
+AeroTextField 1.0 components/AeroTextField.qml
+AeroButton 1.0 components/AeroButton.qml
 ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml
 ContactRow 1.0 components/ContactRow.qml
+AddContactDialog 1.0 components/AddContactDialog.qml
+RequestRow 1.0 components/RequestRow.qml
 ConversationHeader 1.0 components/ConversationHeader.qml
 MessageDelegate 1.0 components/MessageDelegate.qml
 MessageHistory 1.0 components/MessageHistory.qml

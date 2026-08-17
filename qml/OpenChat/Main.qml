@@ -7,6 +7,10 @@ Window {
     id: root
     objectName: "openChatWindow"
     required property var chatController
+    // Optional add-contact bridge; null in the default/capture paths. The visible
+    // add-contact surface binds to it in a later change; declaring it here keeps the
+    // live and --add-contact initial properties valid with no rendering change.
+    property var contactController: null
     readonly property int sidebarWidth: Math.round(
         Math.max(250, Math.min(300, width * Theme.sidebarWidth / 860)))
 

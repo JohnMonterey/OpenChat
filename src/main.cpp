@@ -22,11 +22,11 @@
 #include <optional>
 
 #include "app/AccountBootstrap.h"
-#include "app/AddContactService.h"
 #include "app/AppMetadata.h"
 #include "app/ContactRequestService.h"
 #include "app/ProfileSession.h"
 #include "controllers/ChatController.h"
+#include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
 #include "domain/Identifiers.h"
 #include "network/RelayClient.h"
@@ -52,6 +52,9 @@ void registerQmlTypes()
     qmlRegisterUncreatableType<OpenChat::OnboardingController>(
         "OpenChat.Native", 1, 0, "OnboardingController",
         QStringLiteral("OnboardingController is provided by the application"));
+    qmlRegisterUncreatableType<OpenChat::ContactController>(
+        "OpenChat.Native", 1, 0, "ContactController",
+        QStringLiteral("ContactController is provided by the application"));
 }
 
 // Applies an optional --width/--height override to a window, honouring the app's
@@ -247,12 +250,21 @@ private:
     void loadMainWindow()
     {
         m_chatController = std::make_unique<OpenChat::ChatController>();
+        m_contactController = std::make_unique<OpenChat::ContactController>();
+        // Install the live add-contact seam only when the contact services came up
+        // (m_contactRequests implies a live relay/session/engine). Otherwise the
+        // controller stays in its harmless disabled mock state.
+        if (m_contactRequests) {
+            m_contactController->setLiveServices(m_contactRequests.get(), m_relay.get(),
+                                                 m_session.get(), m_session->syncEngine());
+        }
         m_engine = std::make_unique<QQmlApplicationEngine>();
         QObject::connect(
             m_engine.get(), &QQmlApplicationEngine::objectCreationFailed, qApp,
             [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
         m_engine->setInitialProperties(
-            {{QStringLiteral("chatController"), QVariant::fromValue(m_chatController.get())}});
+            {{QStringLiteral("chatController"), QVariant::fromValue(m_chatController.get())},
+             {QStringLiteral("contactController"), QVariant::fromValue(m_contactController.get())}});
         m_engine->loadFromModule("OpenChat", "Main");
         if (m_engine->rootObjects().isEmpty()) {
             QCoreApplication::exit(EXIT_FAILURE);
@@ -290,10 +302,9 @@ private:
         OpenChat::SyncEngine *engine = m_session->syncEngine();
         if (engine == nullptr)
             return;
-        // AddContactService readies the SEND path for the Phase 10 UI; the request
-        // service self-connects to the engine's handshake signals in its ctor.
-        m_addContact =
-            std::make_unique<OpenChat::AddContactService>(*m_session, *m_relay, *engine);
+        // The request service self-connects to the engine's handshake signals in its
+        // ctor. The SEND path is owned per-attempt by ContactController (which builds
+        // a fresh AddContactService on each add), so nothing is constructed here.
         m_contactRequests =
             std::make_unique<OpenChat::ContactRequestService>(*m_session, *engine);
         m_contactRequests->reconcileOnStartup();
@@ -454,15 +465,19 @@ private:
     std::unique_ptr<OpenChat::ProfileSession> m_session;
     std::optional<OpenChat::ProfileId> m_pendingProfileId;
     std::unique_ptr<OpenChat::AccountBootstrap> m_bootstrap;
-    // Live-session contact services. Declared AFTER m_session (destroyed before it)
-    // and after m_transport/m_relay (destroyed before those), so they disconnect
-    // from the engine while it, the session, the transport and the relay are all
-    // still alive. Only populated on a live unlocked session (enableContactServices).
-    std::unique_ptr<OpenChat::AddContactService> m_addContact;
+    // Live-session contact receive service. Declared AFTER m_session (destroyed
+    // before it) and after m_transport/m_relay (destroyed before those), so it
+    // disconnects from the engine while it, the session, the transport and the relay
+    // are all still alive. Only populated on a live unlocked session
+    // (enableContactServices).
     std::unique_ptr<OpenChat::ContactRequestService> m_contactRequests;
 
     std::unique_ptr<OpenChat::OnboardingController> m_onboardingController;
     std::unique_ptr<OpenChat::ChatController> m_chatController;
+    // Declared next to m_chatController so it tears down with the controllers, ahead
+    // of m_contactRequests / m_session / m_transport / m_relay: its transient
+    // AddContactService borrows the session, relay and engine by reference.
+    std::unique_ptr<OpenChat::ContactController> m_contactController;
     std::unique_ptr<QQuickView> m_onboardingView;
     std::unique_ptr<QQmlApplicationEngine> m_engine;
 };
@@ -528,6 +543,48 @@ int runOnboardingPreview(QGuiApplication &application, QCommandLineParser &parse
     return application.exec();
 }
 
+// Loads the chat window with a mock ChatController and a preview ContactController
+// (no real services), seeding a couple of inbound requests and a preset invite and
+// opening the add-contact dialog. Committable preview path used to launch and
+// capture the add-contact surface. In this phase Main.qml carries no
+// contactController bindings yet, so it renders like the default chat window; the
+// visible add-contact UI arrives in Phase 10b.
+int runContactWindow(QGuiApplication &application, QCommandLineParser &parser,
+                     const QCommandLineOption &captureOption,
+                     const QCommandLineOption &delayOption,
+                     const QCommandLineOption &widthOption,
+                     const QCommandLineOption &heightOption)
+{
+    OpenChat::ChatController chatController;
+    OpenChat::ContactController contactController;
+    contactController.enableForPreview();
+    contactController.addMockRequest(QStringLiteral("New contact request"),
+                                     QStringLiteral("ID a1b2c3d4e5"));
+    contactController.addMockRequest(QStringLiteral("New contact request"),
+                                     QStringLiteral("ID a1b2c3d4e5"));
+    contactController.setMockInvite(QStringLiteral("OPENCHAT-INV-9F3K-77QX-2M8D-4T1P"));
+    contactController.openDialog();
+
+    QQmlApplicationEngine engine;
+    engine.setInitialProperties(
+        {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+         {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+    QObject::connect(
+        &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
+        [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
+    engine.loadFromModule("OpenChat", "Main");
+
+    if (engine.rootObjects().isEmpty())
+        return EXIT_FAILURE;
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window)
+        return EXIT_FAILURE;
+
+    applyWindowSizing(parser, window, widthOption, heightOption);
+    scheduleCaptureIfRequested(parser, window, captureOption, delayOption);
+    return application.exec();
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -559,8 +616,11 @@ int main(int argc, char *argv[])
     const QCommandLineOption onboardingRecoveryOption(
         QStringLiteral("onboarding-recovery"),
         QStringLiteral("Preview the onboarding recovery-code screen."));
+    const QCommandLineOption addContactOption(
+        QStringLiteral("add-contact"),
+        QStringLiteral("Preview the add-contact surface (dialog + requests)."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
-                       onboardingRecoveryOption});
+                       onboardingRecoveryOption, addContactOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -570,6 +630,12 @@ int main(int argc, char *argv[])
     if (parser.isSet(onboardingOption) || previewRecovery)
         return runOnboardingPreview(application, parser, captureOption, delayOption, widthOption,
                                     heightOption, previewRecovery);
+
+    // Add-contact preview: render the add-contact surface with a mock controller,
+    // checked before the plain capture path so --add-contact --capture routes here.
+    if (parser.isSet(addContactOption))
+        return runContactWindow(application, parser, captureOption, delayOption, widthOption,
+                                heightOption);
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

@@ -27,9 +27,11 @@ set_source_files_properties(qml/OpenChat/Theme.qml PROPERTIES
 qt_add_executable(OpenChat
     src/main.cpp
     src/controllers/ChatController.cpp
+    src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
 )
@@ -346,6 +348,28 @@ target_link_libraries(tst_contactrequestservice PRIVATE
 )
 add_test(NAME tst_contactrequestservice COMMAND tst_contactrequestservice)
 set_tests_properties(tst_contactrequestservice PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(tst_contactcontroller
+    tests/tst_contactcontroller.cpp
+    src/controllers/ContactController.cpp
+    src/models/RequestListModel.cpp
+)
+target_include_directories(tst_contactcontroller PRIVATE src tests relay/src)
+target_link_libraries(tst_contactcontroller PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test
+)
+add_test(NAME tst_contactcontroller COMMAND tst_contactcontroller)
+set_tests_properties(tst_contactcontroller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_models
     tests/tst_models.cpp

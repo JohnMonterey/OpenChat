@@ -82,6 +82,15 @@ public:
   [[nodiscard]] Result<AccountId, ProfileSessionError> accountId() const;
   [[nodiscard]] Result<RecoveryCode, ProfileSessionError> takeRecoveryCode();
 
+  // Durably commits any MLS ratchet state captured by an out-of-band mutation
+  // (KeyPackage generation, group setup) that did NOT flow through the
+  // SyncEngine's send/receive path. Surrenders the capturing store's pending
+  // blob and writes it through the SyncStore in one transaction; a no-op that
+  // succeeds when nothing is pending. Without this call such a mutation's
+  // private material is dropped on lock(), so a published KeyPackage could not
+  // be used after a restart (see the Phase-4b caveat in activate()).
+  [[nodiscard]] Result<void, ProfileSessionError> persistMlsState();
+
   [[nodiscard]] SqlCipherChatRepository *chats() const noexcept;
   [[nodiscard]] SqlCipherOutboxRepository *outbox() const noexcept;
   [[nodiscard]] SqlCipherSyncRepository *sync() const noexcept;

@@ -196,6 +196,32 @@ SqlCipherSyncStore::SqlCipherSyncStore(SqlCipherDatabase &database, ProfileId pr
         m_clock = [] { return QDateTime::currentMSecsSinceEpoch(); };
 }
 
+Result<void, RepositoryError> SqlCipherSyncStore::commitMlsState(QByteArrayView mlsState)
+{
+    if (mlsState.isEmpty() || mlsState.size() > maximumMlsStateSize)
+        return Result<void, RepositoryError>::failure(
+            error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitMlsState.invalid")));
+
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("commitMlsState.begin")));
+        if (!upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitMlsState.mls"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitMlsState.commit"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
 Result<void, RepositoryError> SqlCipherSyncStore::commitSend(const MessageRecord &message,
                                                              const OutboxRecord &outbox,
                                                              QByteArrayView mlsState)

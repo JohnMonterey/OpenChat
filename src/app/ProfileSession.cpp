@@ -358,6 +358,23 @@ Result<RecoveryCode, ProfileSessionError> ProfileSession::takeRecoveryCode() {
   return Result<RecoveryCode, ProfileSessionError>::success(std::move(code));
 }
 
+Result<void, ProfileSessionError> ProfileSession::persistMlsState() {
+  if (!m_unlocked || !m_mlsStateStore || !m_syncStore)
+    return Result<void, ProfileSessionError>::failure(
+        ProfileSessionError::NotUnlocked);
+  // Nothing captured since the last durable commit: succeed without a write.
+  if (!m_mlsStateStore->hasPendingState())
+    return Result<void, ProfileSessionError>::success();
+  const QByteArray pending = m_mlsStateStore->takePendingState();
+  if (pending.isEmpty())
+    return Result<void, ProfileSessionError>::success();
+  auto committed = m_syncStore->commitMlsState(pending);
+  if (!committed.hasValue())
+    return Result<void, ProfileSessionError>::failure(
+        ProfileSessionError::DatabaseFailure);
+  return Result<void, ProfileSessionError>::success();
+}
+
 SqlCipherChatRepository *ProfileSession::chats() const noexcept {
   return m_chats.get();
 }

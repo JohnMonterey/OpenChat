@@ -559,6 +559,13 @@ public:
     QSslConfiguration tlsConfig;
     bool tlsConfigured = false;
 
+    // In-memory session tokens installed by setTokens(). The credential
+    // callbacks are re-pointed at these so every existing token fetch (headers,
+    // refresh) keeps working unchanged. Held only for the session lifetime and
+    // never logged or persisted.
+    QByteArray heldAccessToken;
+    QByteArray heldRefreshToken;
+
     quint64 resumeWatermark = 0;
     int reconnectAttempt = 0;
     bool subprotocolVerified = false;
@@ -591,6 +598,19 @@ void RelayClient::setTlsConfiguration(const QSslConfiguration &configuration)
 {
     d->tlsConfig = configuration;
     d->tlsConfigured = true;
+}
+
+void RelayClient::setTokens(const QByteArray &accessToken, const QByteArray &refreshToken)
+{
+    d->heldAccessToken = accessToken;
+    d->heldRefreshToken = refreshToken;
+    // Re-point the credential callbacks at the held tokens. The lambdas capture
+    // the Private object that owns them, so they never outlive the storage they
+    // read. All existing token-fetch sites (authorizedRequest, openSocket, the
+    // refresh paths) go through these callbacks and pick up the rotation.
+    Private *p = d.get();
+    d->credentials.accessToken = [p] { return p->heldAccessToken; };
+    d->credentials.refreshToken = [p] { return p->heldRefreshToken; };
 }
 
 void RelayClient::authenticateDevice(const QByteArray &deviceCredential,

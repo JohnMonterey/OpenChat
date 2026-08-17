@@ -132,6 +132,7 @@ private slots:
   void removalRequiresExactProfileAndPathConfirmation();
   void recoveryCodeIsRevealedAndConsumedOnce();
   void createPersistsAStableAccountId();
+  void persistMlsStateMakesKeyPackageMaterialDurable();
   void offlineDurableSendSurvivesRestart();
 };
 
@@ -344,6 +345,49 @@ void ProfileSessionTest::createPersistsAStableAccountId() {
   const auto secondAccount = reopened.value()->accountId();
   QVERIFY(secondAccount.hasValue());
   QCOMPARE(secondAccount.value().bytes(), firstAccount.value().bytes());
+}
+
+void ProfileSessionTest::persistMlsStateMakesKeyPackageMaterialDurable() {
+  QTemporaryDir directory;
+  SessionVault vault;
+  const auto profileId = ProfileId::generate();
+  const auto paths = ProfilePaths::forProfile(directory.path(), profileId);
+
+  auto created = ProfileSession::create(profileId, vault, paths);
+  QVERIFY(created.hasValue());
+  auto session = std::move(created).value();
+
+  // Drain whatever the MlsClient captured at construction so the store starts
+  // with nothing pending, then prove the no-op path: with nothing captured,
+  // persistMlsState() must still succeed (it early-returns before commitMlsState,
+  // which would otherwise reject an empty blob).
+  QVERIFY(session->persistMlsState().hasValue());
+  QVERIFY(session->persistMlsState().hasValue()); // second call: nothing pending
+
+  // Generating a KeyPackage advances the MLS ratchet out-of-band (it does not
+  // flow through the SyncEngine), so its private material is only captured in
+  // memory until persistMlsState() writes it through the SyncStore.
+  auto keyPackage = session->mls()->generateKeyPackage();
+  QVERIFY(keyPackage.hasValue());
+  QVERIFY(!keyPackage.value().isEmpty());
+  QVERIFY(session->persistMlsState().hasValue());
+
+  session->lock();
+
+  // The captured KeyPackage state survived lock() because it was persisted: the
+  // durable blob loads directly from the store and is non-empty.
+  auto key = vault.readProfileKey(profileId);
+  QVERIFY(key.hasValue());
+  auto inspect = SqlCipherDatabase::open(paths.database, key.value());
+  QVERIFY(inspect.hasValue());
+  auto persisted = inspect.value().loadMlsState(profileId);
+  QVERIFY(persisted.hasValue());
+  QVERIFY(!persisted.value().isEmpty());
+
+  // Restart: unlock reconstructs the MlsClient from the persisted MLS state, so
+  // a successful unlock is itself proof the durable ratchet blob loads back.
+  auto reopened = ProfileSession::unlock(profileId, vault, paths);
+  QVERIFY(reopened.hasValue());
 }
 
 void ProfileSessionTest::offlineDurableSendSurvivesRestart() {

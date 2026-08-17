@@ -126,8 +126,10 @@ struct RelaySession final {
 //    surfaced through envelopeReceived; text frames, oversized frames, malformed
 //    CBOR, wrong recipients, and invalid control frames are dropped as terminal
 //    transport errors and never invoke the envelope callback.
-//  - Authorization travels only in request/handshake headers, is fetched per
-//    use from the credential callbacks, and is never stored as a member.
+//  - Authorization travels only in request/handshake headers and is fetched per
+//    use from the credential callbacks. setTokens() may install the current
+//    session tokens as that callback source; when it does they are held only in
+//    memory, never logged, and never written to disk.
 //  - At most one serialized token refresh is attempted per auth-failure cycle.
 //  - No message plaintext or private key ever enters this object.
 class RelayClient final : public QObject
@@ -148,6 +150,15 @@ public:
     // keep VerifyPeer; the client re-asserts VerifyPeer + SecureProtocols
     // regardless so a test cannot accidentally weaken verification.
     void setTlsConfiguration(const QSslConfiguration &configuration);
+
+    // Installs the session tokens obtained from authenticated()/tokensRotated()
+    // as the source the credential callbacks read from, so a subsequent
+    // authenticated request (publishKeyPackage, fetchSince, connectLive) carries
+    // the fresh access token and the refresh path has a refresh token to present.
+    // The tokens are held only in memory for the life of the session, are never
+    // logged or written to disk, and only ever leave through a request/handshake
+    // Authorization header. Overwrites any previously installed tokens.
+    void setTokens(const QByteArray &accessToken, const QByteArray &refreshToken);
 
     // Performs the two-step device challenge/response over HTTPS and, on
     // success, emits authenticated() with a fresh RelaySession.

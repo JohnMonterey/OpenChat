@@ -84,6 +84,7 @@ private slots:
     void scheduleRetryReArmsAndIsMonotonic();
     void deliveryStateIsMonotonic();
     void capturingStoreCapturesWithoutWritingAndSurrendersOnce();
+    void commitMlsStatePersistsAloneAndUpdatesFromCapture();
 };
 
 void SyncStoreTest::atomicSendPersistsMessageOutboxAndMlsState()
@@ -444,6 +445,41 @@ void SyncStoreTest::capturingStoreCapturesWithoutWritingAndSurrendersOnce()
     QCOMPARE(capture.takePendingState(), QByteArray("pending-A"));
     QVERIFY(!capture.hasPendingState());
     QCOMPARE(capture.takePendingState(), QByteArray()); // nothing pending now
+}
+
+void SyncStoreTest::commitMlsStatePersistsAloneAndUpdatesFromCapture()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherSyncStore store(database, profileId);
+
+    // An empty blob is rejected, and nothing is persisted.
+    QVERIFY(!store.commitMlsState(QByteArray()).hasValue());
+    QVERIFY(database.loadMlsState(profileId).value().isEmpty());
+
+    // A direct commit persists the blob alone; loadMlsState returns exactly it.
+    const QByteArray first("kp-state-1");
+    QVERIFY(store.commitMlsState(first).hasValue());
+    auto afterFirst = database.loadMlsState(profileId);
+    QVERIFY(afterFirst.hasValue());
+    QCOMPARE(afterFirst.value(), first);
+
+    // A subsequent capturing mutation's surrendered blob updates it in place:
+    // store() captures without writing, takePendingState() surrenders it, and
+    // commitMlsState() makes it durable.
+    CapturingMlsStateStore capture(database, profileId);
+    QVERIFY(capture.store(QByteArray("kp-state-2")).hasValue());
+    QVERIFY(capture.hasPendingState());
+    QCOMPARE(database.loadMlsState(profileId).value(), first); // not yet written
+    QVERIFY(store.commitMlsState(capture.takePendingState()).hasValue());
+    QVERIFY(!capture.hasPendingState());
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("kp-state-2"));
 }
 
 QTEST_GUILESS_MAIN(SyncStoreTest)

@@ -27,6 +27,14 @@ public:
 
     SqlCipherSyncStore(SqlCipherDatabase &database, ProfileId profileId, Clock clock = {});
 
+    // Persists the MLS ratchet blob ALONE inside a single transaction. Used for
+    // MLS mutations that do not flow through the engine's send/receive path (for
+    // example KeyPackage generation during account bootstrap), whose captured
+    // state would otherwise be dropped on lock(). Same profile-scoped UPSERT of
+    // local_mls_state that every commit* performs, run on its own so the private
+    // material behind a published KeyPackage becomes durable immediately.
+    [[nodiscard]] Result<void, RepositoryError> commitMlsState(QByteArrayView mlsState);
+
     [[nodiscard]] Result<void, RepositoryError>
     commitSend(const MessageRecord &message, const OutboxRecord &outbox,
                QByteArrayView mlsState) override;

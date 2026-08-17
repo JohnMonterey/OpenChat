@@ -6,7 +6,11 @@
 #include "domain/Contact.h"
 #include "network/RelayClient.h"
 #include "network/SyncEngine.h"
+#include "security/SafetyNumber.h"
 #include "storage/SqlCipherContactRepository.h"
+
+#include <QByteArray>
+#include <QDateTime>
 
 #include <utility>
 
@@ -52,6 +56,20 @@ RequestListModel::RequestEntry entryForRequest(const AccountId &account,
                                           subtitleForAccount(account)};
 }
 
+// Formats the raw 60-decimal-digit safety number into 12 space-separated groups of
+// five, the on-screen presentation both sides compare out-of-band.
+QString groupSafetyNumber(const QString &raw)
+{
+    QString grouped;
+    grouped.reserve(raw.size() + raw.size() / 5);
+    for (qsizetype offset = 0; offset < raw.size(); offset += 5) {
+        if (!grouped.isEmpty())
+            grouped += QLatin1Char(' ');
+        grouped += QStringView(raw).mid(offset, 5);
+    }
+    return grouped;
+}
+
 } // namespace
 
 ContactController::ContactController(QObject *parent)
@@ -94,6 +112,26 @@ QString ContactController::myInvite() const
 bool ContactController::inviteReady() const
 {
     return !m_myInvite.isEmpty();
+}
+
+bool ContactController::safetyNumberOpen() const
+{
+    return m_safetyNumberOpen;
+}
+
+QString ContactController::safetyNumber() const
+{
+    return m_safetyNumber;
+}
+
+bool ContactController::safetyNumberVerified() const
+{
+    return m_safetyNumberVerified;
+}
+
+QString ContactController::safetyNumberContact() const
+{
+    return m_safetyNumberContact;
 }
 
 void ContactController::setStatus(Status status, const QString &message)
@@ -255,6 +293,83 @@ void ContactController::block(const QString &requestId)
     setStatus(Status::Success, QStringLiteral("Contact blocked."));
 }
 
+void ContactController::openSafetyNumber(const QString &contactId)
+{
+    if (m_session == nullptr) {
+        // Mock mode: the preset from setMockSafetyNumber() is already in place; just
+        // reveal the dialog.
+        openSafetyNumberPreview();
+        return;
+    }
+
+    const std::optional<AccountId> account =
+        AccountId::fromBytes(QByteArray::fromHex(contactId.toLatin1()));
+
+    // Reset the surface, then fill from the live contact. A missing key or an
+    // unresolvable id leaves an empty number so the dialog shows "unavailable".
+    m_safetyNumber.clear();
+    m_safetyNumberVerified = false;
+    m_safetyNumberContact = QStringLiteral("ID ") + contactId.left(10);
+    m_safetyNumberAccount = account;
+
+    if (account) {
+        SqlCipherContactRepository *contacts = m_session->contacts();
+        std::optional<ContactRecord> record;
+        if (contacts != nullptr) {
+            if (auto found = contacts->find(*account); found.hasValue())
+                record = std::move(found).value();
+        }
+
+        if (record) {
+            if (!record->handle.isEmpty())
+                m_safetyNumberContact = record->handle;
+            m_safetyNumberVerified = record->verified;
+
+            if (record->peerSigningKey && record->peerSigningKey->size() == 32) {
+                const auto credential = m_session->publicCredential();
+                const auto ourAccount = m_session->accountId();
+                if (credential.hasValue() && ourAccount.hasValue()) {
+                    auto number = computeSafetyNumber(
+                        credential.value().signingPublicKey, ourAccount.value().bytes(),
+                        *record->peerSigningKey, account->bytes());
+                    if (number.hasValue())
+                        m_safetyNumber = groupSafetyNumber(number.value());
+                }
+            }
+        }
+    }
+
+    m_safetyNumberOpen = true;
+    emit safetyNumberChanged();
+}
+
+void ContactController::closeSafetyNumber()
+{
+    if (!m_safetyNumberOpen)
+        return;
+    m_safetyNumberOpen = false;
+    emit safetyNumberChanged();
+}
+
+void ContactController::markVerified()
+{
+    if (m_session != nullptr) {
+        // Live: persist the assertion for the contact the dialog is showing.
+        if (m_safetyNumberAccount) {
+            if (SqlCipherContactRepository *contacts = m_session->contacts())
+                (void)contacts->setVerified(*m_safetyNumberAccount, true,
+                                            QDateTime::currentMSecsSinceEpoch());
+        }
+        m_safetyNumberVerified = true;
+        emit safetyNumberChanged();
+        return;
+    }
+
+    // Mock mode: flip the flag with no persistence.
+    m_safetyNumberVerified = !m_safetyNumberVerified;
+    emit safetyNumberChanged();
+}
+
 void ContactController::setLiveServices(ContactRequestService *requests, RelayClient *relay,
                                         ProfileSession *session, SyncEngine *engine)
 {
@@ -281,6 +396,9 @@ void ContactController::setLiveServices(ContactRequestService *requests, RelayCl
             [this](const AccountId &sender) {
                 m_requests.removeByAccount(sender);
                 setStatus(Status::Success, QStringLiteral("Contact added."));
+                // Show the safety number at the natural verify moment: the request
+                // was just accepted and the peer key is now bound.
+                openSafetyNumber(sender.toHex());
             });
     connect(m_requestsSvc, &ContactRequestService::securityNotice, this,
             [this](const ConversationId &conversation, const AccountId &) {
@@ -333,6 +451,23 @@ void ContactController::setMockInvite(const QString &inviteText)
     m_mockInvite = inviteText;
     m_myInvite = inviteText;
     emit myInviteChanged();
+}
+
+void ContactController::setMockSafetyNumber(const QString &groupedNumber, bool verified,
+                                            const QString &contactLabel)
+{
+    m_safetyNumber = groupedNumber;
+    m_safetyNumberVerified = verified;
+    m_safetyNumberContact = contactLabel;
+    emit safetyNumberChanged();
+}
+
+void ContactController::openSafetyNumberPreview()
+{
+    if (m_safetyNumberOpen)
+        return;
+    m_safetyNumberOpen = true;
+    emit safetyNumberChanged();
 }
 
 void ContactController::clearInviteConnections()

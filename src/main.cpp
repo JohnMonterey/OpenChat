@@ -585,6 +585,46 @@ int runContactWindow(QGuiApplication &application, QCommandLineParser &parser,
     return application.exec();
 }
 
+// Loads the chat window with a mock ChatController and a preview ContactController
+// (no real services), seeding a preset safety number and opening the
+// safety-number dialog. Committable preview path used to launch and capture the
+// contact-verification surface; the injected controllers stay in their harmless
+// disabled mock state (no session, no network).
+int runVerifyWindow(QGuiApplication &application, QCommandLineParser &parser,
+                    const QCommandLineOption &captureOption,
+                    const QCommandLineOption &delayOption,
+                    const QCommandLineOption &widthOption,
+                    const QCommandLineOption &heightOption)
+{
+    OpenChat::ChatController chatController;
+    OpenChat::ContactController contactController;
+    contactController.enableForPreview();
+    contactController.setMockSafetyNumber(
+        QStringLiteral("12345 67890 24680 13579 11223 44556 77889 90011 22334 45566 "
+                       "77889 90011"),
+        /*verified*/ false, QStringLiteral("@ada"));
+    contactController.openSafetyNumberPreview();
+
+    QQmlApplicationEngine engine;
+    engine.setInitialProperties(
+        {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+         {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+    QObject::connect(
+        &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
+        [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
+    engine.loadFromModule("OpenChat", "Main");
+
+    if (engine.rootObjects().isEmpty())
+        return EXIT_FAILURE;
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window)
+        return EXIT_FAILURE;
+
+    applyWindowSizing(parser, window, widthOption, heightOption);
+    scheduleCaptureIfRequested(parser, window, captureOption, delayOption);
+    return application.exec();
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -619,8 +659,11 @@ int main(int argc, char *argv[])
     const QCommandLineOption addContactOption(
         QStringLiteral("add-contact"),
         QStringLiteral("Preview the add-contact surface (dialog + requests)."));
+    const QCommandLineOption verifyOption(
+        QStringLiteral("verify"),
+        QStringLiteral("Preview the contact-verification safety-number surface."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
-                       onboardingRecoveryOption, addContactOption});
+                       onboardingRecoveryOption, addContactOption, verifyOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -636,6 +679,12 @@ int main(int argc, char *argv[])
     if (parser.isSet(addContactOption))
         return runContactWindow(application, parser, captureOption, delayOption, widthOption,
                                 heightOption);
+
+    // Verify preview: render the safety-number surface with a mock controller,
+    // checked before the plain capture path so --verify --capture routes here.
+    if (parser.isSet(verifyOption))
+        return runVerifyWindow(application, parser, captureOption, delayOption, widthOption,
+                               heightOption);
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

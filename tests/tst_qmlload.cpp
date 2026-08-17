@@ -654,6 +654,72 @@ private slots:
         QCOMPARE(myInviteText->property("text").toString(),
                  QStringLiteral("OPENCHAT-INV-TEST-0001"));
     }
+
+    void safetyNumberDialogRendersWithController()
+    {
+        // A preview ContactController seeded like the --verify sub-mode: a preset
+        // grouped safety number and a display label, injected alongside the chat
+        // controller. The number is set before load; the dialog is revealed only
+        // when the controller opens it, mirroring the add-contact overlay.
+        const QString number =
+            QStringLiteral("12345 67890 24680 13579 11223 44556 77889 90011 22334 45566 "
+                           "77889 90011");
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        contactController.setMockSafetyNumber(number, /*verified*/ false,
+                                              QStringLiteral("@ada"));
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        // The dialog is present but hidden until the controller opens the surface.
+        QObject *dialog = root->findChild<QObject *>(QStringLiteral("safetyNumberDialog"));
+        QVERIFY(dialog);
+        QVERIFY(!dialog->property("visible").toBool());
+
+        contactController.openSafetyNumberPreview();
+        QCoreApplication::processEvents();
+        QVERIFY(dialog->property("visible").toBool());
+
+        // Every key element is reachable and bound to the controller's surface.
+        QObject *contactLabel =
+            root->findChild<QObject *>(QStringLiteral("safetyNumberContactLabel"));
+        QObject *numberText =
+            root->findChild<QObject *>(QStringLiteral("safetyNumberText"));
+        QObject *markVerifiedButton =
+            root->findChild<QObject *>(QStringLiteral("markVerifiedButton"));
+        QObject *closeButton =
+            root->findChild<QObject *>(QStringLiteral("safetyNumberClose"));
+        QVERIFY(contactLabel);
+        QVERIFY(numberText);
+        QVERIFY(markVerifiedButton);
+        QVERIFY(closeButton);
+        QCOMPARE(contactLabel->property("text").toString(), QStringLiteral("@ada"));
+        QCOMPARE(numberText->property("text").toString(), number);
+        QVERIFY(numberText->property("visible").toBool());
+        // Not yet verified and a non-empty number: the verify action is enabled.
+        QVERIFY(markVerifiedButton->property("enabled").toBool());
+
+        // Marking verified reveals the badge and disables the button; the flip flows
+        // from the controller through the bound surface.
+        QObject *badge =
+            root->findChild<QObject *>(QStringLiteral("safetyNumberVerifiedBadge"));
+        QVERIFY(badge);
+        QVERIFY(!badge->property("visible").toBool());
+        contactController.markVerified();
+        QCoreApplication::processEvents();
+        QVERIFY(contactController.safetyNumberVerified());
+        QVERIFY(badge->property("visible").toBool());
+        QVERIFY(!markVerifiedButton->property("enabled").toBool());
+    }
 };
 
 int main(int argc, char **argv)

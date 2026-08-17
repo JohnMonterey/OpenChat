@@ -8,6 +8,7 @@
 #include "network/SyncEngine.h"
 #include "protocol/CiphertextEnvelope.h"
 #include "security/KeyVault.h"
+#include "security/SafetyNumber.h"
 #include "security/SecureBuffer.h"
 #include "storage/CapturingMlsStateStore.h"
 #include "storage/SqlCipherContactRepository.h"
@@ -107,6 +108,20 @@ QByteArray credentialFor(const DeviceId &device)
     return credential;
 }
 
+// Groups a raw 60-digit safety number into 12 space-separated groups of five,
+// matching the controller's on-screen formatting, so the tests can compare against
+// an independently computed number.
+QString groupedSafetyNumber(const QString &raw)
+{
+    QString grouped;
+    for (qsizetype offset = 0; offset < raw.size(); offset += 5) {
+        if (!grouped.isEmpty())
+            grouped += QLatin1Char(' ');
+        grouped += raw.mid(offset, 5);
+    }
+    return grouped;
+}
+
 } // namespace
 
 class ContactControllerTest final : public QObject
@@ -124,12 +139,16 @@ private slots:
     void inviteRoundTripsBase64Url();
     void mockAcceptDeclineBlockRemoveRow();
     void openResetsStatusAndTogglesDialog();
+    void mockSafetyNumberReflectsPresetAndToggles();
 
     // Live services (real session + engine + request service).
     void liveIncomingRequestAppearsThenAcceptClearsIt();
     void liveForgedRequestSurfacesSecurityNotice();
     void liveDeclineAndBlockRemoveRows();
     void liveSeedsPreexistingPendingRoster();
+    void liveOpenSafetyNumberComputesAndVerifies();
+    void liveOpenSafetyNumberUnavailableWithoutPeerKey();
+    void liveAcceptOpensSafetyNumber();
 
 private:
     // A genuine inbound handshake (see tst_contactrequestservice): our KeyPackage is
@@ -327,6 +346,34 @@ void ContactControllerTest::openResetsStatusAndTogglesDialog()
     QVERIFY(!controller.dialogOpen());
 }
 
+void ContactControllerTest::mockSafetyNumberReflectsPresetAndToggles()
+{
+    ContactController controller;
+    QSignalSpy spy(&controller, &ContactController::safetyNumberChanged);
+    QVERIFY(!controller.safetyNumberOpen());
+
+    const QString preset =
+        QStringLiteral("11111 22222 33333 44444 55555 66666 77777 88888 99999 00000 "
+                       "12121 34343");
+    controller.setMockSafetyNumber(preset, /*verified*/ false, QStringLiteral("@ada"));
+    QVERIFY(spy.count() >= 1);
+    QCOMPARE(controller.safetyNumber(), preset);
+    QCOMPARE(controller.safetyNumberContact(), QStringLiteral("@ada"));
+    QVERIFY(!controller.safetyNumberVerified());
+
+    controller.openSafetyNumberPreview();
+    QVERIFY(controller.safetyNumberOpen());
+
+    // Mock markVerified() flips the flag (no session behind it, nothing persisted).
+    controller.markVerified();
+    QVERIFY(controller.safetyNumberVerified());
+
+    controller.closeSafetyNumber();
+    QVERIFY(!controller.safetyNumberOpen());
+    // The number and label survive a close; only the open flag cleared.
+    QCOMPARE(controller.safetyNumber(), preset);
+}
+
 // ---- Live services ------------------------------------------------------------
 
 void ContactControllerTest::liveIncomingRequestAppearsThenAcceptClearsIt()
@@ -436,6 +483,114 @@ void ContactControllerTest::liveSeedsPreexistingPendingRoster()
              conversation.toHex());
     QCOMPARE(model->data(model->index(0), RequestListModel::AccountIdRole).toString(),
              m_senderAccount.toHex());
+}
+
+void ContactControllerTest::liveOpenSafetyNumberComputesAndVerifies()
+{
+    ContactController controller;
+    controller.setLiveServices(nullptr, nullptr, m_session.get(), m_session->syncEngine());
+
+    // Seed an Accepted contact with a known peer signing key directly through the
+    // repository (the accept path binds the key the same way in production).
+    SqlCipherContactRepository *contacts = m_session->contacts();
+    const AccountId peer = AccountId::generate();
+    const ConversationId conversation = ConversationId::generate();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QByteArray peerKey(32, '\x5a');
+    const ContactRecord pending{peer,         QString(), QString(), ContactState::PendingIncoming,
+                                conversation, now,       now};
+    QVERIFY(contacts->recordIncomingRequest(pending).hasValue());
+    QVERIFY(contacts->markAccepted(peer, conversation, now).hasValue());
+    QVERIFY(contacts->setPeerSigningKey(peer, peerKey).hasValue());
+
+    controller.openSafetyNumber(peer.toHex());
+    QVERIFY(controller.safetyNumberOpen());
+
+    // Independently compute the expected number from our identity and the seeded
+    // peer key, then compare against the controller's formatted surface.
+    const auto credential = m_session->publicCredential();
+    const auto ourAccount = m_session->accountId();
+    QVERIFY(credential.hasValue());
+    QVERIFY(ourAccount.hasValue());
+    auto expected = computeSafetyNumber(credential.value().signingPublicKey,
+                                        ourAccount.value().bytes(), peerKey, peer.bytes());
+    QVERIFY(expected.hasValue());
+    QVERIFY(!controller.safetyNumber().isEmpty());
+    QCOMPARE(controller.safetyNumber(), groupedSafetyNumber(expected.value()));
+    // Twelve space-separated groups of five (60 digits + 11 spaces).
+    QCOMPARE(controller.safetyNumber().size(), qsizetype(71));
+    QCOMPARE(controller.safetyNumberContact(),
+             QStringLiteral("ID ") + peer.toHex().left(10));
+    QVERIFY(!controller.safetyNumberVerified());
+
+    // markVerified() persists through setVerified and reflects on the surface.
+    controller.markVerified();
+    QVERIFY(controller.safetyNumberVerified());
+    auto found = contacts->find(peer);
+    QVERIFY(found.hasValue());
+    QVERIFY(found.value().has_value());
+    QVERIFY(found.value()->verified);
+}
+
+void ContactControllerTest::liveOpenSafetyNumberUnavailableWithoutPeerKey()
+{
+    ContactController controller;
+    controller.setLiveServices(nullptr, nullptr, m_session.get(), m_session->syncEngine());
+
+    // An Accepted contact whose peer signing key is not yet known: the dialog opens
+    // with an empty number so it can show the "unavailable" message.
+    SqlCipherContactRepository *contacts = m_session->contacts();
+    const AccountId peer = AccountId::generate();
+    const ConversationId conversation = ConversationId::generate();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const ContactRecord pending{peer,         QString(), QString(), ContactState::PendingIncoming,
+                                conversation, now,       now};
+    QVERIFY(contacts->recordIncomingRequest(pending).hasValue());
+    QVERIFY(contacts->markAccepted(peer, conversation, now).hasValue());
+
+    controller.openSafetyNumber(peer.toHex());
+    QVERIFY(controller.safetyNumberOpen());
+    QVERIFY(controller.safetyNumber().isEmpty());
+    QCOMPARE(controller.safetyNumberContact(),
+             QStringLiteral("ID ") + peer.toHex().left(10));
+}
+
+void ContactControllerTest::liveAcceptOpensSafetyNumber()
+{
+    ContactRequestService requestsSvc(*m_session, *m_session->syncEngine());
+    ContactController controller;
+    controller.setLiveServices(&requestsSvc, nullptr, m_session.get(), m_session->syncEngine());
+
+    const ConversationId conversation = feedInboundHandshake();
+    QCOMPARE(controller.requests()->count(), 1);
+
+    controller.accept(conversation.toHex());
+    QCoreApplication::processEvents();
+
+    // contactAccepted fired: the row cleared, the contact is Accepted with its peer
+    // key bound, and the safety number opened at the natural verify moment.
+    QCOMPARE(controller.requests()->count(), 0);
+    QCOMPARE(controller.status(), ContactController::Status::Success);
+    QVERIFY(controller.safetyNumberOpen());
+
+    auto found = m_session->contacts()->find(m_senderAccount);
+    QVERIFY(found.hasValue());
+    QVERIFY(found.value().has_value());
+    QCOMPARE(found.value()->state, ContactState::Accepted);
+    QVERIFY(found.value()->peerSigningKey.has_value());
+
+    // The opened number equals the independently computed value for the just-
+    // accepted peer.
+    const auto credential = m_session->publicCredential();
+    const auto ourAccount = m_session->accountId();
+    QVERIFY(credential.hasValue());
+    QVERIFY(ourAccount.hasValue());
+    auto expected = computeSafetyNumber(credential.value().signingPublicKey,
+                                        ourAccount.value().bytes(),
+                                        *found.value()->peerSigningKey, m_senderAccount.bytes());
+    QVERIFY(expected.hasValue());
+    QVERIFY(!controller.safetyNumber().isEmpty());
+    QCOMPARE(controller.safetyNumber(), groupedSafetyNumber(expected.value()));
 }
 
 QTEST_GUILESS_MAIN(ContactControllerTest)

@@ -4,7 +4,9 @@
 #include <QString>
 
 #include <memory>
+#include <optional>
 
+#include "domain/Identifiers.h"
 #include "models/RequestListModel.h"
 
 namespace OpenChat {
@@ -37,6 +39,10 @@ class ContactController final : public QObject
     Q_PROPERTY(QString statusMessage READ statusMessage NOTIFY statusChanged)
     Q_PROPERTY(QString myInvite READ myInvite NOTIFY myInviteChanged)
     Q_PROPERTY(bool inviteReady READ inviteReady NOTIFY myInviteChanged)
+    Q_PROPERTY(bool safetyNumberOpen READ safetyNumberOpen NOTIFY safetyNumberChanged)
+    Q_PROPERTY(QString safetyNumber READ safetyNumber NOTIFY safetyNumberChanged)
+    Q_PROPERTY(bool safetyNumberVerified READ safetyNumberVerified NOTIFY safetyNumberChanged)
+    Q_PROPERTY(QString safetyNumberContact READ safetyNumberContact NOTIFY safetyNumberChanged)
 
 public:
     enum class Status { Idle, Working, Success, Error };
@@ -55,6 +61,10 @@ public:
     [[nodiscard]] QString statusMessage() const;
     [[nodiscard]] QString myInvite() const;
     [[nodiscard]] bool inviteReady() const;
+    [[nodiscard]] bool safetyNumberOpen() const;
+    [[nodiscard]] QString safetyNumber() const;
+    [[nodiscard]] bool safetyNumberVerified() const;
+    [[nodiscard]] QString safetyNumberContact() const;
 
     Q_INVOKABLE void openDialog();
     Q_INVOKABLE void closeDialog();
@@ -64,6 +74,14 @@ public:
     Q_INVOKABLE void accept(const QString &requestId);
     Q_INVOKABLE void decline(const QString &requestId);
     Q_INVOKABLE void block(const QString &requestId);
+
+    // Safety-number surface. openSafetyNumber(hex) resolves the contact's peer key
+    // and our own identity into the formatted number; markVerified() records the
+    // local user's assertion for the currently open contact (arg-less: it acts on
+    // the contact the dialog is showing, so QML never handles a raw account id).
+    Q_INVOKABLE void openSafetyNumber(const QString &contactId);
+    Q_INVOKABLE void closeSafetyNumber();
+    Q_INVOKABLE void markVerified();
 
     // C++-only live-services seam. Null-tolerant and never called under --capture:
     // installs the real receive/send dependencies, flips enabled, seeds the request
@@ -75,12 +93,19 @@ public:
     void enableForPreview();
     void addMockRequest(const QString &displayName, const QString &subtitle);
     void setMockInvite(const QString &inviteText);
+    // C++-only safety-number preview seeding, used by the --verify sub-mode and
+    // tst_qmlload: a preset grouped number + verified flag + display label with no
+    // live session behind it. openSafetyNumberPreview() reveals the dialog.
+    void setMockSafetyNumber(const QString &groupedNumber, bool verified,
+                             const QString &contactLabel);
+    void openSafetyNumberPreview();
 
 signals:
     void enabledChanged();
     void dialogOpenChanged();
     void statusChanged();
     void myInviteChanged();
+    void safetyNumberChanged();
 
 private:
     void setStatus(Status status, const QString &message);
@@ -97,6 +122,16 @@ private:
     QString m_statusMessage;
     QString m_myInvite;
     QString m_mockInvite; // preset returned by createMyInvite() in mock mode
+
+    // Safety-number surface. m_safetyNumberAccount is populated only on the live
+    // open path (the contact the dialog is showing); markVerified() persists the
+    // verified flag against it. In mock mode it stays empty and the preset from
+    // setMockSafetyNumber() drives the surface.
+    bool m_safetyNumberOpen = false;
+    QString m_safetyNumber;
+    bool m_safetyNumberVerified = false;
+    QString m_safetyNumberContact;
+    std::optional<AccountId> m_safetyNumberAccount;
 
     // Live seam (nullptr in mock mode). Borrowed; owned by the app runtime and kept
     // alive past this controller.

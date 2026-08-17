@@ -53,6 +53,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
         qml/OpenChat/components/AddContactDialog.qml
+        qml/OpenChat/components/SafetyNumberDialog.qml
         qml/OpenChat/components/RequestRow.qml
         qml/OpenChat/components/ConversationHeader.qml
         qml/OpenChat/components/MessageDelegate.qml
@@ -484,3 +485,17 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
 )
 set_tests_properties(capture_add_contact PROPERTIES TIMEOUT 5)
+
+# The contact-verification preview sub-mode: renders the safety-number dialog over
+# the mock chat window. Uses the same verify runner with the extra --verify argument.
+add_test(
+    NAME capture_verify
+    COMMAND ${CMAKE_COMMAND}
+        -DOPENCHAT_EXECUTABLE=$<TARGET_FILE:OpenChat>
+        -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/capture_verify.png
+        -DCAPTURE_WIDTH=900
+        -DCAPTURE_HEIGHT=680
+        -DCAPTURE_EXTRA_ARG=--verify
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
+)
+set_tests_properties(capture_verify PROPERTIES TIMEOUT 5)

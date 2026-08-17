@@ -10,6 +10,7 @@ ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml
 ContactRow 1.0 components/ContactRow.qml
 AddContactDialog 1.0 components/AddContactDialog.qml
+SafetyNumberDialog 1.0 components/SafetyNumberDialog.qml
 RequestRow 1.0 components/RequestRow.qml
 ConversationHeader 1.0 components/ConversationHeader.qml
 MessageDelegate 1.0 components/MessageDelegate.qml

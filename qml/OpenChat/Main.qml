@@ -257,4 +257,12 @@ Window {
     AddContactDialog {
         contactController: root.contactController
     }
+
+    // Safety-number overlay: the contact-verification surface, shown at the natural
+    // verify moment. Like the add-contact overlay it binds to the optional
+    // contactController and self-hides when that is null or its safety-number surface
+    // is closed, so the default and capture paths render unchanged.
+    SafetyNumberDialog {
+        contactController: root.contactController
+    }
 }

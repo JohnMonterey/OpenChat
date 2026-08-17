@@ -41,6 +41,7 @@ private slots:
     void exchangesAndRejectsTampering();
     void inspectsWelcomeWithoutJoining();
     void inspectRejectsMalformedWelcome();
+    void inspectKeyPackageReturnsCredentialReadOnly();
     void restoresOpaqueStateThroughCallbacks();
     void storageFailureRollsBackTheRatchet();
     void storedStateIsBoundToTheDeviceIdentity();
@@ -128,6 +129,43 @@ void MlsBridgeTest::inspectRejectsMalformedWelcome()
     QCOMPARE(rejected.error(), MlsError::InvalidMessage);
     // Empty input fails closed before crossing the ABI.
     QVERIFY(!bob->inspectWelcome({}));
+}
+
+void MlsBridgeTest::inspectKeyPackageReturnsCredentialReadOnly()
+{
+    MemoryStateStore bobState;
+    auto bobResult = MlsClient::create("bob-device", &bobState);
+    auto aliceResult = MlsClient::create("alice-device");
+    QVERIFY(bobResult);
+    QVERIFY(aliceResult);
+    auto bob = std::move(bobResult).value();
+    auto alice = std::move(aliceResult).value();
+
+    auto keyPackage = bob->generateKeyPackage();
+    QVERIFY(keyPackage);
+
+    // Reading a KeyPackage surfaces its authenticated leaf credential without
+    // writing to the persisted snapshot (store() is never called during it).
+    const QByteArray persistedBefore = bobState.state;
+    QVERIFY(!persistedBefore.isEmpty());
+    auto ownView = bob->inspectKeyPackage(keyPackage.value());
+    QVERIFY(ownView);
+    QCOMPARE(ownView.value(), QByteArray("bob-device"));
+    QCOMPARE(bobState.state, persistedBefore);
+
+    // A different client extracts the SAME credential from the same bytes,
+    // proving the identity comes from the KeyPackage, not from local state.
+    auto peerView = alice->inspectKeyPackage(keyPackage.value());
+    QVERIFY(peerView);
+    QCOMPARE(peerView.value(), QByteArray("bob-device"));
+    QCOMPARE(peerView.value(), ownView.value());
+
+    // Malformed and empty inputs fail closed and leave the snapshot untouched.
+    auto malformed = bob->inspectKeyPackage(QByteArray("not a key package"));
+    QVERIFY(!malformed);
+    QCOMPARE(malformed.error(), MlsError::InvalidMessage);
+    QVERIFY(!bob->inspectKeyPackage({}));
+    QCOMPARE(bobState.state, persistedBefore);
 }
 
 void MlsBridgeTest::restoresOpaqueStateThroughCallbacks()

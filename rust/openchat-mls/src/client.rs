@@ -217,6 +217,27 @@ impl MlsClient {
         result
     }
 
+    /// Read-only inspection of a claimed KeyPackage: validates it (crypto only,
+    /// never touching the key store) and returns the MLS-authenticated
+    /// credential identity of its leaf node WITHOUT importing it into any
+    /// group. The caller authenticates the claimed sender against this identity
+    /// before deriving a safety number from the enclosed signing key.
+    pub fn inspect_key_package(&self, encoded: &[u8]) -> Result<Vec<u8>, MlsError> {
+        bounded(encoded, MAX_INPUT_BYTES)?;
+        let mut input = encoded;
+        let key_package =
+            KeyPackageIn::tls_deserialize(&mut input).map_err(|_| MlsError::InvalidMessage)?;
+        if !input.is_empty() {
+            return Err(MlsError::InvalidMessage);
+        }
+        let key_package = key_package
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|_| MlsError::InvalidMessage)?;
+        BasicCredential::try_from(key_package.leaf_node().credential().clone())
+            .map(|credential| credential.identity().to_vec())
+            .map_err(|_| MlsError::InvalidMessage)
+    }
+
     pub fn add_members(
         &mut self,
         conversation: [u8; 16],

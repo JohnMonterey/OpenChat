@@ -125,6 +125,40 @@ fn inspect_welcome_rejects_non_welcome_bytes_without_touching_storage() {
 }
 
 #[test]
+fn inspect_key_package_reveals_the_credential_without_touching_storage() {
+    let mut bob = MlsClient::new(b"bob-device").unwrap();
+    let key_package = bob.generate_key_package().unwrap();
+
+    // A read-only inspection returns the authenticated leaf credential and
+    // leaves storage byte-for-byte identical.
+    let before = bob.snapshot().unwrap();
+    let credential = bob.inspect_key_package(&key_package).unwrap();
+    assert_eq!(credential, b"bob-device".to_vec());
+    let after = bob.snapshot().unwrap();
+    assert_eq!(before, after);
+
+    // Any other client extracts the same credential from the same bytes,
+    // proving it reads the KeyPackage rather than local state.
+    let alice = MlsClient::new(b"alice-device").unwrap();
+    assert_eq!(
+        alice.inspect_key_package(&key_package).unwrap(),
+        b"bob-device".to_vec()
+    );
+}
+
+#[test]
+fn inspect_key_package_rejects_non_key_package_bytes() {
+    let bob = MlsClient::new(b"bob-device").unwrap();
+    let before = bob.snapshot().unwrap();
+    assert_eq!(
+        bob.inspect_key_package(b"not a key package"),
+        Err(MlsError::InvalidMessage)
+    );
+    let after = bob.snapshot().unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
 fn opaque_snapshot_restores_ratchet_state() {
     let (mut alice, mut bob) = joined_pair();
     let snapshot = bob.snapshot().unwrap();

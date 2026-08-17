@@ -236,6 +236,18 @@ Result<QList<QByteArray>, MlsError> MlsClient::inspectWelcome(QByteArrayView wel
     return Result<QList<QByteArray>, MlsError>::success(std::move(*members));
 }
 
+Result<QByteArray, MlsError> MlsClient::inspectKeyPackage(QByteArrayView keyPackage)
+{
+    QMutexLocker locker(&m_mutex);
+    oc_mls_buffer output{};
+    const int status = oc_mls_inspect_key_package(
+        m_handle, reinterpret_cast<const uint8_t *>(keyPackage.data()),
+        static_cast<size_t>(keyPackage.size()), &output);
+    if (status != OC_MLS_OK)
+        return Result<QByteArray, MlsError>::failure(errorFromCode(status));
+    return Result<QByteArray, MlsError>::success(takeBuffer(output));
+}
+
 Result<MlsAddResult, MlsError>
 MlsClient::addMembers(const ConversationId &conversation,
                       const QList<QByteArray> &keyPackages)

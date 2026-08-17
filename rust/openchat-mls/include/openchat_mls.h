@@ -103,6 +103,16 @@ int32_t oc_mls_inspect_welcome(oc_mls_client *client,
                                size_t welcome_len,
                                oc_mls_buffer *out_members);
 
+/* Read-only inspection of a claimed KeyPackage: validates it (crypto only, no
+ * key store) and returns the authenticated leaf credential identity
+ * (version(1) || device_id(16) || signing_key(32)) without importing it into
+ * any group. out_credential receives a single buffer; no group state is
+ * stored. */
+int32_t oc_mls_inspect_key_package(oc_mls_client *client,
+                                   const uint8_t *key_package,
+                                   size_t key_package_len,
+                                   oc_mls_buffer *out_credential);
+
 int32_t oc_mls_encrypt(oc_mls_client *client,
                        const uint8_t conversation_id[16],
                        const uint8_t *plaintext,

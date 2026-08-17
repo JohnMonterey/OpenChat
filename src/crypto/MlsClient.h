@@ -79,6 +79,9 @@ public:
     // or state change. The caller authenticates one of these against the claimed
     // sender before any durable joinGroup.
     [[nodiscard]] Result<QList<QByteArray>, MlsError> inspectWelcome(QByteArrayView welcome);
+    // Returns the KeyPackage's MLS credential identity (version(1)||deviceId(16)||
+    // signingKey(32)) WITHOUT importing or validating into the group store. Read-only.
+    [[nodiscard]] Result<QByteArray, MlsError> inspectKeyPackage(QByteArrayView keyPackage);
     [[nodiscard]] Result<MlsAddResult, MlsError>
     addMembers(const ConversationId &conversation, const QList<QByteArray> &keyPackages);
     [[nodiscard]] Result<QByteArray, MlsError>

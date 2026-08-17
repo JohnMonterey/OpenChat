@@ -277,6 +277,29 @@ pub unsafe extern "C" fn oc_mls_inspect_welcome(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn oc_mls_inspect_key_package(
+    client: *mut OcMlsClient,
+    key_package: *const u8,
+    key_package_len: usize,
+    out_credential: *mut OcMlsBuffer,
+) -> i32 {
+    ffi_guard(|| {
+        // SAFETY: validated by helper functions.
+        let handle = unsafe { handle(client)? };
+        // SAFETY: out parameter is checked by clear_buffer_out.
+        unsafe { clear_buffer_out(out_credential)? };
+        // SAFETY: pointer/length validation happens inside required_slice.
+        let key_package =
+            unsafe { required_slice(key_package, key_package_len, MAX_INPUT_BYTES)? };
+        // Read-only: routed through `inspect`, which never invokes the store
+        // callback, so inspection leaves the persisted snapshot untouched.
+        let credential = inspect(handle, |client| client.inspect_key_package(key_package))?;
+        // SAFETY: out parameter remains valid for this call.
+        unsafe { write_buffer(out_credential, credential) }
+    })
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn oc_mls_encrypt(
     client: *mut OcMlsClient,
     conversation_id: *const u8,

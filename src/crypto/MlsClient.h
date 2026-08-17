@@ -74,6 +74,11 @@ public:
     [[nodiscard]] Result<void, MlsError> createGroup(const ConversationId &conversation);
     [[nodiscard]] Result<void, MlsError> joinGroup(const ConversationId &conversation,
                                                    QByteArrayView welcome);
+    // Returns the MLS-authenticated credential identities of the Welcome's other
+    // members (excluding self) without joining the group. Read-only: no ratchet
+    // or state change. The caller authenticates one of these against the claimed
+    // sender before any durable joinGroup.
+    [[nodiscard]] Result<QList<QByteArray>, MlsError> inspectWelcome(QByteArrayView welcome);
     [[nodiscard]] Result<MlsAddResult, MlsError>
     addMembers(const ConversationId &conversation, const QList<QByteArray> &keyPackages);
     [[nodiscard]] Result<QByteArray, MlsError>

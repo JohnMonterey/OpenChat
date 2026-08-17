@@ -178,6 +178,45 @@ impl MlsClient {
         Ok(())
     }
 
+    /// Read-only inspection of an MLS Welcome: returns the credential identities
+    /// of the group's other members (excluding self) WITHOUT durably joining.
+    /// All storage mutations from staging and into_group are rolled back via
+    /// StorageBackup, so this has no net effect on the provider -- the caller
+    /// can still join_group later with the same Welcome.
+    pub fn inspect_welcome(&self, welcome_message: &[u8]) -> Result<Vec<Vec<u8>>, MlsError> {
+        bounded(welcome_message, MAX_INPUT_BYTES)?;
+        let backup = storage::StorageBackup::capture(&self.provider)?;
+        let result = (|| {
+            let message = deserialize_message(welcome_message)?;
+            let welcome = match message.extract() {
+                MlsMessageBodyIn::Welcome(welcome) => welcome,
+                _ => return Err(MlsError::InvalidMessage),
+            };
+            let config = MlsGroupJoinConfig::builder()
+                .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+                .sender_ratchet_configuration(SenderRatchetConfiguration::new(32, 1000))
+                .use_ratchet_tree_extension(true)
+                .build();
+            let group = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
+                .map_err(|_| MlsError::InvalidMessage)?
+                .into_group(&self.provider)
+                .map_err(|_| MlsError::Storage)?;
+            let mut others = Vec::new();
+            for member in group.members() {
+                let identity = BasicCredential::try_from(member.credential.clone())
+                    .map(|credential| credential.identity().to_vec())
+                    .map_err(|_| MlsError::InvalidMessage)?;
+                if identity != self.identity {
+                    others.push(identity);
+                }
+            }
+            Ok(others)
+        })();
+        // Always restore, on success or failure: inspection never persists.
+        backup.restore(&self.provider)?;
+        result
+    }
+
     pub fn add_members(
         &mut self,
         conversation: [u8; 16],

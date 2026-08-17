@@ -1,4 +1,4 @@
-use openchat_mls::{MlsClient, ProcessResult};
+use openchat_mls::{MlsClient, MlsError, ProcessResult};
 
 const CONVERSATION: [u8; 16] = *b"conversation-one";
 
@@ -86,6 +86,42 @@ fn three_member_group_uses_the_same_encryption_flow() {
     let (charlie_result, charlie_sender) = charlie.process(CONVERSATION, &encrypted).unwrap();
     assert_eq!(charlie_result, ProcessResult::Application(b"hello group".to_vec()));
     assert_eq!(charlie_sender, b"alice-device".to_vec());
+}
+
+#[test]
+fn inspect_welcome_reveals_the_adder_without_joining() {
+    let mut alice = MlsClient::new(b"alice-device").unwrap();
+    let mut bob = MlsClient::new(b"bob-device").unwrap();
+    let bob_key_package = bob.generate_key_package().unwrap();
+
+    alice.create_group(CONVERSATION).unwrap();
+    let add = alice.add_members(CONVERSATION, &[bob_key_package]).unwrap();
+
+    // Storage is byte-for-byte identical before and after a read-only inspection.
+    let before = bob.snapshot().unwrap();
+    let members = bob.inspect_welcome(&add.welcome).unwrap();
+    assert_eq!(members, vec![b"alice-device".to_vec()]);
+    let after = bob.snapshot().unwrap();
+    assert_eq!(before, after);
+
+    // Inspection left no residue: Bob can still join the same Welcome and decrypt.
+    bob.join_group(CONVERSATION, &add.welcome).unwrap();
+    let encrypted = alice.encrypt(CONVERSATION, b"hello bob").unwrap();
+    let (result, sender) = bob.process(CONVERSATION, &encrypted).unwrap();
+    assert_eq!(result, ProcessResult::Application(b"hello bob".to_vec()));
+    assert_eq!(sender, b"alice-device".to_vec());
+}
+
+#[test]
+fn inspect_welcome_rejects_non_welcome_bytes_without_touching_storage() {
+    let bob = MlsClient::new(b"bob-device").unwrap();
+    let before = bob.snapshot().unwrap();
+    assert_eq!(
+        bob.inspect_welcome(b"not a welcome"),
+        Err(MlsError::InvalidMessage)
+    );
+    let after = bob.snapshot().unwrap();
+    assert_eq!(before, after);
 }
 
 #[test]

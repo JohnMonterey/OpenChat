@@ -254,6 +254,29 @@ pub unsafe extern "C" fn oc_mls_remove_members(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn oc_mls_inspect_welcome(
+    client: *mut OcMlsClient,
+    welcome: *const u8,
+    welcome_len: usize,
+    out_members: *mut OcMlsBuffer,
+) -> i32 {
+    ffi_guard(|| {
+        // SAFETY: validated by helper functions.
+        let handle = unsafe { handle(client)? };
+        // SAFETY: out parameter is checked by clear_buffer_out.
+        unsafe { clear_buffer_out(out_members)? };
+        // SAFETY: pointer/length validation happens inside required_slice.
+        let welcome = unsafe { required_slice(welcome, welcome_len, MAX_INPUT_BYTES)? };
+        // Read-only: routed through `inspect`, which never invokes the store
+        // callback, so inspection leaves the persisted snapshot untouched.
+        let members = inspect(handle, |client| client.inspect_welcome(welcome))?;
+        let framed = frame_list(&members)?;
+        // SAFETY: out parameter remains valid for this call.
+        unsafe { write_buffer(out_members, framed) }
+    })
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn oc_mls_encrypt(
     client: *mut OcMlsClient,
     conversation_id: *const u8,
@@ -360,6 +383,27 @@ fn mutate<T>(
     Ok(result)
 }
 
+// Runs a read-only operation. Unlike `mutate`, it never persists: no store()
+// callback fires, so inspection leaves the durable snapshot untouched. A
+// pre-call snapshot backs out any in-memory residue if the operation panics.
+fn inspect<T>(
+    handle: &mut OcMlsClient,
+    operation: impl FnOnce(&MlsClient) -> Result<T, MlsError>,
+) -> Result<T, MlsError> {
+    let before = Zeroizing::new(handle.client.snapshot()?);
+    match catch_unwind(AssertUnwindSafe(|| operation(&handle.client))) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            handle.client = MlsClient::from_snapshot(&before)?;
+            Err(error)
+        }
+        Err(_) => {
+            handle.client = MlsClient::from_snapshot(&before)?;
+            Err(MlsError::Internal)
+        }
+    }
+}
+
 fn load_state(callbacks: OcMlsStorageCallbacks) -> Result<Option<Vec<u8>>, MlsError> {
     let load = callbacks.load.ok_or(MlsError::InvalidInput)?;
     let mut required = 0usize;
@@ -396,6 +440,23 @@ fn persist(client: &mut MlsClient, callbacks: OcMlsStorageCallbacks) -> Result<(
     } else {
         Err(MlsError::Storage)
     }
+}
+
+// Inverse of `parse_list`: u16 count, then per item a u32 byte length + bytes.
+// Shares the framing the C++ side already parses for member lists.
+fn frame_list(values: &[Vec<u8>]) -> Result<Vec<u8>, MlsError> {
+    if values.len() > MAX_LIST_ITEMS {
+        return Err(MlsError::InvalidInput);
+    }
+    let count = u16::try_from(values.len()).map_err(|_| MlsError::InvalidInput)?;
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&count.to_be_bytes());
+    for value in values {
+        let length = u32::try_from(value.len()).map_err(|_| MlsError::InvalidInput)?;
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(value);
+    }
+    Ok(framed)
 }
 
 fn parse_list(input: &[u8]) -> Result<Vec<Vec<u8>>, MlsError> {
@@ -533,5 +594,12 @@ mod tests {
             parse_list(&[0, 1, 0, 0, 0, 1, 42, 0]),
             Err(MlsError::InvalidInput)
         );
+    }
+
+    #[test]
+    fn frame_list_round_trips_through_parse_list() {
+        let values = vec![vec![1u8, 2, 3], vec![9u8]];
+        let framed = frame_list(&values).unwrap();
+        assert_eq!(parse_list(&framed).unwrap(), values);
     }
 }

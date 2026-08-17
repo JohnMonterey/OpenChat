@@ -94,6 +94,15 @@ int32_t oc_mls_remove_members(oc_mls_client *client,
                               size_t framed_identities_len,
                               oc_mls_buffer *out_commit);
 
+/* Read-only inspection of a Welcome: returns the other members' credential
+ * identities (excluding self) without joining. out_members is written as the
+ * framed member list above (u16 count, then per item u32 length + bytes); no
+ * group state is stored. */
+int32_t oc_mls_inspect_welcome(oc_mls_client *client,
+                               const uint8_t *welcome,
+                               size_t welcome_len,
+                               oc_mls_buffer *out_members);
+
 int32_t oc_mls_encrypt(oc_mls_client *client,
                        const uint8_t conversation_id[16],
                        const uint8_t *plaintext,

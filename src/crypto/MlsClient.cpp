@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <limits>
+#include <optional>
 
 namespace OpenChat {
 namespace {
@@ -59,6 +60,35 @@ QByteArray frameList(const QList<QByteArray> &values)
         framed.append(value);
     }
     return framed;
+}
+
+// Exact inverse of frameList: u16 count, then per item a u32 byte length +
+// bytes. Returns nullopt on any framing inconsistency.
+std::optional<QList<QByteArray>> unframeList(QByteArrayView framed)
+{
+    if (framed.size() < 2)
+        return std::nullopt;
+    const auto byteAt = [&](qsizetype index) {
+        return static_cast<quint32>(static_cast<quint8>(framed[index]));
+    };
+    const quint16 count = static_cast<quint16>((byteAt(0) << 8) | byteAt(1));
+    qsizetype position = 2;
+    QList<QByteArray> values;
+    values.reserve(count);
+    for (quint16 index = 0; index < count; ++index) {
+        if (position + 4 > framed.size())
+            return std::nullopt;
+        quint32 size = 0;
+        for (int byte = 0; byte < 4; ++byte)
+            size = (size << 8) | byteAt(position++);
+        if (size == 0 || static_cast<qsizetype>(size) > framed.size() - position)
+            return std::nullopt;
+        values.append(framed.sliced(position, static_cast<qsizetype>(size)).toByteArray());
+        position += static_cast<qsizetype>(size);
+    }
+    if (position != framed.size())
+        return std::nullopt;
+    return values;
 }
 
 } // namespace
@@ -188,6 +218,22 @@ Result<void, MlsError> MlsClient::joinGroup(const ConversationId &conversation,
     if (status != OC_MLS_OK)
         return Result<void, MlsError>::failure(errorFromCode(status));
     return Result<void, MlsError>::success();
+}
+
+Result<QList<QByteArray>, MlsError> MlsClient::inspectWelcome(QByteArrayView welcome)
+{
+    QMutexLocker locker(&m_mutex);
+    oc_mls_buffer output{};
+    const int status = oc_mls_inspect_welcome(
+        m_handle, reinterpret_cast<const uint8_t *>(welcome.data()),
+        static_cast<size_t>(welcome.size()), &output);
+    if (status != OC_MLS_OK)
+        return Result<QList<QByteArray>, MlsError>::failure(errorFromCode(status));
+    const QByteArray framed = takeBuffer(output);
+    auto members = unframeList(framed);
+    if (!members)
+        return Result<QList<QByteArray>, MlsError>::failure(MlsError::Internal);
+    return Result<QList<QByteArray>, MlsError>::success(std::move(*members));
 }
 
 Result<MlsAddResult, MlsError>

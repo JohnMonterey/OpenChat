@@ -89,10 +89,13 @@ public:
                            const DeviceId &senderDeviceId, const ConversationId &conversationId,
                            QByteArrayView welcome, qint64 receivedAtMs, quint64 watermark) = 0;
 
-    // Atomic: upsert mls state + PendingIncoming->Accepted (guarded) + delete stash.
+    // Atomic: upsert mls state + PendingIncoming->Accepted (guarded, also binds the
+    // authenticated peer signing key) + delete stash. peerSigningKey is the peer
+    // credential's 32 identity bytes, or empty to bind NULL.
     [[nodiscard]] virtual Result<void, RepositoryError>
     commitHandshakeAccept(const AccountId &accountId, const ConversationId &conversationId,
-                          qint64 updatedAtMs, QByteArrayView mlsState) = 0;
+                          qint64 updatedAtMs, QByteArrayView mlsState,
+                          QByteArrayView peerSigningKey) = 0;
 
     [[nodiscard]] virtual Result<bool, RepositoryError> hasSeen(const EnvelopeId &envelopeId) = 0;
     [[nodiscard]] virtual Result<QVector<OutboxRecord>, RepositoryError>

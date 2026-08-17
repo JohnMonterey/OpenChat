@@ -25,6 +25,10 @@ public:
     block(const AccountId &accountId, qint64 updatedAtMs) override;
     [[nodiscard]] Result<void, RepositoryError> unblock(const AccountId &accountId) override;
     [[nodiscard]] Result<void, RepositoryError> remove(const AccountId &accountId) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    setVerified(const AccountId &accountId, bool verified, qint64 updatedAtMs) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    setPeerSigningKey(const AccountId &accountId, QByteArrayView key32) override;
 
 private:
     SqlCipherDatabase &m_database;

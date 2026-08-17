@@ -566,7 +566,7 @@ SqlCipherSyncStore::commitHandshakeReceive(const EnvelopeId &envelopeId,
 Result<void, RepositoryError>
 SqlCipherSyncStore::commitHandshakeAccept(const AccountId &accountId,
                                           const ConversationId &conversationId, qint64 updatedAtMs,
-                                          QByteArrayView mlsState)
+                                          QByteArrayView mlsState, QByteArrayView peerSigningKey)
 {
     if (mlsState.isEmpty() || mlsState.size() > maximumMlsStateSize)
         return Result<void, RepositoryError>::failure(
@@ -584,12 +584,16 @@ SqlCipherSyncStore::commitHandshakeAccept(const AccountId &accountId,
             return Result<void, RepositoryError>::failure(e);
         }
 
+        // The peer signing key is bound INSIDE this guarded, atomic UPDATE so a
+        // durable Accepted flip always carries a durable peer key (or NULL when the
+        // engine forwarded no authenticated key).
         Statement update(database,
-                         "UPDATE contacts SET state=?2, conversation_id=?3, updated_at_ms=?4 "
-                         "WHERE account_id=?1 AND state=?5");
+                         "UPDATE contacts SET state=?2, conversation_id=?3, updated_at_ms=?4, "
+                         "peer_signing_key=?6 WHERE account_id=?1 AND state=?5");
         if (!update.isValid() || !update.bindBlob(1, accountId.bytes())
             || !update.bindInt(2, acceptedContactState) || !update.bindBlob(3, conversationId.bytes())
             || !update.bindInt64(4, updatedAtMs) || !update.bindInt(5, pendingIncomingContactState)
+            || !(peerSigningKey.isEmpty() ? update.bindNull(6) : update.bindBlob(6, peerSigningKey))
             || sqlite3_step(update.get()) != SQLITE_DONE) {
             auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
                                     QStringLiteral("commitHandshakeAccept.update"));

@@ -4,6 +4,7 @@
 #include "domain/Contact.h"
 #include "repositories/RepositoryError.h"
 
+#include <QByteArrayView>
 #include <QVector>
 
 #include <optional>
@@ -60,6 +61,17 @@ public:
 
     // Delete any contact from the roster (idempotent).
     [[nodiscard]] virtual Result<void, RepositoryError> remove(const AccountId &accountId) = 0;
+
+    // Record the local user's out-of-band safety-number verification assertion for
+    // a contact. Returns NotFound when the peer is unknown.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    setVerified(const AccountId &accountId, bool verified, qint64 updatedAtMs) = 0;
+
+    // Backfill a contact's authenticated peer signing key. Idempotent set-if-NULL:
+    // an already-known key is never overwritten (no-op success). Returns NotFound
+    // when the peer is unknown and InvalidInput when the key is not 32 bytes.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    setPeerSigningKey(const AccountId &accountId, QByteArrayView key32) = 0;
 };
 
 } // namespace OpenChat

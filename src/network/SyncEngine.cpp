@@ -384,10 +384,19 @@ public:
             return;
         }
         const QByteArray mlsState = mls.takePendingState();
+        // Forward the ALREADY-authenticated credential's 32 identity bytes so the
+        // store binds the peer signing key atomically with the accept. The engine
+        // only slices the front member's credential (version(1) || deviceId(16) ||
+        // signingKey(32)); it never inspects application plaintext, staying
+        // content-blind. A short credential yields an empty key (bound NULL).
+        const QByteArray peerKey =
+            members.value().front().size() >= 49 ? members.value().front().sliced(17, 32)
+                                                 : QByteArray();
         // Persist the just-joined ratchet atomically with the PendingIncoming->
         // Accepted flip and the stash delete. On failure, fail closed so the
         // in-memory join is discarded on restart rather than left ahead of the store.
-        if (!store.commitHandshakeAccept(senderAccount, conversation, now(), mlsState).hasValue()) {
+        if (!store.commitHandshakeAccept(senderAccount, conversation, now(), mlsState, peerKey)
+                 .hasValue()) {
             failClosed();
             return;
         }

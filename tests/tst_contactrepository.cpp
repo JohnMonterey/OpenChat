@@ -38,6 +38,10 @@ private slots:
     void reopeningWithWrongKeyFailsClosed();
     void contactsAreOrderedDeterministically();
     void malformedRowsAreRejectedOnDecode();
+    void peerSigningKeyPersistsAcrossReopenAndVerifiedDefaultsOff();
+    void setVerifiedFlipsFlagAndRejectsUnknown();
+    void setPeerSigningKeyIsSetIfNullAndValidated();
+    void stateTransitionsDoNotClobberPeerKeyOrVerified();
 };
 
 void ContactRepositoryTest::emptyRosterReturnsEmptyList()
@@ -426,6 +430,161 @@ void ContactRepositoryTest::malformedRowsAreRejectedOnDecode()
     auto accepted = contacts.find(accountId);
     QVERIFY(accepted.value().value().conversationId.has_value());
     QVERIFY(accepted.value().value().conversationId.value() == conversationId);
+}
+
+void ContactRepositoryTest::peerSigningKeyPersistsAcrossReopenAndVerifiedDefaultsOff()
+{
+    // Exercises migration 009 end to end: the two new columns are usable (open
+    // succeeds and migrates to v9), a stored 32-byte peer key round-trips through a
+    // reopen (migration idempotent at v9), and verified defaults off.
+    QTemporaryDir directory;
+    const QString path = directory.filePath("profile.sqlite3");
+    auto key = SecureBuffer::random(32);
+    const auto accountId = AccountId::generate();
+    const QByteArray peerKey(32, 'k');
+
+    {
+        auto opened = SqlCipherDatabase::open(path, key);
+        QVERIFY(opened.hasValue());
+        auto database = std::move(opened).value();
+        SqlCipherContactRepository contacts(database);
+
+        ContactRecord record = contactRecord(accountId, ContactState::PendingOutgoing, 1'000, 1'000);
+        record.peerSigningKey = peerKey;
+        QVERIFY(contacts.recordOutgoingRequest(record).hasValue());
+
+        auto found = contacts.find(accountId);
+        QVERIFY(found.hasValue());
+        QVERIFY(found.value().has_value());
+        QVERIFY(found.value().value().peerSigningKey.has_value());
+        QCOMPARE(*found.value().value().peerSigningKey, peerKey);
+        QVERIFY(!found.value().value().verified); // default off
+    }
+
+    auto reopened = SqlCipherDatabase::open(path, key);
+    QVERIFY(reopened.hasValue());
+    auto database = std::move(reopened).value();
+    SqlCipherContactRepository contacts(database);
+    auto found = contacts.find(accountId);
+    QVERIFY(found.hasValue());
+    QVERIFY(found.value().has_value());
+    QVERIFY(found.value().value().peerSigningKey.has_value());
+    QCOMPARE(found.value().value().peerSigningKey->size(), qsizetype(32));
+    QCOMPARE(*found.value().value().peerSigningKey, peerKey);
+    QVERIFY(!found.value().value().verified);
+}
+
+void ContactRepositoryTest::setVerifiedFlipsFlagAndRejectsUnknown()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    SqlCipherContactRepository contacts(database);
+
+    // An unknown peer cannot be verified.
+    auto unknown = contacts.setVerified(AccountId::generate(), true, 1'000);
+    QVERIFY(!unknown.hasValue());
+    QCOMPARE(unknown.error().code, RepositoryErrorCode::NotFound);
+
+    const auto accountId = AccountId::generate();
+    QVERIFY(contacts
+                .recordOutgoingRequest(
+                    contactRecord(accountId, ContactState::PendingOutgoing, 1'000, 1'000))
+                .hasValue());
+    QVERIFY(!contacts.find(accountId).value().value().verified); // default off
+
+    // Asserting verification flips the flag and bumps updated_at_ms.
+    QVERIFY(contacts.setVerified(accountId, true, 2'000).hasValue());
+    auto verified = contacts.find(accountId);
+    QVERIFY(verified.value().value().verified);
+    QCOMPARE(verified.value().value().updatedAtMs, qint64(2'000));
+
+    // It can also be cleared.
+    QVERIFY(contacts.setVerified(accountId, false, 3'000).hasValue());
+    QVERIFY(!contacts.find(accountId).value().value().verified);
+}
+
+void ContactRepositoryTest::setPeerSigningKeyIsSetIfNullAndValidated()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    SqlCipherContactRepository contacts(database);
+
+    // An unknown peer is NotFound.
+    auto unknown = contacts.setPeerSigningKey(AccountId::generate(), QByteArray(32, 'k'));
+    QVERIFY(!unknown.hasValue());
+    QCOMPARE(unknown.error().code, RepositoryErrorCode::NotFound);
+
+    const auto accountId = AccountId::generate();
+    QVERIFY(contacts
+                .recordIncomingRequest(
+                    contactRecord(accountId, ContactState::PendingIncoming, 1'000, 1'000))
+                .hasValue());
+    QVERIFY(!contacts.find(accountId).value().value().peerSigningKey.has_value());
+
+    // A wrong-size key is rejected without writing anything.
+    auto badSize = contacts.setPeerSigningKey(accountId, QByteArray(16, 'x'));
+    QVERIFY(!badSize.hasValue());
+    QCOMPARE(badSize.error().code, RepositoryErrorCode::InvalidInput);
+    QVERIFY(!contacts.find(accountId).value().value().peerSigningKey.has_value());
+
+    // The first backfill stores the key.
+    const QByteArray first(32, 'k');
+    QVERIFY(contacts.setPeerSigningKey(accountId, first).hasValue());
+    QCOMPARE(*contacts.find(accountId).value().value().peerSigningKey, first);
+
+    // A second backfill with a DIFFERENT key is an idempotent no-op: a known key is
+    // authoritative and never overwritten.
+    const QByteArray second(32, 'z');
+    QVERIFY(contacts.setPeerSigningKey(accountId, second).hasValue());
+    QCOMPARE(*contacts.find(accountId).value().value().peerSigningKey, first);
+}
+
+void ContactRepositoryTest::stateTransitionsDoNotClobberPeerKeyOrVerified()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    SqlCipherContactRepository contacts(database);
+
+    const auto accountId = AccountId::generate();
+    const QByteArray peerKey(32, 'k');
+    ContactRecord record = contactRecord(accountId, ContactState::PendingIncoming, 1'000, 1'000);
+    record.peerSigningKey = peerKey;
+    QVERIFY(contacts.recordIncomingRequest(record).hasValue());
+    QVERIFY(contacts.setVerified(accountId, true, 1'500).hasValue());
+
+    // A metadata refresh through updateContactState (a still-PendingIncoming row
+    // re-recorded with NO key and verified=false on the incoming record) refreshes
+    // directory fields but must never clobber the stored key or verified assertion.
+    QVERIFY(contacts
+                .recordIncomingRequest(contactRecord(accountId, ContactState::PendingIncoming, 9'000,
+                                                     9'000, QStringLiteral("renamed"),
+                                                     QStringLiteral("Renamed")))
+                .hasValue());
+    {
+        auto found = contacts.find(accountId);
+        QVERIFY(found.value().value().peerSigningKey.has_value());
+        QCOMPARE(*found.value().value().peerSigningKey, peerKey);
+        QVERIFY(found.value().value().verified);
+        QCOMPARE(found.value().value().handle, QStringLiteral("renamed")); // metadata did refresh
+    }
+
+    // A state flip through markAccepted likewise preserves both.
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(contacts.markAccepted(accountId, conversationId, 10'000).hasValue());
+    auto accepted = contacts.find(accountId);
+    QVERIFY(accepted.value().value().state == ContactState::Accepted);
+    QVERIFY(accepted.value().value().peerSigningKey.has_value());
+    QCOMPARE(*accepted.value().value().peerSigningKey, peerKey);
+    QVERIFY(accepted.value().value().verified);
 }
 
 QTEST_GUILESS_MAIN(ContactRepositoryTest)

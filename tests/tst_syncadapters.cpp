@@ -323,13 +323,21 @@ void SyncAdaptersTest::handshakeAcceptAuthenticatesJoinsPersistsAndDecrypts()
     QVERIFY(bContacts.recordIncomingRequest(pending).hasValue());
 
     SqlCipherSyncStore bStore(*bDb, bProfile);
-    QVERIFY(bStore.commitHandshakeAccept(senderAccount, conversation, now, joinedState).hasValue());
+    // Mirror the engine: forward the authenticated front-member credential's 32
+    // identity bytes as the peer signing key.
+    const QByteArray peerKey = members.value().front().sliced(17, 32);
+    QVERIFY(bStore.commitHandshakeAccept(senderAccount, conversation, now, joinedState, peerKey)
+                .hasValue());
 
     // The roster flipped to Accepted and the MLS state is durable.
     auto accepted = bContacts.find(senderAccount);
     QVERIFY(accepted.hasValue());
     QVERIFY(accepted.value().has_value());
     QCOMPARE(accepted.value()->state, ContactState::Accepted);
+    // The persisted peer key is exactly the sender client's signing key -- the 32
+    // identity bytes of A's real MLS credential.
+    QVERIFY(accepted.value()->peerSigningKey.has_value());
+    QCOMPARE(*accepted.value()->peerSigningKey, aIdentity.sliced(17, 32));
     QVERIFY(!bDb->loadMlsState(bProfile).value().isEmpty());
 
     // A now encrypts an application message at the joined epoch.

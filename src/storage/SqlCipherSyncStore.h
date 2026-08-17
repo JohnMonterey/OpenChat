@@ -70,7 +70,8 @@ public:
                            QByteArrayView welcome, qint64 receivedAtMs, quint64 watermark) override;
     [[nodiscard]] Result<void, RepositoryError>
     commitHandshakeAccept(const AccountId &accountId, const ConversationId &conversationId,
-                          qint64 updatedAtMs, QByteArrayView mlsState) override;
+                          qint64 updatedAtMs, QByteArrayView mlsState,
+                          QByteArrayView peerSigningKey) override;
 
     // Non-virtual reads/deletes over the stash, for the receive service and
     // reconcile paths that surface and clear pending requests. loadPendingHandshake

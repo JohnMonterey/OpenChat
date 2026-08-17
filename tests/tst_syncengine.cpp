@@ -173,13 +173,15 @@ public:
     Result<void, RepositoryError> commitHandshakeAccept(const AccountId &accountId,
                                                         const ConversationId &conversationId,
                                                         qint64 updatedAtMs,
-                                                        QByteArrayView mlsState) override
+                                                        QByteArrayView mlsState,
+                                                        QByteArrayView peerSigningKey) override
     {
         ++commitHandshakeAcceptCount;
         handshakeAcceptAccount = accountId;
         handshakeAcceptConversation = conversationId;
         handshakeAcceptUpdatedAtMs = updatedAtMs;
         handshakeAcceptMlsState = mlsState.toByteArray();
+        handshakeAcceptPeerKey = peerSigningKey.toByteArray();
         if (failHandshakeAccept)
             return err();
         return ok();
@@ -270,6 +272,7 @@ public:
     std::optional<ConversationId> handshakeAcceptConversation;
     qint64 handshakeAcceptUpdatedAtMs = 0;
     QByteArray handshakeAcceptMlsState;
+    QByteArray handshakeAcceptPeerKey;
 
 private:
     static RepositoryError error()
@@ -901,6 +904,9 @@ void SyncEngineTest::acceptHandshakeAuthenticatesJoinsAndCommits()
     QCOMPARE(store.handshakeAcceptAccount->bytes(), senderAccount.bytes());
     QCOMPARE(store.handshakeAcceptConversation->bytes(), conversation.bytes());
     QCOMPARE(store.handshakeAcceptMlsState, QByteArray("state-8")); // join advanced the ratchet
+    // The engine forwarded the authenticated front-member credential's identity
+    // bytes [17,49) as the peer signing key.
+    QCOMPARE(store.handshakeAcceptPeerKey, credentialBytes(claimedDevice).sliced(17, 32));
     QCOMPARE(authFailed, 0);
     QVERIFY(accepted.has_value());
     QCOMPARE(accepted->bytes(), conversation.bytes());

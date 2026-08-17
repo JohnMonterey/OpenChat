@@ -2,6 +2,7 @@
 
 #include "domain/Identifiers.h"
 
+#include <QByteArray>
 #include <QString>
 
 #include <optional>
@@ -33,6 +34,8 @@ struct ContactRecord final {
     std::optional<ConversationId> conversationId;
     qint64 createdAtMs = 0;
     qint64 updatedAtMs = 0;
+    std::optional<QByteArray> peerSigningKey{};  // peer's 32-byte Ed25519 identity key, when known
+    bool verified = false;                        // local user assertion after comparing the safety number
 };
 
 } // namespace OpenChat

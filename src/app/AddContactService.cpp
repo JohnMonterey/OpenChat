@@ -142,13 +142,22 @@ void AddContactService::onKeyPackageClaimed(const QByteArray &keyPackage)
     // benign PendingOutgoing row with no durable group, which is retryable and
     // strictly better than a durable group/Welcome with no roster row.
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const ContactRecord record{m_entry->accountId,
-                               m_handle,
-                               QString(),
-                               ContactState::PendingOutgoing,
-                               conversation,
-                               now,
-                               now};
+    ContactRecord record{m_entry->accountId,
+                         m_handle,
+                         QString(),
+                         ContactState::PendingOutgoing,
+                         conversation,
+                         now,
+                         now};
+    // Capture the peer's MLS-authenticated Ed25519 identity key from the claimed
+    // KeyPackage credential (version(1) || deviceId(16) || signingKey(32)), so a
+    // later checkpoint can compute the safety number. A failed or short inspect
+    // simply leaves the key null (backfilled later) and never fails the add.
+    auto credential = mls->inspectKeyPackage(keyPackage);
+    if (credential.hasValue() && credential.value().size() >= 49
+        && static_cast<unsigned char>(credential.value().at(0)) == 1) {
+        record.peerSigningKey = credential.value().sliced(17, 32);
+    }
     auto recorded = contacts->recordOutgoingRequest(record);
     if (!recorded.hasValue()) {
         fail(recorded.error().code == RepositoryErrorCode::Conflict ? Error::Blocked

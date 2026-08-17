@@ -97,6 +97,7 @@ private slots:
     void commitHandshakeReceiveIsIdempotentOnRedelivery();
     void commitHandshakeReceiveDropsBlockedSenderButConsumesEnvelope();
     void commitHandshakeAcceptPromotesContactAndDeletesStash();
+    void commitHandshakeAcceptWithEmptyKeyBindsNull();
     void commitHandshakeAcceptRollsBackWhenNotPendingIncoming();
     void deletePendingHandshakeRemovesRowAndListIsOrdered();
 };
@@ -638,19 +639,62 @@ void SyncStoreTest::commitHandshakeAcceptPromotesContactAndDeletesStash()
                 .hasValue());
 
     const QByteArray joinedState("joined-mls-state");
-    auto accepted = store.commitHandshakeAccept(senderAccountId, conversationId, 5'000, joinedState);
+    const QByteArray peerKey(32, 'k');
+    auto accepted =
+        store.commitHandshakeAccept(senderAccountId, conversationId, 5'000, joinedState, peerKey);
     QVERIFY(accepted.hasValue());
 
-    // All three effects landed atomically: contact flipped to Accepted with the
-    // conversation id, MLS state persisted, stash gone.
+    // All effects landed atomically: contact flipped to Accepted with the
+    // conversation id AND the authenticated peer signing key, MLS state persisted,
+    // stash gone.
     auto contact = contacts.find(senderAccountId);
     QVERIFY(contact.hasValue());
     QVERIFY(contact.value().has_value());
     QCOMPARE(contact.value()->state, ContactState::Accepted);
     QVERIFY(contact.value()->conversationId.has_value());
     QCOMPARE(*contact.value()->conversationId, conversationId);
+    QVERIFY(contact.value()->peerSigningKey.has_value());
+    QCOMPARE(*contact.value()->peerSigningKey, peerKey);
+    QVERIFY(!contact.value()->verified); // accept never asserts verification
     QCOMPARE(database.loadMlsState(profileId).value(), joinedState);
     QVERIFY(!store.loadPendingHandshake(conversationId).value().has_value());
+}
+
+void SyncStoreTest::commitHandshakeAcceptWithEmptyKeyBindsNull()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherContactRepository contacts(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto envelopeId = EnvelopeId::generate();
+    const auto senderAccountId = AccountId::generate();
+    const auto senderDeviceId = DeviceId::generate();
+    const auto conversationId = ConversationId::generate();
+
+    QVERIFY(contacts.recordIncomingRequest(incomingContact(senderAccountId)).hasValue());
+    QVERIFY(store
+                .commitHandshakeReceive(envelopeId, senderAccountId, senderDeviceId, conversationId,
+                                        QByteArray("welcome"), 2'000, 4)
+                .hasValue());
+
+    // An empty peer key still accepts (the safety number is simply unavailable
+    // until a later backfill), binding NULL rather than a zero-length blob.
+    auto accepted = store.commitHandshakeAccept(senderAccountId, conversationId, 5'000,
+                                                QByteArray("joined-mls-state"), QByteArray());
+    QVERIFY(accepted.hasValue());
+
+    auto contact = contacts.find(senderAccountId);
+    QVERIFY(contact.hasValue());
+    QVERIFY(contact.value().has_value());
+    QCOMPARE(contact.value()->state, ContactState::Accepted);
+    QVERIFY(!contact.value()->peerSigningKey.has_value());
 }
 
 void SyncStoreTest::commitHandshakeAcceptRollsBackWhenNotPendingIncoming()
@@ -674,7 +718,7 @@ void SyncStoreTest::commitHandshakeAcceptRollsBackWhenNotPendingIncoming()
     {
         const auto conversationId = ConversationId::generate();
         auto result = store.commitHandshakeAccept(AccountId::generate(), conversationId, 5'000,
-                                                  QByteArray("nope"));
+                                                  QByteArray("nope"), QByteArray(32, 'k'));
         QVERIFY(!result.hasValue());
         QCOMPARE(result.error().code, RepositoryErrorCode::Conflict);
         QCOMPARE(database.loadMlsState(profileId).value(), baseline);
@@ -694,11 +738,13 @@ void SyncStoreTest::commitHandshakeAcceptRollsBackWhenNotPendingIncoming()
         QVERIFY(contacts.block(senderAccountId, 3'000).hasValue());
 
         auto result = store.commitHandshakeAccept(senderAccountId, conversationId, 5'000,
-                                                  QByteArray("nope"));
+                                                  QByteArray("nope"), QByteArray(32, 'k'));
         QVERIFY(!result.hasValue());
         QCOMPARE(result.error().code, RepositoryErrorCode::Conflict);
         QCOMPARE(database.loadMlsState(profileId).value(), baseline);
         QVERIFY(store.loadPendingHandshake(conversationId).value().has_value());
+        // The wholesale rollback bound no peer key to the blocked contact.
+        QVERIFY(!contacts.find(senderAccountId).value().value().peerSigningKey.has_value());
     }
 
     // Already-accepted contact: a second accept is a no-op transition, Conflict.
@@ -715,11 +761,14 @@ void SyncStoreTest::commitHandshakeAcceptRollsBackWhenNotPendingIncoming()
                     .hasValue());
 
         auto result = store.commitHandshakeAccept(senderAccountId, conversationId, 5'000,
-                                                  QByteArray("nope"));
+                                                  QByteArray("nope"), QByteArray(32, 'k'));
         QVERIFY(!result.hasValue());
         QCOMPARE(result.error().code, RepositoryErrorCode::Conflict);
         QCOMPARE(database.loadMlsState(profileId).value(), baseline);
         QVERIFY(store.loadPendingHandshake(conversationId).value().has_value());
+        // The already-accepted contact keeps its NULL peer key: the failed second
+        // accept wrote nothing.
+        QVERIFY(!contacts.find(senderAccountId).value().value().peerSigningKey.has_value());
     }
 }
 

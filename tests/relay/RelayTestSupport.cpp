@@ -271,6 +271,11 @@ QByteArray FakeHttpsServer::lastBody(const QString &path) const
     return m_lastBody.value(path);
 }
 
+QByteArray FakeHttpsServer::lastTarget(const QString &path) const
+{
+    return m_lastTarget.value(path);
+}
+
 void FakeHttpsServer::onReadyRead(QSslSocket *socket)
 {
     QByteArray &buffer = m_buffers[socket];
@@ -307,8 +312,10 @@ void FakeHttpsServer::dispatch(QSslSocket *socket, const QByteArray &requestLine
 {
     const QList<QByteArray> parts = requestLine.split(' ');
     QString path;
+    QByteArray fullTarget;
     if (parts.size() >= 2) {
-        QByteArray target = parts.at(1);
+        fullTarget = parts.at(1);
+        QByteArray target = fullTarget;
         const int q = target.indexOf('?');
         if (q >= 0)
             target = target.left(q);
@@ -325,6 +332,7 @@ void FakeHttpsServer::dispatch(QSslSocket *socket, const QByteArray &requestLine
     m_requestCounts[path] += 1;
     m_lastAuthorization[path] = authorization;
     m_lastBody[path] = body;
+    m_lastTarget[path] = fullTarget;
 
     Response response;
     if (m_responses.contains(path) && !m_responses[path].isEmpty())

@@ -7,6 +7,7 @@
 #include "protocol/CiphertextEnvelope.h"
 
 #include <QByteArray>
+#include <QList>
 #include <QObject>
 #include <QSslConfiguration>
 #include <QString>
@@ -38,6 +39,9 @@ struct RelayEndpoints final {
     QUrl authRefresh;   // POST { refresh } -> rotated tokens
     QUrl sync;          // GET ?since=<watermark> -> bounded envelope batch
     QUrl keyPackages;   // POST { key_package } -> 200 (authenticated bearer token)
+    QUrl directory;     // GET ?handle=<h> -> CBOR { account_id, devices } (authenticated)
+    QUrl invites;       // POST { ttl_ms? } -> CBOR { token, expires_at_ms } (authenticated)
+    QUrl invitesRedeem; // POST { token } -> CBOR { account_id, devices } (authenticated)
     QUrl live;          // wss:// live envelope stream
 
     [[nodiscard]] bool isSecure() const;
@@ -101,6 +105,35 @@ enum class RelayTransportError {
 enum class RelayRegistrationError {
     HandleUnavailable,
     InvalidRequest,
+    Transport,
+};
+
+// One device returned by a directory lookup: its stable device id plus the
+// Ed25519 signing public key other members verify against. Only ever populated
+// from a response that passed defensive validation (fixed field sizes, bounded
+// device count).
+struct RelayDirectoryDevice final {
+    DeviceId deviceId;
+    QByteArray signingKey;
+};
+
+// A resolved account and its active devices, produced by resolveHandle() and
+// redeemInvite(). Like the envelope payloads it is intentionally not
+// default-constructible (AccountId has no default), so it travels through its
+// signals by const reference and is observed from a slot rather than QSignalSpy.
+struct RelayDirectoryEntry final {
+    AccountId accountId;
+    QList<RelayDirectoryDevice> devices;
+};
+
+// Typed discovery failures surfaced through handleResolutionFailed() and
+// inviteRedemptionFailed(). NotFound maps the relay's 404 (an unknown handle, or
+// an invalid/expired/consumed invite); Malformed is a response that decoded but
+// violated the directory shape or its defensive bounds; Transport covers
+// TLS/network failures, an oversize body, and any other non-2xx status.
+enum class RelayDirectoryError {
+    NotFound,
+    Malformed,
     Transport,
 };
 
@@ -199,6 +232,31 @@ public:
     // authExpired(); any other failure emits keyPackagePublishFailed().
     void publishKeyPackage(const QByteArray &keyPackage);
 
+    // Resolves a handle to an account and its active devices over the
+    // authenticated HTTPS directory endpoint (bearer access token attached). The
+    // handle is URL-encoded into a `handle` query item. Emits handleResolved()
+    // with a defensively validated entry on a 2xx; a rejected token drives a
+    // single serialized refresh-and-retry and then authExpired(); an unknown
+    // handle (relay 404) emits handleResolutionFailed(NotFound); a response that
+    // violates the directory shape or its bounds emits Malformed; any other
+    // failure emits Transport.
+    void resolveHandle(const QString &handle);
+
+    // Mints a one-time invite over the authenticated HTTPS endpoint. When
+    // ttlMs > 0 it is sent as ttl_ms; otherwise the body is empty and the relay
+    // applies its default TTL. Emits inviteCreated(token, expiresAtMs) on a 2xx;
+    // a rejected token drives the single refresh-and-retry then authExpired();
+    // any other failure emits inviteCreationFailed().
+    void createInvite(qint64 ttlMs = 0);
+
+    // Redeems a one-time invite over the authenticated HTTPS endpoint and, on a
+    // 2xx, emits inviteRedeemed() with the inviter's defensively validated entry.
+    // A rejected token drives the single refresh-and-retry then authExpired(); an
+    // invalid/expired/consumed token (relay 404) emits
+    // inviteRedemptionFailed(NotFound); a malformed body emits Malformed; any
+    // other failure Transport.
+    void redeemInvite(const QByteArray &token);
+
     // Closes the live stream and cancels any pending reconnect. Idempotent.
     void disconnect();
 
@@ -225,12 +283,26 @@ signals:
     // surfaces through authExpired() after the single refresh-and-retry).
     void keyPackagePublished();
     void keyPackagePublishFailed();
+    // Directory lookup: a defensively validated entry, or a typed failure.
+    void handleResolved(const RelayDirectoryEntry &entry);
+    void handleResolutionFailed(RelayDirectoryError error);
+    // One-time invite creation: the plaintext token plus advisory expiry, or a
+    // non-auth failure (a rejected token surfaces through authExpired()).
+    void inviteCreated(const QByteArray &token, qint64 expiresAtMs);
+    void inviteCreationFailed();
+    // One-time invite redemption: the inviter's entry, or a typed failure.
+    void inviteRedeemed(const RelayDirectoryEntry &entry);
+    void inviteRedemptionFailed(RelayDirectoryError error);
 
 private:
     void completeAuthentication(const QByteArray &challenge, const ChallengeSigner &signer,
                                 const QByteArray &context);
     void refreshThenRetryFetch(quint64 watermark);
     void refreshThenRetryPublish(const QByteArray &keyPackage);
+    // Runs one serialized token refresh and, on success, invokes `retry` exactly
+    // once with the rotated credentials in place. Used by the authenticated
+    // discovery calls; the fetch/publish paths keep their own typed helpers.
+    void refreshThenRetry(std::function<void()> retry);
     void deliverCatchUp(const QByteArray &body);
 
     class Private;

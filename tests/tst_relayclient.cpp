@@ -32,6 +32,7 @@ using namespace std::chrono;
 // so those signal payloads are captured through lambdas instead of QSignalSpy.
 Q_DECLARE_METATYPE(OpenChat::RelayTransportError)
 Q_DECLARE_METATYPE(OpenChat::RelayRegistrationError)
+Q_DECLARE_METATYPE(OpenChat::RelayDirectoryError)
 Q_DECLARE_METATYPE(OpenChat::RelaySession)
 
 namespace {
@@ -100,6 +101,25 @@ RelayEndpoints wssOnly(const QUrl &live)
     RelayEndpoints endpoints;
     endpoints.live = live;
     return endpoints;
+}
+
+// One device entry of the shared discovery wire shape { device_id, signing_key }.
+QCborMap directoryDeviceCbor(const DeviceId &deviceId, const QByteArray &signingKey)
+{
+    QCborMap map;
+    map.insert(QLatin1StringView("device_id"), deviceId.bytes());
+    map.insert(QLatin1StringView("signing_key"), signingKey);
+    return map;
+}
+
+// The full directory shape { account_id, devices: [ ... ] } served by both
+// /v1/directory and /v1/invites/redeem.
+QByteArray directoryCbor(const AccountId &account, const QCborArray &devices)
+{
+    QCborMap map;
+    map.insert(QLatin1StringView("account_id"), account.bytes());
+    map.insert(QLatin1StringView("devices"), devices);
+    return map.toCborValue().toCbor();
 }
 
 // Bundles the signal observation needed by the transport tests. Envelope and
@@ -180,6 +200,13 @@ private slots:
     void publishKeyPackageSucceeds();
     void publishKeyPackageUnauthorizedRefreshExhaustionExpires();
 
+    void resolveHandleSucceeds();
+    void resolveHandleNotFoundFails();
+    void resolveHandleMalformedIsRejected();
+    void createInviteSucceeds();
+    void redeemInviteSucceeds();
+    void redeemInviteNotFoundFails();
+
     void serializedRefreshSucceedsOnce();
     void refreshExhaustionExpiresAuth();
     void refreshCycleResetsAfterSuccess();
@@ -194,6 +221,7 @@ void RelayClientTest::initTestCase()
 {
     qRegisterMetaType<RelayTransportError>();
     qRegisterMetaType<RelayRegistrationError>();
+    qRegisterMetaType<RelayDirectoryError>();
     qRegisterMetaType<RelaySession>();
     QVERIFY2(QSslSocket::supportsSsl(), "TLS backend must be available for these tests");
 }
@@ -823,6 +851,277 @@ void RelayClientTest::publishKeyPackageUnauthorizedRefreshExhaustionExpires()
     QCOMPARE(rotated.count(), 1);        // the single refresh itself succeeded
     QCOMPARE(server.requestCount(QStringLiteral("/auth/refresh")), 1);
     QCOMPARE(server.requestCount(QStringLiteral("/v1/key-packages")), 2);
+}
+
+// --- Discovery: handle resolution + one-time invites ------------------------
+
+void RelayClientTest::resolveHandleSucceeds()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    const AccountId account = AccountId::generate();
+    const DeviceId device = DeviceId::generate();
+    const QByteArray signingKey(32, '\x33');
+    QCborArray devices;
+    devices.append(directoryDeviceCbor(device, signingKey));
+    server.enqueue(QStringLiteral("/v1/directory"), {200, directoryCbor(account, devices), -1});
+
+    RelayEndpoints endpoints;
+    endpoints.directory = server.url(QStringLiteral("/v1/directory"));
+    endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    std::optional<RelayDirectoryEntry> resolved;
+    int resolvedCount = 0;
+    QObject::connect(&client, &RelayClient::handleResolved, &client,
+                     [&](const RelayDirectoryEntry &entry) {
+                         resolved = entry;
+                         ++resolvedCount;
+                     });
+    QSignalSpy failed(&client, &RelayClient::handleResolutionFailed);
+    QSignalSpy errors(&client, &RelayClient::transportError);
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+
+    client.resolveHandle(QStringLiteral("alice"));
+
+    QTRY_COMPARE(resolvedCount, 1);
+    QCOMPARE(failed.count(), 0);
+    QCOMPARE(errors.count(), 0);
+    QCOMPARE(expired.count(), 0);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/directory")), 1);
+
+    // The authenticated GET carries the bearer access token and the handle query.
+    QCOMPARE(server.lastAuthorization(QStringLiteral("/v1/directory")),
+             QByteArray("Bearer access-token"));
+    const QUrl target(QString::fromLatin1(server.lastTarget(QStringLiteral("/v1/directory"))));
+    QCOMPARE(QUrlQuery(target).queryItemValue(QStringLiteral("handle")), QStringLiteral("alice"));
+
+    // The parsed entry matches the fixture bytes exactly.
+    QVERIFY(resolved.has_value());
+    QCOMPARE(resolved->accountId, account);
+    QCOMPARE(resolved->devices.count(), 1);
+    QCOMPARE(resolved->devices.first().deviceId, device);
+    QCOMPARE(resolved->devices.first().signingKey, signingKey);
+}
+
+void RelayClientTest::resolveHandleNotFoundFails()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    server.enqueue(QStringLiteral("/v1/directory"), {404, {}, -1});
+
+    RelayEndpoints endpoints;
+    endpoints.directory = server.url(QStringLiteral("/v1/directory"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    int resolvedCount = 0;
+    QObject::connect(&client, &RelayClient::handleResolved, &client,
+                     [&](const RelayDirectoryEntry &) { ++resolvedCount; });
+    QSignalSpy failed(&client, &RelayClient::handleResolutionFailed);
+
+    client.resolveHandle(QStringLiteral("ghost"));
+
+    QTRY_COMPARE(failed.count(), 1);
+    QCOMPARE(failed.first().at(0).value<RelayDirectoryError>(), RelayDirectoryError::NotFound);
+    QCOMPARE(resolvedCount, 0);
+}
+
+void RelayClientTest::resolveHandleMalformedIsRejected()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    // (1) A device whose signing_key is 31 bytes (must be exactly 32).
+    QCborArray shortKey;
+    shortKey.append(directoryDeviceCbor(DeviceId::generate(), QByteArray(31, '\x04')));
+    server.enqueue(QStringLiteral("/v1/directory"),
+                   {200, directoryCbor(AccountId::generate(), shortKey), -1});
+    // (2) A devices array over the cap (65 > 64).
+    QCborArray tooMany;
+    for (int i = 0; i < 65; ++i)
+        tooMany.append(directoryDeviceCbor(DeviceId::generate(), QByteArray(32, '\x05')));
+    server.enqueue(QStringLiteral("/v1/directory"),
+                   {200, directoryCbor(AccountId::generate(), tooMany), -1});
+
+    RelayEndpoints endpoints;
+    endpoints.directory = server.url(QStringLiteral("/v1/directory"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    int resolvedCount = 0;
+    QObject::connect(&client, &RelayClient::handleResolved, &client,
+                     [&](const RelayDirectoryEntry &) { ++resolvedCount; });
+    QSignalSpy failed(&client, &RelayClient::handleResolutionFailed);
+
+    client.resolveHandle(QStringLiteral("alice"));
+    QTRY_COMPARE(failed.count(), 1);
+    QCOMPARE(failed.at(0).at(0).value<RelayDirectoryError>(), RelayDirectoryError::Malformed);
+
+    client.resolveHandle(QStringLiteral("bob"));
+    QTRY_COMPARE(failed.count(), 2);
+    QCOMPARE(failed.at(1).at(0).value<RelayDirectoryError>(), RelayDirectoryError::Malformed);
+
+    // A malformed response never surfaces a (partial) entry.
+    QCOMPARE(resolvedCount, 0);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/directory")), 2);
+}
+
+void RelayClientTest::createInviteSucceeds()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    const QByteArray token(32, '\x77');
+    const qint64 expiresAtMs = 1'700'000'123'000;
+    QCborMap response;
+    response.insert(QLatin1StringView("token"), token);
+    response.insert(QLatin1StringView("expires_at_ms"), expiresAtMs);
+    server.enqueue(QStringLiteral("/v1/invites"), {200, response.toCborValue().toCbor(), -1});
+
+    RelayEndpoints endpoints;
+    endpoints.invites = server.url(QStringLiteral("/v1/invites"));
+    endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy created(&client, &RelayClient::inviteCreated);
+    QSignalSpy createFailed(&client, &RelayClient::inviteCreationFailed);
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+
+    const qint64 ttlMs = 3'600'000;
+    client.createInvite(ttlMs);
+
+    QTRY_COMPARE(created.count(), 1);
+    QCOMPARE(createFailed.count(), 0);
+    QCOMPARE(expired.count(), 0);
+    QCOMPARE(created.first().at(0).toByteArray(), token);
+    QCOMPARE(created.first().at(1).toLongLong(), expiresAtMs);
+    QCOMPARE(server.requestCount(QStringLiteral("/v1/invites")), 1);
+
+    // The authenticated POST carries the bearer access token.
+    QCOMPARE(server.lastAuthorization(QStringLiteral("/v1/invites")),
+             QByteArray("Bearer access-token"));
+
+    // With ttl > 0 the request body carries ttl_ms.
+    QCborParserError err{};
+    const QCborValue value =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/v1/invites")), &err);
+    QCOMPARE(err.error, QCborError::NoError);
+    QVERIFY(value.isMap());
+    QCOMPARE(value.toMap().value(QLatin1StringView("ttl_ms")).toInteger(), ttlMs);
+}
+
+void RelayClientTest::redeemInviteSucceeds()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    const AccountId account = AccountId::generate();
+    const DeviceId device = DeviceId::generate();
+    const QByteArray signingKey(32, '\x44');
+    QCborArray devices;
+    devices.append(directoryDeviceCbor(device, signingKey));
+    server.enqueue(QStringLiteral("/v1/invites/redeem"),
+                   {200, directoryCbor(account, devices), -1});
+
+    RelayEndpoints endpoints;
+    endpoints.invitesRedeem = server.url(QStringLiteral("/v1/invites/redeem"));
+    endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    std::optional<RelayDirectoryEntry> redeemed;
+    int redeemedCount = 0;
+    QObject::connect(&client, &RelayClient::inviteRedeemed, &client,
+                     [&](const RelayDirectoryEntry &entry) {
+                         redeemed = entry;
+                         ++redeemedCount;
+                     });
+    QSignalSpy redeemFailed(&client, &RelayClient::inviteRedemptionFailed);
+    QSignalSpy expired(&client, &RelayClient::authExpired);
+
+    const QByteArray token("invite-token-bytes");
+    client.redeemInvite(token);
+
+    QTRY_COMPARE(redeemedCount, 1);
+    QCOMPARE(redeemFailed.count(), 0);
+    QCOMPARE(expired.count(), 0);
+
+    QVERIFY(redeemed.has_value());
+    QCOMPARE(redeemed->accountId, account);
+    QCOMPARE(redeemed->devices.count(), 1);
+    QCOMPARE(redeemed->devices.first().deviceId, device);
+    QCOMPARE(redeemed->devices.first().signingKey, signingKey);
+
+    // The authenticated POST carries the bearer access token and { token }.
+    QCOMPARE(server.lastAuthorization(QStringLiteral("/v1/invites/redeem")),
+             QByteArray("Bearer access-token"));
+    QCborParserError err{};
+    const QCborValue value =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/v1/invites/redeem")), &err);
+    QCOMPARE(err.error, QCborError::NoError);
+    QVERIFY(value.isMap());
+    QCOMPARE(value.toMap().value(QLatin1StringView("token")).toByteArray(), token);
+}
+
+void RelayClientTest::redeemInviteNotFoundFails()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    // An invalid/expired/consumed token collapses to 404 on the relay.
+    server.enqueue(QStringLiteral("/v1/invites/redeem"), {404, {}, -1});
+
+    RelayEndpoints endpoints;
+    endpoints.invitesRedeem = server.url(QStringLiteral("/v1/invites/redeem"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    int redeemedCount = 0;
+    QObject::connect(&client, &RelayClient::inviteRedeemed, &client,
+                     [&](const RelayDirectoryEntry &) { ++redeemedCount; });
+    QSignalSpy redeemFailed(&client, &RelayClient::inviteRedemptionFailed);
+
+    client.redeemInvite(QByteArray("bad-or-expired"));
+
+    QTRY_COMPARE(redeemFailed.count(), 1);
+    QCOMPARE(redeemFailed.first().at(0).value<RelayDirectoryError>(),
+             RelayDirectoryError::NotFound);
+    QCOMPARE(redeemedCount, 0);
 }
 
 // --- HTTPS auth / refresh ---------------------------------------------------

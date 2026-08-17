@@ -125,6 +125,10 @@ public:
     [[nodiscard]] int requestCount(const QString &path) const;
     [[nodiscard]] QByteArray lastAuthorization(const QString &path) const;
     [[nodiscard]] QByteArray lastBody(const QString &path) const;
+    // The full request target (path plus any query string) of the most recent
+    // request to `path`. Lets a test observe a GET's query items, which are
+    // stripped from the key used everywhere else.
+    [[nodiscard]] QByteArray lastTarget(const QString &path) const;
 
 private:
     void onReadyRead(QSslSocket *socket);
@@ -137,6 +141,7 @@ private:
     QHash<QString, int> m_requestCounts;
     QHash<QString, QByteArray> m_lastAuthorization;
     QHash<QString, QByteArray> m_lastBody;
+    QHash<QString, QByteArray> m_lastTarget;
 };
 
 } // namespace RelayTest

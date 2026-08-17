@@ -84,6 +84,14 @@ enum class ControlType : int {
     return bytes.size() == expected ? bytes : QByteArray{};
 }
 
+// Defensive bounds for a directory response from the semi-trusted relay: a
+// resolved account exposes at most this many devices, each device's signing key
+// is exactly an Ed25519 public key, and an invite token is bounded well below
+// the whole-body ceiling so a "token" field can never be an oversize blob.
+constexpr qsizetype maxDirectoryDevices = 64;
+constexpr qsizetype directorySigningKeyBytes = 32;
+constexpr qsizetype maxInviteTokenBytes = 4096;
+
 } // namespace
 
 bool RelayEndpoints::isSecure() const
@@ -533,6 +541,53 @@ public:
         return session;
     }
 
+    // Defensively parses the shared directory shape
+    //   { account_id (16 bytes), devices: [ { device_id (16 bytes),
+    //     signing_key (32 bytes) }, ... ] }
+    // from a semi-trusted relay. Every field size is checked and the device
+    // array is capped before any element is trusted; a single violation rejects
+    // the whole response so no partial or oversized entry is ever surfaced. The
+    // caller applies the raw-body size gate first.
+    [[nodiscard]] std::optional<RelayDirectoryEntry> parseDirectoryEntry(const QByteArray &body) const
+    {
+        QCborParserError error{};
+        const QCborValue value = QCborValue::fromCbor(body, &error);
+        if (error.error != QCborError::NoError || error.offset != body.size() || !value.isMap())
+            return std::nullopt;
+        const QCborMap map = value.toMap();
+
+        const QByteArray accountBytes =
+            fixedBytes(map.value(QLatin1StringView("account_id")), AccountId::byteCount);
+        const auto accountId = AccountId::fromBytes(accountBytes);
+        if (!accountId)
+            return std::nullopt;
+
+        const QCborValue devicesValue = map.value(QLatin1StringView("devices"));
+        if (!devicesValue.isArray())
+            return std::nullopt;
+        const QCborArray devices = devicesValue.toArray();
+        if (devices.size() > maxDirectoryDevices)
+            return std::nullopt;
+
+        RelayDirectoryEntry entry{*accountId, {}};
+        entry.devices.reserve(devices.size());
+        for (const QCborValue &deviceValue : devices) {
+            if (!deviceValue.isMap())
+                return std::nullopt;
+            const QCborMap deviceMap = deviceValue.toMap();
+            const auto deviceId = DeviceId::fromBytes(
+                fixedBytes(deviceMap.value(QLatin1StringView("device_id")), DeviceId::byteCount));
+            if (!deviceId)
+                return std::nullopt;
+            const QByteArray signingKey = fixedBytes(
+                deviceMap.value(QLatin1StringView("signing_key")), directorySigningKeyBytes);
+            if (signingKey.size() != directorySigningKeyBytes)
+                return std::nullopt;
+            entry.devices.append(RelayDirectoryDevice{*deviceId, signingKey});
+        }
+        return entry;
+    }
+
     void teardownSocket()
     {
         if (!socket)
@@ -850,6 +905,194 @@ void RelayClient::publishKeyPackage(const QByteArray &keyPackage)
     });
 }
 
+void RelayClient::resolveHandle(const QString &handle)
+{
+    if (!isHttps(d->endpoints.directory)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        return;
+    }
+
+    QUrl url = d->endpoints.directory;
+    QUrlQuery query(url);
+    query.removeQueryItem(QStringLiteral("handle"));
+    // addQueryItem percent-encodes the value, so a handle with reserved
+    // characters cannot smuggle extra query items or path segments.
+    query.addQueryItem(QStringLiteral("handle"), handle);
+    url.setQuery(query);
+
+    QNetworkRequest request = d->authorizedRequest(url);
+    QNetworkReply *reply = d->network->get(request);
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, handle] {
+        const bool oversized = reply->property("oc_oversized").toBool();
+        reply->deleteLater();
+        if (oversized) {
+            emit handleResolutionFailed(RelayDirectoryError::Transport);
+            return;
+        }
+
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 401) {
+            // Authorization rejected: attempt exactly one serialized refresh, then
+            // retry this lookup once, mirroring the fetch/publish paths.
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight)
+                refreshThenRetry([this, handle] { resolveHandle(handle); });
+            else
+                emit authExpired();
+            return;
+        }
+        if (status == 404) {
+            emit handleResolutionFailed(RelayDirectoryError::NotFound);
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit handleResolutionFailed(RelayDirectoryError::Transport);
+            return;
+        }
+
+        const QByteArray body = reply->readAll();
+        if (body.size() > d->limits.maxHttpBodyBytes) {
+            emit handleResolutionFailed(RelayDirectoryError::Transport);
+            return;
+        }
+        const auto entry = d->parseDirectoryEntry(body);
+        if (!entry) {
+            emit handleResolutionFailed(RelayDirectoryError::Malformed);
+            return;
+        }
+        d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
+        emit handleResolved(*entry);
+    });
+}
+
+void RelayClient::createInvite(qint64 ttlMs)
+{
+    if (!isHttps(d->endpoints.invites)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        return;
+    }
+
+    QCborMap body;
+    if (ttlMs > 0)
+        body.insert(QLatin1StringView("ttl_ms"), ttlMs);
+
+    QNetworkRequest request = d->authorizedRequest(d->endpoints.invites);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, ttlMs] {
+        const bool oversized = reply->property("oc_oversized").toBool();
+        reply->deleteLater();
+        if (oversized) {
+            emit inviteCreationFailed();
+            return;
+        }
+
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 401) {
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight)
+                refreshThenRetry([this, ttlMs] { createInvite(ttlMs); });
+            else
+                emit authExpired();
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit inviteCreationFailed();
+            return;
+        }
+
+        const QByteArray rawBody = reply->readAll();
+        if (rawBody.size() > d->limits.maxHttpBodyBytes) {
+            emit inviteCreationFailed();
+            return;
+        }
+        QCborParserError error{};
+        const QCborValue value = QCborValue::fromCbor(rawBody, &error);
+        if (error.error != QCborError::NoError || error.offset != rawBody.size()
+            || !value.isMap()) {
+            emit inviteCreationFailed();
+            return;
+        }
+        const QCborMap map = value.toMap();
+        const QCborValue tokenValue = map.value(QLatin1StringView("token"));
+        const QCborValue expiresValue = map.value(QLatin1StringView("expires_at_ms"));
+        if (!tokenValue.isByteArray() || !expiresValue.isInteger()) {
+            emit inviteCreationFailed();
+            return;
+        }
+        const QByteArray token = tokenValue.toByteArray();
+        if (token.isEmpty() || token.size() > maxInviteTokenBytes) {
+            emit inviteCreationFailed();
+            return;
+        }
+        d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
+        emit inviteCreated(token, expiresValue.toInteger());
+    });
+}
+
+void RelayClient::redeemInvite(const QByteArray &token)
+{
+    if (!isHttps(d->endpoints.invitesRedeem)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        return;
+    }
+
+    QCborMap body;
+    body.insert(QLatin1StringView("token"), token);
+
+    QNetworkRequest request = d->authorizedRequest(d->endpoints.invitesRedeem);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, token] {
+        const bool oversized = reply->property("oc_oversized").toBool();
+        reply->deleteLater();
+        if (oversized) {
+            emit inviteRedemptionFailed(RelayDirectoryError::Transport);
+            return;
+        }
+
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 401) {
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight)
+                refreshThenRetry([this, token] { redeemInvite(token); });
+            else
+                emit authExpired();
+            return;
+        }
+        if (status == 404) {
+            emit inviteRedemptionFailed(RelayDirectoryError::NotFound);
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit inviteRedemptionFailed(RelayDirectoryError::Transport);
+            return;
+        }
+
+        const QByteArray rawBody = reply->readAll();
+        if (rawBody.size() > d->limits.maxHttpBodyBytes) {
+            emit inviteRedemptionFailed(RelayDirectoryError::Transport);
+            return;
+        }
+        const auto entry = d->parseDirectoryEntry(rawBody);
+        if (!entry) {
+            emit inviteRedemptionFailed(RelayDirectoryError::Malformed);
+            return;
+        }
+        d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
+        emit inviteRedeemed(*entry);
+    });
+}
+
 void RelayClient::disconnect()
 {
     d->userClosed = true;
@@ -980,6 +1223,48 @@ void RelayClient::refreshThenRetryPublish(const QByteArray &keyPackage)
         // Retry the publish exactly once; refreshAttemptedThisCycle stays set so a
         // repeated 401 falls through to authExpired() instead of looping.
         publishKeyPackage(keyPackage);
+    });
+}
+
+void RelayClient::refreshThenRetry(std::function<void()> retry)
+{
+    if (!d->credentials.refreshToken || !isHttps(d->endpoints.authRefresh)) {
+        emit authExpired();
+        return;
+    }
+    const QByteArray refresh = d->credentials.refreshToken();
+    if (refresh.isEmpty()) {
+        emit authExpired();
+        return;
+    }
+
+    d->refreshAttemptedThisCycle = true;
+    d->refreshInFlight = true;
+
+    QCborMap body;
+    body.insert(QLatin1StringView("refresh"), refresh);
+    QNetworkRequest request = d->authorizedRequest(d->endpoints.authRefresh);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, retry = std::move(retry)] {
+        d->refreshInFlight = false;
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError || !d->bodyWithinBounds(reply)) {
+            emit authExpired();
+            return;
+        }
+        const auto session = d->parseSession(reply->readAll());
+        if (!session) {
+            emit authExpired();
+            return;
+        }
+        emit tokensRotated(*session);
+        // Retry the original operation exactly once with the rotated credentials
+        // in place; refreshAttemptedThisCycle stays set so a repeated 401 falls
+        // through to authExpired() instead of looping.
+        retry();
     });
 }
 

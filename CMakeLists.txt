@@ -158,6 +158,7 @@ target_link_libraries(openchat_security
 add_library(openchat_app STATIC
     src/app/ProfileSession.cpp
     src/app/AccountBootstrap.cpp
+    src/app/AddContactService.cpp
 )
 target_include_directories(openchat_app PUBLIC src)
 target_link_libraries(openchat_app
@@ -299,6 +300,28 @@ set_tests_properties(tst_accountbootstrap PROPERTIES
     LABELS integration
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
+
+# Real-wiring integration test for the add-contact handshake SEND path: a live
+# ProfileSession (SQLCipher + real MlsClient) plus a second MlsClient standing in
+# for the peer, driven through AddContactService by emitting the relay's signals.
+add_executable(tst_addcontactservice tests/tst_addcontactservice.cpp)
+target_include_directories(tst_addcontactservice PRIVATE src tests relay/src)
+target_link_libraries(tst_addcontactservice PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    openchat_relay_core
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test
+)
+add_test(NAME tst_addcontactservice COMMAND tst_addcontactservice)
+set_tests_properties(tst_addcontactservice PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_models
     tests/tst_models.cpp

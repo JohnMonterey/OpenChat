@@ -174,6 +174,39 @@ public:
         drainOutbox();
     }
 
+    void doSendHandshake(const ConversationId &conversation, const DeviceId &recipient,
+                         const QByteArray &welcome)
+    {
+        if (failed)
+            return;
+        // Deliberately NO mls.encrypt here: the ciphertext IS the caller-supplied
+        // Welcome. A Welcome is already HPKE-sealed to the recipient's claimed
+        // KeyPackage, so it is confidential to that device as-is; re-encrypting it
+        // through this group's application ratchet would be wrong (the recipient is
+        // not yet a member and could never derive that key), which is why this path
+        // diverges from doAcknowledgeRead by skipping the encrypt step. The pending
+        // MLS state taken below is the createGroup + addMembers snapshot the caller
+        // captured on the shared MlsClient just before invoking us; it is committed
+        // atomically with the Welcome outbox by commitControlSend.
+        const auto envelope =
+            buildEnvelope(conversation, recipient, welcome, EnvelopeMessageKind::MlsHandshake);
+        if (!envelope) {
+            failClosed();
+            return;
+        }
+
+        // No visible message row for a handshake control send.
+        const OutboxRecord outbox = makeOutbox(envelope->envelopeId, MessageId::generate(),
+                                               conversation, encodeCanonical(*envelope));
+
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitControlSend(outbox, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        drainOutbox();
+    }
+
     void drainOutbox()
     {
         if (failed || !transport.isConnected())
@@ -351,6 +384,14 @@ void SyncEngine::acknowledgeRead(const ConversationId &conversation, const Devic
 {
     d->coordinator.run(conversation, [this, conversation, recipientDevice, messageId] {
         d->doAcknowledgeRead(conversation, recipientDevice, messageId);
+    });
+}
+
+void SyncEngine::sendHandshake(const ConversationId &conversation, const DeviceId &recipientDevice,
+                               const QByteArray &welcome)
+{
+    d->coordinator.run(conversation, [this, conversation, recipientDevice, welcome] {
+        d->doSendHandshake(conversation, recipientDevice, welcome);
     });
 }
 

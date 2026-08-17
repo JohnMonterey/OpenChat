@@ -266,6 +266,9 @@ private slots:
     void expiredIncomingIsAckedNotProcessed();
     void retryExhaustionMarksFailed();
     void commitFailureFailsClosed();
+    void sendHandshakeShipsWelcomeWithoutEncrypting();
+    void sendHandshakeAcceptanceCancelsRetry();
+    void sendHandshakeCommitFailureFailsClosed();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -513,6 +516,84 @@ void SyncEngineTest::commitFailureFailsClosed()
     // Further operations are inert once failed closed.
     engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("again"));
     QCOMPARE(failedSpy.count(), 1);
+}
+
+void SyncEngineTest::sendHandshakeShipsWelcomeWithoutEncrypting()
+{
+    FakeStore store;
+    FakeMls mls;
+    // A pending MLS snapshot the caller captured out-of-band via createGroup +
+    // addMembers on the shared client; sendHandshake must surrender and commit it.
+    mls.stateVersion = 5;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy stateSpy(&engine, &SyncEngine::messageStateChanged);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId recipient = DeviceId::generate();
+    const QByteArray welcome("mls-welcome-bytes");
+    engine.sendHandshake(conversation, recipient, welcome);
+
+    // The ciphertext is the raw Welcome: mls.encrypt is never called.
+    QCOMPARE(mls.encryptCount, 0);
+    // Committed as a control send (outbox row, no visible message row) carrying the
+    // pending MLS state the engine took from takePendingState().
+    QCOMPARE(store.outboxes.size(), 1);
+    QCOMPARE(store.messages.size(), 0);
+    QCOMPARE(store.lastMlsState, QByteArray("state-5"));
+    QCOMPARE(stateSpy.count(), 0); // no Queued state reported for a control send
+
+    // Drained while connected: exactly one MlsHandshake envelope whose ciphertext
+    // is the Welcome verbatim and whose signature is present.
+    QCOMPARE(transport.sent.size(), 1);
+    const CiphertextEnvelopeV1 &sent = transport.sent.first();
+    QCOMPARE(sent.messageKind, EnvelopeMessageKind::MlsHandshake);
+    QCOMPARE(sent.ciphertext, welcome);
+    QCOMPARE(sent.recipientDeviceId, recipient);
+    QCOMPARE(sent.conversationId, conversation);
+    QCOMPARE(sent.senderSignature, QByteArray(64, 'S'));
+}
+
+void SyncEngineTest::sendHandshakeAcceptanceCancelsRetry()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    engine.sendHandshake(ConversationId::generate(), DeviceId::generate(),
+                         QByteArray("welcome"));
+    QCOMPARE(transport.sent.size(), 1);
+    const EnvelopeId envelopeId = transport.sent.first().envelopeId;
+
+    // Relay acceptance marks the outbox Accepted, cancelling any scheduled retry.
+    transport.onRelayAccepted(envelopeId, 5);
+
+    // Advance well past the backoff and drain again: nothing is resent.
+    m_now += 600'000;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(mls.encryptCount, 0); // never encrypts on the handshake path
+}
+
+void SyncEngineTest::sendHandshakeCommitFailureFailsClosed()
+{
+    FakeStore store;
+    store.failSend = true;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy failedSpy(&engine, &SyncEngine::failedClosed);
+    engine.start();
+
+    engine.sendHandshake(ConversationId::generate(), DeviceId::generate(),
+                         QByteArray("welcome"));
+
+    QCOMPARE(failedSpy.count(), 1);
+    QVERIFY(engine.isFailedClosed());
+    QCOMPARE(transport.sent.size(), 0); // nothing left the device
 }
 
 QTEST_MAIN(SyncEngineTest)

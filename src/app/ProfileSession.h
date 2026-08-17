@@ -18,6 +18,7 @@ class KeyVault;
 class MlsClient;
 class MlsSyncSession;
 class SqlCipherChatRepository;
+class SqlCipherContactRepository;
 class SqlCipherDatabase;
 class SqlCipherOutboxRepository;
 class SqlCipherSyncRepository;
@@ -92,6 +93,7 @@ public:
   [[nodiscard]] Result<void, ProfileSessionError> persistMlsState();
 
   [[nodiscard]] SqlCipherChatRepository *chats() const noexcept;
+  [[nodiscard]] SqlCipherContactRepository *contacts() const noexcept;
   [[nodiscard]] SqlCipherOutboxRepository *outbox() const noexcept;
   [[nodiscard]] SqlCipherSyncRepository *sync() const noexcept;
   [[nodiscard]] MlsClient *mls() const noexcept;
@@ -127,6 +129,7 @@ private:
   ProfileSessionHooks m_hooks;
   std::unique_ptr<SqlCipherDatabase> m_database;
   std::unique_ptr<SqlCipherChatRepository> m_chats;
+  std::unique_ptr<SqlCipherContactRepository> m_contacts;
   std::unique_ptr<SqlCipherOutboxRepository> m_outbox;
   std::unique_ptr<SqlCipherSyncRepository> m_sync;
   std::unique_ptr<CapturingMlsStateStore> m_mlsStateStore;

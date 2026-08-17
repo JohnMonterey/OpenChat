@@ -129,6 +129,13 @@ public:
     void acknowledgeRead(const ConversationId &conversation, const DeviceId &recipientDevice,
                          const MessageId &messageId);
 
+    // Sends an MLS Welcome to a peer device as a content-blind handshake control
+    // send (no visible message row). Unlike acknowledgeRead the ciphertext is NOT
+    // produced by the group ratchet: `welcome` is the already-sealed Welcome the
+    // caller obtained from MlsClient::addMembers and is shipped verbatim.
+    void sendHandshake(const ConversationId &conversation, const DeviceId &recipientDevice,
+                       const QByteArray &welcome);
+
     // Processes an inbound envelope with its relay sequence.
     void handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);
 

@@ -38,6 +38,8 @@
 #include "network/RelayTransport.h"
 #include "network/SyncEngine.h"
 #include "render/AvatarArtwork.h"
+#include "app/AppearanceSettings.h"
+#include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
 #include "security/QtKeychainVault.h"
@@ -49,7 +51,11 @@ namespace {
 // process, so every engine and view created below resolves the same types.
 void registerQmlTypes()
 {
+    qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
+        "OpenChat.Native", 1, 0, "AppearanceSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
+    qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
@@ -263,16 +269,14 @@ private:
                                                  m_session.get(), m_session->syncEngine());
             m_chatController->setLiveServices(m_session.get(), m_session->syncEngine(),
                                               m_contactRequests.get());
+            m_chatController->setPresenceRelay(m_relay.get());
             // A resolved handle renames the chat row of an already-accepted peer,
             // and the caller shown on a ringing call screen.
             QObject::connect(m_contactController.get(),
                              &OpenChat::ContactController::contactHandleResolved,
                              m_chatController.get(),
-                             [this](const QString &accountHex, const QString &handle) {
+                             [this](const QString &accountHex, const QString &) {
                                  m_chatController->refreshContact(accountHex);
-                                 if (m_callEngine
-                                     && m_callEngine->peer().contactId == accountHex)
-                                     m_callEngine->updatePeerIdentity(handle, QString());
                              });
             if (m_callEngine)
                 m_callController->setLiveEngine(m_callEngine.get(), m_chatController.get());
@@ -698,7 +702,7 @@ int runVerifyWindow(QGuiApplication &application, QCommandLineParser &parser,
 int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
                   const QCommandLineOption &captureOption,
                   const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
-                  const QCommandLineOption &heightOption, bool incoming)
+                  const QCommandLineOption &heightOption, bool incoming, bool video)
 {
     OpenChat::ChatController chatController;
     chatController.setLocalUserName(QStringLiteral("Developer"));
@@ -712,6 +716,14 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         incoming ? OpenChat::CallState::Ringing : OpenChat::CallState::Active,
         QStringLiteral("Jessica"), QStringLiteral("jessica"),
         /*remoteSpeaking=*/!incoming, /*localSpeaking=*/false);
+
+    if (video) {
+        QImage local(640, 360, QImage::Format_RGB32);
+        QImage remote(360, 640, QImage::Format_RGB32);
+        local.fill(QColor("#6192ab"));
+        remote.fill(QColor("#4f7a69"));
+        callController.setPreviewVideo(local, remote);
+    }
 
     QQmlApplicationEngine engine;
     engine.setInitialProperties(
@@ -741,7 +753,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
     QGuiApplication::setWindowIcon(
-        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.svg")));
+        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.png")));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("OpenChat secure chat client"));
@@ -772,12 +784,14 @@ int main(int argc, char *argv[])
         QStringLiteral("Preview the contact-verification safety-number surface."));
     const QCommandLineOption callOption(
         QStringLiteral("call"), QStringLiteral("Preview the in-call surface."));
+    const QCommandLineOption callVideoOption(
+        QStringLiteral("call-video"), QStringLiteral("Preview landscape and portrait video in a call."));
     const QCommandLineOption callIncomingOption(
         QStringLiteral("call-incoming"),
         QStringLiteral("Preview the in-call surface while a call is ringing."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, addContactOption, verifyOption, callOption,
-                       callIncomingOption});
+                       callIncomingOption, callVideoOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -803,9 +817,9 @@ int main(int argc, char *argv[])
     // Call preview: render the in-call surface with a mock controller, checked
     // before the plain capture path so --call --capture routes here.
     const bool previewIncomingCall = parser.isSet(callIncomingOption);
-    if (parser.isSet(callOption) || previewIncomingCall)
+    if (parser.isSet(callOption) || previewIncomingCall || parser.isSet(callVideoOption))
         return runCallWindow(application, parser, captureOption, delayOption, widthOption,
-                             heightOption, previewIncomingCall);
+                             heightOption, previewIncomingCall, parser.isSet(callVideoOption));
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

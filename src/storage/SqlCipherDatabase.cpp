@@ -257,7 +257,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
                                  ? sqlite3_column_int(versionStatement, 0)
                                  : -1;
   sqlite3_finalize(versionStatement);
-  constexpr int latestVersion = 11;
+  constexpr int latestVersion = 12;
   if (currentVersion < 0 || currentVersion > latestVersion)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
 
@@ -277,6 +277,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
       {9, ":/openchat/009_contact_verification.sql"},
       {10, ":/openchat/010_profile_display_name.sql"},
       {11, ":/openchat/011_contact_device.sql"},
+      {12, ":/openchat/012_profiles.sql"},
   };
 
   if (!execute("BEGIN IMMEDIATE;").hasValue())
@@ -613,6 +614,69 @@ SqlCipherDatabase::loadProfileDisplayName(const ProfileId &profileId) {
   const QString displayName = text ? QString::fromUtf8(text) : QString();
   sqlite3_finalize(statement);
   return Result<QString, StorageError>::success(displayName);
+}
+
+Result<void, StorageError>
+SqlCipherDatabase::storeLocalProfile(const ProfileId &profileId,
+                                     const LocalProfileFields &fields) {
+  if (!m_database)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql = "UPDATE local_profiles SET presence = ?1, status_text = ?2, "
+                       "avatar_jpeg = ?3 WHERE profile_id = ?4";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_int(statement, 1, fields.presence);
+  sqlite3_bind_text(statement, 2, fields.statusText.toUtf8().constData(), -1,
+                    SQLITE_TRANSIENT);
+  if (fields.avatarJpeg.isEmpty())
+    sqlite3_bind_null(statement, 3);
+  else
+    sqlite3_bind_blob(statement, 3, fields.avatarJpeg.constData(),
+                      static_cast<int>(fields.avatarJpeg.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 4, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  const int changes = sqlite3_changes(m_database);
+  sqlite3_finalize(statement);
+  if (step != SQLITE_DONE)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  if (changes == 0)
+    return Result<void, StorageError>::failure(StorageError::NotFound);
+  return Result<void, StorageError>::success();
+}
+
+Result<LocalProfileFields, StorageError>
+SqlCipherDatabase::loadLocalProfile(const ProfileId &profileId) {
+  if (!m_database)
+    return Result<LocalProfileFields, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql = "SELECT presence, status_text, avatar_jpeg FROM local_profiles "
+                       "WHERE profile_id = ?1";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<LocalProfileFields, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  if (step != SQLITE_ROW) {
+    sqlite3_finalize(statement);
+    return Result<LocalProfileFields, StorageError>::failure(
+        step == SQLITE_DONE ? StorageError::NotFound : StorageError::QueryFailed);
+  }
+  LocalProfileFields fields;
+  fields.presence = sqlite3_column_int(statement, 0);
+  const auto *text = reinterpret_cast<const char *>(sqlite3_column_text(statement, 1));
+  fields.statusText = text ? QString::fromUtf8(text) : QString();
+  if (sqlite3_column_type(statement, 2) != SQLITE_NULL) {
+    const auto *data = static_cast<const char *>(sqlite3_column_blob(statement, 2));
+    const int size = sqlite3_column_bytes(statement, 2);
+    if (data && size > 0)
+      fields.avatarJpeg = QByteArray(data, size);
+  }
+  sqlite3_finalize(statement);
+  return Result<LocalProfileFields, StorageError>::success(std::move(fields));
 }
 
 void SqlCipherDatabase::close() noexcept {

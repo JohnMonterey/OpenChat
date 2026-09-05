@@ -99,6 +99,23 @@ std::optional<CallMediaKeySchedule> CallMediaKeySchedule::derive(QByteArrayView 
     return schedule;
 }
 
+std::optional<CallMediaKeySchedule> CallMediaKeySchedule::deriveVideo(QByteArrayView secret,
+                                                                    const CallId &callId)
+{
+    if (secret.size() != callSecretBytes)
+        return std::nullopt;
+    // Separate domains: audio and video can use the same sequence without ever
+    // reusing a GCM key/nonce pair. Camera toggles do not reset this schedule.
+    CallMediaKeySchedule schedule;
+    schedule.fromCaller = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/video/caller"), derivedPerDirection));
+    schedule.fromCallee = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/video/callee"), derivedPerDirection));
+    if (!schedule.fromCaller.isValid() || !schedule.fromCallee.isValid())
+        return std::nullopt;
+    return schedule;
+}
+
 const CallMediaKeys &CallMediaKeySchedule::sendKeys(CallDirection direction) const noexcept
 {
     return direction == CallDirection::Outgoing ? fromCaller : fromCallee;

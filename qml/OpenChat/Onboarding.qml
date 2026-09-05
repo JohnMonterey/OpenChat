@@ -36,7 +36,7 @@ Item {
         Rectangle {
             anchors.fill: parent
             radius: 5
-            color: "#ffffff"
+            color: Theme.fieldBackground
         }
 
         Text {
@@ -64,12 +64,14 @@ Item {
             font.pixelSize: 16
             clip: true
             selectByMouse: true
+            selectionColor: Theme.selectionBackground
+            selectedTextColor: Theme.selectionText
 
             Text {
                 anchors.fill: parent
                 visible: !fieldInput.text && !fieldInput.activeFocus
                 text: field.placeholder
-                color: "#98a7ba"
+                color: Theme.placeholderText
                 font: fieldInput.font
                 verticalAlignment: Text.AlignVCenter
                 renderType: Text.NativeRendering
@@ -78,9 +80,9 @@ Item {
 
         // Aero inset: shadow along the inner top/left, a faint highlight along
         // the bottom, then the shared outline drawn last.
-        Rectangle { x: 5; y: 1; width: parent.width - 10; height: 1; color: "#24526878" }
-        Rectangle { x: 1; y: 5; width: 1; height: parent.height - 10; color: "#18526878" }
-        Rectangle { x: 5; y: parent.height - 2; width: parent.width - 10; height: 1; color: "#70ffffff" }
+        Rectangle { x: 5; y: 1; width: parent.width - 10; height: 1; color: Theme.insetTop }
+        Rectangle { x: 1; y: 5; width: 1; height: parent.height - 10; color: Theme.insetLeft }
+        Rectangle { x: 5; y: parent.height - 2; width: parent.width - 10; height: 1; color: Theme.gloss }
         Rectangle {
             anchors.fill: parent
             z: 10
@@ -101,15 +103,15 @@ Item {
         Rectangle {
             anchors.fill: parent
             radius: 4
-            color: button.enabled ? (buttonMouse.containsMouse ? "#f8fbfd" : "#f5f8fa")
-                                   : "#eef2f5"
+            color: button.enabled ? (buttonMouse.containsMouse ? Theme.buttonHover : Theme.buttonBackground)
+                                   : Theme.buttonDisabled
             border.width: 1
-            border.color: button.enabled ? "#aebdca" : "#c5d0d9"
+            border.color: button.enabled ? Theme.buttonBorder : Theme.buttonDisabledBorder
         }
         Text {
             anchors.centerIn: parent
             text: button.label
-            color: button.enabled ? "#3f5570" : "#8b99aa"
+            color: button.enabled ? Theme.buttonText : Theme.buttonDisabledText
             font.family: Theme.uiFont
             font.pixelSize: 16
             renderType: Text.NativeRendering
@@ -143,7 +145,7 @@ Item {
                     width: 46
                     height: 46
                     anchors.verticalCenter: parent.verticalCenter
-                    source: Qt.resolvedUrl("../../assets/icons/openchat.svg")
+                    source: Qt.resolvedUrl("../../assets/icons/openchat.png")
                     sourceSize: Qt.size(width * 2, height * 2)
                 }
                 Text {
@@ -245,7 +247,7 @@ Item {
                 width: parent.width
                 visible: onboarding.controller.errorText.length > 0
                 text: onboarding.controller.errorText
-                color: "#c0392b"
+                color: Theme.errorText
                 wrapMode: Text.WordWrap
                 font.family: Theme.uiFont
                 font.pixelSize: 13
@@ -314,16 +316,16 @@ Item {
                 Rectangle {
                     anchors.fill: parent
                     radius: 6
-                    color: "#eef6fb"
+                    color: Theme.panelBackground
                     border.width: 1
                     border.color: Theme.inputBorder
                 }
                 Rectangle {
-                    x: 6; y: 1; width: parent.width - 12; height: 1; color: "#24526878"
+                    x: 6; y: 1; width: parent.width - 12; height: 1; color: Theme.insetTop
                 }
                 Rectangle {
                     x: 6; y: parent.height - 2; width: parent.width - 12; height: 1
-                    color: "#70ffffff"
+                    color: Theme.gloss
                 }
 
                 Text {
@@ -333,7 +335,7 @@ Item {
                     width: parent.width - 24
                     horizontalAlignment: Text.AlignHCenter
                     text: onboarding.controller.recoveryCode
-                    color: "#2b3b53"
+                    color: Theme.textPrimary
                     font.family: "Courier New"
                     font.pixelSize: 19
                     font.letterSpacing: 1

@@ -100,11 +100,23 @@ struct StoredOutbox final {
 class FakeStore final : public SyncStore
 {
 public:
+    Result<void, RepositoryError> failSend(const EnvelopeId &id, const MessageId &messageId) override
+    {
+        for (auto &outbox : outboxes) {
+            if (outbox.record.envelopeId == id && outbox.record.messageId == messageId) {
+                outbox.record.state = OutboxState::Failed;
+                deliveryStates.insert(messageId.bytes(), DeliveryState::Failed);
+                return ok();
+            }
+        }
+        return err();
+    }
+
     Result<void, RepositoryError> commitSend(const MessageRecord &message,
                                              const OutboxRecord &outbox,
                                              QByteArrayView mlsState) override
     {
-        if (failSend)
+        if (failSendCommit)
             return err();
         messages.append(message);
         outboxes.append(StoredOutbox{outbox});
@@ -116,7 +128,7 @@ public:
     Result<void, RepositoryError> commitControlSend(const OutboxRecord &outbox,
                                                     QByteArrayView mlsState) override
     {
-        if (failSend)
+        if (failSendCommit)
             return err();
         outboxes.append(StoredOutbox{outbox});
         lastMlsState = mlsState.toByteArray();
@@ -250,7 +262,7 @@ public:
     QByteArray lastMlsState;
     quint64 watermarkValue = 0;
     int commitSendCount = 0;
-    bool failSend = false;
+    bool failSendCommit = false;
     bool failReceive = false;
 
     // commitHandshakeReceive controls + recorded args.
@@ -367,8 +379,36 @@ private slots:
 
     void sendEncryptsPersistsAndReportsQueued();
     void relayAcceptanceMarksSent();
-    void offlineSendStaysQueuedThenDrainsOnConnect();
-    void offlineSendSurvivesEngineRestart();
+    void recipientUnavailableStopsRetries()
+    {
+        FakeStore store;
+        FakeMls mls;
+        FakeTransport transport;
+        SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+        engine.start();
+        engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("hello"));
+        QCOMPARE(transport.sent.size(), 1);
+        transport.onRecipientUnavailable(transport.sent.first().envelopeId);
+        QCOMPARE(store.deliveryStates.value(store.messages.first().id.bytes()), DeliveryState::Failed);
+        transport.onConnected();
+        QCOMPARE(transport.sent.size(), 1);
+    }
+    void timerRetriesWithoutAnotherSendOrReconnect()
+    {
+        FakeStore store;
+        FakeMls mls;
+        FakeTransport transport;
+        qint64 now = 1000;
+        SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), [&] { return now; });
+        engine.start();
+        engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("hello"));
+        now += 2000;
+        QTRY_COMPARE_WITH_TIMEOUT(transport.sent.size(), 2, 2500);
+        QCOMPARE(mls.encryptCount, 1);
+        QCOMPARE(transport.sent.first().ciphertext, transport.sent.last().ciphertext);
+    }
+    void offlineSendFailsWithoutLaterDelivery();
+    void offlineFailureSurvivesEngineRestart();
     void neverReEncryptsOnResend();
     void duplicateIncomingIsAckedNotReprocessed();
     void staleMessageIsDroppedWithoutAckOrCallback();
@@ -390,6 +430,7 @@ private slots:
     void sendEmitsQueuedRowBeforeRelayAcceptance();
     void contactAcceptIsControlSentAndSurfacedOnReceive();
     void callSignalIsControlSentAndSurfacedOnReceive();
+    void profileUpdateIsControlSentAndSurfacedOnReceive();
     void callMediaBypassesTheStoreAndTheRatchet();
     void inboundDatagramsAreSurfacedWithoutTouchingTheStore();
 
@@ -442,7 +483,7 @@ void SyncEngineTest::relayAcceptanceMarksSent()
     QVERIFY(sawSent);
 }
 
-void SyncEngineTest::offlineSendStaysQueuedThenDrainsOnConnect()
+void SyncEngineTest::offlineSendFailsWithoutLaterDelivery()
 {
     FakeStore store;
     FakeMls mls;
@@ -452,15 +493,17 @@ void SyncEngineTest::offlineSendStaysQueuedThenDrainsOnConnect()
     engine.start();
 
     engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("later"));
-    QCOMPARE(store.outboxes.size(), 1); // durably queued
+    QCOMPARE(store.outboxes.size(), 1);
+    QCOMPARE(store.messages.first().deliveryState, DeliveryState::Failed);
+    QCOMPARE(store.outboxes.first().record.state, OutboxState::Failed);
     QCOMPARE(transport.sent.size(), 0); // but not sent while offline
 
     transport.connected = true;
-    transport.onConnected(); // link comes up -> drain
-    QCOMPARE(transport.sent.size(), 1);
+    transport.onConnected(); // failed sends require a manual retry
+    QCOMPARE(transport.sent.size(), 0);
 }
 
-void SyncEngineTest::offlineSendSurvivesEngineRestart()
+void SyncEngineTest::offlineFailureSurvivesEngineRestart()
 {
     FakeStore store; // shared durable store across engine instances
     FakeMls mls;
@@ -479,8 +522,9 @@ void SyncEngineTest::offlineSendSurvivesEngineRestart()
 
     transport.connected = true;
     SyncEngine second(makeConfig(), store, mls, transport, okSigner(), clock());
-    second.start(); // initial drain resends the durable item
-    QCOMPARE(transport.sent.size(), 1);
+    second.start();
+    QCOMPARE(transport.sent.size(), 0);
+    QCOMPARE(store.messages.first().deliveryState, DeliveryState::Failed);
 }
 
 void SyncEngineTest::neverReEncryptsOnResend()
@@ -621,7 +665,7 @@ void SyncEngineTest::retryExhaustionMarksFailed()
 void SyncEngineTest::commitFailureFailsClosed()
 {
     FakeStore store;
-    store.failSend = true;
+    store.failSendCommit = true;
     FakeMls mls;
     FakeTransport transport;
     SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
@@ -704,7 +748,7 @@ void SyncEngineTest::sendHandshakeAcceptanceCancelsRetry()
 void SyncEngineTest::sendHandshakeCommitFailureFailsClosed()
 {
     FakeStore store;
-    store.failSend = true;
+    store.failSendCommit = true;
     FakeMls mls;
     FakeTransport transport;
     SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
@@ -1146,6 +1190,69 @@ void SyncEngineTest::callSignalIsControlSentAndSurfacedOnReceive()
     // A redelivery is acked but surfaced only once, so a retried offer does not
     // ring twice.
     engine.handleEnvelope(inbound, 33);
+    QVERIFY(receivedPayload.isEmpty());
+    QCOMPARE(transport.acks.size(), 2);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::profileUpdateIsControlSentAndSurfacedOnReceive()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QByteArray receivedPayload;
+    std::optional<DeviceId> receivedFrom;
+    int visibleMessages = 0;
+    connect(&engine, &SyncEngine::profileUpdateReceived, &engine,
+            [&](const ConversationId &, const DeviceId &sender, const QByteArray &payload) {
+                receivedFrom = sender;
+                receivedPayload = payload;
+            });
+    connect(&engine, &SyncEngine::messageReceived, &engine,
+            [&](const MessageRecord &) { ++visibleMessages; });
+    engine.start();
+
+    // A profile update travels the DURABLE path: encrypted under the group
+    // ratchet and queued in the outbox, so a change made while the contact is
+    // away still reaches them. It never becomes a visible message row.
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    engine.sendProfileUpdate(conversation, peer, QByteArray("PROFILE"));
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.messages.size(), 0);
+    QCOMPARE(store.outboxes.size(), 1);
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(transport.datagrams.size(), 0);
+    QCOMPARE(transport.sent.first().messageKind, EnvelopeMessageKind::ProfileUpdate);
+    QCOMPARE(transport.sent.first().recipientDeviceId.bytes(), peer.bytes());
+    QCOMPARE(transport.sent.first().ciphertext, QByteArray("ENC:PROFILE"));
+
+    // Receiving one is a control receive: acked, replay-guarded, and surfaced
+    // as plaintext for the roster rather than as conversation.
+    CiphertextEnvelopeV1 inbound =
+        incomingEnvelope(conversation, mls.senderDevice, QByteArray("ENC:THEIRS"));
+    inbound.messageKind = EnvelopeMessageKind::ProfileUpdate;
+    engine.handleEnvelope(inbound, 41);
+    QCOMPARE(receivedPayload, QByteArray("THEIRS"));
+    QCOMPARE(receivedFrom->bytes(), mls.senderDevice.bytes());
+    QCOMPARE(visibleMessages, 0);
+    QCOMPARE(store.received.size(), 0);
+    QCOMPARE(transport.acks.size(), 1);
+
+    // One whose MLS credential names a different device is a relay trying to
+    // put words (or a picture) in someone else's mouth; dropped unsurfaced.
+    CiphertextEnvelopeV1 forged =
+        incomingEnvelope(conversation, DeviceId::generate(), QByteArray("ENC:FORGED"));
+    forged.messageKind = EnvelopeMessageKind::ProfileUpdate;
+    receivedPayload.clear();
+    engine.handleEnvelope(forged, 42);
+    QVERIFY(receivedPayload.isEmpty());
+    QCOMPARE(transport.acks.size(), 1);
+
+    // A redelivery is acked but surfaced only once.
+    engine.handleEnvelope(inbound, 43);
     QVERIFY(receivedPayload.isEmpty());
     QCOMPARE(transport.acks.size(), 2);
     QVERIFY(!engine.isFailedClosed());

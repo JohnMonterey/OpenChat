@@ -43,6 +43,7 @@ private slots:
     void setPeerSigningKeyIsSetIfNullAndValidated();
     void stateTransitionsDoNotClobberPeerKeyOrVerified();
     void peerDeviceAndHandlePersistAndUpdate();
+    void publishedProfilePersistsAndIsValidated();
 };
 
 void ContactRepositoryTest::emptyRosterReturnsEmptyList()
@@ -645,6 +646,77 @@ void ContactRepositoryTest::peerDeviceAndHandlePersistAndUpdate()
     const auto other = DeviceId::generate();
     QVERIFY(contacts.setPeerDeviceId(accountId, other).hasValue());
     QCOMPARE(contacts.find(accountId).value()->peerDeviceId->bytes(), other.bytes());
+}
+
+void ContactRepositoryTest::publishedProfilePersistsAndIsValidated()
+{
+    // Exercises migration 012: a contact's self-published presence, status
+    // line and picture round-trip through a reopen, default to "nothing
+    // published", clear when the picture is empty, and reject bad input.
+    QTemporaryDir directory;
+    const QString path = directory.filePath("profile.sqlite3");
+    auto key = SecureBuffer::random(32);
+    const auto accountId = AccountId::generate();
+    const QByteArray picture = QByteArray("\xFF\xD8\xFF\xE0", 4) + QByteArray(300, 'p');
+
+    {
+        auto opened = SqlCipherDatabase::open(path, key);
+        QVERIFY(opened.hasValue());
+        auto database = std::move(opened).value();
+        SqlCipherContactRepository contacts(database);
+        QVERIFY(contacts
+                    .recordOutgoingRequest(
+                        contactRecord(accountId, ContactState::PendingOutgoing, 1'000, 1'000))
+                    .hasValue());
+
+        auto fresh = contacts.find(accountId);
+        QVERIFY(fresh.hasValue() && fresh.value().has_value());
+        QCOMPARE(fresh.value()->presence, 0);
+        QVERIFY(fresh.value()->statusText.isEmpty());
+        QVERIFY(fresh.value()->avatarJpeg.isEmpty());
+
+        QVERIFY(contacts.setProfile(accountId, 3, QStringLiteral("Heads down"), picture, 2'000)
+                    .hasValue());
+        auto set = contacts.find(accountId);
+        QVERIFY(set.hasValue() && set.value().has_value());
+        QCOMPARE(set.value()->presence, 3);
+        QCOMPARE(set.value()->statusText, QStringLiteral("Heads down"));
+        QCOMPARE(set.value()->avatarJpeg, picture);
+        QCOMPARE(set.value()->updatedAtMs, qint64(2'000));
+
+        // Out-of-range presence and unknown peers are refused, leaving the row.
+        const auto badPresence = contacts.setProfile(accountId, 4, QString(), picture, 3'000);
+        QVERIFY(!badPresence.hasValue());
+        QCOMPARE(badPresence.error().code, RepositoryErrorCode::InvalidInput);
+        const auto unknown =
+            contacts.setProfile(AccountId::generate(), 0, QString(), QByteArray(), 3'000);
+        QVERIFY(!unknown.hasValue());
+        QCOMPARE(unknown.error().code, RepositoryErrorCode::NotFound);
+        QCOMPARE(contacts.find(accountId).value()->presence, 3);
+
+        // A state change does not disturb the published profile.
+        const auto conversation = ConversationId::generate();
+        QVERIFY(contacts.markAccepted(accountId, conversation, 4'000).hasValue());
+        QCOMPARE(contacts.find(accountId).value()->statusText, QStringLiteral("Heads down"));
+    }
+
+    auto reopened = SqlCipherDatabase::open(path, key);
+    QVERIFY(reopened.hasValue());
+    auto database = std::move(reopened).value();
+    SqlCipherContactRepository contacts(database);
+    auto found = contacts.find(accountId);
+    QVERIFY(found.hasValue() && found.value().has_value());
+    QCOMPARE(found.value()->presence, 3);
+    QCOMPARE(found.value()->statusText, QStringLiteral("Heads down"));
+    QCOMPARE(found.value()->avatarJpeg, picture);
+
+    // An empty picture clears the stored one.
+    QVERIFY(contacts.setProfile(accountId, 1, QString(), QByteArray(), 5'000).hasValue());
+    auto cleared = contacts.find(accountId);
+    QCOMPARE(cleared.value()->presence, 1);
+    QVERIFY(cleared.value()->statusText.isEmpty());
+    QVERIFY(cleared.value()->avatarJpeg.isEmpty());
+    QCOMPARE(contacts.contacts().value().size(), qsizetype(1));
 }
 
 QTEST_GUILESS_MAIN(ContactRepositoryTest)

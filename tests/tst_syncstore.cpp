@@ -89,6 +89,7 @@ private slots:
     void controlReceiveIsIdempotent();
     void claimDueLeasesAndReclaimsAfterExpiry();
     void acceptedEnvelopeIsNeverClaimedAgain();
+    void failedSendStopsOutboxAndPersistsFailure();
     void scheduleRetryReArmsAndIsMonotonic();
     void deliveryStateIsMonotonic();
     void capturingStoreCapturesWithoutWritingAndSurrendersOnce();
@@ -371,6 +372,37 @@ void SyncStoreTest::acceptedEnvelopeIsNeverClaimedAgain()
 
     QCOMPARE(store.claimDue(100, 1, 200).value().size(), 1);
     QVERIFY(store.markAccepted(envelopeId).hasValue());
+    QCOMPARE(store.claimDue(1'000, 1, 2'000).value().size(), 0);
+    QVERIFY(!store.scheduleRetry(envelopeId, 1, 3'000).hasValue());
+}
+
+void SyncStoreTest::failedSendStopsOutboxAndPersistsFailure()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto conversationId = ConversationId::generate();
+    const auto messageId = MessageId::generate();
+    const auto envelopeId = EnvelopeId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    QVERIFY(store
+                .commitSend(outgoingMessage(messageId, conversationId, DeviceId::generate()),
+                            outbox(envelopeId, messageId, conversationId, 100), QByteArray("s"))
+                .hasValue());
+
+    QCOMPARE(store.claimDue(100, 1, 200).value().size(), 1);
+    QVERIFY(store.failSend(envelopeId, messageId).hasValue());
+    auto history = chats.messages(conversationId, 10, std::nullopt);
+    QVERIFY(history.hasValue());
+    QCOMPARE(history.value().first().deliveryState, DeliveryState::Failed);
     QCOMPARE(store.claimDue(1'000, 1, 2'000).value().size(), 0);
     QVERIFY(!store.scheduleRetry(envelopeId, 1, 3'000).hasValue());
 }

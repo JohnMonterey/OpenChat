@@ -23,7 +23,7 @@ Item {
     // the dialog through the controller.
     Rectangle {
         anchors.fill: parent
-        color: "#66223247"
+        color: Theme.dialogScrim
 
         MouseArea {
             anchors.fill: parent
@@ -49,8 +49,8 @@ Item {
         MouseArea { anchors.fill: parent }
 
         // Aero inset along the top and bottom edges, matching the app's framed surfaces.
-        Rectangle { x: 6; y: 1; width: parent.width - 12; height: 1; color: "#24526878" }
-        Rectangle { x: 6; y: parent.height - 2; width: parent.width - 12; height: 1; color: "#70ffffff" }
+        Rectangle { x: 6; y: 1; width: parent.width - 12; height: 1; color: Theme.insetTop }
+        Rectangle { x: 6; y: parent.height - 2; width: parent.width - 12; height: 1; color: Theme.gloss }
 
         // Close affordance: a small "×" drawn from two crossed strokes.
         Item {
@@ -223,7 +223,7 @@ Item {
                         width: parent.width
                         height: myInviteText.height + 24
                         radius: 6
-                        color: "#eef6fb"
+                        color: Theme.panelBackground
                         border.width: 1
                         border.color: Theme.inputBorder
 
@@ -237,8 +237,10 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             readOnly: true
                             selectByMouse: true
+                            selectionColor: Theme.selectionBackground
+                            selectedTextColor: Theme.selectionText
                             text: root.contactController ? root.contactController.myInvite : ""
-                            color: "#2b3b53"
+                            color: Theme.textPrimary
                             font.family: "Courier New"
                             font.pixelSize: 15
                             wrapMode: TextEdit.WrapAnywhere
@@ -289,10 +291,10 @@ Item {
                 color: {
                     if (root.contactController
                             && root.contactController.status === ContactController.Status.Error)
-                        return "#c0392b";
+                        return Theme.errorText;
                     if (root.contactController
                             && root.contactController.status === ContactController.Status.Success)
-                        return "#2e7d4f";
+                        return Theme.successText;
                     return Theme.textSecondary;
                 }
                 wrapMode: Text.WordWrap

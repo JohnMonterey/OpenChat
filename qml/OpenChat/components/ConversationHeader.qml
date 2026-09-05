@@ -14,8 +14,8 @@ Item {
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0; color: "#fbfdff" }
-            GradientStop { position: 1; color: "#edf5fb" }
+            GradientStop { position: 0; color: Theme.headerTop }
+            GradientStop { position: 1; color: Theme.headerBottom }
         }
     }
 
@@ -43,8 +43,7 @@ Item {
         x: 110
         y: 63
         beadSize: 11
-        presence: header.controller.currentStatusText === "Available" ? 0
-                : header.controller.currentStatusText === "Away" ? 1 : 2
+        presence: header.controller.currentPresence
     }
 
     Text {
@@ -60,6 +59,7 @@ Item {
     Item {
         id: videoButton
         objectName: "videoCallButton"
+        opacity: phoneButton.callable || header.callController === null ? 1.0 : 0.4
         width: 40
         height: 42
         anchors.right: phoneButton.left
@@ -71,7 +71,7 @@ Item {
             anchors.centerIn: parent
             width: 28
             height: 22
-            source: Qt.resolvedUrl("../../../assets/icons/video-call.svg")
+            source: Qt.resolvedUrl("../../../assets/icons/video-call" + (Theme.darkMode ? "-dark.svg" : ".svg"))
             sourceSize: Qt.size(width * 2, height * 2)
         }
         Item {
@@ -94,7 +94,12 @@ Item {
                 }
             }
         }
-        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            enabled: phoneButton.callable
+            onClicked: header.callController.callCurrentContact(true)
+        }
     }
 
     Item {
@@ -116,7 +121,7 @@ Item {
             anchors.centerIn: parent
             width: 28
             height: 28
-            source: Qt.resolvedUrl("../../../assets/icons/phone-call.svg")
+            source: Qt.resolvedUrl("../../../assets/icons/phone-call" + (Theme.darkMode ? "-dark.svg" : ".svg"))
             sourceSize: Qt.size(width * 2, height * 2)
         }
         Shape {
@@ -153,7 +158,7 @@ Item {
             anchors.centerIn: parent
             width: 13
             height: 9
-            source: Qt.resolvedUrl("../../../assets/icons/chevron-down.svg")
+            source: Qt.resolvedUrl("../../../assets/icons/chevron-down" + (Theme.darkMode ? "-dark.svg" : ".svg"))
         }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
     }

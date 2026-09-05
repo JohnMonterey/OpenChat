@@ -777,6 +777,31 @@ SqlCipherSyncStore::claimDue(qint64 nowMs, int limit, qint64 leaseUntilMs)
     });
 }
 
+Result<void, RepositoryError> SqlCipherSyncStore::failSend(const EnvelopeId &envelopeId,
+                                                         const MessageId &messageId)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("send.fail.begin")));
+        Statement outbox(database,
+                         "UPDATE outbox SET state=3, lease_until_ms=0 "
+                         "WHERE envelope_id=?1 AND message_id=?2 AND state IN (0,1)");
+        Statement message(database,
+                          "UPDATE messages SET delivery_state=6 "
+                          "WHERE id=?1 AND delivery_state IN (1,2,6)");
+        if (!outbox.isValid() || !outbox.bindBlob(1, envelopeId.bytes())
+            || !outbox.bindBlob(2, messageId.bytes()) || sqlite3_step(outbox.get()) != SQLITE_DONE
+            || sqlite3_changes(database) != 1
+            || !message.isValid() || !message.bindBlob(1, messageId.bytes())
+            || sqlite3_step(message.get()) != SQLITE_DONE || !commit(database)) {
+            rollback(database);
+            return Result<void, RepositoryError>::failure(internalError(QStringLiteral("send.fail")));
+        }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
 Result<void, RepositoryError> SqlCipherSyncStore::markAccepted(const EnvelopeId &envelopeId)
 {
     return m_database.withConnection([&](sqlite3 *database) {

@@ -4,6 +4,7 @@
 #include "domain/Identifiers.h"
 #include "security/SecureBuffer.h"
 
+#include <QByteArray>
 #include <QByteArrayView>
 #include <QMutex>
 #include <QString>
@@ -29,6 +30,13 @@ enum class StorageError {
   QueryFailed,
   NotFound,
   AuthenticationFailed
+};
+
+// The self-published profile stored on the local profile row.
+struct LocalProfileFields final {
+  int presence = 0; // a models/Contact.h Presence value
+  QString statusText;
+  QByteArray avatarJpeg; // empty when there is no picture
 };
 
 struct StoredDeviceIdentity final {
@@ -72,6 +80,12 @@ public:
   storeProfileDisplayName(const ProfileId &profileId, const QString &displayName);
   [[nodiscard]] Result<QString, StorageError>
   loadProfileDisplayName(const ProfileId &profileId);
+  // The local user's self-published profile (migration 012). An empty picture
+  // is stored as NULL and read back empty.
+  [[nodiscard]] Result<void, StorageError>
+  storeLocalProfile(const ProfileId &profileId, const LocalProfileFields &fields);
+  [[nodiscard]] Result<LocalProfileFields, StorageError>
+  loadLocalProfile(const ProfileId &profileId);
   void close() noexcept;
 
 private:

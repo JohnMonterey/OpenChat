@@ -27,12 +27,18 @@ enum class EnvelopeMessageKind : quint8 {
     // the datagram path: it is never stored, never retried, and dropped when the
     // recipient is offline, because a late voice frame is worse than none.
     CallMedia = 6,
+    // A profile update: the sender's chosen presence, status text and (JPEG)
+    // profile picture, as an MLS application message under the conversation's
+    // ratchet. Durable and retried like a call signal, consumed as a control
+    // receive, and never a visible row. The relay sees only ciphertext, so a
+    // picture or status never leaves the two devices in the clear.
+    ProfileUpdate = 7,
 };
 
 // The highest EnvelopeMessageKind the codec accepts on decode. Kept next to the
 // enum so a new kind cannot be added without widening the wire bound.
 inline constexpr quint8 maxEnvelopeMessageKind =
-    static_cast<quint8>(EnvelopeMessageKind::CallMedia);
+    static_cast<quint8>(EnvelopeMessageKind::ProfileUpdate);
 
 struct CiphertextEnvelopeV1 final {
     quint8 version = 1;

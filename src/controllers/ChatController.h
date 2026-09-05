@@ -2,12 +2,15 @@
 
 #include <QHash>
 #include <QObject>
+#include <QTimer>
 #include <QStringList>
+#include <QUrl>
 
 #include <optional>
 
 #include "domain/ChatTypes.h"
 #include "domain/Identifiers.h"
+#include "domain/ProfileUpdate.h"
 #include "models/ContactListModel.h"
 #include "models/MessageListModel.h"
 
@@ -16,6 +19,7 @@ namespace OpenChat {
 class ContactRequestService;
 class ProfileSession;
 class SyncEngine;
+class RelayClient;
 
 // The QML-facing bridge for the conversation surface: the chat list, the open
 // conversation's history, and the composer.
@@ -31,11 +35,23 @@ class ChatController final : public QObject
     Q_OBJECT
     Q_PROPERTY(ContactListModel *contacts READ contacts CONSTANT)
     Q_PROPERTY(MessageListModel *messages READ messages CONSTANT)
+    Q_PROPERTY(bool localOnline READ localOnline NOTIFY localOnlineChanged)
     Q_PROPERTY(QString localUserName READ localUserName NOTIFY localUserNameChanged)
+    // The local user's self-published profile. localStatusLine is what the
+    // sidebar prints under the name: the custom status text, or the name of the
+    // presence contacts currently see (Offline while the relay link is down).
+    Q_PROPERTY(QString localStatusText READ localStatusText NOTIFY localProfileChanged)
+    Q_PROPERTY(QString localStatusLine READ localStatusLine NOTIFY localProfileChanged)
+    Q_PROPERTY(int localPresence READ localPresence NOTIFY localProfileChanged)
+    Q_PROPERTY(QString localAvatarKey READ localAvatarKey NOTIFY localProfileChanged)
+    // A one-line explanation of why a profile change was refused (e.g. an
+    // unusable picture file); empty when there is nothing to say.
+    Q_PROPERTY(QString profileNotice READ profileNotice NOTIFY profileNoticeChanged)
     Q_PROPERTY(bool hasCurrentContact READ hasCurrentContact NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentContactName READ currentContactName NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentStatusText READ currentStatusText NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentAvatarKey READ currentAvatarKey NOTIFY currentContactChanged)
+    Q_PROPERTY(int currentPresence READ currentPresence NOTIFY currentContactChanged)
     Q_PROPERTY(QString composerText READ composerText WRITE setComposerText NOTIFY composerTextChanged)
     Q_PROPERTY(bool canSend READ canSend NOTIFY canSendChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY searchQueryChanged)
@@ -91,6 +107,11 @@ public:
     [[nodiscard]] QString currentContactName() const;
     [[nodiscard]] QString currentStatusText() const;
     [[nodiscard]] QString currentAvatarKey() const;
+    [[nodiscard]] int currentPresence() const;
+    [[nodiscard]] QString localStatusText() const { return m_localStatusText; }
+    [[nodiscard]] QString localStatusLine() const;
+    [[nodiscard]] int localPresence() const { return m_localPresence; }
+    [[nodiscard]] QString profileNotice() const { return m_profileNotice; }
     [[nodiscard]] QString composerText() const;
     [[nodiscard]] bool canSend() const;
     [[nodiscard]] QString searchQuery() const;
@@ -106,11 +127,25 @@ public:
     [[nodiscard]] int currentSettingsCategory() const;
     [[nodiscard]] QString currentSettingsCategoryName() const;
     [[nodiscard]] QStringList currentSettingsElements() const;
+    void setPresenceRelay(RelayClient *relay);
+    [[nodiscard]] bool localOnline() const { return m_localOnline; }
     [[nodiscard]] bool isLive() const noexcept { return m_live; }
 
     Q_INVOKABLE bool selectContact(const QString &id);
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setLocalUserName(const QString &name);
+    // Profile edits. Each persists to the profile (live mode), updates the
+    // sidebar, and publishes the whole profile to every accepted contact as an
+    // end-to-end encrypted ProfileUpdate. The status text is trimmed and capped
+    // at maxStatusTextLength; an empty one shows the presence name instead. The
+    // presence must be a Presence value (Offline means "appear offline").
+    Q_INVOKABLE void setLocalStatusText(const QString &text);
+    Q_INVOKABLE void setLocalPresence(int presence);
+    // Reads the chosen image file, refuses anything unrealistic (see
+    // render/ProfileImage.h), scales and JPEG-compresses it locally, then stores
+    // and publishes it. Returns false and sets profileNotice on refusal.
+    Q_INVOKABLE bool setLocalAvatarFromFile(const QUrl &file);
+    Q_INVOKABLE void clearProfileNotice();
     Q_INVOKABLE void setComposerText(const QString &text);
     Q_INVOKABLE bool sendMessage();
     Q_INVOKABLE void setSessionState(SessionState state);
@@ -143,22 +178,32 @@ public:
         QString avatarKey;
     };
     [[nodiscard]] std::optional<CallRoute> callRouteFor(const QString &contactId) const;
+    // Resolve an incoming caller from the conversation and authenticated sender,
+    // independently of the selected chat or roster search filter.
+    [[nodiscard]] std::optional<CallRoute> callRouteFor(const ConversationId &conversation,
+                                                      const DeviceId &device) const;
 
     // The contact currently open in the conversation pane, or empty when none
     // is. This is what the header's call button acts on.
     [[nodiscard]] QString currentContactId() const { return m_currentContactId; }
 
-    // The identity to show for this user on the call screen.
-    [[nodiscard]] QString localAvatarKey() const;
+    // The identity to show for this user on the call screen and in the sidebar:
+    // the content key of the chosen picture, or the neutral artwork.
+    [[nodiscard]] QString localAvatarKey() const { return m_localAvatarKey; }
+    // The local profile as it would be published (also what tests decode).
+    [[nodiscard]] ProfileUpdateMessage localProfile() const;
 
 signals:
     void currentContactChanged();
     void localUserNameChanged();
+    void localProfileChanged();
+    void profileNoticeChanged();
     void composerTextChanged();
     void canSendChanged();
     void searchQueryChanged();
     void sessionStateChanged();
     void navSectionChanged();
+    void localOnlineChanged();
     void chatUnreadCountChanged();
     void currentSettingsCategoryChanged();
 
@@ -171,6 +216,10 @@ private:
         std::optional<DeviceId> peerDevice;
         QString handle;
         int unread = 0;
+        // The peer's last published profile (see ContactRecord).
+        int presence = 0;
+        QString statusText;
+        QString avatarKey;
     };
 
     [[nodiscard]] std::optional<Contact> currentContact() const;
@@ -185,7 +234,9 @@ private:
 
     // Live roster and history.
     void loadRoster();
-    [[nodiscard]] static Contact contactRowFor(const LiveChat &chat);
+    void refreshPresence();
+    void setDevicePresence(const DeviceId &device, bool online);
+    [[nodiscard]] Contact contactRowFor(const LiveChat &chat) const;
     [[nodiscard]] QVector<Message> loadHistory(const ConversationId &conversation) const;
     [[nodiscard]] static Message toMessage(const MessageRecord &record);
     [[nodiscard]] QString contactForConversation(const ConversationId &conversation) const;
@@ -193,6 +244,15 @@ private:
     void onMessageReceived(const MessageRecord &record);
     void onMessageStateChanged(const MessageId &messageId, DeliveryState state);
     void onContactAccepted(const AccountId &account);
+    void onProfileUpdateReceived(const ConversationId &conversation, const DeviceId &senderDevice,
+                                 const QByteArray &payload);
+    // What a contact's row shows: their chosen presence while their device is
+    // reachable, Offline otherwise.
+    [[nodiscard]] Presence displayedPresence(const LiveChat &chat) const;
+    // Publishes the local profile to one chat / every chat with a known device.
+    void sendProfileTo(const LiveChat &chat);
+    void broadcastProfile();
+    void setProfileNotice(const QString &notice);
     void updateCanSend(bool wasSendable);
 
     ContactListModel m_contacts;
@@ -200,6 +260,11 @@ private:
     QHash<QString, QVector<Message>> m_messagesByContact;
     QString m_currentContactId;
     QString m_localUserName;
+    QString m_localStatusText;
+    int m_localPresence = 0;
+    QByteArray m_localAvatarJpeg;
+    QString m_localAvatarKey = QStringLiteral("userpfp_none");
+    QString m_profileNotice;
     QString m_composerText;
     QString m_searchQuery;
     SessionState m_sessionState = SessionState::Ready;
@@ -209,6 +274,10 @@ private:
     // Live seam (null in mock mode). Borrowed; owned by the app runtime and kept
     // alive past this controller.
     bool m_live = false;
+    bool m_localOnline = true; // reference rendering
+    RelayClient *m_presenceRelay = nullptr;
+    QTimer m_presenceTimer;
+    QHash<QByteArray, qint64> m_onlineDevices;
     ProfileSession *m_session = nullptr;
     SyncEngine *m_engine = nullptr;
     ContactRequestService *m_requests = nullptr;

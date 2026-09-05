@@ -4,6 +4,7 @@
 #include "repositories/OutboxRepository.h" // for retryDelayMs
 
 #include <QCryptographicHash>
+#include <QTimer>
 
 #include <utility>
 
@@ -127,12 +128,14 @@ public:
                                     ContentKind::Text,
                                     text,
                                     now(),
-                                    DeliveryState::Queued,
+                                    transport.isConnected() ? DeliveryState::Queued : DeliveryState::Failed,
                                     std::nullopt,
                                     std::nullopt};
 
-        const OutboxRecord outbox =
+        OutboxRecord outbox =
             makeOutbox(envelope->envelopeId, message.id, conversation, envelopeBytes);
+        if (message.deliveryState == DeliveryState::Failed)
+            outbox.state = OutboxState::Failed;
 
         const QByteArray mlsState = mls.takePendingState();
         if (!store.commitSend(message, outbox, mlsState).hasValue()) {
@@ -140,7 +143,7 @@ public:
             return;
         }
         emit q->messageQueued(message);
-        emit q->messageStateChanged(message.id, DeliveryState::Queued);
+        emit q->messageStateChanged(message.id, message.deliveryState);
         drainOutbox();
     }
 
@@ -263,6 +266,33 @@ public:
         drainOutbox();
     }
 
+    void doSendProfileUpdate(const ConversationId &conversation, const DeviceId &recipient,
+                             const QByteArray &payload)
+    {
+        if (failed)
+            return;
+        const auto ciphertext = mls.encrypt(conversation, payload);
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        const auto envelope = buildEnvelope(conversation, recipient, ciphertext.value(),
+                                            EnvelopeMessageKind::ProfileUpdate);
+        if (!envelope) {
+            failClosed();
+            return;
+        }
+        // No visible message row: a profile change is not conversation.
+        const OutboxRecord outbox = makeOutbox(envelope->envelopeId, MessageId::generate(),
+                                               conversation, encodeCanonical(*envelope));
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitControlSend(outbox, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        drainOutbox();
+    }
+
     void doSendCallMedia(const ConversationId &conversation, const DeviceId &recipient,
                          const QByteArray &payload)
     {
@@ -290,11 +320,10 @@ public:
             return;
         for (const OutboxRecord &record : due.value()) {
             if (record.attemptCount >= config.maxSendAttempts) {
-                (void)store.advanceDeliveryState(record.messageId, DeliveryState::Failed);
-                emit q->messageStateChanged(record.messageId, DeliveryState::Failed);
-                // Park so it is not re-claimed.
-                (void)store.scheduleRetry(record.envelopeId, record.attemptCount,
-                                          nowMs + envelopeLifetimeMs);
+                if (store.failSend(record.envelopeId, record.messageId).hasValue()) {
+                    inflight.remove(record.envelopeId.bytes());
+                    emit q->messageStateChanged(record.messageId, DeliveryState::Failed);
+                }
                 continue;
             }
             const auto decoded = decodeEnvelope(record.envelope);
@@ -305,12 +334,28 @@ public:
                 continue;
             }
             inflight.insert(record.envelopeId.bytes(), record.messageId);
-            transport.sendEnvelope(decoded.value());
-            (void)store.advanceDeliveryState(record.messageId, DeliveryState::Sending);
+            if (store.advanceDeliveryState(record.messageId, DeliveryState::Sending).hasValue()
+                && decoded.value().messageKind == EnvelopeMessageKind::MlsPrivateMessage)
+                emit q->messageStateChanged(record.messageId, DeliveryState::Sending);
             // Schedule the next attempt; relay acceptance cancels it via markAccepted.
             const qint64 nextMs = nowMs + retryDelayMs(record.attemptCount, 0);
             (void)store.scheduleRetry(record.envelopeId, record.attemptCount + 1, nextMs);
+            transport.sendEnvelope(decoded.value());
         }
+    }
+
+    void onUnavailable(const EnvelopeId &envelopeId)
+    {
+        const auto it = inflight.constFind(envelopeId.bytes());
+        if (it == inflight.cend())
+            return;
+        const auto messageId = it.value();
+        if (!store.failSend(envelopeId, messageId).hasValue()) {
+            failClosed();
+            return;
+        }
+        inflight.remove(envelopeId.bytes());
+        emit q->messageStateChanged(messageId, DeliveryState::Failed);
     }
 
     void onAccepted(const EnvelopeId &envelopeId, quint64 /*serverSequence*/)
@@ -386,6 +431,10 @@ public:
                 else if (envelope.messageKind == EnvelopeMessageKind::CallSignal)
                     emit q->callSignalReceived(envelope.conversationId, envelope.senderDeviceId,
                                                processed.value().applicationData);
+                else if (envelope.messageKind == EnvelopeMessageKind::ProfileUpdate)
+                    emit q->profileUpdateReceived(envelope.conversationId,
+                                                  envelope.senderDeviceId,
+                                                  processed.value().applicationData);
                 return;
             }
 
@@ -507,6 +556,7 @@ public:
     Clock clock;
     MlsTransactionCoordinator coordinator;
     QHash<QByteArray, MessageId> inflight;
+    QTimer retryTimer;
     bool failed = false;
     bool started = false;
 };
@@ -519,13 +569,17 @@ SyncEngine::SyncEngine(Config config, SyncStore &store, SyncMlsSession &mls,
 {
 }
 
-SyncEngine::~SyncEngine() = default;
+SyncEngine::~SyncEngine() { stop(); }
 
 void SyncEngine::start()
 {
     if (d->started)
         return;
     d->started = true;
+    d->retryTimer.setInterval(1000);
+    connect(&d->retryTimer, &QTimer::timeout, this, [this] { d->drainOutbox(); });
+    d->retryTimer.start();
+    d->transport.onRecipientUnavailable = [this](const EnvelopeId &id) { d->onUnavailable(id); };
     d->transport.onRelayAccepted = [this](const EnvelopeId &id, quint64 seq) {
         d->onAccepted(id, seq);
     };
@@ -546,6 +600,9 @@ void SyncEngine::start()
 void SyncEngine::stop()
 {
     d->started = false;
+    d->retryTimer.stop();
+    disconnect(&d->retryTimer, nullptr, this, nullptr);
+    d->transport.onRecipientUnavailable = nullptr;
     d->transport.onRelayAccepted = nullptr;
     d->transport.onEnvelope = nullptr;
     d->transport.onDatagram = nullptr;
@@ -599,6 +656,14 @@ void SyncEngine::sendCallSignal(const ConversationId &conversation,
 {
     d->coordinator.run(conversation, [this, conversation, recipientDevice, payload] {
         d->doSendCallSignal(conversation, recipientDevice, payload);
+    });
+}
+
+void SyncEngine::sendProfileUpdate(const ConversationId &conversation,
+                                   const DeviceId &recipientDevice, const QByteArray &payload)
+{
+    d->coordinator.run(conversation, [this, conversation, recipientDevice, payload] {
+        d->doSendProfileUpdate(conversation, recipientDevice, payload);
     });
 }
 

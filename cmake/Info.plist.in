@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>app.openchat.desktop</string>
+    <key>CFBundleName</key><string>OpenChat</string>
+    <key>CFBundleExecutable</key><string>OpenChat</string>
+    <key>CFBundleVersion</key><string>@PROJECT_VERSION@</string>
+    <key>CFBundleShortVersionString</key><string>@PROJECT_VERSION@</string>
+    <key>NSCameraUsageDescription</key>
+    <string>OpenChat uses your camera when you turn on video during a call.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>OpenChat uses your microphone so people can hear you during calls.</string>
+</dict>
+</plist>

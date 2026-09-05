@@ -1,5 +1,6 @@
 import QtQuick
 import OpenChat
+import OpenChat.Native
 
 // One person on the call screen: their picture, their name, and the ring that
 // says whether they are the one talking.
@@ -22,13 +23,25 @@ Item {
     property bool muted: false
     property int avatarSize: 74
 
-    implicitWidth: 132
-    implicitHeight: avatarSize + 40
+    property bool cameraEnabled: false
+    property var videoFrame
+    property real videoAspect: 4 / 3
+    property real videoMaxWidth: 260
+    property real videoMaxHeight: 210
+    property bool mirrored: false
+    readonly property real pictureWidth: cameraEnabled
+        ? Math.min(videoMaxWidth, videoMaxHeight * videoAspect) : avatarSize
+    readonly property real pictureHeight: cameraEnabled ? pictureWidth / videoAspect : avatarSize
+
+    implicitWidth: cameraEnabled ? Math.max(100, pictureWidth) : 132
+    implicitHeight: pictureHeight + 40
+    width: implicitWidth
+    height: implicitHeight
 
     Item {
         id: avatarBlock
-        width: participant.avatarSize
-        height: participant.avatarSize
+        width: participant.pictureWidth
+        height: participant.pictureHeight
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
 
@@ -64,9 +77,19 @@ Item {
         }
 
         Avatar {
-            anchors.fill: parent
+            anchors.centerIn: parent
+            width: participant.avatarSize
+            height: participant.avatarSize
             cornerRadius: 6
             avatarKey: participant.avatarKey
+        }
+
+        CallVideoItem {
+            objectName: "participantVideo"
+            anchors.fill: parent
+            visible: participant.cameraEnabled
+            frame: participant.videoFrame
+            mirrored: participant.mirrored
         }
 
         // A muted participant is marked on the picture, because a muted person
@@ -80,7 +103,7 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.margins: -4
-            color: "#f4f8fb"
+            color: Theme.outgoingBottom
             border.width: 1
             border.color: Theme.inputBorder
 

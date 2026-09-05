@@ -30,6 +30,7 @@ Item {
 
         delegate: MessageDelegate {
             width: ListView.view.width
+            onRetryRequested: (messageBody) => history.controller.setComposerText(messageBody)
         }
 
         onCountChanged: Qt.callLater(positionViewAtEnd)

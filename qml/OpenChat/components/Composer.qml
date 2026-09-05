@@ -11,7 +11,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#eef4f8"
+        color: Theme.composerBackground
     }
     Rectangle {
         anchors.left: parent.left
@@ -32,7 +32,7 @@ Item {
         Rectangle {
             anchors.fill: parent
             radius: 5
-            color: "#ffffff"
+            color: Theme.fieldBackground
         }
 
         TextEdit {
@@ -50,6 +50,8 @@ Item {
             font.pixelSize: 16
             wrapMode: TextEdit.Wrap
             selectByMouse: true
+            selectionColor: Theme.selectionBackground
+            selectedTextColor: Theme.selectionText
             clip: false
             onTextChanged: {
                 if (text !== composer.controller.composerText)
@@ -75,27 +77,27 @@ Item {
             Rectangle {
                 anchors.fill: parent
                 radius: 5
-                color: "#fbfdfe"
+                color: Theme.fieldAccessory
             }
             Rectangle {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 width: parent.width / 2
                 height: parent.height
-                color: "#fbfdfe"
+                color: Theme.fieldAccessory
             }
 
             Rectangle {
                 anchors.left: parent.left
                 width: 1
                 height: parent.height
-                color: "#d9e1e7"
+                color: Theme.fieldDivider
             }
             Image {
                 anchors.centerIn: parent
                 width: 11
                 height: 7
-                source: Qt.resolvedUrl("../../../assets/icons/chevron-down.svg")
+                source: Qt.resolvedUrl("../../../assets/icons/chevron-down" + (Theme.darkMode ? "-dark.svg" : ".svg"))
             }
             MouseArea {
                 anchors.fill: parent
@@ -110,21 +112,21 @@ Item {
             y: 1
             width: parent.width - 10
             height: 1
-            color: "#24526878"
+            color: Theme.insetTop
         }
         Rectangle {
             x: 1
             y: 5
             width: 1
             height: parent.height - 10
-            color: "#18526878"
+            color: Theme.insetLeft
         }
         Rectangle {
             x: 5
             y: parent.height - 2
             width: parent.width - 10
             height: 1
-            color: "#70ffffff"
+            color: Theme.gloss
         }
         Rectangle {
             anchors.fill: parent
@@ -149,14 +151,14 @@ Item {
         Rectangle {
             anchors.fill: parent
             radius: 4
-            color: send.enabled ? (sendMouse.containsMouse ? "#f8fbfd" : "#f5f8fa") : "#eef2f5"
+            color: send.enabled ? (sendMouse.containsMouse ? Theme.buttonHover : Theme.buttonBackground) : Theme.buttonDisabled
             border.width: 1
-            border.color: send.enabled ? "#aebdca" : "#c5d0d9"
+            border.color: send.enabled ? Theme.buttonBorder : Theme.buttonDisabledBorder
         }
         Text {
             anchors.centerIn: parent
             text: "Send"
-            color: send.enabled ? "#596c83" : "#8b99aa"
+            color: send.enabled ? Theme.sendText : Theme.buttonDisabledText
             font.family: Theme.uiFont
             font.pixelSize: 15
             renderType: Text.NativeRendering

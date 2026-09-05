@@ -196,6 +196,43 @@ private slots:
         QCOMPARE(m_bob.engine->state(), CallState::Active);
     }
 
+    void camerasStreamIndependentlyWithoutInterruptingVoice()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy aliceVideo(m_alice.engine.get(), &CallEngine::remoteVideoFrame);
+        QSignalSpy bobVideo(m_bob.engine.get(), &CallEngine::remoteVideoFrame);
+        QImage landscape(640, 360, QImage::Format_RGB32);
+        landscape.fill(Qt::blue);
+        QImage portrait(360, 640, QImage::Format_RGB32);
+        portrait.fill(Qt::green);
+        const auto audioBefore = m_bob.engine->session()->stats().packetsReceived;
+        m_alice.engine->sendVideoFrame(landscape);
+        QCOMPARE(bobVideo.count(), 1);
+        QCOMPARE(qvariant_cast<QImage>(bobVideo.last().first()).size(), landscape.size());
+        QCOMPARE(aliceVideo.count(), 0); // receiving never enables our own camera
+        QCOMPARE(m_bob.engine->session()->stats().packetsReceived, audioBefore);
+        m_bob.engine->sendVideoFrame(portrait);
+        QCOMPARE(qvariant_cast<QImage>(aliceVideo.last().first()).size(), portrait.size());
+        m_alice.engine->sendVideoFrame(QImage());
+        QVERIFY(qvariant_cast<QImage>(bobVideo.last().first()).isNull());
+        m_alice.engine->sendVideoFrame(landscape);
+        QVERIFY(!qvariant_cast<QImage>(bobVideo.last().first()).isNull());
+        exchangeMedia();
+        QCOMPARE(m_bob.engine->session()->stats().packetsReceived, audioBefore + 1);
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QTRY_VERIFY_WITH_TIMEOUT(qvariant_cast<QImage>(bobVideo.last().first()).isNull(), 3500);
+        m_alice.engine->sendVideoFrame(landscape);
+        m_alice.engine->hangUp();
+        QVERIFY(qvariant_cast<QImage>(bobVideo.last().first()).isNull());
+        const int frames = bobVideo.count();
+        m_alice.engine->sendVideoFrame(landscape);
+        QCOMPARE(bobVideo.count(), frames);
+    }
+
     void audioCrossesTheEngineIntact()
     {
         // Pin the lossless codec: this test is about the engine wiring carrying

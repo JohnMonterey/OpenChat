@@ -205,6 +205,7 @@ private slots:
     void malformedCborIsRejected();
     void wrongRecipientIsRejected();
 
+    void presenceAndUnavailableFramesRoundTrip();
     void validCiphertextIsDelivered();
     void connectLiveResumesFromWatermark();
     void sendEnvelopeIsAcknowledged();
@@ -242,6 +243,43 @@ private slots:
     void backoffRespectsFullJitterBounds();
     void backoffSaturatesAtCap();
 };
+
+void RelayClientTest::presenceAndUnavailableFramesRoundTrip()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                   {QString::fromLatin1(relaySubprotocol)});
+    const auto peer = DeviceId::generate();
+    const auto envelope = EnvelopeId::generate();
+    server.onConnected = [peer, envelope](QWebSocket *socket) {
+        QObject::connect(socket, &QWebSocket::binaryMessageReceived, socket,
+            [socket, peer, envelope](const QByteArray &bytes) {
+                const auto request = QCborValue::fromCbor(bytes).toArray();
+                QCOMPARE(request.at(0).toInteger(), 7);
+                QCOMPARE(request.at(1).toArray().first().toByteArray(), peer.bytes());
+                QCborArray row; row.append(peer.bytes()); row.append(true);
+                QCborArray rows; rows.append(row);
+                QCborArray result; result.append(8); result.append(rows);
+                socket->sendBinaryMessage(result.toCborValue().toCbor());
+                QCborArray rejected; rejected.append(9); rejected.append(envelope.bytes());
+                socket->sendBinaryMessage(rejected.toCborValue().toCbor());
+            });
+    };
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl()),
+                       fixedCredentials("a", "r"));
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    bool online = false, rejected = false;
+    connect(&client, &RelayClient::devicePresenceChanged, &client, [&](const DeviceId &id, bool state) {
+        QCOMPARE(id, peer); online = state;
+    });
+    connect(&client, &RelayClient::recipientUnavailable, &client, [&](const EnvelopeId &id) {
+        QCOMPARE(id, envelope); rejected = true;
+    });
+    client.connectLive(0);
+    QTRY_VERIFY(client.isConnected());
+    client.requestPresence({peer});
+    QTRY_VERIFY(online && rejected);
+}
 
 void RelayClientTest::initTestCase()
 {

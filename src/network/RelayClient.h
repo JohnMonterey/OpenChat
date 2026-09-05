@@ -250,6 +250,9 @@ public:
     // through envelopeReceived and finishes with catchUpComplete().
     void fetchSince(quint64 watermark);
 
+    // Query only known contact devices over the authenticated live connection.
+    void requestPresence(const QList<DeviceId> &devices);
+
     // Registers a new account+device over HTTPS. This is the unauthenticated
     // bootstrap call, so it carries no bearer token even when one is available.
     // Emits accountRegistered() on a 2xx; a taken handle (relay 409) emits
@@ -323,6 +326,8 @@ signals:
     // than surfaced, so every emission here is a well-formed envelope for this
     // device.
     void datagramReceived(const CiphertextEnvelopeV1 &envelope);
+    void devicePresenceChanged(const DeviceId &deviceId, bool online);
+    void recipientUnavailable(const EnvelopeId &envelopeId);
     void relayAccepted(const EnvelopeId &envelopeId, quint64 serverSequence);
     // Emitted after a successful refresh so the caller can persist rotated
     // tokens; RelayClient itself does not store them.

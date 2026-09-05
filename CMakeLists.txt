@@ -36,7 +36,21 @@ qt_add_executable(OpenChat
     src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
+    src/render/CallVideoItem.cpp
+    src/app/AppearanceSettings.cpp
 )
+
+if(APPLE)
+    configure_file(cmake/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist @ONLY)
+    # Declare usage strings to Qt's permission-plugin finalizer and embed them
+    # in the existing standalone executable as well as any future app bundle.
+    set_target_properties(OpenChat PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist)
+    target_link_options(OpenChat PRIVATE
+        "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist")
+    set_property(TARGET OpenChat APPEND PROPERTY LINK_DEPENDS
+        ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist)
+endif()
 
 qt_add_qml_module(OpenChat
     URI OpenChat
@@ -51,9 +65,11 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/Avatar.qml
         qml/OpenChat/components/AeroTextField.qml
         qml/OpenChat/components/AeroButton.qml
+        qml/OpenChat/components/AeroSwitch.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
+        qml/OpenChat/components/ContactStatusBubble.qml
         qml/OpenChat/components/AddContactDialog.qml
         qml/OpenChat/components/SafetyNumberDialog.qml
         qml/OpenChat/components/RequestRow.qml
@@ -71,15 +87,20 @@ qt_add_qml_module(OpenChat
         assets/ryan.png
         assets/userpfp_none.png
         assets/icons/video-call.svg
+        assets/icons/video-call-dark.svg
         assets/icons/phone-call.svg
+        assets/icons/phone-call-dark.svg
         assets/icons/settings.svg
+        assets/icons/settings-dark.svg
         assets/icons/chevron-down.svg
-        assets/icons/openchat.svg
+        assets/icons/chevron-down-dark.svg
+        assets/icons/openchat.png
 )
 
 target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
     openchat_app
+    openchat_avatar
     openchat_call
     Qt6::Core
     Qt6::Gui
@@ -127,9 +148,21 @@ add_test(NAME tst_appmetadata COMMAND tst_appmetadata)
 
 add_library(openchat_domain STATIC
     src/domain/Identifiers.cpp
+    src/domain/ProfileUpdate.cpp
 )
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)
+
+# Profile pictures: the file -> bounded JPEG pipeline a user's chosen picture
+# goes through before it is stored or sent, and the in-process registry the
+# avatar artwork draws received pictures from. Needs Qt Gui for QImage, which
+# is why it is not part of openchat_domain.
+add_library(openchat_avatar STATIC
+    src/render/ProfileImage.cpp
+    src/render/AvatarStore.cpp
+)
+target_include_directories(openchat_avatar PUBLIC src)
+target_link_libraries(openchat_avatar PUBLIC openchat_domain Qt6::Core Qt6::Gui)
 
 add_library(openchat_protocol STATIC
     src/protocol/CiphertextEnvelope.cpp
@@ -216,6 +249,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/009_contact_verification.sql
         src/storage/migrations/010_profile_display_name.sql
         src/storage/migrations/011_contact_device.sql
+        src/storage/migrations/012_profiles.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -236,6 +270,9 @@ add_library(openchat_call STATIC
     src/call/CallEngine.cpp
     src/call/SyncCallTransport.cpp
     src/call/QtAudioIo.cpp
+    src/call/CallVideoSession.cpp
+    src/call/QtVideoCapture.cpp
+    src/call/VideoFrameCopy.cpp
 )
 target_include_directories(openchat_call PUBLIC src)
 target_link_libraries(openchat_call
@@ -455,6 +492,7 @@ add_executable(tst_e2e
 target_include_directories(tst_e2e PRIVATE src tests relay/src)
 target_link_libraries(tst_e2e PRIVATE
     openchat_app
+    openchat_avatar
     openchat_call
     openchat_media
     openchat_network
@@ -513,11 +551,14 @@ add_test(NAME tst_models COMMAND tst_models)
 add_executable(tst_chatcontroller
     tests/tst_chatcontroller.cpp
     src/controllers/ChatController.cpp
+    src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
 )
 target_include_directories(tst_chatcontroller PRIVATE src tests)
 target_link_libraries(tst_chatcontroller PRIVATE
+    openchat_call
+    openchat_avatar
     openchat_app
     openchat_network
     openchat_crypto
@@ -540,6 +581,10 @@ add_executable(tst_onboardingcontroller
 target_include_directories(tst_onboardingcontroller PRIVATE src)
 target_link_libraries(tst_onboardingcontroller PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_onboardingcontroller COMMAND tst_onboardingcontroller)
+
+add_executable(tst_videocall tests/tst_videocall.cpp)
+target_link_libraries(tst_videocall PRIVATE openchat_call Qt6::Test)
+add_test(NAME tst_videocall COMMAND tst_videocall)
 
 # The voice-call test: pushes a real audio file (and synthesised references)
 # through the whole pipeline and checks what comes out the far end, plus the
@@ -574,13 +619,22 @@ target_link_libraries(tst_callengine PRIVATE
 )
 add_test(NAME tst_callengine COMMAND tst_callengine)
 
+# The profile-update codec, the picture pipeline and the avatar registry:
+# round trips, every rejected shape, and the size/dimension bounds a chosen
+# file must respect before it is decoded in full.
+add_executable(tst_profile tests/tst_profile.cpp)
+target_include_directories(tst_profile PRIVATE src)
+target_link_libraries(tst_profile PRIVATE openchat_avatar openchat_domain Qt6::Core Qt6::Gui Qt6::Test)
+add_test(NAME tst_profile COMMAND tst_profile)
+set_tests_properties(tst_profile PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(tst_bubblebackground
     tests/tst_bubblebackground.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
 )
 target_include_directories(tst_bubblebackground PRIVATE src)
-target_link_libraries(tst_bubblebackground PRIVATE Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
+target_link_libraries(tst_bubblebackground PRIVATE openchat_avatar Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
 add_test(NAME tst_bubblebackground COMMAND tst_bubblebackground)
 
 add_executable(tst_qmlload
@@ -594,6 +648,8 @@ add_executable(tst_qmlload
     src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
+    src/render/CallVideoItem.cpp
+    src/app/AppearanceSettings.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE
@@ -601,6 +657,7 @@ target_compile_definitions(tst_qmlload PRIVATE
 )
 target_link_libraries(tst_qmlload PRIVATE
     openchat_app
+    openchat_avatar
     openchat_call
     openchat_network
     openchat_crypto
@@ -629,6 +686,7 @@ function(add_openchat_capture_test test_name capture_width capture_height)
             -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/${test_name}.png
             -DCAPTURE_WIDTH=${capture_width}
             -DCAPTURE_HEIGHT=${capture_height}
+            -DCAPTURE_EXTRA_ARG=${ARGV3}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
     )
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 5)
@@ -637,6 +695,8 @@ endfunction()
 add_openchat_capture_test(capture_smoke 860 680)
 add_openchat_capture_test(capture_minimum 720 560)
 add_openchat_capture_test(capture_large 1024 768)
+add_openchat_capture_test(capture_video 900 680 --call-video)
+add_openchat_capture_test(capture_video_minimum 720 560 --call-video)
 
 # The add-contact preview sub-mode: renders the dialog over a populated mock
 # Requests list. Uses the same verify runner with the extra --add-contact argument.

@@ -15,15 +15,15 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 4
-        color: button.enabled ? (buttonMouse.containsMouse ? "#f8fbfd" : "#f5f8fa")
-                               : "#eef2f5"
+        color: button.enabled ? (buttonMouse.containsMouse ? Theme.buttonHover : Theme.buttonBackground)
+                               : Theme.buttonDisabled
         border.width: 1
-        border.color: button.enabled ? "#aebdca" : "#c5d0d9"
+        border.color: button.enabled ? Theme.buttonBorder : Theme.buttonDisabledBorder
     }
     Text {
         anchors.centerIn: parent
         text: button.label
-        color: button.enabled ? "#3f5570" : "#8b99aa"
+        color: button.enabled ? Theme.buttonText : Theme.buttonDisabledText
         font.family: Theme.uiFont
         font.pixelSize: button.fontPixelSize
         renderType: Text.NativeRendering

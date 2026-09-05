@@ -83,6 +83,8 @@ public:
     [[nodiscard]] Result<void, RepositoryError>
     deletePendingHandshake(const ConversationId &conversationId);
 
+    Result<void, RepositoryError> failSend(const EnvelopeId &, const MessageId &) override;
+
     [[nodiscard]] Result<bool, RepositoryError> hasSeen(const EnvelopeId &envelopeId) override;
     [[nodiscard]] Result<QVector<OutboxRecord>, RepositoryError>
     claimDue(qint64 nowMs, int limit, qint64 leaseUntilMs) override;

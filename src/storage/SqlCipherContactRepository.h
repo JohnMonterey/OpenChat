@@ -33,6 +33,9 @@ public:
     setPeerDeviceId(const AccountId &accountId, const DeviceId &deviceId) override;
     [[nodiscard]] Result<void, RepositoryError>
     setHandle(const AccountId &accountId, const QString &handle) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    setProfile(const AccountId &accountId, int presence, const QString &statusText,
+               QByteArrayView avatarJpeg, qint64 updatedAtMs) override;
 
 private:
     SqlCipherDatabase &m_database;

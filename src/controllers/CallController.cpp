@@ -33,6 +33,22 @@ constexpr int durationRefreshMs = 1000;
 CallController::CallController(QObject *parent)
     : QObject(parent)
 {
+    connect(&m_camera, &QtVideoCapture::frameCaptured, this, [this](const QImage &image) {
+        if (!m_cameraEnabled)
+            return;
+        const QSize oldSize = m_localVideo.size();
+        m_localVideo = image;
+        emit localVideoChanged();
+        if (oldSize != image.size())
+            emit videoChanged();
+        if (m_engine)
+            m_engine->sendVideoFrame(image);
+    });
+    connect(&m_camera, &QtVideoCapture::failed, this, [this](const QString &message) {
+        stopCamera();
+        m_cameraError = message;
+        emit videoChanged();
+    });
     m_durationTimer = new QTimer(this);
     m_durationTimer->setInterval(durationRefreshMs);
     connect(m_durationTimer, &QTimer::timeout, this, [this] {
@@ -95,11 +111,15 @@ QString CallController::durationText() const
     return formatDuration(m_durationMs);
 }
 
-void CallController::callCurrentContact()
+void CallController::callCurrentContact(bool video)
 {
     if (m_chats == nullptr)
         return;
+    if (m_engine == nullptr || callOccupiesDevice(m_engine->state()))
+        return;
     callContact(m_chats->currentContactId());
+    if (video && callOccupiesDevice(m_engine->state()) && !isIncoming())
+        toggleCamera();
 }
 
 void CallController::callContact(const QString &contactId)
@@ -143,6 +163,52 @@ void CallController::toggleMute()
         m_engine->setMuted(!m_engine->isMuted());
 }
 
+void CallController::toggleCamera()
+{
+    if (!inCall() || isRinging() || callEnded())
+        return;
+    m_cameraError.clear();
+    if (m_cameraEnabled) {
+        stopCamera();
+    } else if (m_engine) {
+        m_cameraEnabled = true;
+        emit videoChanged();
+        m_camera.start();
+    }
+}
+
+void CallController::stopCamera()
+{
+    m_camera.stop();
+    const bool wasEnabled = m_cameraEnabled;
+    m_cameraEnabled = false;
+    m_localVideo = QImage();
+    if (wasEnabled && m_engine)
+        m_engine->sendVideoFrame(QImage());
+    emit localVideoChanged();
+    emit videoChanged();
+}
+
+void CallController::setRemoteVideo(const QImage &image)
+{
+    const QSize oldSize = m_remoteVideo.size();
+    m_remoteVideo = image;
+    emit remoteVideoChanged();
+    if (oldSize != image.size())
+        emit videoChanged();
+}
+
+void CallController::setPreviewVideo(const QImage &local, const QImage &remote)
+{
+    if (m_engine)
+        return;
+    m_cameraEnabled = !local.isNull();
+    m_localVideo = local;
+    setRemoteVideo(remote);
+    emit localVideoChanged();
+    emit videoChanged();
+}
+
 void CallController::dismissCall()
 {
     if (m_engine != nullptr)
@@ -167,11 +233,17 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
     m_chats = chats;
     setLocalIdentity(chats->localUserName(), chats->localAvatarKey());
 
+    connect(engine, &CallEngine::remoteVideoFrame, this, &CallController::setRemoteVideo);
     connect(engine, &CallEngine::stateChanged, this, &CallController::syncFromEngine);
     connect(engine, &CallEngine::mutedChanged, this, &CallController::syncFromEngine);
     connect(engine, &CallEngine::levelsChanged, this, &CallController::syncLevels);
     connect(engine, &CallEngine::incomingCall, this, &CallController::incomingCall);
+    connect(chats->contacts(), &QAbstractItemModel::modelReset,
+            this, &CallController::syncFromEngine);
     connect(chats, &ChatController::localUserNameChanged, this, [this] {
+        setLocalIdentity(m_chats->localUserName(), m_chats->localAvatarKey());
+    });
+    connect(chats, &ChatController::localProfileChanged, this, [this] {
         setLocalIdentity(m_chats->localUserName(), m_chats->localAvatarKey());
     });
     syncFromEngine();
@@ -185,13 +257,21 @@ void CallController::syncFromEngine()
     m_endReason = m_engine->endReason();
     m_direction = m_engine->direction();
     m_muted = m_engine->isMuted();
+    if (m_state == CallState::Idle || m_state == CallState::Ended || isRinging()) {
+        stopCamera();
+        setRemoteVideo(QImage());
+        m_cameraError.clear();
+        emit videoChanged();
+    }
 
     const CallEngine::CallPeer &peer = m_engine->peer();
-    // An incoming call from a peer whose handle has not resolved yet has no name
-    // to show, so it is announced by relationship rather than left blank.
-    m_peerName = peer.displayName.isEmpty() ? QStringLiteral("Unknown caller") : peer.displayName;
-    m_peerAvatarKey =
-        peer.avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : peer.avatarKey;
+    // Incoming offers carry routing IDs, not display names. Use the same saved
+    // identity as the chat roster, including handles resolved while ringing.
+    const auto route = m_chats->callRouteFor(peer.conversation, peer.device);
+    const QString name = route ? route->displayName : peer.displayName;
+    const QString avatarKey = route ? route->avatarKey : peer.avatarKey;
+    m_peerName = name.isEmpty() ? QStringLiteral("Unknown caller") : name;
+    m_peerAvatarKey = avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : avatarKey;
 
     if (m_state == CallState::Active) {
         m_durationTimer->start();

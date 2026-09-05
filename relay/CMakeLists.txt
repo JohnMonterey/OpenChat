@@ -23,6 +23,7 @@ qt_add_resources(openchat_relay_core "openchat_relay_migrations"
         migrations/002_tokens_keypackages.sql
         migrations/003_inboxes_attachments.sql
         migrations/004_invites.sql
+        migrations/005_envelope_acceptances.sql
 )
 
 add_library(openchat_relay_server STATIC
@@ -47,6 +48,7 @@ target_link_libraries(openchat-relay PRIVATE
 add_executable(tst_relayservices tests/tst_relayservices.cpp)
 target_include_directories(tst_relayservices PRIVATE src)
 target_link_libraries(tst_relayservices PRIVATE
+    openchat_relay_server
     openchat_relay_core
     openchat_protocol
     openchat_domain

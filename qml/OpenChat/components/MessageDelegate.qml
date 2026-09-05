@@ -4,6 +4,8 @@ import OpenChat.Native
 
 Item {
     id: delegateRoot
+    required property int deliveryState
+    signal retryRequested(string messageBody)
     required property int direction
     required property string body
     required property string timestamp
@@ -33,7 +35,25 @@ Item {
         : Math.max(54, messageBody.paintedHeight + messageTime.implicitHeight + 21)
     readonly property real dateSectionHeight: showDateDivider ? 64 : 0
 
-    implicitHeight: dateSectionHeight + bubbleHeight + 20
+    implicitHeight: dateSectionHeight + bubbleHeight + 20 + (retryText.visible ? 20 : 0)
+
+    Text {
+        id: retryText
+        objectName: "messageRetry"
+        visible: delegateRoot.outgoing && delegateRoot.deliveryState === 6
+        anchors.right: bubble.right
+        anchors.rightMargin: delegateRoot.bubbleTailWidth
+        y: bubble.y + bubble.height + 4
+        text: "Not sent. Try again"
+        color: Theme.retryText
+        font.family: Theme.uiFont
+        font.pixelSize: 12
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: delegateRoot.retryRequested(delegateRoot.body)
+        }
+    }
 
     Text {
         id: naturalMessageBody
@@ -58,7 +78,7 @@ Item {
             anchors.rightMargin: 10
             anchors.verticalCenter: parent.verticalCenter
             height: 1
-            color: "#d7e1e8"
+            color: Theme.dateRule
         }
         Text {
             id: dateText
@@ -76,7 +96,7 @@ Item {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             height: 1
-            color: "#d7e1e8"
+            color: Theme.dateRule
         }
     }
 
@@ -90,9 +110,9 @@ Item {
         radius: 6
         tailWidth: delegateRoot.bubbleTailWidth
         tailHeight: 13
-        fillTop: delegateRoot.outgoing ? "#fdfefe" : "#edf8ff"
-        fillBottom: delegateRoot.outgoing ? "#f4f8fb" : "#e2f2fc"
-        strokeColor: delegateRoot.outgoing ? "#b9c7d4" : "#8dbbe0"
+        fillTop: delegateRoot.outgoing ? Theme.outgoingTop : Theme.incomingTop
+        fillBottom: delegateRoot.outgoing ? Theme.outgoingBottom : Theme.incomingBottom
+        strokeColor: delegateRoot.outgoing ? Theme.outgoingBorder : Theme.incomingBorder
     }
 
     Text {
@@ -128,7 +148,7 @@ Item {
             ? implicitWidth
             : bubble.width - delegateRoot.horizontalContentInset
         text: String(delegateRoot.timestamp)
-        color: "#92a2b4"
+        color: Theme.timestampText
         font.family: Theme.uiFont
         font.pixelSize: 12
         horizontalAlignment: Text.AlignRight

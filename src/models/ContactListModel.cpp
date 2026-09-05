@@ -71,6 +71,19 @@ void ContactListModel::setContacts(QVector<Contact> contacts)
     emit countsChanged();
 }
 
+void ContactListModel::setPresence(const QString &id, Presence presence)
+{
+    for (int i = 0; i < m_contacts.size(); ++i) {
+        auto &contact = m_contacts[i];
+        if (contact.id != id || contact.presence == presence)
+            continue;
+        contact.presence = presence;
+        const int row = m_visibleRows.indexOf(i);
+        if (row >= 0)
+            emit dataChanged(index(row), index(row), {PresenceRole, StatusTextRole});
+    }
+}
+
 void ContactListModel::setQuery(const QString &query)
 {
     const QString normalized = query.trimmed();

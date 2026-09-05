@@ -52,7 +52,8 @@ int main(int argc, char **argv)
     const QStringList migrations{QStringLiteral(":/relay/001_accounts_devices.sql"),
                                  QStringLiteral(":/relay/002_tokens_keypackages.sql"),
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
-                                 QStringLiteral(":/relay/004_invites.sql")};
+                                 QStringLiteral(":/relay/004_invites.sql"),
+                                 QStringLiteral(":/relay/005_envelope_acceptances.sql")};
     if (!store->applyMigrations(migrations, &error)) {
         qCritical("migration failed");
         return 4;

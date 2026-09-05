@@ -15,6 +15,7 @@
 #include <QTcpServer>
 #include <QUrlQuery>
 #include <QWebSocket>
+#include <QTimer>
 
 #include <optional>
 
@@ -44,6 +45,8 @@ StatusCode statusFor(RelayError error)
         return StatusCode::Unauthorized;
     case RelayError::RateLimited:
         return StatusCode::TooManyRequests;
+    case RelayError::RecipientUnavailable:
+        return StatusCode::ServiceUnavailable;
     case RelayError::Internal:
         break;
     }
@@ -434,7 +437,41 @@ void RelayServer::onWebSocketConnection()
         raw->setMaxAllowedIncomingFrameSize(m_limits.maxFrameBytes);
         raw->setMaxAllowedIncomingMessageSize(m_limits.maxFrameBytes);
         const QByteArray key = identity->deviceId.bytes().toHex();
+        if (auto *previous = m_liveByDevice.value(key))
+            previous->abort();
         m_liveByDevice.insert(key, raw);
+        // Detect vanished clients even when TCP has not reported a disconnect.
+        auto *heartbeat = new QTimer(raw);
+        raw->setProperty("awaitingPong", false);
+        connect(raw, &QWebSocket::pong, raw, [raw] { raw->setProperty("awaitingPong", false); });
+        connect(heartbeat, &QTimer::timeout, raw, [raw] {
+            if (raw->property("awaitingPong").toBool()) {
+                raw->abort();
+                return;
+            }
+            raw->setProperty("awaitingPong", true);
+            raw->ping();
+        });
+        heartbeat->start(10'000);
+
+        // Replay the unacknowledged inbox before handling newer live traffic.
+        // A client may resume from zero safely because received rows are pruned.
+        quint64 cursor = QUrlQuery(raw->requestUrl()).queryItemValue(QStringLiteral("since")).toULongLong();
+        while (true) {
+            const auto page = m_envelopes.fetchSince(identity->deviceId, cursor, m_limits.syncLimit);
+            if (!page.hasValue() || page.value().items.isEmpty())
+                break;
+            for (const auto &item : page.value().items) {
+                QCborArray delivery;
+                delivery.append(4);
+                delivery.append(static_cast<qint64>(item.serverSequence));
+                delivery.append(item.envelope);
+                raw->sendBinaryMessage(delivery.toCborValue().toCbor());
+            }
+            if (page.value().newWatermark <= cursor)
+                break;
+            cursor = page.value().newWatermark;
+        }
 
         connect(raw, &QWebSocket::binaryMessageReceived, this,
                 [this, raw, id = *identity](const QByteArray &message) {
@@ -463,10 +500,20 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
     const int major = cborMajorType(message);
     if (major == 5) {
         // A canonical envelope submitted by the sender.
-        const auto submitted = m_envelopes.submit(device, message);
         const auto decoded = decodeEnvelope(message);
-        if (!submitted.hasValue() || !decoded.hasValue())
-            return; // silently drop invalid submissions; no plaintext callback
+        if (!decoded.hasValue())
+            return;
+        const auto submitted = m_envelopes.submit(device, message,
+            m_liveByDevice.contains(decoded.value().recipientDeviceId.bytes().toHex()));
+        if (!submitted.hasValue()) {
+            if (submitted.error() == RelayError::RecipientUnavailable) {
+                QCborArray rejected;
+                rejected.append(9);
+                rejected.append(decoded.value().envelopeId.bytes());
+                socket->sendBinaryMessage(rejected.toCborValue().toCbor());
+            }
+            return;
+        }
         QCborArray ack;
         ack.append(1); // RelayAccepted
         ack.append(decoded.value().envelopeId.bytes());
@@ -491,6 +538,29 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
         if (parseError.error != QCborError::NoError || !value.isArray())
             return;
         const QCborArray control = value.toArray();
+        if (control.size() == 2 && control.at(0).toInteger() == 7 && control.at(1).isArray()) {
+            const auto ids = control.at(1).toArray();
+            if (ids.size() > 256)
+                return;
+            QCborArray rows;
+            for (const auto &value : ids) {
+                if (!value.isByteArray())
+                    return;
+                const auto id = DeviceId::fromBytes(value.toByteArray());
+                if (!id)
+                    return;
+                QCborArray row;
+                row.append(id->bytes());
+                const auto *peer = m_liveByDevice.value(id->bytes().toHex());
+                row.append(peer && peer->state() == QAbstractSocket::ConnectedState);
+                rows.append(row);
+            }
+            QCborArray result;
+            result.append(8);
+            result.append(rows);
+            socket->sendBinaryMessage(result.toCborValue().toCbor());
+            return;
+        }
         if (control.size() == 3 && control.at(0).toInteger() == 3) {
             // Acknowledge: [3, envelopeId, watermark]
             const quint64 watermark = static_cast<quint64>(control.at(2).toInteger());

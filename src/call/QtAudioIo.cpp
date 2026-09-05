@@ -1,5 +1,6 @@
 #include "call/QtAudioIo.h"
 
+#include "media/AudioConvert.h"
 #include "media/AudioTypes.h"
 
 #include <QAudioSink>
@@ -7,6 +8,7 @@
 #include <QMediaDevices>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace OpenChat {
@@ -27,11 +29,48 @@ QAudioFormat callPlaybackQAudioFormat()
     return format;
 }
 
+namespace {
+
+QAudioFormat captureFormat(const QAudioDevice &device)
+{
+    // Preserve the interface's channels so the driver cannot silently select
+    // just input 1 when the microphone is plugged into input 2.
+    QAudioFormat format = device.preferredFormat();
+    format.setSampleRate(CallAudioFormat::sampleRate);
+    if (device.isFormatSupported(format))
+        return format;
+    return device.preferredFormat();
+}
+
+} // namespace
+
+AudioFrame mixCaptureFrame(const QByteArray &pcm, const QAudioFormat &format)
+{
+    if (!format.isValid() || pcm.size() != format.bytesForDuration(20'000))
+        return {};
+    QVector<qint16> mono;
+    const int channels = format.channelCount();
+    const int stride = format.bytesPerSample();
+    mono.reserve(pcm.size() / format.bytesPerFrame());
+    for (qsizetype offset = 0; offset < pcm.size(); offset += format.bytesPerFrame()) {
+        double sum = 0;
+        for (int channel = 0; channel < channels; ++channel) {
+            const double sample =
+                format.normalizedSampleValue(pcm.constData() + offset + channel * stride);
+            sum += std::isfinite(sample) ? sample : 0.0;
+        }
+        mono.append(static_cast<qint16>(
+            std::clamp(std::round(sum * 32768.0 / channels), -32768.0, 32767.0)));
+    }
+    return AudioConvert::frameOf(AudioConvert::resampleMono(
+        mono, format.sampleRate(), CallAudioFormat::sampleRate));
+}
+
 bool hasUsableCallAudioDevices()
 {
     const QAudioDevice input = QMediaDevices::defaultAudioInput();
     const QAudioDevice output = QMediaDevices::defaultAudioOutput();
-    return !input.isNull() && !output.isNull() && input.isFormatSupported(callQAudioFormat())
+    return !input.isNull() && !output.isNull() && input.isFormatSupported(captureFormat(input))
         && output.isFormatSupported(callPlaybackQAudioFormat());
 }
 
@@ -42,8 +81,8 @@ bool hasUsableCallAudioDevices()
 class QtAudioCaptureSource::FrameSlicer final : public QIODevice
 {
 public:
-    explicit FrameSlicer(QtAudioCaptureSource &owner)
-        : m_owner(owner)
+    explicit FrameSlicer(QtAudioCaptureSource &owner, QAudioFormat format)
+        : m_owner(owner), m_format(format)
     {
     }
 
@@ -55,9 +94,10 @@ protected:
         if (length <= 0)
             return 0;
         m_pending.append(data, static_cast<qsizetype>(length));
-        while (m_pending.size() >= CallAudioFormat::bytesPerFrame) {
-            const AudioFrame frame = m_pending.left(CallAudioFormat::bytesPerFrame);
-            m_pending.remove(0, CallAudioFormat::bytesPerFrame);
+        const int captureBytes = m_format.bytesForDuration(20'000);
+        while (m_pending.size() >= captureBytes) {
+            const AudioFrame frame = mixCaptureFrame(m_pending.left(captureBytes), m_format);
+            m_pending.remove(0, captureBytes);
             // Hop to the owner's thread before handing the frame on. Some Qt
             // audio backends deliver from their own thread, and the call's
             // reaction to a captured frame is to sign it and write it to a
@@ -76,6 +116,7 @@ protected:
 
 private:
     QtAudioCaptureSource &m_owner;
+    QAudioFormat m_format;
     QByteArray m_pending;
 };
 
@@ -94,8 +135,11 @@ bool QtAudioCaptureSource::start()
     const QAudioDevice device = QMediaDevices::defaultAudioInput();
     if (device.isNull())
         return false;
-    m_source = std::make_unique<QAudioSource>(device, callQAudioFormat());
-    m_slicer = std::make_unique<FrameSlicer>(*this);
+    const auto format = captureFormat(device);
+    if (!format.isValid() || !device.isFormatSupported(format))
+        return false;
+    m_source = std::make_unique<QAudioSource>(device, format);
+    m_slicer = std::make_unique<FrameSlicer>(*this, format);
     if (!m_slicer->open(QIODevice::WriteOnly))
         return false;
     m_source->start(m_slicer.get());

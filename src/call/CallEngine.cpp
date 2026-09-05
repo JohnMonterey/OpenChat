@@ -36,6 +36,10 @@ CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFacto
     if (!isAudioCodecAvailable(m_config.preferredCodec))
         m_config.preferredCodec = AudioCodecKind::Pcm;
 
+    m_videoTimeout = new QTimer(this);
+    m_videoTimeout->setSingleShot(true);
+    connect(m_videoTimeout, &QTimer::timeout, this, [this] { emit remoteVideoFrame(QImage()); });
+
     m_ringTimer = new QTimer(this);
     m_ringTimer->setSingleShot(true);
     connect(m_ringTimer, &QTimer::timeout, this, [this] {
@@ -394,6 +398,19 @@ void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sen
     if (m_state != CallState::Connecting && m_state != CallState::Active)
         return;
 
+    if (!packet.isEmpty() && static_cast<quint8>(packet[0]) == CallVideoSession::wireVersion) {
+        if (m_videoSession) {
+            const auto image = m_videoSession->decode(packet);
+            if (image) {
+                if (image->isNull())
+                    m_videoTimeout->stop();
+                else
+                    m_videoTimeout->start(2500);
+                emit remoteVideoFrame(*image);
+            }
+        }
+        return;
+    }
     const CallSession::ReceiveResult result = m_session->processIncomingPacket(packet);
     if (result != CallSession::ReceiveResult::Queued)
         return;
@@ -453,6 +470,7 @@ bool CallEngine::startMedia()
         endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
         return false;
     }
+    m_videoSession = CallVideoSession::create(*m_callId, m_direction, m_secret);
     m_session->setMuted(m_muted);
 
     // The speaker is normally already up from the ring; retry here so a call
@@ -486,6 +504,9 @@ void CallEngine::stopCapture()
         m_capture->stop();
         m_capture.reset();
     }
+    m_videoTimeout->stop();
+    m_videoSession.reset();
+    emit remoteVideoFrame(QImage());
     m_session.reset();
     m_secret.fill('\0');
     m_secret.clear();
@@ -505,6 +526,16 @@ void CallEngine::onCapturedFrame(const AudioFrame &frame)
     if (packet.isEmpty() || !m_transport.isConnected())
         return;
     m_transport.sendMedia(m_peer.conversation, m_peer.device, packet);
+}
+
+void CallEngine::sendVideoFrame(const QImage &image)
+{
+    if (!m_videoSession || !m_transport.isConnected()
+        || (m_state != CallState::Connecting && m_state != CallState::Active))
+        return;
+    const QByteArray packet = m_videoSession->encode(image);
+    if (!packet.isEmpty())
+        m_transport.sendMedia(m_peer.conversation, m_peer.device, packet);
 }
 
 AudioFrame CallEngine::pullPlaybackFrame()

@@ -15,7 +15,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 5
-        color: "#ffffff"
+        color: Theme.fieldBackground
     }
 
     Text {
@@ -43,12 +43,14 @@ Item {
         font.pixelSize: 16
         clip: true
         selectByMouse: true
+        selectionColor: Theme.selectionBackground
+        selectedTextColor: Theme.selectionText
 
         Text {
             anchors.fill: parent
             visible: !fieldInput.text && !fieldInput.activeFocus
             text: field.placeholder
-            color: "#98a7ba"
+            color: Theme.placeholderText
             font: fieldInput.font
             verticalAlignment: Text.AlignVCenter
             renderType: Text.NativeRendering
@@ -57,9 +59,9 @@ Item {
 
     // Aero inset: shadow along the inner top/left, a faint highlight along the
     // bottom, then the shared outline drawn last.
-    Rectangle { x: 5; y: 1; width: parent.width - 10; height: 1; color: "#24526878" }
-    Rectangle { x: 1; y: 5; width: 1; height: parent.height - 10; color: "#18526878" }
-    Rectangle { x: 5; y: parent.height - 2; width: parent.width - 10; height: 1; color: "#70ffffff" }
+    Rectangle { x: 5; y: 1; width: parent.width - 10; height: 1; color: Theme.insetTop }
+    Rectangle { x: 1; y: 5; width: 1; height: parent.height - 10; color: Theme.insetLeft }
+    Rectangle { x: 5; y: parent.height - 2; width: parent.width - 10; height: 1; color: Theme.gloss }
     Rectangle {
         anchors.fill: parent
         z: 10

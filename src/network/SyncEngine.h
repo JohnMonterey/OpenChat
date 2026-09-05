@@ -101,6 +101,9 @@ public:
     [[nodiscard]] virtual Result<QVector<OutboxRecord>, RepositoryError>
     claimDue(qint64 nowMs, int limit, qint64 leaseUntilMs) = 0;
     [[nodiscard]] virtual Result<void, RepositoryError> markAccepted(const EnvelopeId &envelopeId) = 0;
+    // Atomically stop retrying a rejected send and persist the visible failure.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    failSend(const EnvelopeId &envelopeId, const MessageId &messageId) = 0;
     [[nodiscard]] virtual Result<void, RepositoryError>
     scheduleRetry(const EnvelopeId &envelopeId, int attemptCount, qint64 nextAttemptMs) = 0;
     [[nodiscard]] virtual Result<void, RepositoryError>
@@ -126,6 +129,7 @@ public:
 
     // Set by the engine before use.
     std::function<void(const EnvelopeId &, quint64 serverSequence)> onRelayAccepted;
+    std::function<void(const EnvelopeId &)> onRecipientUnavailable;
     std::function<void(const CiphertextEnvelopeV1 &, quint64 serverSequence)> onEnvelope;
     std::function<void(const CiphertextEnvelopeV1 &)> onDatagram;
     std::function<void()> onConnected;
@@ -158,7 +162,8 @@ public:
     void stop();
 
     // Encrypts, durably persists, and queues a text message to a recipient
-    // device. UI state reaches Queued only after the durable commit.
+    // device. Offline attempts are stored as Failed for manual retry. Online
+    // attempts reach Queued only after the durable commit.
     void enqueueText(const ConversationId &conversation, const DeviceId &recipientDevice,
                      const QString &text);
 
@@ -193,6 +198,13 @@ public:
     void sendCallSignal(const ConversationId &conversation, const DeviceId &recipientDevice,
                         const QByteArray &payload);
 
+    // Sends the local user's self-published profile (presence, status line,
+    // picture) as an MLS application message on the durable path, so a change
+    // made while a contact is offline still reaches them. `payload` is an
+    // encoded ProfileUpdateMessage. Carries no visible message row.
+    void sendProfileUpdate(const ConversationId &conversation, const DeviceId &recipientDevice,
+                           const QByteArray &payload);
+
     // Sends one sealed media frame on the unreliable datagram path. `payload` is
     // already encrypted under the call's media key, so this deliberately skips
     // the group ratchet: 50 frames a second through MLS would mean 50 durable
@@ -211,7 +223,7 @@ public:
     [[nodiscard]] bool isFailedClosed() const noexcept;
 
 signals:
-    // An outgoing text was durably committed (Queued) and is the exact row the
+    // An outgoing text was durably committed (Queued or Failed) and is the exact row the
     // store holds, so the UI can show it before relay acceptance.
     void messageQueued(const MessageRecord &message);
     void messageStateChanged(const MessageId &messageId, DeliveryState state);
@@ -229,6 +241,11 @@ signals:
     // to authenticate and open.
     void callMediaReceived(const OpenChat::ConversationId &conversation,
                            const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
+    // A ProfileUpdate control message was decrypted, authenticated against the
+    // MLS sender credential, and durably consumed. `payload` is the encoded
+    // ProfileUpdateMessage plaintext.
+    void profileUpdateReceived(const OpenChat::ConversationId &conversation,
+                               const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
     void failedClosed();
     // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
     void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,

@@ -82,6 +82,14 @@ public:
     // of an inbound request's sender). Returns NotFound when the peer is unknown.
     [[nodiscard]] virtual Result<void, RepositoryError>
     setHandle(const AccountId &accountId, const QString &handle) = 0;
+
+    // Record the profile a contact published for themselves (their chosen
+    // presence, status line and JPEG picture; an empty picture clears it).
+    // Returns NotFound when the peer is unknown and InvalidInput when the
+    // presence is not a Presence value.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    setProfile(const AccountId &accountId, int presence, const QString &statusText,
+               QByteArrayView avatarJpeg, qint64 updatedAtMs) = 0;
 };
 
 } // namespace OpenChat

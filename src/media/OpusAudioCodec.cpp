@@ -15,6 +15,7 @@ OpusAudioCodec::OpusAudioCodec(int bitrate)
         m_encoder = nullptr;
     } else {
         opus_encoder_ctl(m_encoder, OPUS_SET_BITRATE(bitrate));
+        opus_encoder_ctl(m_encoder, OPUS_SET_COMPLEXITY(10));
         // In-band FEC lets the decoder reconstruct a lost frame from the next
         // packet; it costs bitrate only when the encoder is told loss is likely.
         opus_encoder_ctl(m_encoder, OPUS_SET_INBAND_FEC(1));

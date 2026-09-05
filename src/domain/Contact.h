@@ -42,6 +42,14 @@ struct ContactRecord final {
     // conversation; NULL for rows that predate migration 011 or were blocked
     // before any exchange.
     std::optional<DeviceId> peerDeviceId{};
+    // The peer's self-published profile, as last received in a ProfileUpdate:
+    // the presence they chose (a Presence value; Available when never told),
+    // their status line, and their picture as the JPEG bytes they sent (empty
+    // when they have none). All three are the peer's own claims, authenticated
+    // by the MLS ratchet but otherwise unverified content.
+    int presence = 0;
+    QString statusText{};
+    QByteArray avatarJpeg{};
 };
 
 } // namespace OpenChat

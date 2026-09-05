@@ -36,6 +36,7 @@ public:
     void setContacts(QVector<Contact> contacts);
     void setQuery(const QString &query);
     bool selectContact(const QString &id);
+    void setPresence(const QString &id, Presence presence);
 
     [[nodiscard]] int favoriteCount() const;
     [[nodiscard]] int regularCount() const;

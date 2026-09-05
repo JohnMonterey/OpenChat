@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import OpenChat
 
 Item {
@@ -11,8 +12,21 @@ Item {
     required property bool selected
     required property string avatarKey
     readonly property bool compact: height < 55
-    // Equal breathing room on both sides of the presence bead.
-    readonly property int beadSpacing: 14
+    property bool statusBubbleEnabled: true
+    property bool statusBubbleReady: false
+    property bool statusBubbleDismissed: false
+    readonly property bool avatarHovered: statusBubbleEnabled && visible && rowMouse.containsMouse
+        && rowMouse.mouseX >= avatarImage.x && rowMouse.mouseX < avatarImage.x + avatarImage.width
+        && rowMouse.mouseY >= avatarImage.y && rowMouse.mouseY < avatarImage.y + avatarImage.height
+        && statusText.trim().length > 0
+    onAvatarHoveredChanged: {
+        statusBubbleReady = false;
+        if (!avatarHovered)
+            statusBubbleDismissed = false;
+    }
+    // The text block starts one avatar-margin right of the avatar; the bead
+    // follows the name on its own line so the status line gets the full width.
+    readonly property int textLeft: avatarImage.x + avatarImage.width + 14
     signal activated(string contactId)
 
     implicitHeight: 60
@@ -31,6 +45,7 @@ Item {
 
     Avatar {
         id: avatarImage
+        objectName: "contactAvatar"
         x: 13
         anchors.verticalCenter: parent.verticalCenter
         width: Math.min(44, row.height - 6)
@@ -38,17 +53,12 @@ Item {
         avatarKey: row.avatarKey
     }
 
-    PresenceBead {
-        id: presenceBead
-        x: avatarImage.x + avatarImage.width + row.beadSpacing
-        anchors.verticalCenter: parent.verticalCenter
-        beadSize: 12
-        presence: row.presence
-    }
-
     Text {
-        x: presenceBead.x + presenceBead.width + row.beadSpacing
+        id: nameText
+        x: row.textLeft
         y: row.compact ? 3 : 11
+        width: Math.min(implicitWidth, row.width - x - presenceBead.width - 8 - 12)
+        elide: Text.ElideRight
         text: row.name
         color: Theme.textPrimary
         font.family: Theme.uiFont
@@ -56,9 +66,20 @@ Item {
         renderType: Text.NativeRendering
     }
 
+    PresenceBead {
+        id: presenceBead
+        x: nameText.x + nameText.width + 8
+        anchors.verticalCenter: nameText.verticalCenter
+        anchors.verticalCenterOffset: 1
+        beadSize: 11
+        presence: row.presence
+    }
+
     Text {
-        x: presenceBead.x + presenceBead.width + row.beadSpacing
+        x: row.textLeft
         y: row.compact ? 26 : 34
+        width: row.width - x - 12
+        elide: Text.ElideRight
         text: row.statusText
         color: Theme.textSecondary
         font.family: Theme.uiFont
@@ -67,8 +88,25 @@ Item {
     }
 
     MouseArea {
+        id: rowMouse
         anchors.fill: parent
+        hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onClicked: row.activated(row.contactId)
+        onClicked: {
+            row.statusBubbleDismissed = true;
+            row.activated(row.contactId);
+        }
+    }
+
+    Timer {
+        interval: 320
+        running: row.avatarHovered && !row.statusBubbleDismissed
+        onTriggered: row.statusBubbleReady = true
+    }
+    ContactStatusBubble {
+        objectName: "contactStatusBubble_" + row.contactId
+        target: avatarImage
+        statusText: row.statusText
+        shown: row.avatarHovered && row.statusBubbleReady && !row.statusBubbleDismissed
     }
 }

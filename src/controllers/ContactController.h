@@ -46,7 +46,7 @@ class ContactController final : public QObject
     Q_PROPERTY(QString safetyNumber READ safetyNumber NOTIFY safetyNumberChanged)
     Q_PROPERTY(bool safetyNumberVerified READ safetyNumberVerified NOTIFY safetyNumberChanged)
     Q_PROPERTY(QString safetyNumberContact READ safetyNumberContact NOTIFY safetyNumberChanged)
-    // Search & Find: the exact-handle directory lookup behind the sidebar search.
+    // Search Chats and Users: the exact-handle directory lookup behind the sidebar search.
     Q_PROPERTY(LookupState lookupState READ lookupState NOTIFY lookupChanged)
     Q_PROPERTY(QString lookupHandle READ lookupHandle NOTIFY lookupChanged)
     Q_PROPERTY(QString lookupSubtitle READ lookupSubtitle NOTIFY lookupChanged)
@@ -99,7 +99,7 @@ public:
     [[nodiscard]] bool lookupVisible() const;
     [[nodiscard]] bool lookupCanRequest() const;
 
-    // Search & Find. lookup(text) normalises the search text (trims, drops a
+    // Search Chats and Users. lookup(text) normalises the search text (trims, drops a
     // leading '@') and, after a short debounce, resolves it as an exact handle
     // against the directory; the result is classified against the local roster.
     // requestLookup() sends a contact request to the Found peer.
@@ -201,7 +201,7 @@ private:
     // One-shot connections to the shared relay for a createMyInvite() attempt.
     QList<QMetaObject::Connection> m_inviteConnections;
 
-    // Search & Find lookup. m_lookupHandle is the normalised text being looked
+    // Search Chats and Users lookup. m_lookupHandle is the normalised text being looked
     // up; m_lookupInFlight guards the single outstanding directory call, and
     // m_lookupDirty remembers that the text changed while one was in flight.
     LookupState m_lookupState = LookupState::Idle;

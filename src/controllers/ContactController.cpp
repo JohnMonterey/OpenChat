@@ -164,7 +164,7 @@ void ContactController::setStatus(Status status, const QString &message)
 }
 
 // ---------------------------------------------------------------------------
-// Search & Find
+// Search Chats and Users
 // ---------------------------------------------------------------------------
 
 ContactController::LookupState ContactController::lookupState() const

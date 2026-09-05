@@ -371,7 +371,7 @@ Item {
                 Text {
                     anchors.fill: parent
                     visible: !searchInput.text && !searchInput.activeFocus
-                    text: "Search & Find"
+                    text: "Search Chats and Users"
                     color: Theme.placeholderText
                     font: searchInput.font
                     verticalAlignment: Text.AlignVCenter
@@ -415,7 +415,7 @@ Item {
             anchors.top: parent.top
             width: parent.width
 
-            // Search & Find: the exact-handle directory match for the search
+            // Search Chats and Users: the exact-handle directory match for the search
             // text, with a grey "add person" affordance that sends a friend
             // request. Collapses to zero height while there is nothing to show.
             Item {
@@ -444,7 +444,7 @@ Item {
                         x: 15
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.verticalCenterOffset: 1
-                        text: "Search & Find"
+                        text: "Search Chats and Users"
                         color: Theme.categoryText
                         font.family: Theme.uiFont
                         font.pixelSize: 17

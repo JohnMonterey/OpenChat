@@ -38,6 +38,8 @@ struct CallMediaKeySchedule final {
     // nullopt if the secret is the wrong length or the KDF fails.
     [[nodiscard]] static std::optional<CallMediaKeySchedule> derive(QByteArrayView secret,
                                                                     const CallId &callId);
+    [[nodiscard]] static std::optional<CallMediaKeySchedule> deriveVideo(QByteArrayView secret,
+                                                                       const CallId &callId);
 
     // The pair this end uses, given which side of the call it is on.
     [[nodiscard]] const CallMediaKeys &sendKeys(CallDirection direction) const noexcept;

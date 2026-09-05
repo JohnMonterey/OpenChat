@@ -68,7 +68,8 @@ Window {
                 id: headerSlot
                 objectName: "conversationHeaderSlot"
                 width: parent.width
-                height: root.inCall ? Theme.callHeaderHeight : Theme.conversationHeaderHeight
+                height: root.inCall && callHeaderLoader.item
+                        ? callHeaderLoader.item.implicitHeight : Theme.conversationHeaderHeight
                 visible: root.chatController.hasCurrentContact || root.inCall
                 clip: true
 
@@ -86,6 +87,7 @@ Window {
                     id: callHeaderComponent
 
                     CallHeader {
+                        maxVideoHeight: Math.min(230, root.height * 0.34)
                         controller: root.callController
                     }
                 }

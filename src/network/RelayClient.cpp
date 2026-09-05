@@ -863,6 +863,12 @@ Result<void, RelayCallError> RelayClient::sendDatagram(const CiphertextEnvelopeV
     if (!d->socket || !d->subprotocolVerified)
         return Result<void, RelayCallError>::failure(RelayCallError::NotConnected);
 
+    // Bound stale media on a slow socket. Durable messages use sendEnvelope;
+    // dropping a disposable frame here prevents video from accumulating seconds
+    // of latency and unbounded memory behind a congested connection.
+    if (d->socket->bytesToWrite() > 128 * 1024)
+        return Result<void, RelayCallError>::success();
+
     const QByteArray encoded = encodeCanonical(envelope);
     if (encoded.isEmpty()
         || static_cast<quint64>(encoded.size()) > d->limits.maxIncomingFrameBytes)

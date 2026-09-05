@@ -5,6 +5,7 @@
 #include <QQuickItem>
 #include <QWindow>
 #include <QtTest>
+#include <QQuickWindow>
 
 #include <optional>
 
@@ -14,6 +15,7 @@
 #include "controllers/OnboardingController.h"
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
+#include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 
 namespace {
@@ -942,6 +944,59 @@ private slots:
         QCOMPARE(local->width(), remote->width());
     }
 
+    void videoFitsEachCameraAndReturnsToAvatars()
+    {
+        OpenChat::ChatController chats;
+        OpenChat::CallController calls;
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), true, false);
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *root = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(root);
+        auto *local = root->findChild<QQuickItem *>(QStringLiteral("localParticipant"));
+        auto *remote = root->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+        auto *localVideo = local->findChild<QQuickItem *>(QStringLiteral("participantVideo"));
+        auto *remoteVideo = remote->findChild<QQuickItem *>(QStringLiteral("participantVideo"));
+        auto *slot = root->findChild<QQuickItem *>(QStringLiteral("conversationHeaderSlot"));
+        auto *camera = root->findChild<QQuickItem *>(QStringLiteral("cameraCallButton"));
+        QVERIFY(localVideo && remoteVideo && slot && camera);
+        QVERIFY(camera->isVisible());
+        QVERIFY(camera->property("cameraIcon").toBool());
+        QImage wide(640, 360, QImage::Format_RGB32);
+        QImage portrait(360, 640, QImage::Format_RGB32);
+        wide.fill(Qt::blue);
+        portrait.fill(Qt::green);
+        for (const QSize windowSize : {QSize(720, 560), QSize(900, 680), QSize(1024, 768)}) {
+            root->resize(windowSize);
+            calls.setPreviewVideo(wide, QImage());
+            QCoreApplication::processEvents();
+            QVERIFY(localVideo->isVisible());
+            QVERIFY(!remoteVideo->isVisible());
+            QVERIFY(localVideo->width() > 74);
+            QCOMPARE(remote->property("pictureWidth").toReal(), 74.0);
+            QVERIFY(qAbs(localVideo->width() / localVideo->height() - 16.0 / 9.0) < 0.001);
+            calls.setPreviewVideo(wide, portrait);
+            QCoreApplication::processEvents();
+            QVERIFY(remoteVideo->isVisible());
+            QVERIFY(qAbs(remoteVideo->width() / remoteVideo->height() - 9.0 / 16.0) < 0.001);
+            QVERIFY(qAbs(localVideo->width() / localVideo->height() - 16.0 / 9.0) < 0.001);
+            QVERIFY(local->mapToItem(slot, QPointF()).x() >= 0);
+            QVERIFY(remote->mapToItem(slot, QPointF(remote->width(), 0)).x() <= slot->width());
+            QVERIFY(camera->mapToItem(slot, QPointF(0, camera->height())).y() <= slot->height());
+        }
+        calls.setPreviewVideo(QImage(), QImage());
+        QCoreApplication::processEvents();
+        QVERIFY(!localVideo->isVisible());
+        QVERIFY(!remoteVideo->isVisible());
+        QCOMPARE(local->property("pictureWidth").toReal(), 74.0);
+        QTRY_COMPARE(slot->height(), 212.0);
+    }
+
     void theTalkingCallerIsRingedInGreen()
     {
         OpenChat::ChatController chatController;
@@ -1063,6 +1118,7 @@ int main(int argc, char **argv)
     QGuiApplication application(argc, argv);
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
+    qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>(
         "OpenChat.Native", 1, 0, "AvatarArtwork");
     qmlRegisterUncreatableType<OpenChat::ChatController>(

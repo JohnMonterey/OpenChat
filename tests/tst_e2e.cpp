@@ -314,7 +314,7 @@ private slots:
 
     void pipelineDeliversMessagesOverRealTls();
     void relockedProfileRelinksWithoutTokens();
-    void voiceCallCarriesAudioOverRealTls();
+    void callCarriesAudioAndVideoOverRealTls();
 
 private:
     void bootstrapClient(ClientStack &stack, const QString &handlePrefix);
@@ -792,7 +792,7 @@ void EndToEndTest::relockedProfileRelinksWithoutTokens()
     carol.session->lock();
 }
 
-void EndToEndTest::voiceCallCarriesAudioOverRealTls()
+void EndToEndTest::callCarriesAudioAndVideoOverRealTls()
 {
     if (!m_available)
         QSKIP("PostgreSQL not available for the E2E test");
@@ -887,9 +887,20 @@ void EndToEndTest::voiceCallCarriesAudioOverRealTls()
     QVERIFY(!source.isEmpty());
     const QList<AudioFrame> spoken = AudioConvert::toFrames(source);
 
+    QSignalSpy aliceVideo(&aliceCall, &CallEngine::remoteVideoFrame);
+    QSignalSpy bobVideo(&bobCall, &CallEngine::remoteVideoFrame);
+    QImage landscape(640, 360, QImage::Format_RGB32);
+    QImage portrait(360, 640, QImage::Format_RGB32);
+    landscape.fill(QColor(40, 100, 200));
+    portrait.fill(QColor(60, 180, 90));
+    int frameIndex = 0;
     QList<AudioFrame> heard;
     bool bobHeardAliceTalking = false;
     for (const AudioFrame &frame : spoken) {
+        if (frameIndex++ % 5 == 0) {
+            aliceCall.sendVideoFrame(landscape);
+            bobCall.sendVideoFrame(portrait);
+        }
         aliceDevices.speak(frame);
         // Bob's microphone runs too, so Alice's end also sees media arrive and
         // both ends reach Active, exactly as in a real call.
@@ -935,6 +946,13 @@ void EndToEndTest::voiceCallCarriesAudioOverRealTls()
     // And the indicator falls away again now that the audio has stopped, rather
     // than latching on for the rest of the call.
     QVERIFY(!bobCall.isRemoteSpeaking());
+
+    QTRY_VERIFY_WITH_TIMEOUT(!aliceVideo.isEmpty() && !bobVideo.isEmpty(), 5000);
+    QCOMPARE(qvariant_cast<QImage>(bobVideo.last().first()).size(), landscape.size());
+    QCOMPARE(qvariant_cast<QImage>(aliceVideo.last().first()).size(), portrait.size());
+    aliceCall.sendVideoFrame(QImage());
+    QTRY_VERIFY_WITH_TIMEOUT(qvariant_cast<QImage>(bobVideo.last().first()).isNull(), 5000);
+    QCOMPARE(bobCall.state(), CallState::Active);
 
     // Media rode the unreliable path, so none of it was stored in anyone's inbox
     // and none of it became a message row.

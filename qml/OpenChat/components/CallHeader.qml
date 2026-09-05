@@ -14,7 +14,14 @@ Item {
     id: callHeader
     objectName: "callHeader"
     required property var controller
-    implicitHeight: Theme.callHeaderHeight
+    property real maxVideoHeight: 210
+    readonly property bool hasVideo: controller.cameraEnabled || controller.remoteCameraEnabled
+    readonly property real videoWidth: Math.max(100,
+        (width - 48 - (hasVideo ? 22 : 94)
+         - (controller.cameraEnabled && controller.remoteCameraEnabled ? 0 : 132))
+        / (controller.cameraEnabled && controller.remoteCameraEnabled ? 2 : 1))
+    implicitHeight: Math.max(Theme.callHeaderHeight, participants.height + 98)
+                    + (cameraError.visible ? cameraError.implicitHeight + 8 : 0)
 
     Rectangle {
         anchors.fill: parent
@@ -24,18 +31,25 @@ Item {
         }
     }
 
-    // The two callers, side by side and equally weighted: a call is between
-    // peers, so neither picture is larger or more central than the other.
+    // Each picture grows only when that participant shares their camera.
     Row {
         id: participants
         objectName: "callParticipants"
+        height: Math.max(localParticipant.height, remoteParticipant.height)
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         anchors.topMargin: 18
-        spacing: 34
+        spacing: callHeader.hasVideo ? 22 : 34
 
         CallParticipant {
+            id: localParticipant
             objectName: "localParticipant"
+            cameraEnabled: callHeader.controller.cameraEnabled
+            videoFrame: callHeader.controller.localVideoFrame
+            videoAspect: callHeader.controller.localVideoAspect
+            videoMaxWidth: callHeader.videoWidth
+            videoMaxHeight: callHeader.maxVideoHeight
+            mirrored: true
             name: callHeader.controller.localName.length > 0
                   ? callHeader.controller.localName : "You"
             avatarKey: callHeader.controller.localAvatarKey
@@ -47,8 +61,9 @@ Item {
         // A quiet reminder of who is connected to whom, sitting between the two
         // pictures where a link belongs.
         Item {
+            visible: !callHeader.hasVideo
             width: 26
-            height: participants.height
+            height: Math.max(localParticipant.height, remoteParticipant.height)
 
             Text {
                 anchors.centerIn: parent
@@ -62,7 +77,13 @@ Item {
         }
 
         CallParticipant {
+            id: remoteParticipant
             objectName: "remoteParticipant"
+            cameraEnabled: callHeader.controller.remoteCameraEnabled
+            videoFrame: callHeader.controller.remoteVideoFrame
+            videoAspect: callHeader.controller.remoteVideoAspect
+            videoMaxWidth: callHeader.videoWidth
+            videoMaxHeight: callHeader.maxVideoHeight
             name: callHeader.controller.peerName
             avatarKey: callHeader.controller.peerAvatarKey
             speaking: callHeader.controller.remoteSpeaking
@@ -76,7 +97,8 @@ Item {
         anchors.top: participants.bottom
         anchors.topMargin: 8
         anchors.horizontalCenter: parent.horizontalCenter
-        text: callHeader.controller.statusText
+        text: callHeader.controller.isActive ? callHeader.controller.durationText
+                                            : callHeader.controller.statusText
         color: Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 14
@@ -87,6 +109,7 @@ Item {
     // is ours to control. The two sets never appear together, so the row below
     // always means exactly one thing.
     Row {
+        id: actions
         objectName: "callActions"
         anchors.top: statusLine.bottom
         anchors.topMargin: 12
@@ -115,6 +138,14 @@ Item {
             onClicked: callHeader.controller.toggleMute()
         }
         CallActionButton {
+            objectName: "cameraCallButton"
+            visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
+            label: callHeader.controller.cameraEnabled ? "Camera off" : "Camera on"
+            cameraIcon: true
+            checked: callHeader.controller.cameraEnabled
+            onClicked: callHeader.controller.toggleCamera()
+        }
+        CallActionButton {
             objectName: "endCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: "End call"
@@ -128,6 +159,22 @@ Item {
             accent: "neutral"
             onClicked: callHeader.controller.dismissCall()
         }
+    }
+
+    Text {
+        id: cameraError
+        objectName: "cameraErrorText"
+        anchors.top: actions.bottom
+        anchors.topMargin: 8
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: parent.width - 40
+        visible: text.length > 0
+        text: callHeader.controller.cameraError
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        color: Theme.declineBottom
+        font.family: Theme.uiFont
+        font.pixelSize: 12
     }
 
     Rectangle {

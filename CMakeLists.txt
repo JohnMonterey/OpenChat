@@ -36,7 +36,20 @@ qt_add_executable(OpenChat
     src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
+    src/render/CallVideoItem.cpp
 )
+
+if(APPLE)
+    configure_file(cmake/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist @ONLY)
+    # Declare usage strings to Qt's permission-plugin finalizer and embed them
+    # in the existing standalone executable as well as any future app bundle.
+    set_target_properties(OpenChat PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist)
+    target_link_options(OpenChat PRIVATE
+        "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist")
+    set_property(TARGET OpenChat APPEND PROPERTY LINK_DEPENDS
+        ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist)
+endif()
 
 qt_add_qml_module(OpenChat
     URI OpenChat
@@ -236,6 +249,9 @@ add_library(openchat_call STATIC
     src/call/CallEngine.cpp
     src/call/SyncCallTransport.cpp
     src/call/QtAudioIo.cpp
+    src/call/CallVideoSession.cpp
+    src/call/QtVideoCapture.cpp
+    src/call/VideoFrameCopy.cpp
 )
 target_include_directories(openchat_call PUBLIC src)
 target_link_libraries(openchat_call
@@ -543,6 +559,10 @@ target_include_directories(tst_onboardingcontroller PRIVATE src)
 target_link_libraries(tst_onboardingcontroller PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_onboardingcontroller COMMAND tst_onboardingcontroller)
 
+add_executable(tst_videocall tests/tst_videocall.cpp)
+target_link_libraries(tst_videocall PRIVATE openchat_call Qt6::Test)
+add_test(NAME tst_videocall COMMAND tst_videocall)
+
 # The voice-call test: pushes a real audio file (and synthesised references)
 # through the whole pipeline and checks what comes out the far end, plus the
 # malformed-input, loss, reordering, duplication, replay and tampering edges
@@ -596,6 +616,7 @@ add_executable(tst_qmlload
     src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
+    src/render/CallVideoItem.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE
@@ -631,6 +652,7 @@ function(add_openchat_capture_test test_name capture_width capture_height)
             -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/${test_name}.png
             -DCAPTURE_WIDTH=${capture_width}
             -DCAPTURE_HEIGHT=${capture_height}
+            -DCAPTURE_EXTRA_ARG=${ARGV3}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
     )
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 5)
@@ -639,6 +661,8 @@ endfunction()
 add_openchat_capture_test(capture_smoke 860 680)
 add_openchat_capture_test(capture_minimum 720 560)
 add_openchat_capture_test(capture_large 1024 768)
+add_openchat_capture_test(capture_video 900 680 --call-video)
+add_openchat_capture_test(capture_video_minimum 720 560 --call-video)
 
 # The add-contact preview sub-mode: renders the dialog over a populated mock
 # Requests list. Uses the same verify runner with the extra --add-contact argument.

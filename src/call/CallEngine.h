@@ -2,6 +2,7 @@
 
 #include "call/AudioIo.h"
 #include "call/CallSession.h"
+#include "call/CallVideoSession.h"
 #include "call/CallSounds.h"
 #include "call/CallSignal.h"
 #include "call/CallTransport.h"
@@ -110,6 +111,7 @@ public:
     void hangUp();
 
     void setMuted(bool muted);
+    void sendVideoFrame(const QImage &image);
 
     // Silences the call's own tones (ring, pick-up, hang-up, mute). The call
     // itself is unaffected; only the interface sounds stop.
@@ -128,6 +130,7 @@ signals:
     void stateChanged();
     void mutedChanged();
     void levelsChanged();
+    void remoteVideoFrame(const QImage &image);
     // A call arrived and is ringing. The UI raises the incoming-call surface.
     void incomingCall();
     // A call reached Ended. `reason` is also readable from endReason().
@@ -174,6 +177,8 @@ private:
     CallTransport &m_transport;
     CallAudioIoFactory m_audioIo;
 
+    std::unique_ptr<CallVideoSession> m_videoSession;
+    QTimer *m_videoTimeout = nullptr;
     CallState m_state = CallState::Idle;
     CallEndReason m_endReason = CallEndReason::None;
     CallDirection m_direction = CallDirection::Outgoing;

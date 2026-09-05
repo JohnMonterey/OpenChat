@@ -2,6 +2,7 @@
 
 #include "call/CallEngine.h"
 #include "call/CallTypes.h"
+#include "call/QtVideoCapture.h"
 
 #include <QObject>
 #include <QString>
@@ -32,6 +33,13 @@ class CallController final : public QObject
     //
     // True whenever a call occupies the conversation surface. This is what
     // replaces the conversation header with the call screen.
+    Q_PROPERTY(bool cameraEnabled READ cameraEnabled NOTIFY videoChanged)
+    Q_PROPERTY(bool remoteCameraEnabled READ remoteCameraEnabled NOTIFY videoChanged)
+    Q_PROPERTY(QImage localVideoFrame READ localVideoFrame NOTIFY localVideoChanged)
+    Q_PROPERTY(QImage remoteVideoFrame READ remoteVideoFrame NOTIFY remoteVideoChanged)
+    Q_PROPERTY(double localVideoAspect READ localVideoAspect NOTIFY videoChanged)
+    Q_PROPERTY(double remoteVideoAspect READ remoteVideoAspect NOTIFY videoChanged)
+    Q_PROPERTY(QString cameraError READ cameraError NOTIFY videoChanged)
     Q_PROPERTY(bool inCall READ inCall NOTIFY callChanged)
     Q_PROPERTY(bool isIncoming READ isIncoming NOTIFY callChanged)
     // True only while an incoming call is still waiting to be answered, i.e.
@@ -80,12 +88,30 @@ public:
 
     // Calls whoever is open in the conversation pane. No-op when nothing is
     // open, when the contact has no reachable device, or when a call is running.
-    Q_INVOKABLE void callCurrentContact();
+    Q_INVOKABLE void callCurrentContact(bool video = false);
     Q_INVOKABLE void callContact(const QString &contactId);
     Q_INVOKABLE void acceptCall();
     Q_INVOKABLE void declineCall();
     Q_INVOKABLE void hangUp();
     Q_INVOKABLE void toggleMute();
+    Q_INVOKABLE void toggleCamera();
+    bool cameraEnabled() const { return m_cameraEnabled; }
+    bool remoteCameraEnabled() const { return !m_remoteVideo.isNull(); }
+    QImage localVideoFrame() const { return m_localVideo; }
+    QImage remoteVideoFrame() const { return m_remoteVideo; }
+    double localVideoAspect() const
+    {
+        return m_localVideo.isNull() ? 4.0 / 3.0
+                                    : double(m_localVideo.width()) / m_localVideo.height();
+    }
+    double remoteVideoAspect() const
+    {
+        return m_remoteVideo.isNull() ? 4.0 / 3.0
+                                     : double(m_remoteVideo.width()) / m_remoteVideo.height();
+    }
+    QString cameraError() const { return m_cameraError; }
+    void setPreviewVideo(const QImage &local, const QImage &remote);
+
     Q_INVOKABLE void dismissCall();
 
     // How this user is shown on the call screen. Set from the profile in a live
@@ -105,6 +131,9 @@ public:
 
 signals:
     void callChanged();
+    void videoChanged();
+    void localVideoChanged();
+    void remoteVideoChanged();
     void levelsChanged();
     void durationChanged();
     // Raised when a call arrives, so the app can alert the user.
@@ -112,8 +141,15 @@ signals:
 
 private:
     void syncFromEngine();
+    void stopCamera();
+    void setRemoteVideo(const QImage &image);
     void syncLevels();
 
+    QtVideoCapture m_camera;
+    bool m_cameraEnabled = false;
+    QImage m_localVideo;
+    QImage m_remoteVideo;
+    QString m_cameraError;
     CallEngine *m_engine = nullptr;
     ChatController *m_chats = nullptr;
     QTimer *m_durationTimer = nullptr;

@@ -60,6 +60,7 @@ Item {
     Item {
         id: videoButton
         objectName: "videoCallButton"
+        opacity: phoneButton.callable || header.callController === null ? 1.0 : 0.4
         width: 40
         height: 42
         anchors.right: phoneButton.left
@@ -94,7 +95,12 @@ Item {
                 }
             }
         }
-        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            enabled: phoneButton.callable
+            onClicked: header.callController.callCurrentContact(true)
+        }
     }
 
     Item {

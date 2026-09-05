@@ -18,6 +18,8 @@ source_dir="$(cd "$(dirname "$0")/../.." && pwd)"
 rm -rf "$dist"
 mkdir -p "$dist/plugins" "$dist/qml"
 cp "$build_dir/OpenChat.exe" "$dist/"
+# The sysroot's DLLs arrive stripped; the freshly linked executable does not.
+x86_64-w64-mingw32-strip "$dist/OpenChat.exe"
 
 cat > "$dist/qt.conf" <<'CONF'
 [Paths]

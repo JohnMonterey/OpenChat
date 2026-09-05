@@ -5,6 +5,7 @@
 #include "security/DeviceIdentity.h"
 #include "security/RecoveryCode.h"
 
+#include <QByteArray>
 #include <QString>
 
 #include <functional>
@@ -84,6 +85,17 @@ public:
   [[nodiscard]] QString displayName() const;
   [[nodiscard]] Result<void, ProfileSessionError>
   setDisplayName(const QString &displayName);
+  // The self-published profile shown to contacts: chosen presence (a
+  // models/Contact.h Presence value, Available by default), status line and
+  // JPEG picture (empty when none). Each setter persists durably; presence is
+  // validated, the status line is trimmed and capped, and the picture is
+  // taken as-is (callers hand over the already-processed JPEG).
+  [[nodiscard]] int presence() const;
+  [[nodiscard]] QString statusText() const;
+  [[nodiscard]] QByteArray avatarJpeg() const;
+  [[nodiscard]] Result<void, ProfileSessionError> setPresence(int presence);
+  [[nodiscard]] Result<void, ProfileSessionError> setStatusText(const QString &statusText);
+  [[nodiscard]] Result<void, ProfileSessionError> setAvatarJpeg(const QByteArray &avatarJpeg);
   [[nodiscard]] Result<RecoveryCode, ProfileSessionError> takeRecoveryCode();
 
   // Durably commits any MLS ratchet state captured by an out-of-band mutation
@@ -151,6 +163,9 @@ private:
   std::unique_ptr<SyncEngine> m_syncEngine;
   std::optional<AccountId> m_accountId;
   QString m_displayName;
+  int m_presence = 0;
+  QString m_statusText;
+  QByteArray m_avatarJpeg;
   SecureBuffer m_databaseKey;
   SecureBuffer m_wrappingKey;
   std::unique_ptr<RecoveryCode> m_recoveryCode;

@@ -2,7 +2,12 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
+#include <QFile>
+#include <QImage>
 #include <QQuickItem>
+#include <QQuickWindow>
+#include <QTemporaryDir>
+#include <QUrl>
 #include <QWindow>
 #include <QtTest>
 #include <QQuickWindow>
@@ -31,6 +36,13 @@ QQuickItem *findVisualItem(QQuickItem *root, const QString &objectName)
             return match;
     }
     return nullptr;
+}
+
+// Types `text` (ASCII) into whatever has focus in `window`, one key at a time.
+void typeText(QWindow *window, const QString &text)
+{
+    for (const QChar character : text)
+        QTest::keyClick(window, character.toLatin1());
 }
 
 } // namespace
@@ -606,6 +618,137 @@ private slots:
         QCoreApplication::processEvents();
         QCOMPARE(controller.step(), OpenChat::OnboardingController::Step::Done);
         QCOMPARE(completedSpy.count(), 1);
+    }
+
+    void localProfileEditorsAreWiredToTheController()
+    {
+        OpenChat::ChatController controller;
+        controller.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        auto *window = qobject_cast<QQuickWindow *>(root);
+        QVERIFY(window);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        // Everything is present but dormant: no shades, no menu, no editor.
+        auto *avatarButton = findVisualItem(window->contentItem(), QStringLiteral("localAvatarButton"));
+        auto *avatarShade = findVisualItem(window->contentItem(), QStringLiteral("localAvatarHoverShade"));
+        auto *statusEditor = findVisualItem(window->contentItem(), QStringLiteral("localStatusEditor"));
+        auto *statusShade = findVisualItem(window->contentItem(), QStringLiteral("localStatusHoverShade"));
+        auto *statusText = findVisualItem(window->contentItem(), QStringLiteral("localStatusText"));
+        auto *statusInput = findVisualItem(window->contentItem(), QStringLiteral("localStatusInput"));
+        auto *presenceButton = findVisualItem(window->contentItem(), QStringLiteral("localPresenceButton"));
+        auto *presenceShade = findVisualItem(window->contentItem(), QStringLiteral("localPresenceHoverShade"));
+        auto *presenceMenu = findVisualItem(window->contentItem(), QStringLiteral("localPresenceMenu"));
+        auto *notice = findVisualItem(window->contentItem(), QStringLiteral("profileNotice"));
+        QVERIFY(avatarButton && avatarShade && statusEditor && statusShade && statusText
+                && statusInput && presenceButton && presenceShade && presenceMenu && notice);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("localAvatarFileDialog")));
+        QVERIFY(!avatarShade->isVisible());
+        QVERIFY(!statusShade->isVisible());
+        QVERIFY(!statusInput->isVisible());
+        QVERIFY(!presenceShade->isVisible());
+        QVERIFY(!presenceMenu->isVisible());
+        QVERIFY(!notice->isVisible());
+        QCOMPARE(statusText->property("text").toString(), QStringLiteral("Available"));
+
+        // Hovering the picture darkens it and shows the plus; hovering the
+        // status line tints the field; hovering the bead darkens it.
+        const auto centre = [](QQuickItem *item) {
+            return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+        };
+        QTest::mouseMove(window, centre(avatarButton));
+        QTRY_VERIFY(avatarShade->isVisible());
+        QTest::mouseMove(window, centre(statusEditor));
+        QTRY_VERIFY(statusShade->isVisible());
+        QTRY_VERIFY(!avatarShade->isVisible());
+        QTest::mouseMove(window, centre(presenceButton));
+        QTRY_VERIFY(presenceShade->isVisible());
+        QTRY_VERIFY(!statusShade->isVisible());
+
+        // Clicking the bead opens the picker with every presence; choosing one
+        // applies it, closes the picker, and the bead and line follow.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(presenceButton));
+        QTRY_VERIFY(presenceMenu->isVisible());
+        for (const int value : {0, 1, 2, 3}) {
+            QVERIFY2(findVisualItem(window->contentItem(),
+                                    QStringLiteral("presenceOption_%1").arg(value)),
+                     qPrintable(QStringLiteral("presence option %1").arg(value)));
+        }
+        auto *busy = findVisualItem(window->contentItem(), QStringLiteral("presenceOption_3"));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(busy));
+        QTRY_COMPARE(controller.localPresence(), 3);
+        QTRY_VERIFY(!presenceMenu->isVisible());
+        QCOMPARE(statusText->property("text").toString(), QStringLiteral("Busy"));
+        auto *sidebar = root->findChild<QObject *>(QStringLiteral("contactSidebar"));
+        QVERIFY(sidebar);
+        // Clicking away closes an open picker without choosing.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(presenceButton));
+        QTRY_VERIFY(presenceMenu->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, QPoint(window->width() - 40, window->height() - 40));
+        QTRY_VERIFY(!presenceMenu->isVisible());
+        QCOMPARE(controller.localPresence(), 3);
+
+        // Clicking the status line turns it into an editor holding the
+        // current text; Enter commits the new text to the controller.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(statusEditor));
+        QTRY_VERIFY(statusInput->isVisible());
+        QVERIFY(!statusText->isVisible());
+        QCOMPARE(statusInput->property("text").toString(), QStringLiteral("Busy"));
+        QVERIFY(statusInput->hasActiveFocus());
+        typeText(window, QStringLiteral("Heads down until 4"));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(controller.localStatusText(), QStringLiteral("Heads down until 4"));
+        QTRY_VERIFY(!statusInput->isVisible());
+        QCOMPARE(statusText->property("text").toString(), QStringLiteral("Heads down until 4"));
+
+        // Escape abandons an edit.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(statusEditor));
+        QTRY_VERIFY(statusInput->isVisible());
+        QCOMPARE(statusInput->property("text").toString(), QStringLiteral("Heads down until 4"));
+        typeText(window, QStringLiteral("nope"));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!statusInput->isVisible());
+        QCOMPARE(controller.localStatusText(), QStringLiteral("Heads down until 4"));
+
+        // Keeping the presence name as-is leaves the status unset.
+        controller.setLocalStatusText(QString());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(statusEditor));
+        QTRY_VERIFY(statusInput->isVisible());
+        QCOMPARE(statusInput->property("text").toString(), QStringLiteral("Busy"));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!statusInput->isVisible());
+        QVERIFY(controller.localStatusText().isEmpty());
+
+        // A refused picture surfaces its reason under the status line, and the
+        // sidebar avatar follows the controller's picture key.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString junk = dir.filePath(QStringLiteral("junk.png"));
+        {
+            QFile file(junk);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("not a picture");
+        }
+        QVERIFY(!controller.setLocalAvatarFromFile(QUrl::fromLocalFile(junk)));
+        QTRY_VERIFY(notice->isVisible());
+        controller.clearProfileNotice();
+        QTRY_VERIFY(!notice->isVisible());
+        QImage photo(80, 80, QImage::Format_RGB32);
+        photo.fill(QColor("#35618f"));
+        const QString good = dir.filePath(QStringLiteral("me.png"));
+        QVERIFY(photo.save(good, "PNG"));
+        QVERIFY(controller.setLocalAvatarFromFile(QUrl::fromLocalFile(good)));
+        auto *avatar = root->findChild<QObject *>(QStringLiteral("localUserAvatar"));
+        QVERIFY(avatar);
+        QTRY_COMPARE(avatar->property("avatarKey").toString(), controller.localAvatarKey());
+        QVERIFY(controller.localAvatarKey().startsWith(QStringLiteral("blob:")));
     }
 
     void unknownAvatarUsesNeutralFallback()

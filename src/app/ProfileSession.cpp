@@ -1,6 +1,8 @@
 #include "app/ProfileSession.h"
 
 #include "crypto/MlsClient.h"
+#include "domain/ProfileUpdate.h"
+#include "models/Contact.h"
 #include "network/MlsSyncSession.h"
 #include "network/SyncEngine.h"
 #include "repositories/ChatRepository.h"
@@ -242,6 +244,14 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         activated.error());
   session->m_displayName = std::move(storedDisplayName).value();
+  // The profile columns arrived with migration 012; a row that predates it
+  // reads back as the defaults, which is exactly an unset profile.
+  if (auto storedProfile = session->m_database->loadLocalProfile(profileId);
+      storedProfile.hasValue()) {
+    session->m_presence = storedProfile.value().presence;
+    session->m_statusText = storedProfile.value().statusText;
+    session->m_avatarJpeg = storedProfile.value().avatarJpeg;
+  }
   return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::success(
       std::move(session));
 }
@@ -315,6 +325,9 @@ void ProfileSession::lock() noexcept {
   m_identity.reset();
   m_accountId.reset();
   m_displayName.clear();
+  m_presence = 0;
+  m_statusText.clear();
+  m_avatarJpeg.clear();
   m_databaseKey = {};
   m_wrappingKey = {};
   m_recoveryCode.reset();
@@ -372,6 +385,55 @@ ProfileSession::setDisplayName(const QString &displayName) {
   if (!m_database->storeProfileDisplayName(m_profileId, normalized).hasValue())
     return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
   m_displayName = normalized;
+  return Result<void, ProfileSessionError>::success();
+}
+
+int ProfileSession::presence() const {
+  return m_unlocked ? m_presence : 0;
+}
+
+QString ProfileSession::statusText() const {
+  return m_unlocked ? m_statusText : QString();
+}
+
+QByteArray ProfileSession::avatarJpeg() const {
+  return m_unlocked ? m_avatarJpeg : QByteArray();
+}
+
+Result<void, ProfileSessionError> ProfileSession::setPresence(int presence) {
+  if (!m_unlocked || !m_database)
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::NotUnlocked);
+  if (!isSelectablePresence(presence))
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  const LocalProfileFields fields{presence, m_statusText, m_avatarJpeg};
+  if (!m_database->storeLocalProfile(m_profileId, fields).hasValue())
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  m_presence = presence;
+  return Result<void, ProfileSessionError>::success();
+}
+
+Result<void, ProfileSessionError>
+ProfileSession::setStatusText(const QString &statusText) {
+  if (!m_unlocked || !m_database)
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::NotUnlocked);
+  const QString normalized = statusText.trimmed().left(maxStatusTextLength);
+  const LocalProfileFields fields{m_presence, normalized, m_avatarJpeg};
+  if (!m_database->storeLocalProfile(m_profileId, fields).hasValue())
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  m_statusText = normalized;
+  return Result<void, ProfileSessionError>::success();
+}
+
+Result<void, ProfileSessionError>
+ProfileSession::setAvatarJpeg(const QByteArray &avatarJpeg) {
+  if (!m_unlocked || !m_database)
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::NotUnlocked);
+  if (avatarJpeg.size() > maxAvatarJpegBytes)
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  const LocalProfileFields fields{m_presence, m_statusText, avatarJpeg};
+  if (!m_database->storeLocalProfile(m_profileId, fields).hasValue())
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  m_avatarJpeg = avatarJpeg;
   return Result<void, ProfileSessionError>::success();
 }
 

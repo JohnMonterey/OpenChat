@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Dialogs
 import OpenChat
 import OpenChat.Native
 
@@ -39,11 +40,15 @@ Item {
         id: localUser
         width: parent.width
         height: 88
+        // Above the search field so a profile notice can overhang it.
+        z: 1
 
-        // Equal breathing room on both sides of the presence bead, matching the
-        // contact rows below. The name shares the bead's left edge so the text
-        // block under the avatar stays flush.
-        readonly property int beadSpacing: 14
+        // The text block starts one avatar-margin right of the avatar, the same
+        // gap the contact rows below use, so names and status lines line up.
+        readonly property int textLeft: localAvatar.x + localAvatar.width + 14
+        // The right edge the status field may grow to: clear of the add-contact
+        // "+" when it is shown, otherwise of the sidebar's own margin.
+        readonly property int statusRight: width - 48
 
         Avatar {
             id: localAvatar
@@ -52,32 +57,240 @@ Item {
             y: 22
             width: 44
             height: 44
-            avatarKey: "userpfp_none"
+            avatarKey: sidebar.controller.localAvatarKey
         }
+
+        // Hovering the picture darkens it and shows a "+"; clicking opens the
+        // platform file chooser for a new picture. Invisible until hovered, so
+        // the default rendering is untouched.
+        Item {
+            id: avatarChanger
+            objectName: "localAvatarButton"
+            anchors.fill: localAvatar
+            readonly property bool hovered: avatarMouse.containsMouse
+
+            Rectangle {
+                objectName: "localAvatarHoverShade"
+                anchors.fill: parent
+                radius: localAvatar.cornerRadius
+                color: "#66000000"
+                visible: avatarChanger.hovered
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 16
+                height: 3
+                radius: 1
+                color: "white"
+                visible: avatarChanger.hovered
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 3
+                height: 16
+                radius: 1
+                color: "white"
+                visible: avatarChanger.hovered
+            }
+
+            MouseArea {
+                id: avatarMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: avatarFileDialog.open()
+            }
+        }
+
+        // The native picker on every desktop (macOS/Windows/GTK or the portal
+        // on Linux, with Qt's own dialog as the fallback). The chosen file is
+        // scaled and compressed locally before anything is stored or sent.
+        FileDialog {
+            id: avatarFileDialog
+            objectName: "localAvatarFileDialog"
+            title: "Choose a profile picture"
+            fileMode: FileDialog.OpenFile
+            nameFilters: ["Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)",
+                          "All files (*)"]
+            onAccepted: sidebar.controller.setLocalAvatarFromFile(selectedFile)
+        }
+
         Text {
+            id: localName
             objectName: "localUserName"
-            x: localBead.x; y: 22
+            x: localUser.textLeft
+            y: 22
+            // Leaves room for the bead after the name; a long name elides.
+            width: Math.min(implicitWidth, localUser.statusRight - x - localBead.width - 8)
+            elide: Text.ElideRight
             text: sidebar.controller.localUserName
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 17
             renderType: Text.NativeRendering
         }
+
+        // The bead sits after the name, on its line, so the status line below
+        // can use the full width from the avatar's margin.
         PresenceBead {
             id: localBead
-            x: localAvatar.x + localAvatar.width + localUser.beadSpacing
-            y: 51
+            x: localName.x + localName.width + 8
+            anchors.verticalCenter: localName.verticalCenter
+            anchors.verticalCenterOffset: 1
             beadSize: 11
-            presence: sidebar.controller.localOnline ? 0 : 2
+            presence: sidebar.controller.localOnline ? sidebar.controller.localPresence : 2
         }
-        Text {
-            x: localBead.x + localBead.width + localUser.beadSpacing
-            y: 46
-            text: sidebar.controller.localOnline ? "Available" : "Offline"
-            color: Theme.textSecondary
-            font.family: Theme.uiFont
-            font.pixelSize: 14
-            renderType: Text.NativeRendering
+
+        // Hovering the bead darkens it; clicking opens the presence picker.
+        Item {
+            id: presenceButton
+            objectName: "localPresenceButton"
+            x: localBead.x - 3
+            y: localBead.y - 3
+            width: localBead.width + 6
+            height: localBead.height + 6
+
+            Rectangle {
+                objectName: "localPresenceHoverShade"
+                anchors.fill: parent
+                radius: width / 2
+                color: "#33000000"
+                visible: presenceMouse.containsMouse || presenceMenu.visible
+            }
+            MouseArea {
+                id: presenceMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: presenceMenu.visible = !presenceMenu.visible
+            }
+        }
+
+        // The status line: a hover tint marks it as a field; a click turns it
+        // into an editor holding the current text. Enter or leaving the field
+        // commits, Escape puts the old text back.
+        Item {
+            id: statusEditor
+            objectName: "localStatusEditor"
+            x: localUser.textLeft - 4
+            y: 43
+            width: Math.max(60, localUser.statusRight - x)
+            height: 22
+            property bool editing: false
+
+            function beginEditing() {
+                // Edit the custom text when there is one; otherwise start from
+                // the presence name so it can be replaced or kept as-is.
+                statusInput.text = sidebar.controller.localStatusText.length > 0
+                        ? sidebar.controller.localStatusText
+                        : sidebar.controller.localStatusLine;
+                editing = true;
+                statusInput.forceActiveFocus();
+                statusInput.selectAll();
+            }
+            function commit() {
+                if (!editing)
+                    return;
+                editing = false;
+                var text = statusInput.text.trim();
+                // Keeping the presence name as-is means "no custom status".
+                if (sidebar.controller.localStatusText.length === 0
+                        && text === sidebar.controller.localStatusLine)
+                    text = "";
+                sidebar.controller.setLocalStatusText(text);
+            }
+            function cancel() {
+                editing = false;
+            }
+
+            Rectangle {
+                objectName: "localStatusHoverShade"
+                anchors.fill: parent
+                radius: 3
+                color: statusEditor.editing ? "#ffffff" : "#14000000"
+                border.width: statusEditor.editing ? 1 : 0
+                border.color: Theme.inputBorder
+                visible: statusMouse.containsMouse || statusEditor.editing
+            }
+
+            Text {
+                id: statusLabel
+                objectName: "localStatusText"
+                x: 4
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - 8
+                elide: Text.ElideRight
+                visible: !statusEditor.editing
+                text: sidebar.controller.localStatusLine
+                color: Theme.textSecondary
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                renderType: Text.NativeRendering
+            }
+
+            TextInput {
+                id: statusInput
+                objectName: "localStatusInput"
+                x: 4
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - 8
+                visible: statusEditor.editing
+                clip: true
+                selectByMouse: true
+                maximumLength: 80
+                color: Theme.textPrimary
+                font.family: Theme.uiFont
+                font.pixelSize: 14
+                onAccepted: statusEditor.commit()
+                onActiveFocusChanged: {
+                    if (!activeFocus)
+                        statusEditor.commit();
+                }
+                Keys.onEscapePressed: statusEditor.cancel()
+            }
+
+            MouseArea {
+                id: statusMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                enabled: !statusEditor.editing
+                cursorShape: Qt.IBeamCursor
+                onClicked: statusEditor.beginEditing()
+            }
+        }
+
+        // Why a profile change was refused, shown in place of the status line
+        // for a few seconds. Collapsed and invisible while there is nothing.
+        Rectangle {
+            objectName: "profileNotice"
+            x: statusEditor.x
+            y: statusEditor.y + statusEditor.height + 2
+            width: localUser.width - x - 12
+            height: noticeText.implicitHeight + 6
+            radius: 3
+            color: "#fdf3d8"
+            border.width: 1
+            border.color: "#e2c98a"
+            visible: sidebar.controller.profileNotice.length > 0
+            z: 5
+
+            Text {
+                id: noticeText
+                x: 5
+                y: 3
+                width: parent.width - 10
+                wrapMode: Text.WordWrap
+                text: sidebar.controller.profileNotice
+                color: "#6b5a2b"
+                font.family: Theme.uiFont
+                font.pixelSize: 12
+                renderType: Text.NativeRendering
+            }
+            Timer {
+                running: sidebar.controller.profileNotice.length > 0
+                interval: 6000
+                onTriggered: sidebar.controller.clearProfileNotice()
+            }
         }
 
         // Primitive "+" affordance drawn from two crossed strokes, opening the
@@ -778,5 +991,100 @@ Item {
         }
 
         Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
+    }
+
+    // Click anywhere else in the window to close the presence picker. Both
+    // this catcher and the picker live on the window's content item, above
+    // the sidebar and the conversation pane alike, so "anywhere else" really
+    // is anywhere; their z keeps the picker above the catcher.
+    MouseArea {
+        parent: sidebar.Window.contentItem
+        anchors.fill: parent
+        visible: presenceMenu.visible
+        z: 19
+        onClicked: presenceMenu.visible = false
+    }
+
+    // The presence picker: every presence a user can choose, the current one
+    // highlighted. Opens under the status line, its beads lined up under the
+    // one after the name, and is drawn over everything.
+    Item {
+        id: presenceMenu
+        objectName: "localPresenceMenu"
+        parent: sidebar.Window.contentItem
+        visible: false
+        z: 20
+        x: sidebar.x + Math.min(localBead.x - 14, sidebar.width - width - 8)
+        y: sidebar.y + localUser.y + statusEditor.y + statusEditor.height + 4
+        width: 156
+        height: presenceColumn.height + 12
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 5
+            color: Theme.contentBackground
+            border.width: 1
+            border.color: Theme.inputBorder
+        }
+        // Aero inset along the top edge, matching the app's framed surfaces.
+        Rectangle { x: 6; y: 1; width: parent.width - 12; height: 1; color: "#70ffffff" }
+
+        Column {
+            id: presenceColumn
+            x: 6
+            y: 6
+            width: parent.width - 12
+
+            Repeater {
+                model: [
+                    { value: 0, label: "Available" },
+                    { value: 1, label: "Away" },
+                    { value: 3, label: "Busy" },
+                    { value: 2, label: "Appear offline" }
+                ]
+
+                Item {
+                    id: presenceOption
+                    required property var modelData
+                    objectName: "presenceOption_" + modelData.value
+                    width: presenceColumn.width
+                    height: 28
+                    readonly property bool current:
+                        sidebar.controller.localPresence === modelData.value
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 3
+                        color: optionMouse.containsMouse ? "#d4e8f3"
+                             : presenceOption.current ? "#e7f2f8" : "transparent"
+                    }
+                    PresenceBead {
+                        x: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        beadSize: 11
+                        presence: presenceOption.modelData.value
+                    }
+                    Text {
+                        x: 30
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: presenceOption.modelData.label
+                        color: Theme.textPrimary
+                        font.family: Theme.uiFont
+                        font.pixelSize: 14
+                        renderType: Text.NativeRendering
+                    }
+                    MouseArea {
+                        id: optionMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            sidebar.controller.setLocalPresence(presenceOption.modelData.value);
+                            presenceMenu.visible = false;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

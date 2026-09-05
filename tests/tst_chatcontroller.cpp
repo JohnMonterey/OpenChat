@@ -20,8 +20,16 @@
 #include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherDatabase.h"
 
+#include "domain/ProfileUpdate.h"
+#include "render/AvatarStore.h"
+
+#include <QBuffer>
 #include <QCryptographicHash>
+#include <QFile>
+#include <QImage>
+#include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QUrl>
 
 #include <memory>
 #include <optional>
@@ -185,8 +193,15 @@ struct LiveFixture final {
     // The peer sends `text` into the group and the relay delivers it to us.
     bool deliverFromPeer(const QString &text)
     {
+        return deliverFromPeer(OpenChat::EnvelopeMessageKind::MlsPrivateMessage, text.toUtf8());
+    }
+
+    // The peer sends a control message of `kind` (its plaintext `payload`
+    // encrypted under the group ratchet) and the relay delivers it to us.
+    bool deliverFromPeer(OpenChat::EnvelopeMessageKind kind, const QByteArray &payload)
+    {
         using namespace OpenChat;
-        auto ciphertext = peer->encrypt(conversation, text.toUtf8());
+        auto ciphertext = peer->encrypt(conversation, payload);
         if (!ciphertext.hasValue())
             return false;
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -197,7 +212,7 @@ struct LiveFixture final {
             peerDevice,
             DeviceId::generate(),
             conversation,
-            EnvelopeMessageKind::MlsPrivateMessage,
+            kind,
             now,
             now + 3'600'000,
             EnvelopeId::generate(),
@@ -214,6 +229,42 @@ struct LiveFixture final {
             session->lock();
     }
 };
+
+// Writes a small but real photo to `dir` and returns its path.
+QString writePhoto(const QTemporaryDir &dir, const QString &name, const QColor &colour)
+{
+    QImage image(120, 90, QImage::Format_RGB32);
+    image.fill(colour);
+    const QString path = dir.filePath(name);
+    if (!image.save(path, "PNG"))
+        return {};
+    return path;
+}
+
+// The last envelope of `kind` the fake transport saw, decrypted by the peer
+// and decoded as a profile.
+std::optional<OpenChat::ProfileUpdateMessage> lastProfileSentTo(LiveFixture &live)
+{
+    using namespace OpenChat;
+    for (auto it = live.transport->sent.crbegin(); it != live.transport->sent.crend(); ++it) {
+        if (it->messageKind != EnvelopeMessageKind::ProfileUpdate)
+            continue;
+        auto processed = live.peer->process(live.conversation, it->ciphertext);
+        if (!processed.hasValue())
+            return std::nullopt;
+        return decodeProfileUpdate(processed.value().applicationData);
+    }
+    return std::nullopt;
+}
+
+int countProfileUpdates(const LiveFixture &live)
+{
+    int count = 0;
+    for (const auto &envelope : live.transport->sent)
+        if (envelope.messageKind == OpenChat::EnvelopeMessageKind::ProfileUpdate)
+            ++count;
+    return count;
+}
 
 } // namespace
 
@@ -594,6 +645,221 @@ private slots:
         calls.acceptCall();
         QCOMPARE(engine.state(), CallState::Connecting);
         QCOMPARE(calls.peerName(), updated);
+    }
+
+    void mockProfileEditsUpdateTheSidebarWithoutServices()
+    {
+        ChatController controller;
+        QSignalSpy profileSpy(&controller, &ChatController::localProfileChanged);
+        QSignalSpy noticeSpy(&controller, &ChatController::profileNoticeChanged);
+
+        // Defaults: Available, no custom status, the neutral picture.
+        QCOMPARE(controller.localPresence(), 0);
+        QVERIFY(controller.localStatusText().isEmpty());
+        QCOMPARE(controller.localStatusLine(), QStringLiteral("Available"));
+        QCOMPARE(controller.localAvatarKey(), QStringLiteral("userpfp_none"));
+        QVERIFY(controller.profileNotice().isEmpty());
+
+        // The status line is trimmed, capped, and shown in place of the presence.
+        controller.setLocalStatusText(QStringLiteral("  Out for lunch  "));
+        QCOMPARE(controller.localStatusText(), QStringLiteral("Out for lunch"));
+        QCOMPARE(controller.localStatusLine(), QStringLiteral("Out for lunch"));
+        QCOMPARE(profileSpy.count(), 1);
+        controller.setLocalStatusText(QStringLiteral("Out for lunch"));
+        QCOMPARE(profileSpy.count(), 1); // unchanged: no signal
+        controller.setLocalStatusText(QString(500, QLatin1Char('z')));
+        QCOMPARE(controller.localStatusText().size(), OpenChat::maxStatusTextLength);
+        controller.setLocalStatusText(QString());
+        QCOMPARE(controller.localStatusLine(), QStringLiteral("Available"));
+
+        // Presence must be a real value; Offline means "appear offline".
+        controller.setLocalPresence(static_cast<int>(OpenChat::Presence::Busy));
+        QCOMPARE(controller.localPresence(), 3);
+        QCOMPARE(controller.localStatusLine(), QStringLiteral("Busy"));
+        controller.setLocalPresence(2);
+        QCOMPARE(controller.localStatusLine(), QStringLiteral("Offline"));
+        controller.setLocalPresence(99);
+        controller.setLocalPresence(-1);
+        QCOMPARE(controller.localPresence(), 2);
+
+        // A picture file is scaled into a content-keyed avatar; junk is refused
+        // with a notice the sidebar can show, and clears again on request.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString photo = writePhoto(dir, QStringLiteral("me.png"), QColor("#35618f"));
+        QVERIFY(!photo.isEmpty());
+        QVERIFY(controller.setLocalAvatarFromFile(QUrl::fromLocalFile(photo)));
+        QVERIFY(OpenChat::AvatarStore::isBlobKey(controller.localAvatarKey()));
+        QVERIFY(OpenChat::AvatarStore::instance().image(controller.localAvatarKey()).has_value());
+        QVERIFY(controller.profileNotice().isEmpty());
+        const QString firstKey = controller.localAvatarKey();
+
+        const QString junk = dir.filePath(QStringLiteral("junk.png"));
+        {
+            QFile file(junk);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("definitely not an image");
+        }
+        QVERIFY(!controller.setLocalAvatarFromFile(QUrl::fromLocalFile(junk)));
+        QVERIFY(!controller.profileNotice().isEmpty());
+        QCOMPARE(controller.localAvatarKey(), firstKey); // the old picture stays
+        QVERIFY(noticeSpy.count() >= 1);
+        controller.clearProfileNotice();
+        QVERIFY(controller.profileNotice().isEmpty());
+
+        // A different picture is a different key, so bindings refresh.
+        const QString other = writePhoto(dir, QStringLiteral("other.png"), QColor("#e0503d"));
+        QVERIFY(controller.setLocalAvatarFromFile(QUrl::fromLocalFile(other)));
+        QVERIFY(controller.localAvatarKey() != firstKey);
+
+        // The profile a contact would receive carries all three fields.
+        const OpenChat::ProfileUpdateMessage profile = controller.localProfile();
+        QCOMPARE(profile.presence, 2);
+        QVERIFY(profile.statusText.isEmpty());
+        QVERIFY(!profile.avatarJpeg.isEmpty());
+        QCOMPARE(OpenChat::AvatarStore::keyFor(profile.avatarJpeg), controller.localAvatarKey());
+    }
+
+    void liveProfileEditsArePublishedAndPersisted()
+    {
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        OpenChat::ContactRequestService requests(*live.session, *live.session->syncEngine());
+
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QCOMPARE(countProfileUpdates(live), 0);
+
+        // Each edit publishes the WHOLE profile to the contact as a
+        // ProfileUpdate the peer can decrypt, and nothing goes out as a
+        // visible message.
+        controller.setLocalStatusText(QStringLiteral("Shipping it"));
+        QCOMPARE(countProfileUpdates(live), 1);
+        QCOMPARE(live.transport->sent.size(), qsizetype(1));
+        QCOMPARE(live.transport->sent.last().recipientDeviceId.bytes(), live.peerDevice.bytes());
+        auto published = lastProfileSentTo(live);
+        QVERIFY(published.has_value());
+        QCOMPARE(published->statusText, QStringLiteral("Shipping it"));
+        QCOMPARE(published->presence, 0);
+        QVERIFY(published->avatarJpeg.isEmpty());
+        QCOMPARE(controller.messages()->rowCount(), 0);
+
+        controller.setLocalPresence(1);
+        QCOMPARE(countProfileUpdates(live), 2);
+        published = lastProfileSentTo(live);
+        QVERIFY(published.has_value());
+        QCOMPARE(published->presence, 1);
+        QCOMPARE(published->statusText, QStringLiteral("Shipping it"));
+
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString photo = writePhoto(dir, QStringLiteral("me.png"), QColor("#78acd3"));
+        QVERIFY(controller.setLocalAvatarFromFile(QUrl::fromLocalFile(photo)));
+        QCOMPARE(countProfileUpdates(live), 3);
+        published = lastProfileSentTo(live);
+        QVERIFY(published.has_value());
+        QVERIFY(!published->avatarJpeg.isEmpty());
+        QCOMPARE(OpenChat::AvatarStore::keyFor(published->avatarJpeg), controller.localAvatarKey());
+
+        // Everything is on the profile, so a fresh controller (a restart)
+        // comes back with the same picture, status and presence.
+        QCOMPARE(live.session->statusText(), QStringLiteral("Shipping it"));
+        QCOMPARE(live.session->presence(), 1);
+        ChatController reloaded;
+        reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QCOMPARE(reloaded.localStatusText(), QStringLiteral("Shipping it"));
+        QCOMPARE(reloaded.localPresence(), 1);
+        QCOMPARE(reloaded.localAvatarKey(), controller.localAvatarKey());
+        QCOMPARE(countProfileUpdates(live), 3); // loading is not a change: nothing sent
+    }
+
+    void newlyAcceptedContactIsIntroducedToTheProfile()
+    {
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        OpenChat::ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        controller.setLocalStatusText(QStringLiteral("Hello, new friend"));
+        QCOMPARE(countProfileUpdates(live), 0); // nobody to tell yet
+
+        // The moment a contact becomes a chat they get our current profile,
+        // even though nothing changed on our side.
+        QVERIFY(live.acceptPeer(QStringLiteral("carol")));
+        emit requests.contactAccepted(live.peerAccount);
+        QCOMPARE(countProfileUpdates(live), 1);
+        auto published = lastProfileSentTo(live);
+        QVERIFY(published.has_value());
+        QCOMPARE(published->statusText, QStringLiteral("Hello, new friend"));
+    }
+
+    void inboundProfileUpdateChangesTheContactRow()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QCOMPARE(controller.currentStatusText(), QStringLiteral("Offline"));
+        QCOMPARE(controller.currentAvatarKey(), QStringLiteral("userpfp_none"));
+
+        // Bob publishes a status, a presence and a picture.
+        QImage picture(64, 64, QImage::Format_RGB32);
+        picture.fill(QColor("#4e9f0f"));
+        QByteArray jpeg;
+        {
+            QBuffer buffer(&jpeg);
+            QVERIFY(buffer.open(QIODevice::WriteOnly));
+            QVERIFY(picture.save(&buffer, "JPEG", 80));
+        }
+        ProfileUpdateMessage theirs;
+        theirs.presence = static_cast<int>(Presence::Busy);
+        theirs.statusText = QStringLiteral("Deep in code");
+        theirs.avatarJpeg = jpeg;
+        QSignalSpy contactSpy(&controller, &ChatController::currentContactChanged);
+        QVERIFY(live.deliverFromPeer(EnvelopeMessageKind::ProfileUpdate,
+                                     encodeProfileUpdate(theirs)));
+
+        // The row shows their words and picture. Their chosen presence is
+        // remembered but only shown while their device is reachable, which
+        // without a relay it never is: the bead stays Offline.
+        QVERIFY(contactSpy.count() >= 1);
+        QCOMPARE(controller.currentStatusText(), QStringLiteral("Deep in code"));
+        QCOMPARE(controller.currentAvatarKey(), AvatarStore::keyFor(jpeg));
+        QVERIFY(AvatarStore::instance().image(controller.currentAvatarKey()).has_value());
+        QCOMPARE(controller.currentPresence(), static_cast<int>(Presence::Offline));
+        QCOMPARE(controller.messages()->rowCount(), 0); // not conversation
+        const QModelIndex row = controller.contacts()->index(0);
+        QCOMPARE(controller.contacts()->data(row, OpenChat::ContactListModel::StatusTextRole)
+                     .toString(),
+                 QStringLiteral("Deep in code"));
+
+        // It is durable: the roster row holds it, and a restart shows it again.
+        auto stored = live.session->contacts()->find(live.peerAccount);
+        QVERIFY(stored.hasValue() && stored.value().has_value());
+        QCOMPARE(stored.value()->presence, static_cast<int>(Presence::Busy));
+        QCOMPARE(stored.value()->statusText, QStringLiteral("Deep in code"));
+        QCOMPARE(stored.value()->avatarJpeg, jpeg);
+        ChatController reloaded;
+        reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QCOMPARE(reloaded.currentStatusText(), QStringLiteral("Deep in code"));
+        QCOMPARE(reloaded.currentAvatarKey(), AvatarStore::keyFor(jpeg));
+        // And the call screen would show that picture for them.
+        QCOMPARE(reloaded.callRouteFor(live.peerAccount.toHex())->avatarKey,
+                 AvatarStore::keyFor(jpeg));
+
+        // Clearing everything on their side clears it here.
+        QVERIFY(live.deliverFromPeer(EnvelopeMessageKind::ProfileUpdate,
+                                     encodeProfileUpdate(ProfileUpdateMessage{})));
+        QCOMPARE(controller.currentStatusText(), QStringLiteral("Offline"));
+        QCOMPARE(controller.currentAvatarKey(), QStringLiteral("userpfp_none"));
+
+        // Garbage is ignored, not applied.
+        QVERIFY(live.deliverFromPeer(EnvelopeMessageKind::ProfileUpdate, QByteArray("???")));
+        QCOMPARE(controller.currentStatusText(), QStringLiteral("Offline"));
     }
 
     void quarantineAndDeviceChangeWithholdPlaintext()

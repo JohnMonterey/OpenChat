@@ -5,6 +5,8 @@
 #include "app/ProfileSession.h"
 #include "domain/Contact.h"
 #include "network/SyncEngine.h"
+#include "render/AvatarStore.h"
+#include "render/ProfileImage.h"
 #include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 
@@ -176,6 +178,30 @@ QString ChatController::currentAvatarKey() const
     return contact ? contact->avatarKey : QStringLiteral("neutral");
 }
 
+int ChatController::currentPresence() const
+{
+    const auto contact = currentContact();
+    return static_cast<int>(contact ? contact->presence : Presence::Offline);
+}
+
+QString ChatController::localStatusLine() const
+{
+    if (!m_localStatusText.isEmpty())
+        return m_localStatusText;
+    if (!m_localOnline)
+        return presenceText(Presence::Offline);
+    return presenceText(static_cast<Presence>(m_localPresence));
+}
+
+ProfileUpdateMessage ChatController::localProfile() const
+{
+    ProfileUpdateMessage profile;
+    profile.presence = m_localPresence;
+    profile.statusText = m_localStatusText;
+    profile.avatarJpeg = m_localAvatarJpeg;
+    return profile;
+}
+
 QString ChatController::composerText() const
 {
     return m_composerText;
@@ -297,6 +323,72 @@ void ChatController::setLocalUserName(const QString &name)
         return;
     m_localUserName = normalized;
     emit localUserNameChanged();
+}
+
+void ChatController::setLocalStatusText(const QString &text)
+{
+    const QString normalized = text.trimmed().left(maxStatusTextLength);
+    if (m_localStatusText == normalized)
+        return;
+    if (m_session && !m_session->setStatusText(normalized).hasValue()) {
+        setProfileNotice(QStringLiteral("Your status could not be saved."));
+        return;
+    }
+    m_localStatusText = normalized;
+    emit localProfileChanged();
+    broadcastProfile();
+}
+
+void ChatController::setLocalPresence(int presence)
+{
+    if (!isSelectablePresence(presence) || m_localPresence == presence)
+        return;
+    if (m_session && !m_session->setPresence(presence).hasValue()) {
+        setProfileNotice(QStringLiteral("Your status could not be saved."));
+        return;
+    }
+    m_localPresence = presence;
+    emit localProfileChanged();
+    broadcastProfile();
+}
+
+bool ChatController::setLocalAvatarFromFile(const QUrl &file)
+{
+    const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+    const auto processed = processProfileImageFile(path);
+    if (!processed.hasValue()) {
+        setProfileNotice(profileImageErrorText(processed.error()));
+        return false;
+    }
+    const QByteArray jpeg = processed.value();
+    const QString key = AvatarStore::instance().registerJpeg(jpeg);
+    if (key.isEmpty()) {
+        setProfileNotice(profileImageErrorText(ProfileImageError::EncodeFailed));
+        return false;
+    }
+    if (m_session && !m_session->setAvatarJpeg(jpeg).hasValue()) {
+        setProfileNotice(QStringLiteral("Your picture could not be saved."));
+        return false;
+    }
+    m_localAvatarJpeg = jpeg;
+    m_localAvatarKey = key;
+    setProfileNotice({});
+    emit localProfileChanged();
+    broadcastProfile();
+    return true;
+}
+
+void ChatController::clearProfileNotice()
+{
+    setProfileNotice({});
+}
+
+void ChatController::setProfileNotice(const QString &notice)
+{
+    if (m_profileNotice == notice)
+        return;
+    m_profileNotice = notice;
+    emit profileNoticeChanged();
 }
 
 void ChatController::setComposerText(const QString &text)
@@ -455,10 +547,24 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
     connect(m_engine, &SyncEngine::messageReceived, this, &ChatController::onMessageReceived);
     connect(m_engine, &SyncEngine::messageStateChanged, this,
             &ChatController::onMessageStateChanged);
+    connect(m_engine, &SyncEngine::profileUpdateReceived, this,
+            &ChatController::onProfileUpdateReceived);
     if (m_requests != nullptr) {
         connect(m_requests, &ContactRequestService::contactAccepted, this,
                 &ChatController::onContactAccepted);
     }
+
+    // The profile as last saved. A picture that no longer decodes is dropped
+    // rather than shown broken.
+    m_localPresence = isSelectablePresence(m_session->presence()) ? m_session->presence() : 0;
+    m_localStatusText = m_session->statusText();
+    m_localAvatarJpeg = m_session->avatarJpeg();
+    m_localAvatarKey = AvatarStore::instance().registerJpeg(m_localAvatarJpeg);
+    if (m_localAvatarKey.isEmpty()) {
+        m_localAvatarJpeg.clear();
+        m_localAvatarKey = QStringLiteral("userpfp_none");
+    }
+    emit localProfileChanged();
 
     loadRoster();
     emit chatUnreadCountChanged();
@@ -491,6 +597,7 @@ void ChatController::refreshPresence()
     if (m_localOnline != online) {
         m_localOnline = online;
         emit localOnlineChanged();
+        emit localProfileChanged(); // the status line follows the link
     }
     QList<DeviceId> devices;
     const auto now = QDateTime::currentMSecsSinceEpoch();
@@ -514,8 +621,7 @@ void ChatController::setDevicePresence(const DeviceId &device, bool online)
             m_onlineDevices.insert(device.bytes(), QDateTime::currentMSecsSinceEpoch());
         else
             m_onlineDevices.remove(device.bytes());
-        m_contacts.setPresence(chat.account.toHex(), m_onlineDevices.contains(device.bytes())
-            ? Presence::Available : Presence::Offline);
+        m_contacts.setPresence(chat.account.toHex(), displayedPresence(chat));
         if (chat.account.toHex() == m_currentContactId)
             emit currentContactChanged();
     }
@@ -543,8 +649,13 @@ void ChatController::loadRoster()
         int unread = 0;
         if (const auto existing = m_liveChats.constFind(id); existing != m_liveChats.cend())
             unread = existing->unread;
-        const LiveChat chat{record.accountId, *record.conversationId, record.peerDeviceId,
-                            record.handle, unread};
+        LiveChat chat{record.accountId, *record.conversationId, record.peerDeviceId,
+                      record.handle, unread};
+        chat.presence = isSelectablePresence(record.presence) ? record.presence : 0;
+        chat.statusText = record.statusText;
+        chat.avatarKey = AvatarStore::instance().registerJpeg(record.avatarJpeg);
+        if (chat.avatarKey.isEmpty())
+            chat.avatarKey = QStringLiteral("userpfp_none");
         chats.insert(id, chat);
         byConversation.insert(record.conversationId->bytes(), id);
         rows.append(contactRowFor(chat));
@@ -592,11 +703,10 @@ ChatController::callRouteFor(const ConversationId &conversation, const DeviceId 
     return route;
 }
 
-QString ChatController::localAvatarKey() const
+Presence ChatController::displayedPresence(const LiveChat &chat) const
 {
-    // The local user has no stored avatar yet, so the call screen shows the same
-    // neutral artwork the rest of the interface uses for an unset picture.
-    return QStringLiteral("userpfp_none");
+    const bool reachable = chat.peerDevice && m_onlineDevices.contains(chat.peerDevice->bytes());
+    return reachable ? static_cast<Presence>(chat.presence) : Presence::Offline;
 }
 
 Contact ChatController::contactRowFor(const LiveChat &chat) const
@@ -604,11 +714,58 @@ Contact ChatController::contactRowFor(const LiveChat &chat) const
     Contact row;
     row.id = chat.account.toHex();
     row.name = chat.handle.isEmpty() ? shortIdLabel(chat.account) : chat.handle;
-    row.presence = chat.peerDevice && m_onlineDevices.contains(chat.peerDevice->bytes())
-        ? Presence::Available : Presence::Offline;
+    row.presence = displayedPresence(chat);
     row.favorite = false;
-    row.avatarKey = QStringLiteral("userpfp_none");
+    row.avatarKey = chat.avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : chat.avatarKey;
+    row.statusText = chat.statusText;
     return row;
+}
+
+void ChatController::sendProfileTo(const LiveChat &chat)
+{
+    if (m_engine == nullptr || !chat.peerDevice)
+        return;
+    m_engine->sendProfileUpdate(chat.conversation, *chat.peerDevice,
+                                encodeProfileUpdate(localProfile()));
+}
+
+void ChatController::broadcastProfile()
+{
+    if (!m_live)
+        return;
+    for (const LiveChat &chat : m_liveChats)
+        sendProfileTo(chat);
+}
+
+void ChatController::onProfileUpdateReceived(const ConversationId &conversation,
+                                             const DeviceId &senderDevice,
+                                             const QByteArray &payload)
+{
+    (void)senderDevice; // the engine already bound the plaintext to the MLS credential
+    QString contactId = contactForConversation(conversation);
+    if (contactId.isEmpty()) {
+        // A profile can arrive before we learn of the acceptance that created
+        // the chat, exactly like a first message; re-read the roster first.
+        loadRoster();
+        contactId = contactForConversation(conversation);
+        if (contactId.isEmpty())
+            return;
+    }
+    const auto profile = decodeProfileUpdate(payload);
+    if (!profile || m_session == nullptr)
+        return;
+    const auto chat = m_liveChats.constFind(contactId);
+    if (chat == m_liveChats.cend())
+        return;
+    SqlCipherContactRepository *contacts = m_session->contacts();
+    if (contacts == nullptr
+        || !contacts
+                ->setProfile(chat->account, profile->presence, profile->statusText,
+                             profile->avatarJpeg, QDateTime::currentMSecsSinceEpoch())
+                .hasValue())
+        return;
+    // The row, the header and any ringing call screen all read the roster.
+    loadRoster();
 }
 
 QVector<Message> ChatController::loadHistory(const ConversationId &conversation) const
@@ -708,11 +865,13 @@ void ChatController::onMessageStateChanged(const MessageId &messageId, DeliveryS
 
 void ChatController::onContactAccepted(const AccountId &account)
 {
-    (void)account;
     // Either side of a request completed: the roster now has a new Accepted row
     // with a conversation. Re-read it so the chat appears (and opens if nothing
-    // else is open).
+    // else is open), then introduce ourselves: the new contact has never seen
+    // our picture or status.
     loadRoster();
+    if (const auto chat = m_liveChats.constFind(account.toHex()); chat != m_liveChats.cend())
+        sendProfileTo(*chat);
 }
 
 void ChatController::refreshContact(const QString &accountHex)

@@ -243,6 +243,9 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
     connect(chats, &ChatController::localUserNameChanged, this, [this] {
         setLocalIdentity(m_chats->localUserName(), m_chats->localAvatarKey());
     });
+    connect(chats, &ChatController::localProfileChanged, this, [this] {
+        setLocalIdentity(m_chats->localUserName(), m_chats->localAvatarKey());
+    });
     syncFromEngine();
 }
 

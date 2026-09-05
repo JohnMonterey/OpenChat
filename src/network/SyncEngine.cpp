@@ -266,6 +266,33 @@ public:
         drainOutbox();
     }
 
+    void doSendProfileUpdate(const ConversationId &conversation, const DeviceId &recipient,
+                             const QByteArray &payload)
+    {
+        if (failed)
+            return;
+        const auto ciphertext = mls.encrypt(conversation, payload);
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        const auto envelope = buildEnvelope(conversation, recipient, ciphertext.value(),
+                                            EnvelopeMessageKind::ProfileUpdate);
+        if (!envelope) {
+            failClosed();
+            return;
+        }
+        // No visible message row: a profile change is not conversation.
+        const OutboxRecord outbox = makeOutbox(envelope->envelopeId, MessageId::generate(),
+                                               conversation, encodeCanonical(*envelope));
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitControlSend(outbox, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        drainOutbox();
+    }
+
     void doSendCallMedia(const ConversationId &conversation, const DeviceId &recipient,
                          const QByteArray &payload)
     {
@@ -404,6 +431,10 @@ public:
                 else if (envelope.messageKind == EnvelopeMessageKind::CallSignal)
                     emit q->callSignalReceived(envelope.conversationId, envelope.senderDeviceId,
                                                processed.value().applicationData);
+                else if (envelope.messageKind == EnvelopeMessageKind::ProfileUpdate)
+                    emit q->profileUpdateReceived(envelope.conversationId,
+                                                  envelope.senderDeviceId,
+                                                  processed.value().applicationData);
                 return;
             }
 
@@ -625,6 +656,14 @@ void SyncEngine::sendCallSignal(const ConversationId &conversation,
 {
     d->coordinator.run(conversation, [this, conversation, recipientDevice, payload] {
         d->doSendCallSignal(conversation, recipientDevice, payload);
+    });
+}
+
+void SyncEngine::sendProfileUpdate(const ConversationId &conversation,
+                                   const DeviceId &recipientDevice, const QByteArray &payload)
+{
+    d->coordinator.run(conversation, [this, conversation, recipientDevice, payload] {
+        d->doSendProfileUpdate(conversation, recipientDevice, payload);
     });
 }
 

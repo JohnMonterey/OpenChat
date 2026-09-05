@@ -1,5 +1,7 @@
 #include "storage/SqlCipherContactRepository.h"
 
+#include "models/Contact.h"
+
 #include "storage/RepositorySql.h"
 #include "storage/SqlCipherDatabase.h"
 
@@ -176,10 +178,18 @@ Result<ContactRecord, RepositoryError> decodeContact(sqlite3_stmt *statement)
                                                      QStringLiteral("contact.decode.peerdevice")));
         peerDeviceId = *device;
     }
-    return Ret::success(ContactRecord{*accountId, handle, displayName, *state, conversationId,
-                                      sqlite3_column_int64(statement, 5),
-                                      sqlite3_column_int64(statement, 6), std::move(peerSigningKey),
-                                      verified, peerDeviceId});
+    ContactRecord record{*accountId, handle, displayName, *state, conversationId,
+                         sqlite3_column_int64(statement, 5),
+                         sqlite3_column_int64(statement, 6), std::move(peerSigningKey),
+                         verified, peerDeviceId};
+    record.presence = sqlite3_column_int(statement, 10);
+    if (!isSelectablePresence(record.presence))
+        return Ret::failure(RepositorySql::error(RepositoryErrorCode::IntegrityFailure,
+                                                 QStringLiteral("contact.decode.presence")));
+    record.statusText = RepositorySql::text(statement, 11);
+    if (sqlite3_column_type(statement, 12) != SQLITE_NULL)
+        record.avatarJpeg = RepositorySql::blob(statement, 12);
+    return Ret::success(std::move(record));
 }
 
 } // namespace
@@ -196,7 +206,7 @@ Result<QVector<ContactRecord>, RepositoryError> SqlCipherContactRepository::cont
         Statement statement(database,
                             "SELECT account_id, handle, display_name, state, conversation_id, "
                             "created_at_ms, updated_at_ms, peer_signing_key, verified, "
-                            "peer_device_id FROM contacts "
+                            "peer_device_id, presence, status_text, avatar_jpeg FROM contacts "
                             "ORDER BY created_at_ms ASC, account_id ASC");
         if (!statement.isValid())
             return Ret::failure(internalError(QStringLiteral("contact.list.prepare")));
@@ -222,7 +232,7 @@ SqlCipherContactRepository::find(const AccountId &accountId)
         Statement statement(database,
                             "SELECT account_id, handle, display_name, state, conversation_id, "
                             "created_at_ms, updated_at_ms, peer_signing_key, verified, "
-                            "peer_device_id FROM contacts "
+                            "peer_device_id, presence, status_text, avatar_jpeg FROM contacts "
                             "WHERE account_id=?1");
         if (!statement.isValid() || !statement.bindBlob(1, accountId.bytes()))
             return Ret::failure(internalError(QStringLiteral("contact.find.prepare")));
@@ -436,6 +446,34 @@ SqlCipherContactRepository::setHandle(const AccountId &accountId, const QString 
         if (sqlite3_changes(database) == 0)
             return failVoid(RepositorySql::error(RepositoryErrorCode::NotFound,
                                                  QStringLiteral("contact.handle.missing")));
+        return okVoid();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherContactRepository::setProfile(const AccountId &accountId, int presence,
+                                       const QString &statusText, QByteArrayView avatarJpeg,
+                                       qint64 updatedAtMs)
+{
+    if (!isSelectablePresence(presence))
+        return failVoid(RepositorySql::error(RepositoryErrorCode::InvalidInput,
+                                             QStringLiteral("contact.profile.presence")));
+    return m_database.withConnection([&](sqlite3 *database) {
+        const auto existing = readContactState(database, accountId);
+        if (!existing.queryOk)
+            return failVoid(internalError(QStringLiteral("contact.profile.read")));
+        if (!existing.found)
+            return failVoid(RepositorySql::error(RepositoryErrorCode::NotFound,
+                                                 QStringLiteral("contact.profile.missing")));
+        Statement statement(database,
+                            "UPDATE contacts SET presence=?2, status_text=?3, avatar_jpeg=?4, "
+                            "updated_at_ms=?5 WHERE account_id=?1");
+        if (!statement.isValid() || !statement.bindBlob(1, accountId.bytes())
+            || !statement.bindInt(2, presence) || !statement.bindText(3, statusText)
+            || !(avatarJpeg.isEmpty() ? statement.bindNull(4) : statement.bindBlob(4, avatarJpeg))
+            || !statement.bindInt64(5, updatedAtMs)
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return failVoid(internalError(QStringLiteral("contact.profile.update")));
         return okVoid();
     });
 }

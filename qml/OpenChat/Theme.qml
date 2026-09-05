@@ -23,4 +23,17 @@ QtObject {
     readonly property color iconInk: "#425570"
     readonly property color accentBlue: "#78acd3"
     readonly property color inputBorder: "#b8c7d5"
+
+    // Affirmative / destructive actions on contact requests. Each carries the
+    // presence bead's Aero treatment: a three-stop vertical gradient under a gloss
+    // highlight, bounded by a darker rim. Softened off the pure hues so the pair
+    // sits with the sidebar rather than shouting over it.
+    readonly property color acceptTop: "#a9dd7b"
+    readonly property color acceptMid: "#7cc848"
+    readonly property color acceptBottom: "#61ac2e"
+    readonly property color acceptBorder: "#58992b"
+    readonly property color declineTop: "#efa79d"
+    readonly property color declineMid: "#db7264"
+    readonly property color declineBottom: "#c65a4c"
+    readonly property color declineBorder: "#b04c40"
 }

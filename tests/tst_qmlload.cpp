@@ -39,7 +39,7 @@ private slots:
     void requiredStructure()
     {
         OpenChat::ChatController controller;
-        controller.setLocalUserName(QStringLiteral("Ada Lovelace"));
+        controller.setLocalUserName(QStringLiteral("Developer"));
         QQmlApplicationEngine engine;
         engine.setInitialProperties(
             {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
@@ -63,7 +63,7 @@ private slots:
         QObject *localUserName =
             root->findChild<QObject *>(QStringLiteral("localUserName"));
         QVERIFY(localUserName);
-        QCOMPARE(localUserName->property("text").toString(), QStringLiteral("Ada Lovelace"));
+        QCOMPARE(localUserName->property("text").toString(), QStringLiteral("Developer"));
 
         window->setHeight(560);
         QCoreApplication::processEvents();
@@ -657,8 +657,8 @@ private slots:
         QVERIFY(!favoritesCategory->property("visible").toBool());
         QVERIFY(addContactButton->property("visible").toBool());
 
-        // The seeded request's delegate is keyed by its requestId hex, and each of
-        // its accept / decline / block buttons targets that same id.
+        // The seeded request's delegate is keyed by its requestId hex, and both of
+        // its accept / decline buttons target that same id.
         OpenChat::RequestListModel *model = contactController.requests();
         QVERIFY(model);
         QCOMPARE(model->count(), 1);
@@ -672,7 +672,6 @@ private slots:
         QVERIFY(findVisualItem(panelItem, QStringLiteral("requestRow_") + requestId));
         QVERIFY(findVisualItem(panelItem, QStringLiteral("requestAccept_") + requestId));
         QVERIFY(findVisualItem(panelItem, QStringLiteral("requestDecline_") + requestId));
-        QVERIFY(findVisualItem(panelItem, QStringLiteral("requestBlock_") + requestId));
 
         // The dialog is present but hidden until the controller opens it.
         QObject *dialog = root->findChild<QObject *>(QStringLiteral("addContactDialog"));

@@ -11,6 +11,8 @@ Item {
     required property bool selected
     required property string avatarKey
     readonly property bool compact: height < 55
+    // Equal breathing room on both sides of the presence bead.
+    readonly property int beadSpacing: 14
     signal activated(string contactId)
 
     implicitHeight: 60
@@ -37,14 +39,15 @@ Item {
     }
 
     PresenceBead {
-        x: avatarImage.x + avatarImage.width + 10
+        id: presenceBead
+        x: avatarImage.x + avatarImage.width + row.beadSpacing
         anchors.verticalCenter: parent.verticalCenter
         beadSize: 12
         presence: row.presence
     }
 
     Text {
-        x: 84
+        x: presenceBead.x + presenceBead.width + row.beadSpacing
         y: row.compact ? 3 : 11
         text: row.name
         color: Theme.textPrimary
@@ -54,7 +57,7 @@ Item {
     }
 
     Text {
-        x: 84
+        x: presenceBead.x + presenceBead.width + row.beadSpacing
         y: row.compact ? 26 : 34
         text: row.statusText
         color: Theme.textSecondary

@@ -40,7 +40,13 @@ Item {
         width: parent.width
         height: 88
 
+        // Equal breathing room on both sides of the presence bead, matching the
+        // contact rows below. The name shares the bead's left edge so the text
+        // block under the avatar stays flush.
+        readonly property int beadSpacing: 14
+
         Avatar {
+            id: localAvatar
             objectName: "localUserAvatar"
             x: 13
             y: 22
@@ -50,16 +56,23 @@ Item {
         }
         Text {
             objectName: "localUserName"
-            x: 67; y: 22
+            x: localBead.x; y: 22
             text: sidebar.controller.localUserName
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 17
             renderType: Text.NativeRendering
         }
-        PresenceBead { x: 67; y: 51; beadSize: 11; presence: 0 }
+        PresenceBead {
+            id: localBead
+            x: localAvatar.x + localAvatar.width + localUser.beadSpacing
+            y: 51
+            beadSize: 11
+            presence: 0
+        }
         Text {
-            x: 84; y: 46
+            x: localBead.x + localBead.width + localUser.beadSpacing
+            y: 46
             text: "Available"
             color: Theme.textSecondary
             font.family: Theme.uiFont

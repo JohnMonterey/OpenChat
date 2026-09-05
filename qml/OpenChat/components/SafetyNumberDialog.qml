@@ -149,7 +149,11 @@ Item {
                         color: "#2b3b53"
                         font.family: "Courier New"
                         font.pixelSize: 17
-                        wrapMode: TextEdit.WrapAnywhere
+                        // WordWrap, not WrapAnywhere: the number arrives as
+                        // space-joined 5-digit groups, and breaking mid-group makes
+                        // it far easier to misread aloud when comparing with a
+                        // contact. Every group is short enough to always fit.
+                        wrapMode: TextEdit.WordWrap
                         renderType: Text.NativeRendering
                     }
 

@@ -597,10 +597,12 @@ int runContactWindow(QGuiApplication &application, QCommandLineParser &parser,
     OpenChat::ChatController chatController;
     OpenChat::ContactController contactController;
     contactController.enableForPreview();
-    contactController.addMockRequest(QStringLiteral("New contact request"),
-                                     QStringLiteral("ID a1b2c3d4e5"));
-    contactController.addMockRequest(QStringLiteral("New contact request"),
-                                     QStringLiteral("ID a1b2c3d4e5"));
+    // Seeded the way a resolved request renders: the sender's handle as the
+    // title, not the account-id fallback shown while a handle is still unknown.
+    contactController.addMockRequest(QStringLiteral("@ada"),
+                                     QStringLiteral("wants to chat with you"));
+    contactController.addMockRequest(QStringLiteral("@grace"),
+                                     QStringLiteral("wants to chat with you"));
     contactController.setMockInvite(QStringLiteral("OPENCHAT-INV-9F3K-77QX-2M8D-4T1P"));
     // Preview the Search & Find row too: a seeded directory handle typed into the
     // search resolves as Found with the send-request affordance.

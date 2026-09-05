@@ -15,9 +15,19 @@ QT_END_NAMESPACE
 
 namespace OpenChat {
 
-// The QAudioFormat matching CallAudioFormat exactly. Kept in one place so the
-// capture and playback devices cannot be opened with formats that disagree.
+// The QAudioFormat matching CallAudioFormat exactly: what the microphone is
+// opened with, and the shape of every frame inside the call.
 [[nodiscard]] QAudioFormat callQAudioFormat();
+
+// The format the speaker is opened with: the call format widened to stereo.
+// A mono output stream lands on the left channel alone on common backends, so
+// playback duplicates each call sample into both channels on the way out.
+[[nodiscard]] QAudioFormat callPlaybackQAudioFormat();
+
+// Bytes in one 20 ms frame of playback-format audio.
+inline constexpr int playbackChannels = 2;
+inline constexpr int playbackBytesPerFrame = CallAudioFormat::samplesPerFrame
+    * CallAudioFormat::bytesPerSample * playbackChannels;
 
 // True when this machine has both a usable default input and a usable default
 // output for the call format. Checked before a call is offered so "you have no

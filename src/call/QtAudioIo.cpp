@@ -20,13 +20,19 @@ QAudioFormat callQAudioFormat()
     return format;
 }
 
+QAudioFormat callPlaybackQAudioFormat()
+{
+    QAudioFormat format = callQAudioFormat();
+    format.setChannelCount(playbackChannels);
+    return format;
+}
+
 bool hasUsableCallAudioDevices()
 {
-    const QAudioFormat format = callQAudioFormat();
     const QAudioDevice input = QMediaDevices::defaultAudioInput();
     const QAudioDevice output = QMediaDevices::defaultAudioOutput();
-    return !input.isNull() && !output.isNull() && input.isFormatSupported(format)
-        && output.isFormatSupported(format);
+    return !input.isNull() && !output.isNull() && input.isFormatSupported(callQAudioFormat())
+        && output.isFormatSupported(callPlaybackQAudioFormat());
 }
 
 // Accumulates whatever byte counts the audio backend hands over and emits
@@ -113,6 +119,9 @@ void QtAudioCaptureSource::stop()
 // underrun; asking the call for more than one frame per read would drain the
 // jitter buffer faster than real time.
 //
+// The call hands over mono frames; the sink is stereo (see
+// callPlaybackQAudioFormat), so each sample is written to both channels here.
+//
 // Unlike capture this CANNOT hop threads: the backend wants the bytes now. The
 // call session it pulls from is internally synchronised for exactly this reason.
 class QtAudioPlaybackSink::FramePump final : public QIODevice
@@ -133,7 +142,7 @@ protected:
             if (m_pending.isEmpty()) {
                 if (!m_owner.pullFrame)
                     break;
-                m_pending = m_owner.pullFrame();
+                m_pending = upmixToStereo(m_owner.pullFrame());
                 if (m_pending.isEmpty())
                     break;
             }
@@ -155,10 +164,27 @@ protected:
     // something to play (silence at worst), so it is never empty.
     [[nodiscard]] qint64 bytesAvailable() const override
     {
-        return CallAudioFormat::bytesPerFrame + QIODevice::bytesAvailable();
+        return playbackBytesPerFrame + QIODevice::bytesAvailable();
     }
 
 private:
+    // Interleaves a mono S16LE frame as L R L R ..., the same sample in both.
+    [[nodiscard]] static QByteArray upmixToStereo(const AudioFrame &mono)
+    {
+        constexpr int bytesPerSample = CallAudioFormat::bytesPerSample;
+        const qsizetype samples = mono.size() / bytesPerSample;
+        QByteArray stereo(samples * bytesPerSample * playbackChannels, Qt::Uninitialized);
+        const char *in = mono.constData();
+        char *out = stereo.data();
+        for (qsizetype i = 0; i < samples; ++i) {
+            std::memcpy(out, in, bytesPerSample);
+            std::memcpy(out + bytesPerSample, in, bytesPerSample);
+            in += bytesPerSample;
+            out += bytesPerSample * playbackChannels;
+        }
+        return stereo;
+    }
+
     QtAudioPlaybackSink &m_owner;
     QByteArray m_pending;
 };
@@ -178,7 +204,7 @@ bool QtAudioPlaybackSink::start()
     const QAudioDevice device = QMediaDevices::defaultAudioOutput();
     if (device.isNull())
         return false;
-    m_sink = std::make_unique<QAudioSink>(device, callQAudioFormat());
+    m_sink = std::make_unique<QAudioSink>(device, callPlaybackQAudioFormat());
     m_pump = std::make_unique<FramePump>(*this);
     if (!m_pump->open(QIODevice::ReadOnly))
         return false;

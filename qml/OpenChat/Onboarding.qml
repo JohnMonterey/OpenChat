@@ -95,7 +95,6 @@ Item {
     component OnboardingButton : Item {
         id: button
         property string label: ""
-        property bool enabled: true
         signal clicked
         height: 44
 
@@ -118,7 +117,6 @@ Item {
         MouseArea {
             id: buttonMouse
             anchors.fill: parent
-            enabled: button.enabled
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: button.clicked()

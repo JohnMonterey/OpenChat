@@ -139,7 +139,7 @@ Item {
     Item {
         id: send
         objectName: "sendButton"
-        property bool enabled: composer.controller.canSend
+        enabled: composer.controller.canSend
         signal clicked
         x: inputFrame.x + inputFrame.width + 17
         y: Math.round((parent.height - height) / 2)
@@ -164,7 +164,6 @@ Item {
         MouseArea {
             id: sendMouse
             anchors.fill: parent
-            enabled: send.enabled
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: send.clicked()

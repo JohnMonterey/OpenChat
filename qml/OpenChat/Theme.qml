@@ -3,7 +3,12 @@ pragma Singleton
 import QtQuick
 
 QtObject {
-    readonly property string uiFont: "Segoe UI"
+    // Segoe UI is the Aero skin's native face, but it only ships on Windows.
+    // Ask the font database once rather than letting every Text miss and pay for
+    // the alias-population walk, and fall back to the platform's own UI font.
+    readonly property string uiFont: Qt.fontFamilies().indexOf("Segoe UI") >= 0
+                                         ? "Segoe UI"
+                                         : Application.font.family
 
     readonly property int sidebarWidth: 268
     readonly property int conversationHeaderHeight: 111

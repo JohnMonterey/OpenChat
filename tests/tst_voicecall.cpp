@@ -568,7 +568,7 @@ private slots:
         // padding wrong and the data chunk is never found.
         WavBuilder builder;
         builder.extraChunkId = "LIST";
-        builder.extraChunkBody = QByteArray("INFOIART\x05\x00\x00\x00Ada\0", 21);
+        builder.extraChunkBody = QByteArray("INFOIART\x05\x00\x00\x00" "Adam\0", 17);
         builder.data = QByteArray::fromHex("0100feff0300");
         auto decoded = WavFile::decode(builder.build());
         QVERIFY(decoded.hasValue());

@@ -513,11 +513,13 @@ add_test(NAME tst_models COMMAND tst_models)
 add_executable(tst_chatcontroller
     tests/tst_chatcontroller.cpp
     src/controllers/ChatController.cpp
+    src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
 )
 target_include_directories(tst_chatcontroller PRIVATE src tests)
 target_link_libraries(tst_chatcontroller PRIVATE
+    openchat_call
     openchat_app
     openchat_network
     openchat_crypto

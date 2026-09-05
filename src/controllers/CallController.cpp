@@ -171,6 +171,8 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
     connect(engine, &CallEngine::mutedChanged, this, &CallController::syncFromEngine);
     connect(engine, &CallEngine::levelsChanged, this, &CallController::syncLevels);
     connect(engine, &CallEngine::incomingCall, this, &CallController::incomingCall);
+    connect(chats->contacts(), &QAbstractItemModel::modelReset,
+            this, &CallController::syncFromEngine);
     connect(chats, &ChatController::localUserNameChanged, this, [this] {
         setLocalIdentity(m_chats->localUserName(), m_chats->localAvatarKey());
     });
@@ -187,11 +189,13 @@ void CallController::syncFromEngine()
     m_muted = m_engine->isMuted();
 
     const CallEngine::CallPeer &peer = m_engine->peer();
-    // An incoming call from a peer whose handle has not resolved yet has no name
-    // to show, so it is announced by relationship rather than left blank.
-    m_peerName = peer.displayName.isEmpty() ? QStringLiteral("Unknown caller") : peer.displayName;
-    m_peerAvatarKey =
-        peer.avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : peer.avatarKey;
+    // Incoming offers carry routing IDs, not display names. Use the same saved
+    // identity as the chat roster, including handles resolved while ringing.
+    const auto route = m_chats->callRouteFor(peer.conversation, peer.device);
+    const QString name = route ? route->displayName : peer.displayName;
+    const QString avatarKey = route ? route->avatarKey : peer.avatarKey;
+    m_peerName = name.isEmpty() ? QStringLiteral("Unknown caller") : name;
+    m_peerAvatarKey = avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : avatarKey;
 
     if (m_state == CallState::Active) {
         m_durationTimer->start();

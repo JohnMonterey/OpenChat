@@ -583,6 +583,15 @@ ChatController::callRouteFor(const QString &contactId) const
     return CallRoute{chat->conversation, *chat->peerDevice, contactId, row.name, row.avatarKey};
 }
 
+std::optional<ChatController::CallRoute>
+ChatController::callRouteFor(const ConversationId &conversation, const DeviceId &device) const
+{
+    const auto route = callRouteFor(contactForConversation(conversation));
+    if (!route || route->device != device)
+        return std::nullopt;
+    return route;
+}
+
 QString ChatController::localAvatarKey() const
 {
     // The local user has no stored avatar yet, so the call screen shows the same

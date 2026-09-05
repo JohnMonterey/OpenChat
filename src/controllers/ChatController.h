@@ -148,6 +148,10 @@ public:
         QString avatarKey;
     };
     [[nodiscard]] std::optional<CallRoute> callRouteFor(const QString &contactId) const;
+    // Resolve an incoming caller from the conversation and authenticated sender,
+    // independently of the selected chat or roster search filter.
+    [[nodiscard]] std::optional<CallRoute> callRouteFor(const ConversationId &conversation,
+                                                      const DeviceId &device) const;
 
     // The contact currently open in the conversation pane, or empty when none
     // is. This is what the header's call button acts on.

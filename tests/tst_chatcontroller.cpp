@@ -1,7 +1,11 @@
 #include <QtTest>
 
+#include "CallTestSupport.h"
 #include "app/ContactRequestService.h"
 #include "app/ProfileSession.h"
+#include "call/CallSignal.h"
+#include "call/SyncCallTransport.h"
+#include "controllers/CallController.h"
 #include "controllers/ChatController.h"
 #include "crypto/MlsClient.h"
 #include "domain/ChatTypes.h"
@@ -526,6 +530,70 @@ private slots:
         QVERIFY(live.deliverFromPeer(QStringLiteral("first")));
         // `other` has the chat open (it is the only one), so it reads it directly.
         QCOMPARE(other.messages()->rowCount(), 1);
+    }
+
+    void incomingCallUsesSavedContactIdentity_data()
+    {
+        QTest::addColumn<QString>("handle");
+        QTest::addColumn<bool>("knownConversation");
+        QTest::addColumn<bool>("knownDevice");
+        QTest::newRow("saved caller") << QStringLiteral("Alice") << true << true;
+        QTest::newRow("unresolved handle") << QString() << true << true;
+        QTest::newRow("unknown conversation") << QStringLiteral("Alice") << false << true;
+        QTest::newRow("different device") << QStringLiteral("Alice") << true << false;
+    }
+
+    void incomingCallUsesSavedContactIdentity()
+    {
+        using namespace OpenChat;
+        QFETCH(QString, handle);
+        QFETCH(bool, knownConversation);
+        QFETCH(bool, knownDevice);
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(handle));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController chats;
+        chats.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        const QString savedName = chats.currentContactName();
+        chats.setSearchQuery(QStringLiteral("no matching contacts"));
+        QCOMPARE(chats.contacts()->rowCount(), 0);
+
+        SyncCallTransport transport(*live.session->syncEngine());
+        CallTest::ScriptedAudioDevices devices;
+        CallEngine engine(CallEngine::Config{}, transport, devices.factory());
+        CallController calls;
+        calls.setLiveEngine(&engine, &chats);
+        QString nameAtAlert;
+        connect(&calls, &CallController::incomingCall, this,
+                [&] { nameAtAlert = calls.peerName(); });
+        const bool knownCaller = knownConversation && knownDevice;
+        const QString expected = knownCaller ? savedName : QStringLiteral("Unknown caller");
+
+        // Exercise delivery through the live call transport, as a decrypted
+        // offer arrives from SyncEngine. No microphone or network is needed.
+        emit live.session->syncEngine()->callSignalReceived(
+            knownConversation ? live.conversation : ConversationId::generate(),
+            knownDevice ? live.peerDevice : DeviceId::generate(),
+            encodeCallSignal(CallSignalMessage::offer(
+                CallId::generate(), generateCallSecret(), AudioCodecKind::Pcm)));
+        QVERIFY(calls.isRinging());
+        QCOMPARE(nameAtAlert, expected);
+        QCOMPARE(calls.peerName(), expected);
+        QCOMPARE(calls.peerAvatarKey(), QStringLiteral("userpfp_none"));
+
+        // Late handle resolution must update a ringing call even though the
+        // incoming engine peer has no contactId or displayName of its own.
+        QSignalSpy changed(&calls, &CallController::callChanged);
+        QVERIFY(live.session->contacts()->setHandle(live.peerAccount, QStringLiteral("AliceNew"))
+                    .hasValue());
+        chats.refreshContact(live.peerAccount.toHex());
+        QVERIFY(!changed.isEmpty());
+        const QString updated = knownCaller ? QStringLiteral("AliceNew") : expected;
+        QCOMPARE(calls.peerName(), updated);
+        calls.acceptCall();
+        QCOMPARE(engine.state(), CallState::Connecting);
+        QCOMPARE(calls.peerName(), updated);
     }
 
     void quarantineAndDeviceChangeWithholdPlaintext()

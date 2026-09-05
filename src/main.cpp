@@ -269,11 +269,8 @@ private:
             QObject::connect(m_contactController.get(),
                              &OpenChat::ContactController::contactHandleResolved,
                              m_chatController.get(),
-                             [this](const QString &accountHex, const QString &handle) {
+                             [this](const QString &accountHex, const QString &) {
                                  m_chatController->refreshContact(accountHex);
-                                 if (m_callEngine
-                                     && m_callEngine->peer().contactId == accountHex)
-                                     m_callEngine->updatePeerIdentity(handle, QString());
                              });
             if (m_callEngine)
                 m_callController->setLiveEngine(m_callEngine.get(), m_chatController.get());

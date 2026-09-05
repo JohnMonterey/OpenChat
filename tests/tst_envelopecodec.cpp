@@ -78,6 +78,28 @@ private slots:
     void encodeForSignatureClearsSignatureField();
     void rejectsOversizeCiphertext();
     void honorsTighterDecodeLimits();
+    void groupKindsRoundTripAndTheBoundHoldsAfterThem()
+    {
+        // The three group kinds are inside the wire bound; the value just past
+        // the bound is still refused, so the bound moved exactly as far as the
+        // new kinds and no further.
+        for (const auto kind : {EnvelopeMessageKind::GroupWelcome, EnvelopeMessageKind::GroupControl,
+                                EnvelopeMessageKind::MlsCommit}) {
+            CiphertextEnvelopeV1 envelope = fixedEnvelope();
+            envelope.messageKind = kind;
+            const auto decoded = decodeEnvelope(encodeCanonical(envelope));
+            QVERIFY(decoded.hasValue());
+            QCOMPARE(decoded.value().messageKind, kind);
+        }
+        QCOMPARE(maxEnvelopeMessageKind, quint8(10));
+        QByteArray encoded = encodeCanonical(fixedEnvelope());
+        // messageKind is field 6; find its canonical "06 00" (key 6, value 0)
+        // pair and bump the value past the bound.
+        const int at = encoded.indexOf(QByteArray("\x06\x00", 2));
+        QVERIFY(at >= 0);
+        encoded[at + 1] = char(maxEnvelopeMessageKind + 1);
+        QVERIFY(!decodeEnvelope(encoded).hasValue());
+    }
 };
 
 void EnvelopeCodecTest::canonicalEncodingMatchesGoldenFixture()

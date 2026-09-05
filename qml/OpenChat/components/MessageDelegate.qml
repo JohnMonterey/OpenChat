@@ -12,7 +12,12 @@ Item {
     required property int kind
     required property string dateLabel
     required property bool showDateDivider
+    // Who sent an incoming message in a group chat; empty in a one-to-one
+    // chat, where the bubble alone says.
+    required property string senderName
     readonly property bool outgoing: direction === 1
+    readonly property bool showSender: !outgoing && senderName.length > 0
+    readonly property real senderHeight: showSender ? 18 : 0
     readonly property real maximumBubbleWidth: Math.min(360, width * 0.68)
     readonly property real directionalLimit: outgoing
         ? Math.min(338, maximumBubbleWidth)
@@ -35,7 +40,22 @@ Item {
         : Math.max(54, messageBody.paintedHeight + messageTime.implicitHeight + 21)
     readonly property real dateSectionHeight: showDateDivider ? 64 : 0
 
-    implicitHeight: dateSectionHeight + bubbleHeight + 20 + (retryText.visible ? 20 : 0)
+    implicitHeight: dateSectionHeight + senderHeight + bubbleHeight + 20 + (retryText.visible ? 20 : 0)
+
+    Text {
+        objectName: "messageSender"
+        visible: delegateRoot.showSender
+        x: bubble.x + delegateRoot.contentLeftInset
+        y: delegateRoot.dateSectionHeight + 2
+        width: delegateRoot.maximumBubbleWidth
+        elide: Text.ElideRight
+        text: delegateRoot.senderName
+        color: Theme.categoryText
+        font.family: Theme.uiFont
+        font.pixelSize: 12
+        font.bold: true
+        renderType: Text.NativeRendering
+    }
 
     Text {
         id: retryText
@@ -103,7 +123,7 @@ Item {
     BubbleBackground {
         id: bubble
         x: delegateRoot.outgoing ? delegateRoot.width - bubble.width - 17 : 16
-        y: delegateRoot.dateSectionHeight
+        y: delegateRoot.dateSectionHeight + delegateRoot.senderHeight
         width: delegateRoot.bubbleWidth
         height: delegateRoot.bubbleHeight
         outgoing: delegateRoot.outgoing

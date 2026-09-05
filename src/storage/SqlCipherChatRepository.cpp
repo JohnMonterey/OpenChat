@@ -124,7 +124,7 @@ Result<QVector<ConversationRecord>, RepositoryError> SqlCipherChatRepository::co
 {
     return m_database.withConnection([](sqlite3 *database) {
         Statement statement(database,
-                            "SELECT id, mls_group_id, title, kind, created_at_ms "
+                            "SELECT id, mls_group_id, title, kind, created_at_ms, left_at_ms "
                             "FROM conversations ORDER BY created_at_ms DESC, id DESC");
         if (!statement.isValid())
             return Result<QVector<ConversationRecord>, RepositoryError>::failure(
@@ -144,7 +144,8 @@ Result<QVector<ConversationRecord>, RepositoryError> SqlCipherChatRepository::co
                                               RepositorySql::blob(statement.get(), 1),
                                               RepositorySql::text(statement.get(), 2),
                                               static_cast<ConversationKind>(kind),
-                                              sqlite3_column_int64(statement.get(), 4)});
+                                              sqlite3_column_int64(statement.get(), 4),
+                                              sqlite3_column_int64(statement.get(), 5)});
         }
         if (step != SQLITE_DONE)
             return Result<QVector<ConversationRecord>, RepositoryError>::failure(
@@ -380,6 +381,108 @@ SqlCipherChatRepository::advanceDeliveryState(const MessageId &messageId, Delive
             return Result<void, RepositoryError>::failure(
                 internalError(QStringLiteral("delivery.update")));
         }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<QVector<GroupMemberRecord>, RepositoryError>
+SqlCipherChatRepository::groupMembers(const ConversationId &conversationId)
+{
+    using Ret = Result<QVector<GroupMemberRecord>, RepositoryError>;
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database,
+                            "SELECT account_id, device_id, display_name, joined_at_ms "
+                            "FROM group_members WHERE conversation_id=?1 "
+                            "ORDER BY joined_at_ms ASC, device_id ASC");
+        if (!statement.isValid() || !statement.bindBlob(1, conversationId.bytes()))
+            return Ret::failure(internalError(QStringLiteral("group.members.prepare")));
+        QVector<GroupMemberRecord> records;
+        int step = SQLITE_ROW;
+        while ((step = sqlite3_step(statement.get())) == SQLITE_ROW) {
+            const auto account = AccountId::fromBytes(RepositorySql::blob(statement.get(), 0));
+            const auto device = DeviceId::fromBytes(RepositorySql::blob(statement.get(), 1));
+            if (!account || !device)
+                return Ret::failure(RepositorySql::error(RepositoryErrorCode::IntegrityFailure,
+                                                         QStringLiteral("group.members.decode")));
+            records.append(GroupMemberRecord{conversationId, *account, *device,
+                                             RepositorySql::text(statement.get(), 2),
+                                             sqlite3_column_int64(statement.get(), 3)});
+        }
+        if (step != SQLITE_DONE)
+            return Ret::failure(internalError(QStringLiteral("group.members.read")));
+        return Ret::success(std::move(records));
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherChatRepository::upsertGroupMember(const GroupMemberRecord &member)
+{
+    return m_database.withConnection([&member](sqlite3 *database) {
+        Statement statement(database,
+                            "INSERT INTO group_members(conversation_id, account_id, device_id, "
+                            "display_name, joined_at_ms) VALUES(?1, ?2, ?3, ?4, ?5) "
+                            "ON CONFLICT(conversation_id, device_id) DO UPDATE SET "
+                            "account_id=excluded.account_id, display_name=excluded.display_name");
+        if (!statement.isValid() || !statement.bindBlob(1, member.conversationId.bytes())
+            || !statement.bindBlob(2, member.accountId.bytes())
+            || !statement.bindBlob(3, member.deviceId.bytes())
+            || !statement.bindText(4, member.displayName)
+            || !statement.bindInt64(5, member.joinedAtMs)
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(
+                conflictError(QStringLiteral("group.member.upsert")));
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherChatRepository::removeGroupMember(const ConversationId &conversationId,
+                                          const DeviceId &deviceId)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database,
+                            "DELETE FROM group_members WHERE conversation_id=?1 AND device_id=?2");
+        if (!statement.isValid() || !statement.bindBlob(1, conversationId.bytes())
+            || !statement.bindBlob(2, deviceId.bytes())
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("group.member.remove")));
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherChatRepository::setConversationTitle(const ConversationId &conversationId,
+                                             const QString &title)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database, "UPDATE conversations SET title=?1 WHERE id=?2");
+        if (!statement.isValid() || !statement.bindText(1, title)
+            || !statement.bindBlob(2, conversationId.bytes())
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("conversation.title")));
+        if (sqlite3_changes(database) == 0)
+            return Result<void, RepositoryError>::failure(RepositorySql::error(
+                RepositoryErrorCode::NotFound, QStringLiteral("conversation.title.missing")));
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherChatRepository::markConversationLeft(const ConversationId &conversationId,
+                                             qint64 leftAtMs)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database, "UPDATE conversations SET left_at_ms=?1 WHERE id=?2");
+        if (!statement.isValid() || !statement.bindInt64(1, leftAtMs)
+            || !statement.bindBlob(2, conversationId.bytes())
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("conversation.left")));
+        if (sqlite3_changes(database) == 0)
+            return Result<void, RepositoryError>::failure(RepositorySql::error(
+                RepositoryErrorCode::NotFound, QStringLiteral("conversation.left.missing")));
         return Result<void, RepositoryError>::success();
     });
 }

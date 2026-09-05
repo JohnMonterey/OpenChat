@@ -28,6 +28,7 @@ public:
         FailureReasonRole,
         SenderDeviceRole,
         SecurityEventRole,
+        SenderNameRole,
     };
     Q_ENUM(Role)
 

@@ -86,6 +86,11 @@ public:
     addMembers(const ConversationId &conversation, const QList<QByteArray> &keyPackages);
     [[nodiscard]] Result<QByteArray, MlsError>
     removeMembers(const ConversationId &conversation, const QList<QByteArray> &identities);
+    // The MLS-authenticated credential identities of a joined group's other
+    // members, read from its ratchet tree. Read-only: no ratchet or state
+    // change. This is what a group chat removes a departed member by.
+    [[nodiscard]] Result<QList<QByteArray>, MlsError>
+    groupMembers(const ConversationId &conversation);
     [[nodiscard]] Result<MlsCiphertext, MlsError>
     encrypt(const ConversationId &conversation, QByteArrayView plaintext);
     [[nodiscard]] Result<MlsProcessResult, MlsError>

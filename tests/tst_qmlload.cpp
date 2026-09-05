@@ -477,7 +477,7 @@ private slots:
         QScopedPointer<QObject> item(component.createWithInitialProperties({
             {"direction", 1}, {"deliveryState", 6}, {"body", "hello"},
             {"timestamp", "10:15 AM"}, {"kind", 0}, {"dateLabel", ""},
-            {"showDateDivider", false}, {"width", 540}}));
+            {"showDateDivider", false}, {"senderName", ""}, {"width", 540}}));
         QVERIFY2(item, qPrintable(component.errorString()));
         auto *retry = item->findChild<QObject *>("messageRetry");
         QVERIFY(retry);
@@ -504,6 +504,7 @@ private slots:
              {QStringLiteral("kind"), 0},
              {QStringLiteral("dateLabel"), QStringLiteral("May 24, 2010")},
              {QStringLiteral("showDateDivider"), false},
+             {QStringLiteral("senderName"), QString()},
              {QStringLiteral("width"), 540}}));
         QVERIFY(delegate);
         QObject *timestamp =
@@ -623,6 +624,7 @@ private slots:
                  {QStringLiteral("kind"), 0},
                  {QStringLiteral("dateLabel"), QStringLiteral("May 24, 2010")},
                  {QStringLiteral("showDateDivider"), false},
+             {QStringLiteral("senderName"), QString()},
                  {QStringLiteral("width"), 540}}));
             return delegate ? delegate->property("bubbleWidth").toDouble() : -1.0;
         };
@@ -1360,6 +1362,195 @@ private slots:
                          .value<QColor>(),
                      speaking);
         QTRY_VERIFY(localGlow->opacity() > 0.0);
+    }
+
+    void thePlusNextToTheNameMakesAndManagesAGroup()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *plus = window->findChild<QQuickItem *>(QStringLiteral("addToGroupButton"));
+        auto *picker = window->findChild<QQuickItem *>(QStringLiteral("groupMemberPicker"));
+        auto *title = window->findChild<QQuickItem *>(QStringLiteral("conversationTitle"));
+        auto *leave = window->findChild<QQuickItem *>(QStringLiteral("leaveGroupButton"));
+        auto *editor = window->findChild<QQuickItem *>(QStringLiteral("groupTitleEditor"));
+        auto *input = window->findChild<QQuickItem *>(QStringLiteral("groupTitleInput"));
+        QVERIFY(plus && picker && title && leave && editor && input);
+        // In a one-to-one chat: the plus is there, the picker is closed, no
+        // leave button, and the name is not editable.
+        QVERIFY(plus->isVisible());
+        QVERIFY(!picker->isVisible());
+        QVERIFY(!leave->isVisible());
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Michael"));
+        QVERIFY(QMetaObject::invokeMethod(editor, "beginEditing"));
+        QVERIFY(!editor->property("editing").toBool());
+
+        // The plus opens the picker listing everyone else.
+        const QPoint plusPoint = plus->mapToScene(QPointF(plus->width() / 2, plus->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, plusPoint);
+        QTRY_VERIFY(picker->isVisible());
+        auto *sarah = findVisualItem(picker, QStringLiteral("groupCandidate_sarah"));
+        QVERIFY(sarah);
+        QVERIFY(!findVisualItem(picker, QStringLiteral("groupCandidate_michael")));
+        QVERIFY(picker->mapToScene(QPointF(0, 0)).x() >= 0);
+        QVERIFY(picker->mapToScene(QPointF(picker->width(), 0)).x() <= window->width());
+
+        // Picking Sarah starts a group with Michael and Sarah, and opens it.
+        const QPoint sarahPoint = sarah->mapToScene(QPointF(sarah->width() / 2, sarah->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sarahPoint);
+        QTRY_VERIFY(controller.currentIsGroup());
+        QVERIFY(!picker->isVisible());
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Michael, Sarah"));
+        auto *subtitle = window->findChild<QQuickItem *>(QStringLiteral("conversationSubtitle"));
+        QVERIFY(subtitle);
+        QCOMPARE(subtitle->property("text").toString(), QStringLiteral("You, Michael, Sarah"));
+        QVERIFY(leave->isVisible());
+        // The group row in the sidebar has the group picture and no bead.
+        auto *row = findVisualItem(window->contentItem(),
+                                   QStringLiteral("contactRow_") + controller.currentContactId());
+        QVERIFY(row);
+        QVERIFY(row->property("isGroup").toBool());
+
+        // The title is edited like the status line: type, Enter, done.
+        QVERIFY(QMetaObject::invokeMethod(editor, "beginEditing"));
+        QVERIFY(editor->property("editing").toBool());
+        QVERIFY(input->setProperty("text", QStringLiteral("Weekend plans")));
+        QVERIFY(QMetaObject::invokeMethod(editor, "commit"));
+        QCOMPARE(controller.currentGroupTitle(), QStringLiteral("Weekend plans"));
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Weekend plans"));
+        // Escape reverts.
+        QVERIFY(QMetaObject::invokeMethod(editor, "beginEditing"));
+        QVERIFY(input->setProperty("text", QStringLiteral("nope")));
+        QVERIFY(QMetaObject::invokeMethod(editor, "cancel"));
+        QCOMPARE(controller.currentGroupTitle(), QStringLiteral("Weekend plans"));
+
+        // The plus in a group adds to it. It moved with the longer title.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          plus->mapToScene(QPointF(plus->width() / 2, plus->height() / 2)).toPoint());
+        QTRY_VERIFY(picker->isVisible());
+        auto *alex = findVisualItem(picker, QStringLiteral("groupCandidate_alex"));
+        QVERIFY(alex);
+        QVERIFY(!findVisualItem(picker, QStringLiteral("groupCandidate_sarah")));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          alex->mapToScene(QPointF(alex->width() / 2, alex->height() / 2)).toPoint());
+        QTRY_COMPARE(controller.currentGroupMemberCount(), 4);
+
+        // Leaving returns to a person.
+        QVERIFY(QMetaObject::invokeMethod(leave, "clicked"));
+        QTRY_VERIFY(!controller.currentIsGroup());
+        QVERIFY(!leave->isVisible());
+    }
+
+    void theGroupCallScreenShowsEveryMemberAndWhatTheyAreDoing()
+    {
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::CallController callController;
+        callController.setLocalIdentity(chatController.localUserName(), chatController.localAvatarKey());
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        OpenChat::CallParticipantRow jessica{QStringLiteral("d1"), QStringLiteral("Jessica"),
+                                             QStringLiteral("jessica"), QString(), true, false, true, 0.4};
+        OpenChat::CallParticipantRow michael{QStringLiteral("d2"), QStringLiteral("Michael"),
+                                             QStringLiteral("michael"), QStringLiteral("Ringing…"),
+                                             false, true, false, 0.0};
+        OpenChat::CallParticipantRow ryan{QStringLiteral("d3"), QStringLiteral("Ryan"),
+                                          QStringLiteral("ryan"), QStringLiteral("Declined"), false,
+                                          false, false, 0.0};
+        callController.enableForGroupPreview(OpenChat::CallState::Ringing, QStringLiteral("Weekend plans"),
+                                             {jessica, michael, ryan});
+        QCoreApplication::processEvents();
+
+        auto *callHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
+        auto *group = root->findChild<QQuickItem *>(QStringLiteral("groupParticipants"));
+        auto *pair = root->findChild<QQuickItem *>(QStringLiteral("callParticipants"));
+        auto *groupTitle = root->findChild<QQuickItem *>(QStringLiteral("groupCallTitle"));
+        auto *local = root->findChild<QQuickItem *>(QStringLiteral("groupLocalParticipant"));
+        QVERIFY(callHeader && group && pair && groupTitle && local);
+        QVERIFY(callHeader->isVisible());
+        // The group layout replaces the two-person one.
+        QVERIFY(group->isVisible());
+        QVERIFY(!pair->isVisible());
+        QCOMPARE(groupTitle->property("text").toString(), QStringLiteral("Weekend plans"));
+        QCOMPARE(local->property("name").toString(), QStringLiteral("Developer"));
+
+        // Every member is on screen with what they are doing; the one talking
+        // is ringed green, the one who declined is faded.
+        auto *jessicaItem = findVisualItem(group, QStringLiteral("groupParticipant_d1"));
+        auto *michaelItem = findVisualItem(group, QStringLiteral("groupParticipant_d2"));
+        auto *ryanItem = findVisualItem(group, QStringLiteral("groupParticipant_d3"));
+        QVERIFY(jessicaItem && michaelItem && ryanItem);
+        QCOMPARE(michaelItem->property("caption").toString(), QStringLiteral("Ringing…"));
+        QCOMPARE(ryanItem->property("caption").toString(), QStringLiteral("Declined"));
+        QVERIFY(jessicaItem->property("caption").toString().isEmpty());
+        QVERIFY(jessicaItem->property("speaking").toBool());
+        QVERIFY(ryanItem->property("dimmed").toBool());
+        QVERIFY(!michaelItem->property("dimmed").toBool());
+        auto *ryanCaption = ryanItem->findChild<QQuickItem *>(QStringLiteral("participantCaption"));
+        QVERIFY(ryanCaption && ryanCaption->isVisible());
+        // Us first, then the members, left to right.
+        QVERIFY(local->mapToScene(QPointF()).x() < jessicaItem->mapToScene(QPointF()).x());
+        // The slot grew to fit everyone.
+        auto *slot = root->findChild<QQuickItem *>(QStringLiteral("conversationHeaderSlot"));
+        QVERIFY(slot);
+        QVERIFY(slot->height() >= callHeader->implicitHeight());
+        // An incoming group call offers answer/decline like any other.
+        auto *accept = root->findChild<QQuickItem *>(QStringLiteral("acceptCallButton"));
+        QVERIFY(accept && accept->isVisible());
+        auto *status = root->findChild<QQuickItem *>(QStringLiteral("callStatusText"));
+        QVERIFY(status);
+        QCOMPARE(status->property("text").toString(), QStringLiteral("Incoming group call"));
+
+        // Back to a one-to-one preview: the pair layout returns.
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), true, false);
+        QCoreApplication::processEvents();
+        QVERIFY(pair->isVisible());
+        QVERIFY(!group->isVisible());
+    }
+
+    void groupMessagesNameTheirSender()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        const auto make = [&component](int direction, const QString &sender) {
+            return component.createWithInitialProperties(
+                {{"direction", direction}, {"deliveryState", 0}, {"body", "hello"},
+                 {"timestamp", "10:15 AM"}, {"kind", 0}, {"dateLabel", ""},
+                 {"showDateDivider", false}, {"senderName", sender}, {"width", 540}});
+        };
+        QScopedPointer<QObject> named(make(0, QStringLiteral("carol")));
+        QScopedPointer<QObject> plain(make(0, QString()));
+        QScopedPointer<QObject> outgoing(make(1, QStringLiteral("me")));
+        QVERIFY(named && plain && outgoing);
+        auto *label = named->findChild<QObject *>(QStringLiteral("messageSender"));
+        QVERIFY(label);
+        QVERIFY(label->property("visible").toBool());
+        QCOMPARE(label->property("text").toString(), QStringLiteral("carol"));
+        // The label takes its own room above the bubble; without one the
+        // delegate is exactly as tall as before.
+        QVERIFY(named->property("implicitHeight").toReal()
+                > plain->property("implicitHeight").toReal());
+        QVERIFY(!plain->findChild<QObject *>(QStringLiteral("messageSender"))->property("visible").toBool());
+        QVERIFY(!outgoing->findChild<QObject *>(QStringLiteral("messageSender"))->property("visible").toBool());
     }
 
     void theCallScreenOffersTheRightActionForEachStage()

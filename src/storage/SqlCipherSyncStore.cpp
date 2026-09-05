@@ -131,6 +131,12 @@ bool insertOutbox(sqlite3 *database, const OutboxRecord &outbox)
 // the caller's transaction so the ratchet state commits atomically with the rest.
 bool upsertMlsState(sqlite3 *database, const ProfileId &profileId, QByteArrayView state)
 {
+    // An empty blob means the ratchet did not move for this commit (the state
+    // was already surrendered by an earlier commit in the same lane). Keeping
+    // the stored snapshot is the only safe reading: writing an empty one would
+    // erase every group this device holds.
+    if (state.isEmpty())
+        return true;
     Statement statement(database,
                         "INSERT INTO local_mls_state(profile_id, state_blob) VALUES(?1, ?2) "
                         "ON CONFLICT(profile_id) DO UPDATE SET state_blob = excluded.state_blob");
@@ -361,6 +367,205 @@ Result<void, RepositoryError> SqlCipherSyncStore::commitControlSend(const Outbox
             return Result<void, RepositoryError>::failure(e);
         }
         return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherSyncStore::commitGroupSend(const MessageRecord &message,
+                                    const QVector<OutboxRecord> &outboxes, QByteArrayView mlsState)
+{
+    if (message.flow != MessageFlow::Outgoing || outboxes.isEmpty() || message.serverSequence
+        || mlsState.size() > maximumMlsStateSize)
+        return Result<void, RepositoryError>::failure(
+            error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitGroupSend.invalid")));
+    for (const OutboxRecord &outbox : outboxes) {
+        if (outbox.messageId != message.id || outbox.conversationId != message.conversationId
+            || outbox.envelope.isEmpty())
+            return Result<void, RepositoryError>::failure(
+                error(RepositoryErrorCode::InvalidInput,
+                      QStringLiteral("commitGroupSend.outbox")));
+    }
+
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("commitGroupSend.begin")));
+        if (!insertMessage(database, message)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitGroupSend.message"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        for (const OutboxRecord &outbox : outboxes) {
+            if (!insertOutbox(database, outbox)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                        QStringLiteral("commitGroupSend.outbox"));
+                rollback(database);
+                return Result<void, RepositoryError>::failure(e);
+            }
+        }
+        if (!upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitGroupSend.mls"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitGroupSend.commit"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherSyncStore::commitControlSendMany(const QVector<OutboxRecord> &outboxes,
+                                          QByteArrayView mlsState)
+{
+    if (outboxes.isEmpty() || mlsState.size() > maximumMlsStateSize)
+        return Result<void, RepositoryError>::failure(
+            error(RepositoryErrorCode::InvalidInput,
+                  QStringLiteral("commitControlSendMany.invalid")));
+    for (const OutboxRecord &outbox : outboxes) {
+        if (outbox.envelope.isEmpty())
+            return Result<void, RepositoryError>::failure(
+                error(RepositoryErrorCode::InvalidInput,
+                      QStringLiteral("commitControlSendMany.invalid")));
+    }
+
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("commitControlSendMany.begin")));
+        for (const OutboxRecord &outbox : outboxes) {
+            if (!insertOutbox(database, outbox)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                        QStringLiteral("commitControlSendMany.outbox"));
+                rollback(database);
+                return Result<void, RepositoryError>::failure(e);
+            }
+        }
+        if (!upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitControlSendMany.mls"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitControlSendMany.commit"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<void, RepositoryError> SqlCipherSyncStore::failEnvelope(const EnvelopeId &envelopeId)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement outbox(database,
+                         "UPDATE outbox SET state=3, lease_until_ms=0 "
+                         "WHERE envelope_id=?1 AND state IN (0,1)");
+        if (!outbox.isValid() || !outbox.bindBlob(1, envelopeId.bytes())
+            || sqlite3_step(outbox.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("envelope.fail")));
+        if (sqlite3_changes(database) == 0)
+            return Result<void, RepositoryError>::failure(
+                error(RepositoryErrorCode::NotFound, QStringLiteral("envelope.fail.missing")));
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<bool, RepositoryError> SqlCipherSyncStore::canJoinGroup(const AccountId &sender,
+                                                               const ConversationId &conversation)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        const auto existing = readContactState(database, sender);
+        if (!existing.queryOk)
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("group.join.contact")));
+        if (!existing.found || existing.state != acceptedContactState)
+            return Result<bool, RepositoryError>::success(false);
+        Statement known(database, "SELECT 1 FROM conversations WHERE id=?1");
+        if (!known.isValid() || !known.bindBlob(1, conversation.bytes()))
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("group.join.conversation")));
+        const int step = sqlite3_step(known.get());
+        if (step != SQLITE_ROW && step != SQLITE_DONE)
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("group.join.conversation.read")));
+        return Result<bool, RepositoryError>::success(step == SQLITE_DONE);
+    });
+}
+
+Result<bool, RepositoryError>
+SqlCipherSyncStore::commitGroupWelcome(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
+                                       const ConversationId &conversation, quint64 watermark,
+                                       qint64 createdAtMs, QByteArrayView mlsState, bool joined)
+{
+    if (!fitsSqlInteger(watermark) || mlsState.isEmpty() == joined
+        || mlsState.size() > maximumMlsStateSize)
+        return Result<bool, RepositoryError>::failure(
+            error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitGroupWelcome.invalid")));
+
+    const qint64 nowMs = m_clock();
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("commitGroupWelcome.begin")));
+        if (!insertReplay(database, envelopeId, nowMs, senderDeviceId)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitGroupWelcome.replay"));
+            rollback(database);
+            return Result<bool, RepositoryError>::failure(e);
+        }
+        if (sqlite3_changes(database) == 0) {
+            if (!commit(database)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                        QStringLiteral("commitGroupWelcome.idempotent.commit"));
+                rollback(database);
+                return Result<bool, RepositoryError>::failure(e);
+            }
+            return Result<bool, RepositoryError>::success(false);
+        }
+        if (joined) {
+            Statement insert(database,
+                             "INSERT INTO conversations(id, kind, title, created_at_ms, "
+                             "mls_group_id) VALUES(?1, ?2, '', ?3, ?1) "
+                             "ON CONFLICT(id) DO NOTHING");
+            if (!insert.isValid() || !insert.bindBlob(1, conversation.bytes())
+                || !insert.bindInt(2, static_cast<int>(ConversationKind::Group))
+                || !insert.bindInt64(3, createdAtMs)
+                || sqlite3_step(insert.get()) != SQLITE_DONE) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                        QStringLiteral("commitGroupWelcome.conversation"));
+                rollback(database);
+                return Result<bool, RepositoryError>::failure(e);
+            }
+        }
+        if (!advanceCursor(database, senderDeviceId, watermark, nowMs)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitGroupWelcome.cursor"));
+            rollback(database);
+            return Result<bool, RepositoryError>::failure(e);
+        }
+        if (joined && !upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitGroupWelcome.mls"));
+            rollback(database);
+            return Result<bool, RepositoryError>::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitGroupWelcome.commit"));
+            rollback(database);
+            return Result<bool, RepositoryError>::failure(e);
+        }
+        return Result<bool, RepositoryError>::success(true);
     });
 }
 
@@ -723,7 +928,10 @@ SqlCipherSyncStore::claimDue(qint64 nowMs, int limit, qint64 leaseUntilMs)
                          "FROM outbox WHERE "
                          "(state=?1 AND next_attempt_at_ms<=?2) OR "
                          "(state=?3 AND lease_until_ms<=?2) "
-                         "ORDER BY next_attempt_at_ms, envelope_id LIMIT ?4");
+                         // rowid, not envelope_id: envelopes queued in the same
+                         // instant (a group's Welcome and the roster that must
+                         // follow it) leave in the order they were queued.
+                         "ORDER BY next_attempt_at_ms, rowid LIMIT ?4");
         if (!select.isValid() || !select.bindInt(1, static_cast<int>(OutboxState::Pending))
             || !select.bindInt64(2, nowMs)
             || !select.bindInt(3, static_cast<int>(OutboxState::Leased))

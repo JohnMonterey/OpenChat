@@ -33,6 +33,7 @@ qt_add_executable(OpenChat
     src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
     src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
@@ -74,6 +75,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/SafetyNumberDialog.qml
         qml/OpenChat/components/RequestRow.qml
         qml/OpenChat/components/ConversationHeader.qml
+        qml/OpenChat/components/GroupMemberPicker.qml
         qml/OpenChat/components/CallParticipant.qml
         qml/OpenChat/components/CallActionButton.qml
         qml/OpenChat/components/CallHeader.qml
@@ -149,6 +151,7 @@ add_test(NAME tst_appmetadata COMMAND tst_appmetadata)
 add_library(openchat_domain STATIC
     src/domain/Identifiers.cpp
     src/domain/ProfileUpdate.cpp
+    src/domain/GroupUpdate.cpp
 )
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)
@@ -250,6 +253,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/010_profile_display_name.sql
         src/storage/migrations/011_contact_device.sql
         src/storage/migrations/012_profiles.sql
+        src/storage/migrations/013_group_chats.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -285,6 +289,7 @@ add_library(openchat_app STATIC
     src/app/AccountBootstrap.cpp
     src/app/AddContactService.cpp
     src/app/ContactRequestService.cpp
+    src/app/GroupService.cpp
     src/app/DeviceLink.cpp
 )
 target_include_directories(openchat_app PUBLIC src)
@@ -296,6 +301,11 @@ add_executable(tst_domain tests/tst_domain.cpp)
 target_include_directories(tst_domain PRIVATE src)
 target_link_libraries(tst_domain PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_domain COMMAND tst_domain)
+
+add_executable(tst_groupupdate tests/tst_groupupdate.cpp)
+target_include_directories(tst_groupupdate PRIVATE src)
+target_link_libraries(tst_groupupdate PRIVATE openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_groupupdate COMMAND tst_groupupdate)
 
 add_executable(tst_keyvault tests/tst_keyvault.cpp)
 target_include_directories(tst_keyvault PRIVATE src tests)
@@ -486,8 +496,10 @@ add_executable(tst_e2e
     tests/tst_e2e.cpp
     tests/relay/RelayTestSupport.cpp
     src/controllers/ChatController.cpp
+    src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
 )
 target_include_directories(tst_e2e PRIVATE src tests relay/src)
 target_link_libraries(tst_e2e PRIVATE
@@ -543,9 +555,10 @@ add_executable(tst_models
     tests/tst_models.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
 )
 target_include_directories(tst_models PRIVATE src)
-target_link_libraries(tst_models PRIVATE Qt6::Core Qt6::Test)
+target_link_libraries(tst_models PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
 add_test(NAME tst_models COMMAND tst_models)
 
 add_executable(tst_chatcontroller
@@ -554,6 +567,7 @@ add_executable(tst_chatcontroller
     src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
 )
 target_include_directories(tst_chatcontroller PRIVATE src tests)
 target_link_libraries(tst_chatcontroller PRIVATE
@@ -619,6 +633,20 @@ target_link_libraries(tst_callengine PRIVATE
 )
 add_test(NAME tst_callengine COMMAND tst_callengine)
 
+# Group calls over a mesh of scripted endpoints: everyone rings, joins one by
+# one, hears the others mixed, leaves without ending it for the rest, and the
+# decline/busy/timeout/glare edges.
+add_executable(tst_groupcall tests/tst_groupcall.cpp)
+target_include_directories(tst_groupcall PRIVATE src tests)
+target_link_libraries(tst_groupcall PRIVATE
+    openchat_call
+    openchat_media
+    openchat_domain
+    Qt6::Core
+    Qt6::Test
+)
+add_test(NAME tst_groupcall COMMAND tst_groupcall)
+
 # The profile-update codec, the picture pipeline and the avatar registry:
 # round trips, every rejected shape, and the size/dimension bounds a chosen
 # file must respect before it is decoded in full.
@@ -645,6 +673,7 @@ add_executable(tst_qmlload
     src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
     src/models/RequestListModel.cpp
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp

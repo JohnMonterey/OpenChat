@@ -36,6 +36,8 @@ QVariant ContactListModel::data(const QModelIndex &index, int role) const
         return contact->id == m_selectedId;
     case AvatarKeyRole:
         return contact->avatarKey;
+    case IsGroupRole:
+        return contact->isGroup;
     default:
         return {};
     }
@@ -51,6 +53,7 @@ QHash<int, QByteArray> ContactListModel::roleNames() const
         {FavoriteRole, "favorite"},
         {SelectedRole, "selected"},
         {AvatarKeyRole, "avatarKey"},
+        {IsGroupRole, "isGroup"},
     };
 }
 

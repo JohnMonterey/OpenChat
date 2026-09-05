@@ -3,7 +3,9 @@
 #include <QDateTime>
 #include <QTimer>
 
+#include <algorithm>
 #include <chrono>
+#include <limits>
 
 namespace OpenChat {
 
@@ -18,12 +20,57 @@ constexpr int levelRefreshMs = 50;
 // holding the audio device open in the background afterwards.
 constexpr int playbackTailSlackMs = 250;
 
+// A group member's camera whose frames stop arriving reads as off after this.
+constexpr qint64 videoStaleMs = 2500;
+
+// Sums `frame` into `mix` sample by sample, saturating rather than wrapping, so
+// three people talking at once get loud instead of turning into noise.
+void mixInto(AudioFrame &mix, const AudioFrame &frame)
+{
+    if (!isFullAudioFrame(mix) || !isFullAudioFrame(frame))
+        return;
+    auto *out = reinterpret_cast<qint16 *>(mix.data());
+    const auto *in = reinterpret_cast<const qint16 *>(frame.constData());
+    for (int i = 0; i < CallAudioFormat::samplesPerFrame; ++i) {
+        const int sum = int(out[i]) + int(in[i]);
+        out[i] = static_cast<qint16>(std::clamp(sum, int(std::numeric_limits<qint16>::min()),
+                                                int(std::numeric_limits<qint16>::max())));
+    }
+}
+
+// The codec a pair of group members runs: the announced one when this build
+// has it, otherwise PCM, which every build has. Both ends evaluate the same rule
+// on each other's announcement, so they always agree.
+[[nodiscard]] AudioCodecKind pairCodec(AudioCodecKind announced)
+{
+    return isAudioCodecAvailable(announced) ? announced : AudioCodecKind::Pcm;
+}
+
 } // namespace
 
 qint64 steadyClockMs() noexcept
 {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+QString callParticipantStateName(CallParticipantState state)
+{
+    switch (state) {
+    case CallParticipantState::Ringing:
+        return QStringLiteral("Ringing…");
+    case CallParticipantState::Joined:
+        return QString();
+    case CallParticipantState::Declined:
+        return QStringLiteral("Declined");
+    case CallParticipantState::Left:
+        return QStringLiteral("Left");
+    case CallParticipantState::Busy:
+        return QStringLiteral("Busy");
+    case CallParticipantState::NoAnswer:
+        return QStringLiteral("No answer");
+    }
+    return QString();
 }
 
 CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFactory audioIo,
@@ -42,13 +89,7 @@ CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFacto
 
     m_ringTimer = new QTimer(this);
     m_ringTimer->setSingleShot(true);
-    connect(m_ringTimer, &QTimer::timeout, this, [this] {
-        // Whose "no answer" this is depends on the direction: the caller gave up
-        // waiting; the callee never picked up and records a missed call.
-        endCall(m_direction == CallDirection::Outgoing ? CallEndReason::NoAnswer
-                                                       : CallEndReason::Unanswered,
-                /*notifyPeer=*/true);
-    });
+    connect(m_ringTimer, &QTimer::timeout, this, &CallEngine::onRingTimeout);
 
     m_stallTimer = new QTimer(this);
     m_stallTimer->setSingleShot(true);
@@ -57,7 +98,10 @@ CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFacto
 
     m_levelTimer = new QTimer(this);
     m_levelTimer->setInterval(levelRefreshMs);
-    connect(m_levelTimer, &QTimer::timeout, this, &CallEngine::levelsChanged);
+    connect(m_levelTimer, &QTimer::timeout, this, [this] {
+        refreshParticipantLevels();
+        emit levelsChanged();
+    });
 
     m_playbackTailTimer = new QTimer(this);
     m_playbackTailTimer->setSingleShot(true);
@@ -96,22 +140,98 @@ qint64 CallEngine::activeDurationMs() const
 
 double CallEngine::localLevel() const
 {
-    return m_session ? m_session->localLevel() : 0.0;
+    if (m_session)
+        return m_session->localLevel();
+    if (m_group) {
+        // Every member's session meters the same microphone; any one will do.
+        for (const Member &member : m_group->members)
+            if (member.session)
+                return member.session->localLevel();
+    }
+    return 0.0;
 }
 
 double CallEngine::remoteLevel() const
 {
-    return m_session ? m_session->remoteLevel() : 0.0;
+    if (m_session)
+        return m_session->remoteLevel();
+    double loudest = 0.0;
+    if (m_group)
+        for (const Member &member : m_group->members)
+            if (member.session)
+                loudest = std::max(loudest, member.session->remoteLevel());
+    return loudest;
 }
 
 bool CallEngine::isLocalSpeaking() const
 {
-    return m_state == CallState::Active && m_session && m_session->isLocalSpeaking();
+    if (m_state != CallState::Active)
+        return false;
+    if (m_session)
+        return m_session->isLocalSpeaking();
+    if (m_group)
+        for (const Member &member : m_group->members)
+            if (member.session)
+                return member.session->isLocalSpeaking();
+    return false;
 }
 
 bool CallEngine::isRemoteSpeaking() const
 {
-    return m_state == CallState::Active && m_session && m_session->isRemoteSpeaking();
+    if (m_state != CallState::Active)
+        return false;
+    if (m_session)
+        return m_session->isRemoteSpeaking();
+    if (m_group)
+        for (const Member &member : m_group->members)
+            if (member.session && member.session->isRemoteSpeaking())
+                return true;
+    return false;
+}
+
+QString CallEngine::groupTitle() const
+{
+    return m_group ? m_group->title : QString();
+}
+
+QVector<CallEngine::Participant> CallEngine::participants() const
+{
+    QVector<Participant> result;
+    if (!m_group)
+        return result;
+    result.reserve(static_cast<qsizetype>(m_group->members.size()));
+    for (const Member &member : m_group->members)
+        result.append(member.info);
+    return result;
+}
+
+int CallEngine::joinedParticipantCount() const
+{
+    if (!m_group)
+        return 0;
+    return static_cast<int>(std::count_if(
+        m_group->members.cbegin(), m_group->members.cend(),
+        [](const Member &member) { return member.info.state == CallParticipantState::Joined; }));
+}
+
+const CallSession *CallEngine::sessionFor(const DeviceId &device) const
+{
+    if (!m_group)
+        return m_peer.device == device ? m_session.get() : nullptr;
+    for (const Member &member : m_group->members)
+        if (member.info.peer.device == device)
+            return member.session.get();
+    return nullptr;
+}
+
+CallEngine::Member *CallEngine::memberFor(const DeviceId &device)
+{
+    if (!m_group)
+        return nullptr;
+    for (Member &member : m_group->members)
+        if (member.info.peer.device == device)
+            return &member;
+    return nullptr;
 }
 
 bool CallEngine::placeCall(const CallPeer &peer)
@@ -124,6 +244,7 @@ bool CallEngine::placeCall(const CallPeer &peer)
     if (secret.size() != callSecretBytes)
         return false;
 
+    m_group.reset();
     m_peer = peer;
     m_direction = CallDirection::Outgoing;
     m_callId = CallId::generate();
@@ -149,6 +270,49 @@ bool CallEngine::placeCall(const CallPeer &peer)
     return true;
 }
 
+bool CallEngine::placeGroupCall(const GroupCallRoute &route)
+{
+    if (callOccupiesDevice(m_state) || route.members.isEmpty() || !m_config.localDevice)
+        return false;
+    const QByteArray secret = generateCallSecret();
+    if (secret.size() != callSecretBytes)
+        return false;
+
+    auto group = std::make_unique<GroupCall>();
+    group->conversation = route.conversation;
+    group->title = route.title;
+    for (const CallPeer &peer : route.members) {
+        if (peer.device == *m_config.localDevice || memberFor(peer.device) != nullptr)
+            continue;
+        Member member;
+        member.info.peer = peer;
+        member.info.peer.conversation = route.conversation;
+        member.info.state = CallParticipantState::Ringing;
+        group->members.push_back(std::move(member));
+    }
+    if (group->members.empty())
+        return false;
+    m_group = std::move(group);
+    m_peer = m_group->members.front().info.peer;
+    m_direction = CallDirection::Outgoing;
+    m_callId = CallId::generate();
+    m_secret = secret;
+    m_codec = m_config.preferredCodec;
+    m_endReason = CallEndReason::None;
+    m_muted = false;
+
+    (void)openPlayback();
+    if (m_soundsEnabled)
+        m_sounds.startLoop(CallSound::Ringback);
+    m_ringTimer->start(m_config.ringTimeoutMs);
+    setState(CallState::Dialing);
+    emit participantsChanged();
+    // One offer per member, all carrying the same call id and secret: every
+    // member keys its pair paths from that one secret and the device ids.
+    broadcast(CallSignalMessage::offer(*m_callId, m_secret, m_codec));
+    return true;
+}
+
 void CallEngine::acceptCall()
 {
     if (m_state != CallState::Ringing || m_direction != CallDirection::Incoming || !m_callId)
@@ -160,6 +324,16 @@ void CallEngine::acceptCall()
     if (m_soundsEnabled)
         m_sounds.playOnce(CallSound::Connected);
     setState(CallState::Connecting);
+    if (m_group) {
+        // Media first, then the answer to everyone: the members already in the
+        // call start sending the moment they hear it, and those still ringing
+        // learn we are in so they key a path to us when they pick up.
+        if (!startGroupMedia())
+            return;
+        broadcast(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec));
+        m_stallTimer->start(m_config.connectTimeoutMs);
+        return;
+    }
     // Media comes up before the answer goes out, so the caller's first frames
     // have a session to land in however quickly the answer reaches them. A
     // failure here ends the call and tells the peer, so no answer is sent.
@@ -175,7 +349,10 @@ void CallEngine::declineCall()
 {
     if (m_state != CallState::Ringing || m_direction != CallDirection::Incoming || !m_callId)
         return;
-    send(CallSignalMessage::answer(*m_callId, /*accepted=*/false, m_codec));
+    if (m_group)
+        broadcast(CallSignalMessage::answer(*m_callId, /*accepted=*/false, m_codec));
+    else
+        send(CallSignalMessage::answer(*m_callId, /*accepted=*/false, m_codec));
     endCall(CallEndReason::Declined, /*notifyPeer=*/false);
 }
 
@@ -193,6 +370,10 @@ void CallEngine::setMuted(bool muted)
     m_muted = muted;
     if (m_session)
         m_session->setMuted(muted);
+    if (m_group)
+        for (Member &member : m_group->members)
+            if (member.session)
+                member.session->setMuted(muted);
     // Low for off, high for on: the direction is audible without looking away
     // from whatever prompted the mute.
     if (m_soundsEnabled)
@@ -217,7 +398,11 @@ void CallEngine::dismissEndedCall()
     if (m_state != CallState::Ended)
         return;
     m_endReason = CallEndReason::None;
+    const bool wasGroup = m_group != nullptr;
+    m_group.reset();
     setState(CallState::Idle);
+    if (wasGroup)
+        emit participantsChanged();
 }
 
 void CallEngine::updatePeerIdentity(const QString &displayName, const QString &avatarKey)
@@ -237,6 +422,27 @@ void CallEngine::updatePeerIdentity(const QString &displayName, const QString &a
         emit stateChanged();
 }
 
+void CallEngine::updateParticipantIdentity(const DeviceId &device, const QString &displayName,
+                                           const QString &avatarKey)
+{
+    Member *member = memberFor(device);
+    if (member == nullptr)
+        return;
+    bool changed = false;
+    if (!displayName.isEmpty() && displayName != member->info.peer.displayName) {
+        member->info.peer.displayName = displayName;
+        changed = true;
+    }
+    if (!avatarKey.isEmpty() && avatarKey != member->info.peer.avatarKey) {
+        member->info.peer.avatarKey = avatarKey;
+        changed = true;
+    }
+    if (member->info.peer.device == m_peer.device)
+        updatePeerIdentity(displayName, avatarKey);
+    if (changed)
+        emit participantsChanged();
+}
+
 void CallEngine::send(const CallSignalMessage &message)
 {
     send(message, m_peer);
@@ -245,6 +451,30 @@ void CallEngine::send(const CallSignalMessage &message)
 void CallEngine::send(const CallSignalMessage &message, const CallPeer &peer)
 {
     m_transport.sendSignal(peer.conversation, peer.device, encodeCallSignal(message));
+}
+
+void CallEngine::broadcast(const CallSignalMessage &message)
+{
+    if (!m_group)
+        return;
+    // Snapshot the recipients: a loopback transport can answer synchronously,
+    // and an answer may add or drop members while we are still iterating.
+    QVector<CallPeer> recipients;
+    for (const Member &member : m_group->members)
+        if (participantIsPending(member.info.state))
+            recipients.append(member.info.peer);
+    for (const CallPeer &peer : recipients)
+        send(message, peer);
+}
+
+void CallEngine::setParticipantState(Member &member, CallParticipantState state)
+{
+    if (member.info.state == state)
+        return;
+    member.info.state = state;
+    if (state != CallParticipantState::Joined)
+        closeMemberMedia(member);
+    emit participantsChanged();
 }
 
 void CallEngine::onSignal(const ConversationId &conversation, const DeviceId &sender,
@@ -264,6 +494,32 @@ void CallEngine::onSignal(const ConversationId &conversation, const DeviceId &se
     // just-finished call tearing down the one that replaced it.
     if (!m_callId || message->callId != *m_callId || m_state == CallState::Idle)
         return;
+
+    if (m_group) {
+        if (conversation != m_group->conversation)
+            return;
+        Member *member = memberFor(sender);
+        if (member == nullptr)
+            return;
+        switch (message->type) {
+        case CallSignalType::Ringing:
+            // Their device is alerting; for the caller that is the moment the
+            // call goes from dialling into the void to actually ringing.
+            if (m_state == CallState::Dialing)
+                setState(CallState::Ringing);
+            break;
+        case CallSignalType::Answer:
+            handleGroupAnswer(*member, *message);
+            break;
+        case CallSignalType::Hangup:
+            handleGroupHangup(*member, *message);
+            break;
+        case CallSignalType::Offer:
+            break; // handled above
+        }
+        return;
+    }
+
     if (sender != m_peer.device)
         return;
 
@@ -285,6 +541,15 @@ void CallEngine::onSignal(const ConversationId &conversation, const DeviceId &se
 void CallEngine::handleOffer(const ConversationId &conversation, const DeviceId &sender,
                              const CallSignalMessage &message)
 {
+    // An offer on a group conversation rings the group; the resolver is what
+    // tells a group apart from a peer, and who else is in it.
+    if (groupRouteResolver) {
+        if (const auto route = groupRouteResolver(conversation)) {
+            handleGroupOffer(conversation, sender, message, *route);
+            return;
+        }
+    }
+
     // A redelivered copy of the offer we are already ringing on. The signalling
     // path retries, so this is expected rather than exceptional: re-acknowledge
     // and change nothing.
@@ -303,7 +568,7 @@ void CallEngine::handleOffer(const ConversationId &conversation, const DeviceId 
         // has to pick a winner, and it must pick the SAME winner on both
         // machines from information both already have. Comparing the two call
         // ids does that; the lower id survives.
-        const bool isGlare = m_direction == CallDirection::Outgoing
+        const bool isGlare = !m_group && m_direction == CallDirection::Outgoing
             && m_state == CallState::Dialing && sender == m_peer.device && m_callId;
         if (isGlare && message.callId.bytes() < m_callId->bytes()) {
             // We lose: abandon our outgoing call and present theirs instead.
@@ -322,6 +587,7 @@ void CallEngine::handleOffer(const ConversationId &conversation, const DeviceId 
 
     // An offer whose codec this build cannot run is answered on PCM, which every
     // build has, rather than refused.
+    m_group.reset();
     m_peer = offeringPeer;
     m_peer.contactId.clear();
     m_direction = CallDirection::Incoming;
@@ -337,6 +603,95 @@ void CallEngine::handleOffer(const ConversationId &conversation, const DeviceId 
     m_ringTimer->start(m_config.ringTimeoutMs);
     setState(CallState::Ringing);
     send(CallSignalMessage::ringing(message.callId));
+    emit incomingCall();
+}
+
+void CallEngine::handleGroupOffer(const ConversationId &conversation, const DeviceId &sender,
+                                  const CallSignalMessage &message, const GroupCallRoute &route)
+{
+    CallPeer offeringPeer;
+    offeringPeer.conversation = conversation;
+    offeringPeer.device = sender;
+
+    // Redelivered offer for the call we are already ringing on: re-acknowledge.
+    if (m_group && m_callId && message.callId == *m_callId && m_state == CallState::Ringing
+        && m_direction == CallDirection::Incoming) {
+        send(CallSignalMessage::ringing(message.callId), offeringPeer);
+        return;
+    }
+    // Without our own device id there is no way to key a pair path; refuse
+    // rather than ring a call that could never carry media.
+    if (!m_config.localDevice) {
+        send(CallSignalMessage::hangup(message.callId, CallEndReason::Busy), offeringPeer);
+        return;
+    }
+
+    if (callOccupiesDevice(m_state)) {
+        // Glare within the group: two members started a call at once. The lower
+        // call id survives on every device, so whoever loses abandons theirs.
+        const bool isGlare = m_group && m_group->conversation == conversation
+            && m_direction == CallDirection::Outgoing
+            && (m_state == CallState::Dialing || m_state == CallState::Ringing) && m_callId;
+        if (isGlare && message.callId.bytes() < m_callId->bytes()) {
+            broadcast(CallSignalMessage::hangup(*m_callId, CallEndReason::Superseded));
+            stopCapture();
+            m_sounds.stopLoop();
+            m_ringTimer->stop();
+        } else {
+            send(CallSignalMessage::hangup(message.callId, CallEndReason::Busy), offeringPeer);
+            return;
+        }
+    }
+
+    auto group = std::make_unique<GroupCall>();
+    group->conversation = conversation;
+    group->title = route.title;
+    bool callerListed = false;
+    for (const CallPeer &peer : route.members) {
+        if (peer.device == *m_config.localDevice)
+            continue;
+        Member member;
+        member.info.peer = peer;
+        member.info.peer.conversation = conversation;
+        // The caller is in the call by definition; everyone else is being rung
+        // alongside us and will say what they did.
+        if (peer.device == sender) {
+            member.info.state = CallParticipantState::Joined;
+            member.codec = message.codec;
+            callerListed = true;
+        } else {
+            member.info.state = CallParticipantState::Ringing;
+        }
+        group->members.push_back(std::move(member));
+    }
+    if (!callerListed) {
+        // A member we have not learned about yet (their roster update is still
+        // on its way). Ring anyway: the MLS group already vouched for them.
+        Member member;
+        member.info.peer = offeringPeer;
+        member.info.state = CallParticipantState::Joined;
+        member.codec = message.codec;
+        group->members.insert(group->members.begin(), std::move(member));
+    }
+    m_group = std::move(group);
+    m_peer = offeringPeer;
+    for (const Member &member : m_group->members)
+        if (member.info.peer.device == sender)
+            m_peer = member.info.peer;
+    m_direction = CallDirection::Incoming;
+    m_callId = message.callId;
+    m_secret = message.secret;
+    m_codec = isAudioCodecAvailable(message.codec) ? message.codec : AudioCodecKind::Pcm;
+    m_endReason = CallEndReason::None;
+    m_muted = false;
+
+    (void)openPlayback();
+    if (m_soundsEnabled)
+        m_sounds.startLoop(CallSound::IncomingRing);
+    m_ringTimer->start(m_config.ringTimeoutMs);
+    setState(CallState::Ringing);
+    emit participantsChanged();
+    send(CallSignalMessage::ringing(message.callId), m_peer);
     emit incomingCall();
 }
 
@@ -372,6 +727,49 @@ void CallEngine::handleAnswer(const CallSignalMessage &message)
     m_stallTimer->start(m_config.connectTimeoutMs);
 }
 
+void CallEngine::handleGroupAnswer(Member &member, const CallSignalMessage &message)
+{
+    if (!message.accepted) {
+        setParticipantState(member, CallParticipantState::Declined);
+        settleGroup();
+        return;
+    }
+    // An answer we already acted on (the join handshake is deliberately
+    // idempotent: members re-announce themselves to newcomers).
+    if (member.info.state == CallParticipantState::Joined && member.session)
+        return;
+    member.codec = message.codec;
+    const bool wasJoined = member.info.state == CallParticipantState::Joined;
+    member.info.state = CallParticipantState::Joined;
+
+    const bool weAreIn = m_state == CallState::Connecting || m_state == CallState::Active;
+    const bool weAreCalling = m_direction == CallDirection::Outgoing
+        && (m_state == CallState::Dialing || m_state == CallState::Ringing);
+    if (weAreCalling) {
+        // The first pick-up opens the line; later ones just join it. The ring
+        // keeps running for whoever has not answered yet.
+        m_sounds.stopLoop();
+        if (m_soundsEnabled)
+            m_sounds.playOnce(CallSound::Connected);
+        setState(CallState::Connecting);
+        if (!startGroupMedia())
+            return;
+        m_stallTimer->start(m_config.connectTimeoutMs);
+    } else if (weAreIn) {
+        if (!openMemberMedia(member)) {
+            endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
+            return;
+        }
+        // Tell the newcomer we are here too, unicast. They mark us Joined and
+        // key their side of the pair; if they already knew, they ignore it.
+        send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec), member.info.peer);
+    }
+    // Otherwise we are still ringing ourselves: remember that they are in, so
+    // accepting keys a path to them as well as to the caller.
+    if (!wasJoined)
+        emit participantsChanged();
+}
+
 void CallEngine::handleHangup(const CallSignalMessage &message)
 {
     const CallEndReason reason = [&] {
@@ -390,12 +788,105 @@ void CallEngine::handleHangup(const CallSignalMessage &message)
     endCall(reason, /*notifyPeer=*/false);
 }
 
+void CallEngine::handleGroupHangup(Member &member, const CallSignalMessage &message)
+{
+    const CallParticipantState state = [&] {
+        switch (message.reason) {
+        case CallEndReason::Busy:
+            return CallParticipantState::Busy;
+        case CallEndReason::Declined:
+            return CallParticipantState::Declined;
+        case CallEndReason::NoAnswer:
+        case CallEndReason::Unanswered:
+            return CallParticipantState::NoAnswer;
+        default:
+            return member.info.state == CallParticipantState::Ringing
+                ? CallParticipantState::NoAnswer
+                : CallParticipantState::Left;
+        }
+    }();
+    setParticipantState(member, state);
+    settleGroup();
+}
+
+void CallEngine::settleGroup()
+{
+    if (!m_group || !callOccupiesDevice(m_state))
+        return;
+    int joined = 0;
+    int ringing = 0;
+    bool anyDeclined = false;
+    bool anyBusy = false;
+    for (const Member &member : m_group->members) {
+        switch (member.info.state) {
+        case CallParticipantState::Joined:
+            ++joined;
+            break;
+        case CallParticipantState::Ringing:
+            ++ringing;
+            break;
+        case CallParticipantState::Declined:
+            anyDeclined = true;
+            break;
+        case CallParticipantState::Busy:
+            anyBusy = true;
+            break;
+        case CallParticipantState::Left:
+        case CallParticipantState::NoAnswer:
+            break;
+        }
+    }
+    if (m_direction == CallDirection::Incoming && m_state == CallState::Ringing) {
+        // Still deciding, and everyone who was in the call has gone: nothing
+        // left to answer. The offer went unanswered from our point of view.
+        if (joined == 0)
+            endCall(CallEndReason::RemoteHangup, /*notifyPeer=*/false);
+        return;
+    }
+    if (joined > 0 || ringing > 0)
+        return;
+    if (m_direction == CallDirection::Outgoing
+        && (m_state == CallState::Dialing || m_state == CallState::Ringing)) {
+        endCall(anyDeclined ? CallEndReason::Declined
+                            : anyBusy ? CallEndReason::Busy : CallEndReason::NoAnswer,
+                /*notifyPeer=*/false);
+        return;
+    }
+    // We were in the call and the last other member left it.
+    endCall(CallEndReason::RemoteHangup, /*notifyPeer=*/false);
+}
+
+void CallEngine::onRingTimeout()
+{
+    if (m_group && m_direction == CallDirection::Outgoing) {
+        // Whoever has not picked up by now is not going to. The call itself
+        // only ends if nobody did.
+        for (Member &member : m_group->members)
+            if (member.info.state == CallParticipantState::Ringing)
+                setParticipantState(member, CallParticipantState::NoAnswer);
+        settleGroup();
+        return;
+    }
+    // Whose "no answer" this is depends on the direction: the caller gave up
+    // waiting; the callee never picked up and records a missed call.
+    endCall(m_direction == CallDirection::Outgoing ? CallEndReason::NoAnswer
+                                                   : CallEndReason::Unanswered,
+            /*notifyPeer=*/true);
+}
+
 void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sender,
                          const QByteArray &packet)
 {
-    if (!m_session || sender != m_peer.device || conversation != m_peer.conversation)
-        return;
     if (m_state != CallState::Connecting && m_state != CallState::Active)
+        return;
+    if (m_group) {
+        if (conversation != m_group->conversation)
+            return;
+        if (Member *member = memberFor(sender); member != nullptr && member->session)
+            onGroupMedia(*member, packet);
+        return;
+    }
+    if (!m_session || sender != m_peer.device || conversation != m_peer.conversation)
         return;
 
     if (!packet.isEmpty() && static_cast<quint8>(packet[0]) == CallVideoSession::wireVersion) {
@@ -405,7 +896,7 @@ void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sen
                 if (image->isNull())
                     m_videoTimeout->stop();
                 else
-                    m_videoTimeout->start(2500);
+                    m_videoTimeout->start(videoStaleMs);
                 emit remoteVideoFrame(*image);
             }
         }
@@ -417,6 +908,29 @@ void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sen
 
     // The first authenticated packet is what proves the media path works in this
     // direction, so it — not the answer — is what promotes the call to Active.
+    m_lastMediaMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_state == CallState::Connecting) {
+        m_activeSinceMs = m_lastMediaMs;
+        setState(CallState::Active);
+    }
+    m_stallTimer->start(m_config.mediaStallTimeoutMs);
+}
+
+void CallEngine::onGroupMedia(Member &member, const QByteArray &packet)
+{
+    if (!packet.isEmpty() && static_cast<quint8>(packet[0]) == CallVideoSession::wireVersion) {
+        if (!member.video)
+            return;
+        const auto image = member.video->decode(packet);
+        if (!image)
+            return;
+        member.cameraOn = !image->isNull();
+        member.lastVideoMs = QDateTime::currentMSecsSinceEpoch();
+        emit participantVideoFrame(member.info.peer.device, *image);
+        return;
+    }
+    if (member.session->processIncomingPacket(packet) != CallSession::ReceiveResult::Queued)
+        return;
     m_lastMediaMs = QDateTime::currentMSecsSinceEpoch();
     if (m_state == CallState::Connecting) {
         m_activeSinceMs = m_lastMediaMs;
@@ -453,6 +967,27 @@ void CallEngine::closePlayback()
     m_playback.reset();
 }
 
+bool CallEngine::startCapture()
+{
+    // The speaker is normally already up from the ring; retry here so a call
+    // that could not open it earlier still gets a chance to be heard.
+    if (!openPlayback())
+        return false;
+    if (m_capture)
+        return true;
+    m_capture = m_audioIo.makeCapture();
+    if (!m_capture)
+        return false;
+    m_capture->onFrame = [this](const AudioFrame &frame) { onCapturedFrame(frame); };
+    if (!m_capture->start()) {
+        m_capture->onFrame = nullptr;
+        m_capture.reset();
+        return false;
+    }
+    m_levelTimer->start();
+    return true;
+}
+
 bool CallEngine::startMedia()
 {
     if (!m_callId || !m_audioIo.isValid()) {
@@ -473,23 +1008,72 @@ bool CallEngine::startMedia()
     m_videoSession = CallVideoSession::create(*m_callId, m_direction, m_secret);
     m_session->setMuted(m_muted);
 
-    // The speaker is normally already up from the ring; retry here so a call
-    // that could not open it earlier still gets a chance to be heard.
-    if (!openPlayback()) {
+    if (!startCapture()) {
         endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
         return false;
     }
-    m_capture = m_audioIo.makeCapture();
-    if (!m_capture) {
+    return true;
+}
+
+bool CallEngine::openMemberMedia(Member &member)
+{
+    if (member.session)
+        return true;
+    if (!m_callId || !m_config.localDevice)
+        return false;
+    // Each pair keys its own path from the call secret and both device ids,
+    // and takes its direction from their order, so the two ends of a pair
+    // always land on opposite halves of the same schedule.
+    const QByteArray pairSecret = deriveGroupPairSecret(m_secret, *m_callId, *m_config.localDevice,
+                                                        member.info.peer.device);
+    if (pairSecret.isEmpty())
+        return false;
+    const CallDirection direction = m_config.localDevice->bytes() < member.info.peer.device.bytes()
+        ? CallDirection::Outgoing
+        : CallDirection::Incoming;
+    CallSession::Config sessionConfig;
+    sessionConfig.callId = *m_callId;
+    sessionConfig.direction = direction;
+    sessionConfig.codec = pairCodec(member.codec);
+    sessionConfig.jitter.clock = m_config.mediaClock;
+    member.session = CallSession::create(sessionConfig, pairSecret);
+    if (!member.session)
+        return false;
+    member.session->setMuted(m_muted);
+    member.video = CallVideoSession::create(*m_callId, direction, pairSecret);
+    return true;
+}
+
+void CallEngine::closeMemberMedia(Member &member)
+{
+    if (member.cameraOn) {
+        member.cameraOn = false;
+        emit participantVideoFrame(member.info.peer.device, QImage());
+    }
+    member.video.reset();
+    member.session.reset();
+    member.info.speaking = false;
+    member.info.level = 0.0;
+}
+
+bool CallEngine::startGroupMedia()
+{
+    if (!m_callId || !m_audioIo.isValid() || !m_group) {
         endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
         return false;
     }
-    m_capture->onFrame = [this](const AudioFrame &frame) { onCapturedFrame(frame); };
-    if (!m_capture->start()) {
+    for (Member &member : m_group->members) {
+        if (member.info.state != CallParticipantState::Joined)
+            continue;
+        if (!openMemberMedia(member)) {
+            endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
+            return false;
+        }
+    }
+    if (!startCapture()) {
         endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
         return false;
     }
-    m_levelTimer->start();
     return true;
 }
 
@@ -508,6 +1092,16 @@ void CallEngine::stopCapture()
     m_videoSession.reset();
     emit remoteVideoFrame(QImage());
     m_session.reset();
+    if (m_group) {
+        bool changed = false;
+        for (Member &member : m_group->members) {
+            if (member.session || member.video || member.info.speaking)
+                changed = true;
+            closeMemberMedia(member);
+        }
+        if (changed)
+            emit participantsChanged();
+    }
     m_secret.fill('\0');
     m_secret.clear();
 }
@@ -520,7 +1114,22 @@ void CallEngine::stopMedia()
 
 void CallEngine::onCapturedFrame(const AudioFrame &frame)
 {
-    if (!m_session || (m_state != CallState::Connecting && m_state != CallState::Active))
+    if (m_state != CallState::Connecting && m_state != CallState::Active)
+        return;
+    if (m_group) {
+        // The same frame, sealed separately for each member: every pair has its
+        // own key, and nobody's audio is ever forwarded by a third device.
+        for (Member &member : m_group->members) {
+            if (!member.session)
+                continue;
+            const QByteArray packet = member.session->processCapturedFrame(frame);
+            if (packet.isEmpty() || !m_transport.isConnected())
+                continue;
+            m_transport.sendMedia(m_group->conversation, member.info.peer.device, packet);
+        }
+        return;
+    }
+    if (!m_session)
         return;
     const QByteArray packet = m_session->processCapturedFrame(frame);
     if (packet.isEmpty() || !m_transport.isConnected())
@@ -530,8 +1139,20 @@ void CallEngine::onCapturedFrame(const AudioFrame &frame)
 
 void CallEngine::sendVideoFrame(const QImage &image)
 {
-    if (!m_videoSession || !m_transport.isConnected()
+    if (!m_transport.isConnected()
         || (m_state != CallState::Connecting && m_state != CallState::Active))
+        return;
+    if (m_group) {
+        for (Member &member : m_group->members) {
+            if (!member.video)
+                continue;
+            const QByteArray packet = member.video->encode(image);
+            if (!packet.isEmpty())
+                m_transport.sendMedia(m_group->conversation, member.info.peer.device, packet);
+        }
+        return;
+    }
+    if (!m_videoSession)
         return;
     const QByteArray packet = m_videoSession->encode(image);
     if (!packet.isEmpty())
@@ -543,9 +1164,46 @@ AudioFrame CallEngine::pullPlaybackFrame()
     // Before the call is answered there is no session at all and the frame is
     // pure sound; during a call the sounds ride over the far end's voice on the
     // same stream, which is what keeps them on one clock and one device.
-    AudioFrame frame = m_session ? m_session->nextPlaybackFrame() : silentAudioFrame();
+    AudioFrame frame;
+    if (m_session) {
+        frame = m_session->nextPlaybackFrame();
+    } else if (m_group) {
+        // Everyone in the call, mixed: each member's own jitter buffer paces
+        // their voice, and the sum is what one speaker plays.
+        frame = silentAudioFrame();
+        for (Member &member : m_group->members)
+            if (member.session)
+                mixInto(frame, member.session->nextPlaybackFrame());
+    } else {
+        frame = silentAudioFrame();
+    }
     m_sounds.mixInto(frame);
     return frame;
+}
+
+void CallEngine::refreshParticipantLevels()
+{
+    if (!m_group)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    bool changed = false;
+    for (Member &member : m_group->members) {
+        const bool speaking = m_state == CallState::Active && member.session
+            && member.session->isRemoteSpeaking();
+        const double level = member.session ? member.session->remoteLevel() : 0.0;
+        if (speaking != member.info.speaking || !qFuzzyCompare(level + 1.0, member.info.level + 1.0))
+            changed = true;
+        member.info.speaking = speaking;
+        member.info.level = level;
+        // A camera whose frames stopped arriving reads as off, even if the
+        // camera-off packet itself was lost.
+        if (member.cameraOn && now - member.lastVideoMs > videoStaleMs) {
+            member.cameraOn = false;
+            emit participantVideoFrame(member.info.peer.device, QImage());
+        }
+    }
+    if (changed)
+        emit participantsChanged();
 }
 
 void CallEngine::setState(CallState state)
@@ -560,8 +1218,12 @@ void CallEngine::endCall(CallEndReason reason, bool notifyPeer)
 {
     if (m_state == CallState::Idle || m_state == CallState::Ended)
         return;
-    if (notifyPeer && m_callId)
-        send(CallSignalMessage::hangup(*m_callId, reason));
+    if (notifyPeer && m_callId) {
+        if (m_group)
+            broadcast(CallSignalMessage::hangup(*m_callId, reason));
+        else
+            send(CallSignalMessage::hangup(*m_callId, reason));
+    }
     m_ringTimer->stop();
     // The microphone and the call keys go immediately; the speaker stays a
     // moment longer so the hang-up sound is actually heard rather than cut off

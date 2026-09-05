@@ -18,7 +18,10 @@
 #include "app/AddContactService.h"
 #include "app/ContactRequestService.h"
 #include "app/DeviceLink.h"
+#include "app/GroupService.h"
 #include "app/ProfileSession.h"
+#include "controllers/CallController.h"
+#include "models/MessageListModel.h"
 #include "AudioTestSupport.h"
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
@@ -315,9 +318,14 @@ private slots:
     void pipelineDeliversMessagesOverRealTls();
     void relockedProfileRelinksWithoutTokens();
     void callCarriesAudioAndVideoOverRealTls();
+    void groupChatAndGroupCallOverRealTls();
 
 private:
     void bootstrapClient(ClientStack &stack, const QString &handlePrefix);
+    // Makes `requester` and `acceptor` mutual contacts through the relay, each
+    // side driven by its own long-lived request service.
+    void becomeContacts(ClientStack &requester, ContactRequestService &requesterRequests,
+                        ClientStack &acceptor, ContactRequestService &acceptorRequests);
     [[nodiscard]] RelayEndpoints proxyEndpoints() const;
 
     bool m_available = false;
@@ -986,6 +994,239 @@ void EndToEndTest::callCarriesAudioAndVideoOverRealTls()
     bob.client->disconnect();
     alice.session->lock();
     bob.session->lock();
+}
+
+void EndToEndTest::becomeContacts(ClientStack &requester, ContactRequestService &requesterRequests,
+                                  ClientStack &acceptor, ContactRequestService &acceptorRequests)
+{
+    std::optional<ConversationId> incoming;
+    auto incomingConnection =
+        connect(&acceptorRequests, &ContactRequestService::incomingRequest, this,
+                [&](const AccountId &, const ConversationId &conversation) { incoming = conversation; });
+    bool requesterAccepted = false;
+    auto acceptedConnection =
+        connect(&requesterRequests, &ContactRequestService::contactAccepted, this,
+                [&](const AccountId &peer) { requesterAccepted = peer == acceptor.account; });
+    AddContactService add(*requester.session, *requester.client, *requester.session->syncEngine());
+    std::optional<ConversationId> created;
+    connect(&add, &AddContactService::succeeded, this,
+            [&](const ConversationId &conversation, const AccountId &) { created = conversation; });
+    add.startByHandle(acceptor.handle);
+    QTRY_VERIFY_WITH_TIMEOUT(created.has_value(), 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(incoming.has_value(), 30000);
+    acceptorRequests.acceptContact(*incoming);
+    QTRY_VERIFY_WITH_TIMEOUT(requesterAccepted, 30000);
+    disconnect(incomingConnection);
+    disconnect(acceptedConnection);
+}
+
+void EndToEndTest::groupChatAndGroupCallOverRealTls()
+{
+    if (!m_available)
+        QSKIP("PostgreSQL not available for the E2E test");
+
+    // Three real clients over real TLS and a real relay: Alice is friends with
+    // Bob and with Carol, but Bob and Carol have never met. A group Alice makes
+    // still lets all three talk, because the group is one MLS group whose
+    // Welcomes, roster and messages the relay carries device to device.
+    ClientStack alice;
+    ClientStack bob;
+    ClientStack carol;
+    bootstrapClient(alice, QStringLiteral("galice"));
+    if (QTest::currentTestFailed())
+        return;
+    bootstrapClient(bob, QStringLiteral("gbob"));
+    if (QTest::currentTestFailed())
+        return;
+    bootstrapClient(carol, QStringLiteral("gcarol"));
+    if (QTest::currentTestFailed())
+        return;
+    QTRY_VERIFY_WITH_TIMEOUT(alice.client->isConnected() && bob.client->isConnected()
+                                 && carol.client->isConnected(),
+                             30000);
+
+    ContactRequestService aliceRequests(*alice.session, *alice.session->syncEngine());
+    ContactRequestService bobRequests(*bob.session, *bob.session->syncEngine());
+    ContactRequestService carolRequests(*carol.session, *carol.session->syncEngine());
+    becomeContacts(alice, aliceRequests, bob, bobRequests);
+    if (QTest::currentTestFailed())
+        return;
+    becomeContacts(alice, aliceRequests, carol, carolRequests);
+    if (QTest::currentTestFailed())
+        return;
+    // The app resolves a requester's handle through the directory once the
+    // request lands; here the roster is stamped directly.
+    QVERIFY(bob.session->contacts()->setHandle(alice.account, alice.handle).hasValue());
+    QVERIFY(carol.session->contacts()->setHandle(alice.account, alice.handle).hasValue());
+
+    // The whole app-side stack on every client, exactly as main.cpp wires it.
+    GroupService aliceGroups(*alice.session, *alice.session->syncEngine(),
+                             GroupService::relayClaimer(*alice.client));
+    GroupService bobGroups(*bob.session, *bob.session->syncEngine(),
+                           GroupService::relayClaimer(*bob.client));
+    GroupService carolGroups(*carol.session, *carol.session->syncEngine(),
+                             GroupService::relayClaimer(*carol.client));
+    ChatController aliceChat;
+    ChatController bobChat;
+    ChatController carolChat;
+    aliceChat.setLiveServices(alice.session.get(), alice.session->syncEngine(), &aliceRequests,
+                              &aliceGroups);
+    bobChat.setLiveServices(bob.session.get(), bob.session->syncEngine(), &bobRequests, &bobGroups);
+    carolChat.setLiveServices(carol.session.get(), carol.session->syncEngine(), &carolRequests,
+                              &carolGroups);
+    QStringList aliceNotices;
+    connect(&aliceGroups, &GroupService::groupActionFailed, this,
+            [&](const QString &message) { aliceNotices.append(message); });
+
+    // --- From Bob's chat, the "+" with Carol makes the group. Its KeyPackages
+    //     are claimed from the relay, then Welcomes and the roster go out. ---
+    QVERIFY(aliceChat.selectContact(bob.account.toHex()));
+    QCOMPARE(aliceChat.groupCandidates().size(), 1);
+    aliceChat.addToGroup(carol.account.toHex());
+    QTRY_VERIFY_WITH_TIMEOUT(aliceChat.currentIsGroup(), 30000);
+    QVERIFY2(aliceNotices.isEmpty(), qPrintable(aliceNotices.join(QStringLiteral("; "))));
+    const QString aliceGroupId = aliceChat.currentContactId();
+    const auto aliceRoute = aliceChat.groupCallRouteFor(aliceGroupId);
+    QVERIFY(aliceRoute.has_value());
+    const ConversationId group = aliceRoute->conversation;
+
+    // Bob and Carol each join from their Welcome and learn the roster, Carol
+    // included even though she is a stranger to Bob.
+    QTRY_VERIFY_WITH_TIMEOUT(!bobChat.groupChatIdFor(group).isEmpty(), 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(!carolChat.groupChatIdFor(group).isEmpty(), 30000);
+    QVERIFY(bobChat.selectContact(bobChat.groupChatIdFor(group)));
+    QVERIFY(carolChat.selectContact(carolChat.groupChatIdFor(group)));
+    QTRY_COMPARE_WITH_TIMEOUT(bobChat.currentGroupMemberCount(), 3, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(carolChat.currentGroupMemberCount(), 3, 30000);
+    QVERIFY(bobChat.currentGroupMembers().contains(carol.handle));
+    QVERIFY(carolChat.currentGroupMembers().contains(bob.handle));
+
+    // --- One message from Alice reaches both; a reply from Carol reaches Bob
+    //     directly, named, although they are not contacts. ---
+    aliceChat.setComposerText(QStringLiteral("hello group"));
+    QVERIFY(aliceChat.sendMessage());
+    QTRY_COMPARE_WITH_TIMEOUT(bobChat.messages()->rowCount(), 1, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(carolChat.messages()->rowCount(), 1, 30000);
+    QCOMPARE(bobChat.messages()->data(bobChat.messages()->index(0), MessageListModel::BodyRole).toString(),
+             QStringLiteral("hello group"));
+    QCOMPARE(bobChat.messages()->data(bobChat.messages()->index(0), MessageListModel::SenderNameRole)
+                 .toString(),
+             alice.handle);
+    carolChat.setComposerText(QStringLiteral("hi from carol"));
+    QVERIFY(carolChat.sendMessage());
+    QTRY_COMPARE_WITH_TIMEOUT(bobChat.messages()->rowCount(), 2, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(aliceChat.messages()->rowCount(), 2, 30000);
+    QCOMPARE(bobChat.messages()->data(bobChat.messages()->index(1), MessageListModel::SenderNameRole)
+                 .toString(),
+             carol.handle);
+
+    // --- Bob renames it; everyone sees the new name. ---
+    QVERIFY(bobChat.renameCurrentGroup(QStringLiteral("Weekend plans")));
+    QTRY_COMPARE_WITH_TIMEOUT(aliceChat.currentGroupTitle(), QStringLiteral("Weekend plans"), 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(carolChat.currentGroupTitle(), QStringLiteral("Weekend plans"), 30000);
+
+    // --- A group call rings both members at once. Bob answers, Carol declines,
+    //     and audio flows between the two on the call. ---
+    SyncCallTransport aliceCallTransport(*alice.session->syncEngine());
+    SyncCallTransport bobCallTransport(*bob.session->syncEngine());
+    SyncCallTransport carolCallTransport(*carol.session->syncEngine());
+    OpenChat::CallTest::ScriptedAudioDevices aliceDevices;
+    OpenChat::CallTest::ScriptedAudioDevices bobDevices;
+    OpenChat::CallTest::ScriptedAudioDevices carolDevices;
+    const auto callConfigFor = [](const ClientStack &stack) {
+        CallEngine::Config config;
+        config.preferredCodec = AudioCodecKind::Pcm;
+        config.localDevice = stack.deviceId;
+        return config;
+    };
+    CallEngine aliceCall(callConfigFor(alice), aliceCallTransport, aliceDevices.factory());
+    CallEngine bobCall(callConfigFor(bob), bobCallTransport, bobDevices.factory());
+    CallEngine carolCall(callConfigFor(carol), carolCallTransport, carolDevices.factory());
+    for (CallEngine *engine : {&aliceCall, &bobCall, &carolCall})
+        engine->setSoundsEnabled(false);
+    CallController aliceCalls;
+    CallController bobCalls;
+    CallController carolCalls;
+    aliceCalls.setLiveEngine(&aliceCall, &aliceChat);
+    bobCalls.setLiveEngine(&bobCall, &bobChat);
+    carolCalls.setLiveEngine(&carolCall, &carolChat);
+
+    aliceCalls.callCurrentContact();
+    QTRY_VERIFY_WITH_TIMEOUT(aliceCall.isGroupCall(), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(bobCall.state(), CallState::Ringing, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(carolCall.state(), CallState::Ringing, 30000);
+    QVERIFY(bobCall.isGroupCall());
+    QCOMPARE(bobCalls.groupTitle(), QStringLiteral("Weekend plans"));
+    QCOMPARE(bobCalls.participants()->count(), 2);
+    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.state(), CallState::Ringing, 30000);
+    QCOMPARE(aliceCalls.participants()->count(), 2);
+
+    carolCall.declineCall();
+    bobCall.acceptCall();
+    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.state(), CallState::Connecting, 30000);
+    const auto stateOf = [](const CallEngine &engine, const DeviceId &device) {
+        for (const CallEngine::Participant &participant : engine.participants())
+            if (participant.peer.device == device)
+                return participant.state;
+        return CallParticipantState::NoAnswer;
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(stateOf(aliceCall, carol.deviceId), CallParticipantState::Declined, 30000);
+    QCOMPARE(stateOf(aliceCall, bob.deviceId), CallParticipantState::Joined);
+    QTRY_COMPARE_WITH_TIMEOUT(stateOf(bobCall, carol.deviceId), CallParticipantState::Declined, 30000);
+
+    const QList<AudioFrame> spoken =
+        AudioConvert::toFrames(OpenChat::AudioTest::syntheticSpeech(200));
+    QList<AudioFrame> bobHeard;
+    for (const AudioFrame &frame : spoken) {
+        aliceDevices.speak(frame);
+        bobDevices.speak(silentAudioFrame());
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        bobHeard.append(bobDevices.listen());
+        (void)aliceDevices.listen();
+    }
+    for (int i = 0; i < 40; ++i) {
+        QTest::qWait(2);
+        bobHeard.append(bobDevices.listen());
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(bobCall.state(), CallState::Active, 30000);
+    QCOMPARE(aliceCall.state(), CallState::Active);
+    int matched = 0;
+    for (const AudioFrame &frame : bobHeard)
+        if (matched < spoken.size() && frame == spoken.at(matched))
+            ++matched;
+    QVERIFY2(matched >= spoken.size() * 9 / 10,
+             qPrintable(QStringLiteral("only %1 of %2 frames reached Bob").arg(matched).arg(spoken.size())));
+    // Carol, who declined, received no media at all.
+    QCOMPARE(carolCall.state(), CallState::Ended);
+    QVERIFY(!carolDevices.capture->started);
+
+    // Bob leaves the call: with nobody left, Alice's call ends too.
+    bobCall.hangUp();
+    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.state(), CallState::Ended, 30000);
+    QCOMPARE(aliceCall.endReason(), CallEndReason::RemoteHangup);
+
+    // --- Carol leaves the group: Alice and Bob drop her, one of them re-keys
+    //     the group, and a message after that still reaches the other. ---
+    carolChat.leaveCurrentGroup();
+    QVERIFY(!carolChat.currentIsGroup());
+    QTRY_COMPARE_WITH_TIMEOUT(aliceChat.currentGroupMemberCount(), 2, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(bobChat.currentGroupMemberCount(), 2, 30000);
+    // Give the removal commit time to cross.
+    QTest::qWait(1500);
+    aliceChat.setComposerText(QStringLiteral("just us now"));
+    QVERIFY(aliceChat.sendMessage());
+    QTRY_COMPARE_WITH_TIMEOUT(bobChat.messages()->rowCount(), 3, 30000);
+    QCOMPARE(carolChat.messages()->rowCount(), 0); // she is looking at a person now
+    QVERIFY(!alice.session->syncEngine()->isFailedClosed());
+    QVERIFY(!bob.session->syncEngine()->isFailedClosed());
+    QVERIFY(!carol.session->syncEngine()->isFailedClosed());
+
+    alice.client->disconnect();
+    bob.client->disconnect();
+    carol.client->disconnect();
+    alice.session->lock();
+    bob.session->lock();
+    carol.session->lock();
 }
 
 QTEST_GUILESS_MAIN(EndToEndTest)

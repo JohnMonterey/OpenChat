@@ -7,6 +7,7 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -114,6 +115,20 @@ std::optional<CallMediaKeySchedule> CallMediaKeySchedule::deriveVideo(QByteArray
     if (!schedule.fromCaller.isValid() || !schedule.fromCallee.isValid())
         return std::nullopt;
     return schedule;
+}
+
+QByteArray deriveGroupPairSecret(QByteArrayView callSecret, const CallId &callId,
+                                 const DeviceId &first, const DeviceId &second)
+{
+    if (callSecret.size() != callSecretBytes)
+        return {};
+    // Order the pair so both members build the same label whichever end they are.
+    const QByteArray low = std::min(first.bytes(), second.bytes());
+    const QByteArray high = std::max(first.bytes(), second.bytes());
+    QByteArray info = QByteArrayLiteral("openchat/call/v1/group/pair");
+    info.append(low);
+    info.append(high);
+    return hkdf(callSecret, callId.bytes(), info, callSecretBytes);
 }
 
 const CallMediaKeys &CallMediaKeySchedule::sendKeys(CallDirection direction) const noexcept

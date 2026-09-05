@@ -70,7 +70,61 @@ private slots:
     void retryDelayIsCappedAndJittered();
     void retryAttemptCannotMoveBackwardOrRepeat();
     void watermarkOnlyMovesForward();
+    void groupRosterTitleAndLeaveArePersisted();
 };
+
+void RepositoryTest::groupRosterTitleAndLeaveArePersisted()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    SqlCipherChatRepository chats(database);
+
+    const auto group = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(ConversationRecord{group, group.bytes(), QStringLiteral("Trip"),
+                                                        ConversationKind::Group, 1'000})
+                .hasValue());
+    // A group row reads back as a group with no members and not left.
+    auto all = chats.conversations();
+    QVERIFY(all.hasValue());
+    QCOMPARE(all.value().size(), 1);
+    QCOMPARE(all.value().first().kind, ConversationKind::Group);
+    QCOMPARE(all.value().first().leftAtMs, qint64(0));
+    QVERIFY(chats.groupMembers(group).value().isEmpty());
+
+    // Members are keyed by device; re-upserting one refreshes its name.
+    const auto alice = AccountId::generate();
+    const auto aliceDevice = DeviceId::generate();
+    const auto bobDevice = DeviceId::generate();
+    QVERIFY(chats.upsertGroupMember({group, alice, aliceDevice, QStringLiteral("ali"), 2'000}).hasValue());
+    QVERIFY(chats.upsertGroupMember({group, AccountId::generate(), bobDevice, QStringLiteral("bob"), 3'000})
+                .hasValue());
+    QVERIFY(chats.upsertGroupMember({group, alice, aliceDevice, QStringLiteral("alice"), 4'000}).hasValue());
+    auto members = chats.groupMembers(group);
+    QVERIFY(members.hasValue());
+    QCOMPARE(members.value().size(), 2);
+    QCOMPARE(members.value().at(0).displayName, QStringLiteral("alice")); // joined first, renamed
+    QCOMPARE(members.value().at(0).deviceId, aliceDevice);
+    QCOMPARE(members.value().at(1).displayName, QStringLiteral("bob"));
+
+    // Removing one leaves the other; removing an unknown device is harmless.
+    QVERIFY(chats.removeGroupMember(group, aliceDevice).hasValue());
+    QVERIFY(chats.removeGroupMember(group, DeviceId::generate()).hasValue());
+    QCOMPARE(chats.groupMembers(group).value().size(), 1);
+
+    // The title changes in place; an unknown conversation is reported.
+    QVERIFY(chats.setConversationTitle(group, QStringLiteral("Road trip")).hasValue());
+    QCOMPARE(chats.conversations().value().first().title, QStringLiteral("Road trip"));
+    QVERIFY(!chats.setConversationTitle(ConversationId::generate(), QStringLiteral("x")).hasValue());
+
+    // Leaving keeps the row (and its members) but stamps it.
+    QVERIFY(chats.markConversationLeft(group, 9'000).hasValue());
+    QCOMPARE(chats.conversations().value().first().leftAtMs, qint64(9'000));
+    QCOMPARE(chats.groupMembers(group).value().size(), 1);
+    QVERIFY(!chats.markConversationLeft(ConversationId::generate(), 1).hasValue());
+}
 
 void RepositoryTest::messageAndOutboxCommitAtomically()
 {

@@ -79,6 +79,21 @@ struct ConversationRecord final {
     QString title;
     ConversationKind kind = ConversationKind::Direct;
     qint64 createdAtMs = 0;
+    // Non-zero once the local user left this (group) conversation. The row is
+    // kept, hidden, so late envelopes from members who have not yet heard can
+    // still be stored; it is never shown again.
+    qint64 leftAtMs = 0;
+};
+
+// One other member of a group conversation: the device every envelope into the
+// group is addressed to, the account it belongs to, and the name the inviter
+// knew them by (shown only when they are not a local contact).
+struct GroupMemberRecord final {
+    ConversationId conversationId;
+    AccountId accountId;
+    DeviceId deviceId;
+    QString displayName;
+    qint64 joinedAtMs = 0;
 };
 
 struct MessageRecord final {

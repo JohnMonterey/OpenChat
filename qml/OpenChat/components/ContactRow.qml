@@ -11,6 +11,7 @@ Item {
     required property bool favorite
     required property bool selected
     required property string avatarKey
+    required property bool isGroup
     readonly property bool compact: height < 55
     property bool statusBubbleEnabled: true
     property bool statusBubbleReady: false
@@ -66,6 +67,7 @@ Item {
         renderType: Text.NativeRendering
     }
 
+    // A group has no presence of its own, so no bead follows its name.
     PresenceBead {
         id: presenceBead
         x: nameText.x + nameText.width + 8
@@ -73,6 +75,7 @@ Item {
         anchors.verticalCenterOffset: 1
         beadSize: 11
         presence: row.presence
+        visible: !row.isGroup
     }
 
     Text {

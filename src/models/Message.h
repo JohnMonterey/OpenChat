@@ -59,6 +59,9 @@ struct Message {
     MessageFailureReason failureReason = MessageFailureReason::None;
     QString senderDevice;
     MessageSecurityEvent securityEvent = MessageSecurityEvent::None;
+    // Who sent an incoming message, shown above the bubble in a group chat
+    // where the bubble alone does not say. Empty in a one-to-one chat.
+    QString senderName;
 };
 
 } // namespace OpenChat

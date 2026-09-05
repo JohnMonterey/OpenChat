@@ -11,6 +11,8 @@
 
 #include <QObject>
 #include <QString>
+#include <QVector>
+#include <vector>
 
 #include <functional>
 #include <memory>
@@ -27,6 +29,24 @@ namespace OpenChat {
 // the system time, which would otherwise read as a burst of jitter.
 [[nodiscard]] qint64 steadyClockMs() noexcept;
 
+// What one member of a group call is doing, as every other member sees it.
+enum class CallParticipantState {
+    Ringing,  // offered, no answer yet
+    Joined,   // in the call
+    Declined, // refused the offer
+    Left,     // hung up after joining
+    Busy,     // was in another call
+    NoAnswer, // never picked up before the ring timed out
+};
+
+[[nodiscard]] QString callParticipantStateName(CallParticipantState state);
+
+// True in the states where a participant may still end up in the call.
+[[nodiscard]] constexpr bool participantIsPending(CallParticipantState state) noexcept
+{
+    return state == CallParticipantState::Ringing || state == CallParticipantState::Joined;
+}
+
 // The lifecycle of one voice call at a time: who is being called, what state the
 // call is in, and when audio starts and stops flowing.
 //
@@ -34,6 +54,12 @@ namespace OpenChat {
 // one microphone and one speaker, so a second call cannot be carried anyway; the
 // engine answers a competing offer with Busy and says so, rather than silently
 // dropping it.
+//
+// A call is either with one peer (the conversation's other device) or with a
+// group. A group call rings every member at once and carries media as a mesh:
+// each pair of members keys its own path from the shared call secret, so audio
+// never passes through a third device, and a member who leaves is simply
+// dropped from everyone else's mesh while the rest carry on.
 //
 // Everything the engine touches is injected: the transport, the audio devices,
 // and the timeouts. It owns no sockets and opens no devices itself, so the whole
@@ -63,6 +89,11 @@ public:
         // that loop would look like a 4 s burst and the buffer would deepen to
         // absorb it.
         std::function<qint64()> mediaClock = steadyClockMs;
+        // This device's id. A group call needs it to key each pair's media path
+        // (both ends of a pair derive the same keys from the ordered pair of
+        // device ids); without it group calls are refused and ordinary calls
+        // are unaffected.
+        std::optional<DeviceId> localDevice;
     };
 
     // A peer, as a call needs to address it: the shared conversation, the device
@@ -75,6 +106,22 @@ public:
         QString avatarKey;
     };
 
+    // A group, as a call needs to address it: the group conversation and every
+    // other member's device.
+    struct GroupCallRoute final {
+        ConversationId conversation = ConversationId::generate();
+        QString title;
+        QVector<CallPeer> members;
+    };
+
+    // One other member of a group call, for the UI.
+    struct Participant final {
+        CallPeer peer;
+        CallParticipantState state = CallParticipantState::Ringing;
+        bool speaking = false;
+        double level = 0.0;
+    };
+
     CallEngine(Config config, CallTransport &transport, CallAudioIoFactory audioIo,
                QObject *parent = nullptr);
     ~CallEngine() override;
@@ -85,6 +132,8 @@ public:
     [[nodiscard]] CallState state() const noexcept { return m_state; }
     [[nodiscard]] CallEndReason endReason() const noexcept { return m_endReason; }
     [[nodiscard]] CallDirection direction() const noexcept { return m_direction; }
+    // The one peer of an ordinary call; in a group call, the member who placed
+    // it (incoming) or the first member rung (outgoing).
     [[nodiscard]] const CallPeer &peer() const noexcept { return m_peer; }
     [[nodiscard]] bool isMuted() const noexcept { return m_muted; }
     // Milliseconds since the call became Active, or 0 outside a live call.
@@ -95,19 +144,35 @@ public:
     [[nodiscard]] bool isLocalSpeaking() const;
     [[nodiscard]] bool isRemoteSpeaking() const;
 
-    // Non-null only between Connecting and Ended; exposed for diagnostics.
+    // Group call surface. participants() is every other member with what they
+    // are doing right now; empty outside a group call. Held through Ended so
+    // the summary can still show who was there, cleared on dismiss.
+    [[nodiscard]] bool isGroupCall() const noexcept { return m_group != nullptr; }
+    [[nodiscard]] QString groupTitle() const;
+    [[nodiscard]] QVector<Participant> participants() const;
+    // How many members are in the call with us right now.
+    [[nodiscard]] int joinedParticipantCount() const;
+
+    // Non-null only between Connecting and Ended in an ordinary call; exposed
+    // for diagnostics. A group call keeps one session per member instead.
     [[nodiscard]] const CallSession *session() const noexcept { return m_session.get(); }
+    [[nodiscard]] const CallSession *sessionFor(const DeviceId &device) const;
 
     // Places a call. Fails (returning false, leaving state untouched) when a
     // call is already in progress or the call secret cannot be generated.
     [[nodiscard]] bool placeCall(const CallPeer &peer);
+    // Places a group call: every member is offered the same call and rings at
+    // once. Fails like placeCall, and also when the route has no members or
+    // Config::localDevice is unset.
+    [[nodiscard]] bool placeGroupCall(const GroupCallRoute &route);
 
     // Answers or refuses the ringing incoming call. Both are no-ops when there
     // is nothing ringing.
     void acceptCall();
     void declineCall();
 
-    // Ends whatever is in progress, at any stage. Safe to call when idle.
+    // Ends whatever is in progress, at any stage. Safe to call when idle. In a
+    // group call this leaves the call: the others carry on without us.
     void hangUp();
 
     void setMuted(bool muted);
@@ -125,18 +190,46 @@ public:
     // Called by the app when the peer's identity is resolved late (a handle that
     // arrives after the call started), so the ringing UI can be renamed.
     void updatePeerIdentity(const QString &displayName, const QString &avatarKey);
+    void updateParticipantIdentity(const DeviceId &device, const QString &displayName,
+                                   const QString &avatarKey);
+
+    // Answers "which group is this conversation, and who is in it?" for an
+    // incoming group offer, so the callee can ring with the members in view.
+    // An offer on a conversation this returns nothing for is an ordinary call.
+    std::function<std::optional<GroupCallRoute>(const ConversationId &)> groupRouteResolver;
 
 signals:
     void stateChanged();
     void mutedChanged();
     void levelsChanged();
     void remoteVideoFrame(const QImage &image);
+    // A group member's camera frame (null when their camera is off or gone).
+    void participantVideoFrame(const OpenChat::DeviceId &device, const QImage &image);
+    // Who is in a group call, or what they are doing, changed.
+    void participantsChanged();
     // A call arrived and is ringing. The UI raises the incoming-call surface.
     void incomingCall();
     // A call reached Ended. `reason` is also readable from endReason().
     void callEnded(OpenChat::CallEndReason reason);
 
 private:
+    // A group call's view of one other member, and the media path to them.
+    struct Member final {
+        Participant info;
+        // The codec this member announced; each pair runs the narrower of the
+        // two ends' choices, which both compute the same way.
+        AudioCodecKind codec = AudioCodecKind::Pcm;
+        std::unique_ptr<CallSession> session;
+        std::unique_ptr<CallVideoSession> video;
+        qint64 lastVideoMs = 0;
+        bool cameraOn = false;
+    };
+    struct GroupCall final {
+        ConversationId conversation = ConversationId::generate();
+        QString title;
+        std::vector<Member> members;
+    };
+
     void onSignal(const ConversationId &conversation, const DeviceId &sender,
                   const QByteArray &payload);
     void onMedia(const ConversationId &conversation, const DeviceId &sender,
@@ -147,6 +240,22 @@ private:
     void handleRinging(const CallSignalMessage &message);
     void handleAnswer(const CallSignalMessage &message);
     void handleHangup(const CallSignalMessage &message);
+
+    // Group counterparts. Every signal in a group call is dispatched here once
+    // the sender is known to be a member.
+    void handleGroupOffer(const ConversationId &conversation, const DeviceId &sender,
+                          const CallSignalMessage &message, const GroupCallRoute &route);
+    void handleGroupAnswer(Member &member, const CallSignalMessage &message);
+    void handleGroupHangup(Member &member, const CallSignalMessage &message);
+    void onGroupMedia(Member &member, const QByteArray &packet);
+    // Ends the group call when there is nobody left to be in it with.
+    void settleGroup();
+    [[nodiscard]] Member *memberFor(const DeviceId &device);
+    [[nodiscard]] bool openMemberMedia(Member &member);
+    void closeMemberMedia(Member &member);
+    void broadcast(const CallSignalMessage &message);
+    void setParticipantState(Member &member, CallParticipantState state);
+    void onRingTimeout();
 
     void send(const CallSignalMessage &message);
     void send(const CallSignalMessage &message, const CallPeer &peer);
@@ -161,6 +270,9 @@ private:
     // Builds the media session and opens the microphone. Playback must already
     // be up. Returns false (and ends the call as SetupFailed) if either fails.
     [[nodiscard]] bool startMedia();
+    // The group form: opens the microphone and one session per joined member.
+    [[nodiscard]] bool startGroupMedia();
+    [[nodiscard]] bool startCapture();
     // Drops the microphone and the media session, and with them the call keys.
     // Leaves the speaker running so a departing sound can still be heard.
     void stopCapture();
@@ -172,6 +284,7 @@ private:
 
     void onCapturedFrame(const AudioFrame &frame);
     [[nodiscard]] AudioFrame pullPlaybackFrame();
+    void refreshParticipantLevels();
 
     Config m_config;
     CallTransport &m_transport;
@@ -183,6 +296,7 @@ private:
     CallEndReason m_endReason = CallEndReason::None;
     CallDirection m_direction = CallDirection::Outgoing;
     CallPeer m_peer;
+    std::unique_ptr<GroupCall> m_group;
     std::optional<CallId> m_callId;
     QByteArray m_secret;
     AudioCodecKind m_codec = AudioCodecKind::Pcm;

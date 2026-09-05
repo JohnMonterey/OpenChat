@@ -15,12 +15,18 @@ Item {
     objectName: "callHeader"
     required property var controller
     property real maxVideoHeight: 210
+    readonly property bool isGroupCall: controller.isGroupCall === true
     readonly property bool hasVideo: controller.cameraEnabled || controller.remoteCameraEnabled
     readonly property real videoWidth: Math.max(100,
         (width - 48 - (hasVideo ? 22 : 94)
          - (controller.cameraEnabled && controller.remoteCameraEnabled ? 0 : 132))
         / (controller.cameraEnabled && controller.remoteCameraEnabled ? 2 : 1))
-    implicitHeight: Math.max(Theme.callHeaderHeight, participants.height + 98)
+    // In a group every camera shares the row, so each gets a narrower slot.
+    readonly property real groupVideoWidth: Math.max(100, Math.min(260, (width - 60) / 3))
+    readonly property real participantsHeight: isGroupCall ? groupParticipants.height
+                                                           : participants.height
+    implicitHeight: Math.max(Theme.callHeaderHeight, participantsHeight + 98)
+                    + (isGroupCall ? 18 : 0)
                     + (cameraError.visible ? cameraError.implicitHeight + 8 : 0)
 
     Rectangle {
@@ -31,10 +37,84 @@ Item {
         }
     }
 
+    // The group's name over the people in it, group calls only.
+    Text {
+        id: groupTitle
+        objectName: "groupCallTitle"
+        anchors.top: parent.top
+        anchors.topMargin: 10
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: parent.width - 40
+        horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
+        visible: callHeader.isGroupCall
+        text: callHeader.controller.groupTitle
+        color: Theme.textPrimary
+        font.family: Theme.uiFont
+        font.pixelSize: 15
+        font.bold: true
+        renderType: Text.NativeRendering
+    }
+
+    // Everyone on a group call, us first, each captioned with what they are
+    // doing. Wraps onto further rows when the group outgrows the width.
+    Flow {
+        id: groupParticipants
+        objectName: "groupParticipants"
+        visible: callHeader.isGroupCall
+        anchors.top: parent.top
+        anchors.topMargin: callHeader.isGroupCall ? 34 : 18
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(parent.width - 40, 5 * 132 + 4 * 14)
+        spacing: 14
+
+        CallParticipant {
+            objectName: "groupLocalParticipant"
+            cameraEnabled: callHeader.controller.cameraEnabled
+            videoFrame: callHeader.controller.localVideoFrame
+            videoAspect: callHeader.controller.localVideoAspect
+            videoMaxWidth: callHeader.groupVideoWidth
+            videoMaxHeight: callHeader.maxVideoHeight
+            mirrored: true
+            name: callHeader.controller.localName.length > 0
+                  ? callHeader.controller.localName : "You"
+            avatarKey: callHeader.controller.localAvatarKey
+            speaking: callHeader.controller.localSpeaking
+            level: callHeader.controller.localLevel
+            muted: callHeader.controller.muted
+        }
+
+        Repeater {
+            model: callHeader.isGroupCall ? callHeader.controller.participants : null
+
+            CallParticipant {
+                id: member
+                // The model's rows fill the participant's own properties (name,
+                // picture, speaking ring, camera) by role name; the rest are the
+                // group-only roles declared here.
+                required property string deviceId
+                required property string stateText
+                required property bool joined
+                required property bool ringing
+                required speaking
+                required level
+                required videoFrame
+                required cameraEnabled
+                required videoAspect
+                objectName: "groupParticipant_" + deviceId
+                videoMaxWidth: callHeader.groupVideoWidth
+                videoMaxHeight: callHeader.maxVideoHeight
+                caption: stateText
+                dimmed: !joined && !ringing
+            }
+        }
+    }
+
     // Each picture grows only when that participant shares their camera.
     Row {
         id: participants
         objectName: "callParticipants"
+        visible: !callHeader.isGroupCall
         height: Math.max(localParticipant.height, remoteParticipant.height)
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
@@ -94,7 +174,7 @@ Item {
     Text {
         id: statusLine
         objectName: "callStatusText"
-        anchors.top: participants.bottom
+        anchors.top: callHeader.isGroupCall ? groupParticipants.bottom : participants.bottom
         anchors.topMargin: 8
         anchors.horizontalCenter: parent.horizontalCenter
         text: callHeader.controller.isActive ? callHeader.controller.durationText

@@ -25,6 +25,7 @@
 #include "app/AppMetadata.h"
 #include "app/ContactRequestService.h"
 #include "app/DeviceLink.h"
+#include "app/GroupService.h"
 #include "app/ProfileSession.h"
 #include "call/CallEngine.h"
 #include "call/QtAudioIo.h"
@@ -69,6 +70,9 @@ void registerQmlTypes()
     qmlRegisterUncreatableType<OpenChat::CallController>(
         "OpenChat.Native", 1, 0, "CallController",
         QStringLiteral("CallController is provided by the application"));
+    qmlRegisterUncreatableType<OpenChat::CallParticipantModel>(
+        "OpenChat.Native", 1, 0, "CallParticipantModel",
+        QStringLiteral("CallParticipantModel is provided by the CallController"));
 }
 
 // Applies an optional --width/--height override to a window, honouring the app's
@@ -268,7 +272,7 @@ private:
             m_contactController->setLiveServices(m_contactRequests.get(), m_relay.get(),
                                                  m_session.get(), m_session->syncEngine());
             m_chatController->setLiveServices(m_session.get(), m_session->syncEngine(),
-                                              m_contactRequests.get());
+                                              m_contactRequests.get(), m_groups.get());
             m_chatController->setPresenceRelay(m_relay.get());
             // A resolved handle renames the chat row of an already-accepted peer,
             // and the caller shown on a ringing call screen.
@@ -334,6 +338,9 @@ private:
         m_contactRequests =
             std::make_unique<OpenChat::ContactRequestService>(*m_session, *engine);
         m_contactRequests->reconcileOnStartup();
+        // Group chats claim KeyPackages over the relay and ride the same engine.
+        m_groups = std::make_unique<OpenChat::GroupService>(
+            *m_session, *engine, OpenChat::GroupService::relayClaimer(*m_relay));
         m_deviceLink = std::make_unique<OpenChat::DeviceLink>(*m_session, *m_relay);
         m_deviceLink->start(linkStart);
 
@@ -351,9 +358,12 @@ private:
         // all. Leaving the engine null makes the UI report calls as unavailable
         // up front rather than letting one fail after it has started ringing.
         if (OpenChat::hasUsableCallAudioDevices()) {
+            OpenChat::CallEngine::Config callConfig;
+            // A group call keys each pair's media from both device ids.
+            if (const auto credential = m_session->publicCredential(); credential.hasValue())
+                callConfig.localDevice = credential.value().deviceId;
             m_callEngine = std::make_unique<OpenChat::CallEngine>(
-                OpenChat::CallEngine::Config{}, *m_callTransport,
-                OpenChat::makeQtCallAudioIoFactory());
+                callConfig, *m_callTransport, OpenChat::makeQtCallAudioIoFactory());
         } else {
             qWarning().noquote() << QStringLiteral(
                 "OpenChat: no usable audio input/output was found; voice calls are "
@@ -525,6 +535,9 @@ private:
     // are all still alive. Only populated on a live unlocked session
     // (enableContactServices).
     std::unique_ptr<OpenChat::ContactRequestService> m_contactRequests;
+    // Group chats: borrows the session, engine and relay like the request
+    // service, and is torn down with it.
+    std::unique_ptr<OpenChat::GroupService> m_groups;
     // Keeps the relay session authenticated for the life of the profile session.
     // Declared after the relay it borrows (destroyed before it).
     std::unique_ptr<OpenChat::DeviceLink> m_deviceLink;
@@ -628,7 +641,7 @@ int runContactWindow(QGuiApplication &application, QCommandLineParser &parser,
     contactController.addMockRequest(QStringLiteral("@grace"),
                                      QStringLiteral("wants to chat with you"));
     contactController.setMockInvite(QStringLiteral("OPENCHAT-INV-9F3K-77QX-2M8D-4T1P"));
-    // Preview the Search & Find row too: a seeded directory handle typed into the
+    // Preview the Search Chats and Users row too: a seeded directory handle typed into the
     // search resolves as Found with the send-request affordance.
     contactController.setMockDirectory({QStringLiteral("ada")});
     chatController.setSearchQuery(QStringLiteral("ada"));
@@ -702,20 +715,37 @@ int runVerifyWindow(QGuiApplication &application, QCommandLineParser &parser,
 int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
                   const QCommandLineOption &captureOption,
                   const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
-                  const QCommandLineOption &heightOption, bool incoming, bool video)
+                  const QCommandLineOption &heightOption, bool incoming, bool video, bool group)
 {
     OpenChat::ChatController chatController;
     chatController.setLocalUserName(QStringLiteral("Developer"));
     OpenChat::CallController callController;
     callController.setLocalIdentity(chatController.localUserName(),
                                     chatController.localAvatarKey());
-    // Two states worth reviewing: a call still ringing, where the answer and
-    // decline pair is offered, and a live call with the far end talking, which
-    // is the state the green speaking ring exists for.
-    callController.enableForPreview(
-        incoming ? OpenChat::CallState::Ringing : OpenChat::CallState::Active,
-        QStringLiteral("Jessica"), QStringLiteral("jessica"),
-        /*remoteSpeaking=*/!incoming, /*localSpeaking=*/false);
+    if (group) {
+        // A group call mid-way through ringing: one member talking, one still
+        // ringing, one who declined, so every participant state is on screen.
+        OpenChat::CallParticipantRow jessica{QStringLiteral("d1"), QStringLiteral("Jessica"),
+                                             QStringLiteral("jessica"), QString(), true, false,
+                                             true, 0.42};
+        OpenChat::CallParticipantRow michael{QStringLiteral("d2"), QStringLiteral("Michael"),
+                                             QStringLiteral("michael"), QStringLiteral("Ringing…"),
+                                             false, true, false, 0.0};
+        OpenChat::CallParticipantRow ryan{QStringLiteral("d3"), QStringLiteral("Ryan"),
+                                          QStringLiteral("ryan"), QStringLiteral("Declined"),
+                                          false, false, false, 0.0};
+        callController.enableForGroupPreview(OpenChat::CallState::Active,
+                                             QStringLiteral("Weekend plans"),
+                                             {jessica, michael, ryan});
+    } else {
+        // Two states worth reviewing: a call still ringing, where the answer and
+        // decline pair is offered, and a live call with the far end talking, which
+        // is the state the green speaking ring exists for.
+        callController.enableForPreview(
+            incoming ? OpenChat::CallState::Ringing : OpenChat::CallState::Active,
+            QStringLiteral("Jessica"), QStringLiteral("jessica"),
+            /*remoteSpeaking=*/!incoming, /*localSpeaking=*/false);
+    }
 
     if (video) {
         QImage local(640, 360, QImage::Format_RGB32);
@@ -789,9 +819,11 @@ int main(int argc, char *argv[])
     const QCommandLineOption callIncomingOption(
         QStringLiteral("call-incoming"),
         QStringLiteral("Preview the in-call surface while a call is ringing."));
+    const QCommandLineOption callGroupOption(
+        QStringLiteral("call-group"), QStringLiteral("Preview a group call with several members."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, addContactOption, verifyOption, callOption,
-                       callIncomingOption, callVideoOption});
+                       callIncomingOption, callVideoOption, callGroupOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -817,9 +849,11 @@ int main(int argc, char *argv[])
     // Call preview: render the in-call surface with a mock controller, checked
     // before the plain capture path so --call --capture routes here.
     const bool previewIncomingCall = parser.isSet(callIncomingOption);
-    if (parser.isSet(callOption) || previewIncomingCall || parser.isSet(callVideoOption))
+    if (parser.isSet(callOption) || previewIncomingCall || parser.isSet(callVideoOption)
+        || parser.isSet(callGroupOption))
         return runCallWindow(application, parser, captureOption, delayOption, widthOption,
-                             heightOption, previewIncomingCall, parser.isSet(callVideoOption));
+                             heightOption, previewIncomingCall, parser.isSet(callVideoOption),
+                             parser.isSet(callGroupOption));
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

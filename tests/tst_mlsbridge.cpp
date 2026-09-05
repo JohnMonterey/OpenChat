@@ -46,7 +46,89 @@ private slots:
     void storageFailureRollsBackTheRatchet();
     void storedStateIsBoundToTheDeviceIdentity();
     void rejectsInvalidInputsWithoutCrossingTheAbi();
+    void threePartyGroupListsMembersAndRemovesOne();
+    void messagesFromARecentPastEpochStillDecrypt();
 };
+
+void MlsBridgeTest::threePartyGroupListsMembersAndRemovesOne()
+{
+    auto alice = std::move(MlsClient::create("alice-device")).value();
+    auto bob = std::move(MlsClient::create("bob-device")).value();
+    auto carol = std::move(MlsClient::create("carol-device")).value();
+
+    // Alice creates the group and adds both others in one commit; each joins
+    // from the same Welcome.
+    QVERIFY(alice->createGroup(conversationId()));
+    auto add = alice->addMembers(conversationId(),
+                                 {bob->generateKeyPackage().value(), carol->generateKeyPackage().value()});
+    QVERIFY(add);
+    QVERIFY(bob->joinGroup(conversationId(), add.value().welcome));
+    QVERIFY(carol->joinGroup(conversationId(), add.value().welcome));
+
+    // Every member sees the other two by their authenticated credentials.
+    auto aliceView = alice->groupMembers(conversationId());
+    QVERIFY(aliceView);
+    QCOMPARE(aliceView.value().size(), qsizetype(2));
+    QVERIFY(aliceView.value().contains(QByteArray("bob-device")));
+    QVERIFY(aliceView.value().contains(QByteArray("carol-device")));
+    auto bobView = bob->groupMembers(conversationId());
+    QVERIFY(bobView);
+    QVERIFY(bobView.value().contains(QByteArray("alice-device")));
+    QVERIFY(bobView.value().contains(QByteArray("carol-device")));
+    // A group of one lists nobody.
+    auto solo = std::move(MlsClient::create("solo-device")).value();
+    const ConversationId soloGroup = *ConversationId::fromBytes("conversation-two");
+    QVERIFY(solo->createGroup(soloGroup));
+    QVERIFY(solo->groupMembers(soloGroup));
+    QVERIFY(solo->groupMembers(soloGroup).value().isEmpty());
+    QVERIFY(!solo->groupMembers(conversationId()));
+
+    // One ciphertext, readable by both other members.
+    auto hello = bob->encrypt(conversationId(), "hi all");
+    QVERIFY(hello);
+    QCOMPARE(alice->process(conversationId(), hello.value().bytes).value().applicationData,
+             QByteArray("hi all"));
+    QCOMPARE(carol->process(conversationId(), hello.value().bytes).value().applicationData,
+             QByteArray("hi all"));
+
+    // Carol leaves: Bob commits her removal and Alice applies it. From then on
+    // Carol cannot read the group, and the two remaining members still can.
+    auto removal = bob->removeMembers(conversationId(), {QByteArray("carol-device")});
+    QVERIFY(removal);
+    auto applied = alice->process(conversationId(), removal.value());
+    QVERIFY(applied);
+    QCOMPARE(applied.value().kind, MlsProcessKind::Commit);
+    QCOMPARE(alice->groupMembers(conversationId()).value(), QList<QByteArray>{"bob-device"});
+    QCOMPARE(bob->groupMembers(conversationId()).value(), QList<QByteArray>{"alice-device"});
+    auto afterwards = alice->encrypt(conversationId(), "just us");
+    QVERIFY(afterwards);
+    QCOMPARE(bob->process(conversationId(), afterwards.value().bytes).value().applicationData,
+             QByteArray("just us"));
+    QVERIFY(!carol->process(conversationId(), afterwards.value().bytes));
+}
+
+void MlsBridgeTest::messagesFromARecentPastEpochStillDecrypt()
+{
+    auto alice = std::move(MlsClient::create("alice-device")).value();
+    auto bob = std::move(MlsClient::create("bob-device")).value();
+    auto carol = std::move(MlsClient::create("carol-device")).value();
+
+    QVERIFY(alice->createGroup(conversationId()));
+    auto add = alice->addMembers(conversationId(), {bob->generateKeyPackage().value()});
+    QVERIFY(add);
+    QVERIFY(bob->joinGroup(conversationId(), add.value().welcome));
+
+    // Bob's message was sealed at the current epoch. Before it reaches Alice
+    // she adds Carol, moving the group on by one epoch; the message from the
+    // epoch before must still open rather than be lost to the race.
+    auto inFlight = bob->encrypt(conversationId(), "sent just before the add");
+    QVERIFY(inFlight);
+    auto addCarol = alice->addMembers(conversationId(), {carol->generateKeyPackage().value()});
+    QVERIFY(addCarol);
+    auto late = alice->process(conversationId(), inFlight.value().bytes);
+    QVERIFY2(late, "an application message from the previous epoch was refused");
+    QCOMPARE(late.value().applicationData, QByteArray("sent just before the add"));
+}
 
 void MlsBridgeTest::exchangesAndRejectsTampering()
 {

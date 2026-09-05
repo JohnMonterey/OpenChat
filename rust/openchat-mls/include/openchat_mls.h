@@ -113,6 +113,13 @@ int32_t oc_mls_inspect_key_package(oc_mls_client *client,
                                    size_t key_package_len,
                                    oc_mls_buffer *out_credential);
 
+/* Read-only listing of a joined group's other members: their credential
+ * identities, framed like oc_mls_inspect_welcome's output. A group with no
+ * other member yields a zero-count list. No group state is stored. */
+int32_t oc_mls_group_members(oc_mls_client *client,
+                             const uint8_t conversation_id[16],
+                             oc_mls_buffer *out_members);
+
 int32_t oc_mls_encrypt(oc_mls_client *client,
                        const uint8_t conversation_id[16],
                        const uint8_t *plaintext,

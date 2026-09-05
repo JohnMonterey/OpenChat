@@ -165,6 +165,24 @@ void AvatarArtwork::paint(QPainter *painter)
     }
 
     painter->setPen(Qt::NoPen);
+    if (m_avatarKey == QStringLiteral("group")) {
+        // Two silhouettes, one a step behind the other: a group, not a person.
+        QLinearGradient sky(rect.topLeft(), rect.bottomLeft());
+        sky.setColorAt(0.0, QColor("#dcebf6"));
+        sky.setColorAt(1.0, QColor("#a9c6dc"));
+        painter->fillRect(rect, sky);
+        painter->setBrush(QColor("#8fa4b5"));
+        painter->drawEllipse(QRectF(rect.width() * 0.50, rect.height() * 0.22, rect.width() * 0.28,
+                                    rect.width() * 0.28));
+        painter->drawEllipse(QRectF(rect.width() * 0.40, rect.height() * 0.54, rect.width() * 0.50,
+                                    rect.height() * 0.40));
+        painter->setBrush(QColor("#5f7789"));
+        painter->drawEllipse(QRectF(rect.width() * 0.20, rect.height() * 0.28, rect.width() * 0.32,
+                                    rect.width() * 0.32));
+        painter->drawEllipse(QRectF(rect.width() * 0.06, rect.height() * 0.62, rect.width() * 0.60,
+                                    rect.height() * 0.44));
+        return;
+    }
     if (m_avatarKey == QStringLiteral("sarah") || m_avatarKey == QStringLiteral("jessica") ||
         m_avatarKey == QStringLiteral("alex")) {
         painter->setBrush(m_avatarKey == QStringLiteral("alex") ? QColor("#3e3e3e")

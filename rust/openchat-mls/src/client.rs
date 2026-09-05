@@ -19,6 +19,11 @@ const MAX_IDENTITY_BYTES: usize = 1024;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_PLAINTEXT_BYTES: usize = 256 * 1024;
 const MAX_MEMBERS_PER_CHANGE: usize = 256;
+/// Application messages sealed under a recent past epoch still decrypt. A group
+/// chat's members commit adds and removals while other members' messages are
+/// in flight, and a message encrypted just before such a commit must not be
+/// lost on the members that already merged it.
+const MAX_PAST_EPOCHS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]
@@ -140,6 +145,7 @@ impl MlsClient {
             .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
             .sender_ratchet_configuration(SenderRatchetConfiguration::new(32, 1000))
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
         MlsGroup::new_with_group_id(
             &self.provider,
@@ -167,6 +173,7 @@ impl MlsClient {
             .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
             .sender_ratchet_configuration(SenderRatchetConfiguration::new(32, 1000))
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
         let group = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
             .map_err(|_| MlsError::InvalidMessage)?
@@ -196,6 +203,7 @@ impl MlsClient {
                 .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
                 .sender_ratchet_configuration(SenderRatchetConfiguration::new(32, 1000))
                 .use_ratchet_tree_extension(true)
+                .max_past_epochs(MAX_PAST_EPOCHS)
                 .build();
             let group = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
                 .map_err(|_| MlsError::InvalidMessage)?
@@ -236,6 +244,23 @@ impl MlsClient {
         BasicCredential::try_from(key_package.leaf_node().credential().clone())
             .map(|credential| credential.identity().to_vec())
             .map_err(|_| MlsError::InvalidMessage)
+    }
+
+    /// The MLS-authenticated credential identities of every current member of
+    /// the group (self excluded), read from the group's own ratchet tree.
+    /// Read-only: no ratchet or state change.
+    pub fn group_members(&self, conversation: [u8; 16]) -> Result<Vec<Vec<u8>>, MlsError> {
+        let group = self.load_group(conversation)?;
+        let mut others = Vec::new();
+        for member in group.members() {
+            let identity = BasicCredential::try_from(member.credential.clone())
+                .map(|credential| credential.identity().to_vec())
+                .map_err(|_| MlsError::InvalidMessage)?;
+            if identity != self.identity {
+                others.push(identity);
+            }
+        }
+        Ok(others)
     }
 
     pub fn add_members(

@@ -2,8 +2,10 @@
 #include "network/RelayClient.h"
 
 #include "app/ContactRequestService.h"
+#include "app/GroupService.h"
 #include "app/ProfileSession.h"
 #include "domain/Contact.h"
+#include "domain/GroupUpdate.h"
 #include "network/SyncEngine.h"
 #include "render/AvatarStore.h"
 #include "render/ProfileImage.h"
@@ -118,6 +120,9 @@ QString shortIdLabel(const AccountId &account)
     return QStringLiteral("ID ") + account.toHex().left(10);
 }
 
+const QString groupIdPrefix = QStringLiteral("group:");
+const QString groupAvatarKey = QStringLiteral("group");
+
 } // namespace
 
 ChatController::ChatController(QObject *parent)
@@ -169,7 +174,259 @@ QString ChatController::currentStatusText() const
     const auto contact = currentContact();
     if (!contact)
         return QString();
+    if (contact->isGroup)
+        return currentGroupMembers();
     return contact->statusText.isEmpty() ? presenceText(contact->presence) : contact->statusText;
+}
+
+bool ChatController::isGroupChatId(const QString &chatId)
+{
+    return chatId.startsWith(groupIdPrefix);
+}
+
+const ChatController::LiveGroup *ChatController::currentGroup() const
+{
+    const auto group = m_liveGroups.constFind(m_currentContactId);
+    return group == m_liveGroups.cend() ? nullptr : &*group;
+}
+
+bool ChatController::currentIsGroup() const
+{
+    return currentGroup() != nullptr;
+}
+
+QString ChatController::currentGroupTitle() const
+{
+    const LiveGroup *group = currentGroup();
+    return group ? group->title : QString();
+}
+
+QString ChatController::memberName(const GroupMember &member) const
+{
+    // A member who is also a contact goes by the roster's name (a resolved
+    // handle beats whatever name their inviter knew them by).
+    if (!member.contactId.isEmpty()) {
+        if (const auto contact = m_contacts.contactById(member.contactId))
+            return contact->name;
+    }
+    return member.name.isEmpty() ? shortIdLabel(member.account) : member.name;
+}
+
+QString ChatController::currentGroupMembers() const
+{
+    const LiveGroup *group = currentGroup();
+    if (group == nullptr)
+        return QString();
+    QStringList names;
+    for (const GroupMember &member : group->members)
+        names.append(memberName(member));
+    // Alphabetical, so every device lists the same group the same way.
+    std::sort(names.begin(), names.end(),
+              [](const QString &a, const QString &b) { return a.localeAwareCompare(b) < 0; });
+    names.prepend(QStringLiteral("You"));
+    return names.join(QStringLiteral(", "));
+}
+
+int ChatController::currentGroupMemberCount() const
+{
+    const LiveGroup *group = currentGroup();
+    return group ? group->members.size() + 1 : 0;
+}
+
+QString ChatController::groupDisplayName(const LiveGroup &group) const
+{
+    if (!group.title.isEmpty())
+        return group.title;
+    // Untitled: the members name it, the way a phone names a group thread.
+    QStringList names;
+    for (const GroupMember &member : group.members)
+        names.append(memberName(member));
+    std::sort(names.begin(), names.end(),
+              [](const QString &a, const QString &b) { return a.localeAwareCompare(b) < 0; });
+    return names.isEmpty() ? QStringLiteral("New group") : names.join(QStringLiteral(", "));
+}
+
+Contact ChatController::groupRowFor(const QString &id, const LiveGroup &group) const
+{
+    Contact row;
+    row.id = id;
+    row.name = groupDisplayName(group);
+    row.presence = Presence::Available;
+    row.favorite = false;
+    row.avatarKey = groupAvatarKey;
+    const int count = group.members.size() + 1;
+    row.statusText = count == 1 ? QStringLiteral("Just you")
+                                : QStringLiteral("%1 members").arg(count);
+    row.isGroup = true;
+    return row;
+}
+
+QVariantList ChatController::groupCandidates() const
+{
+    QVariantList candidates;
+    if (m_currentContactId.isEmpty())
+        return candidates;
+    const LiveGroup *group = currentGroup();
+    for (int row = 0; row < m_contacts.rowCount(); ++row) {
+        const auto contact = m_contacts.contactAt(row);
+        if (!contact || contact->isGroup || contact->id == m_currentContactId)
+            continue;
+        if (m_live) {
+            // Only a contact with a known device can be put into a group.
+            const auto chat = m_liveChats.constFind(contact->id);
+            if (chat == m_liveChats.cend() || !chat->peerDevice)
+                continue;
+        }
+        bool member = false;
+        if (group != nullptr)
+            for (const GroupMember &existing : group->members)
+                member = member || existing.contactId == contact->id;
+        if (member)
+            continue;
+        candidates.append(QVariantMap{{QStringLiteral("contactId"), contact->id},
+                                      {QStringLiteral("name"), contact->name},
+                                      {QStringLiteral("avatarKey"), contact->avatarKey}});
+    }
+    return candidates;
+}
+
+void ChatController::addToGroup(const QString &contactId)
+{
+    if (contactId.isEmpty() || contactId == m_currentContactId || m_currentContactId.isEmpty())
+        return;
+    if (!m_live) {
+        mockAddToGroup(contactId);
+        return;
+    }
+    if (m_groups == nullptr) {
+        setGroupNotice(QStringLiteral("Group chats are not available right now."));
+        return;
+    }
+    const auto added = m_liveChats.constFind(contactId);
+    if (added == m_liveChats.cend()) {
+        setGroupNotice(QStringLiteral("Only your contacts can be added to a group."));
+        return;
+    }
+    setGroupNotice({});
+    if (const LiveGroup *group = currentGroup()) {
+        m_groups->addMember(group->conversation, added->account);
+        return;
+    }
+    const auto current = m_liveChats.constFind(m_currentContactId);
+    if (current == m_liveChats.cend())
+        return;
+    m_groups->createGroup({current->account, added->account}, QString());
+}
+
+bool ChatController::renameCurrentGroup(const QString &title)
+{
+    const auto group = m_liveGroups.find(m_currentContactId);
+    if (group == m_liveGroups.end())
+        return false;
+    const QString normalized = normalizeGroupTitle(title);
+    if (m_live) {
+        if (m_groups == nullptr || !m_groups->rename(group->conversation, normalized)) {
+            setGroupNotice(QStringLiteral("The group could not be renamed."));
+            return false;
+        }
+        // groupChanged re-reads the roster; nothing more to do here.
+        return true;
+    }
+    group->title = normalized;
+    QVector<Contact> rows;
+    for (int row = 0; row < m_contacts.rowCount(); ++row)
+        if (auto contact = m_contacts.contactAt(row); contact) {
+            if (contact->id == m_currentContactId)
+                *contact = groupRowFor(contact->id, *group);
+            rows.append(*contact);
+        }
+    m_contacts.setContacts(rows);
+    m_contacts.selectContact(m_currentContactId);
+    emit currentContactChanged();
+    return true;
+}
+
+void ChatController::leaveCurrentGroup()
+{
+    const auto group = m_liveGroups.constFind(m_currentContactId);
+    if (group == m_liveGroups.cend())
+        return;
+    if (m_live) {
+        if (m_groups != nullptr && !m_groups->leave(group->conversation))
+            setGroupNotice(QStringLiteral("The group could not be left."));
+        return;
+    }
+    const QString id = m_currentContactId;
+    m_liveGroups.remove(id);
+    m_messagesByContact.remove(id);
+    QVector<Contact> rows;
+    for (int row = 0; row < m_contacts.rowCount(); ++row)
+        if (const auto contact = m_contacts.contactAt(row); contact && contact->id != id)
+            rows.append(*contact);
+    m_contacts.setContacts(rows);
+    m_currentContactId = m_contacts.contactAt(0) ? m_contacts.contactAt(0)->id : QString();
+    if (!m_currentContactId.isEmpty())
+        m_contacts.selectContact(m_currentContactId);
+    refreshVisibleMessages();
+    emit currentContactChanged();
+    emit groupCandidatesChanged();
+}
+
+void ChatController::mockAddToGroup(const QString &contactId)
+{
+    const auto added = m_contacts.contactById(contactId);
+    if (!added || added->isGroup)
+        return;
+    const auto toMember = [](const Contact &contact) {
+        GroupMember member{AccountId::generate(), DeviceId::generate(), contact.id, contact.name,
+                           contact.avatarKey};
+        return member;
+    };
+    QString id = m_currentContactId;
+    if (const auto group = m_liveGroups.find(id); group != m_liveGroups.end()) {
+        for (const GroupMember &member : group->members)
+            if (member.contactId == contactId)
+                return;
+        group->members.append(toMember(*added));
+    } else {
+        const auto current = m_contacts.contactById(id);
+        if (!current)
+            return;
+        id = groupIdPrefix + QStringLiteral("mock-%1").arg(++m_mockGroupCounter);
+        LiveGroup created;
+        created.members = {toMember(*current), toMember(*added)};
+        m_liveGroups.insert(id, created);
+        m_messagesByContact.insert(id, {});
+    }
+    QVector<Contact> rows;
+    bool present = false;
+    for (int row = 0; row < m_contacts.rowCount(); ++row)
+        if (auto contact = m_contacts.contactAt(row); contact) {
+            if (contact->id == id) {
+                *contact = groupRowFor(id, m_liveGroups[id]);
+                present = true;
+            }
+            rows.append(*contact);
+        }
+    if (!present)
+        rows.append(groupRowFor(id, m_liveGroups[id]));
+    m_contacts.setContacts(rows);
+    selectContact(id);
+    emit currentContactChanged();
+    emit groupCandidatesChanged();
+}
+
+void ChatController::clearGroupNotice()
+{
+    setGroupNotice({});
+}
+
+void ChatController::setGroupNotice(const QString &notice)
+{
+    if (m_groupNotice == notice)
+        return;
+    m_groupNotice = notice;
+    emit groupNoticeChanged();
 }
 
 QString ChatController::currentAvatarKey() const
@@ -216,8 +473,12 @@ bool ChatController::canSend() const
 
 bool ChatController::currentLiveChatSendable() const
 {
+    if (m_engine == nullptr)
+        return false;
+    if (const LiveGroup *group = currentGroup())
+        return !group->members.isEmpty();
     const auto chat = m_liveChats.constFind(m_currentContactId);
-    return chat != m_liveChats.cend() && chat->peerDevice.has_value() && m_engine != nullptr;
+    return chat != m_liveChats.cend() && chat->peerDevice.has_value();
 }
 
 QString ChatController::searchQuery() const
@@ -298,9 +559,18 @@ bool ChatController::selectContact(const QString &id)
                 emit chatUnreadCountChanged();
             }
         }
+        const auto group = m_liveGroups.find(id);
+        if (group != m_liveGroups.end()) {
+            m_messagesByContact.insert(id, loadHistory(group->conversation));
+            if (group->unread != 0) {
+                group->unread = 0;
+                emit chatUnreadCountChanged();
+            }
+        }
     }
     refreshVisibleMessages();
     emit currentContactChanged();
+    emit groupCandidatesChanged();
     updateCanSend(wasSendable);
     return true;
 }
@@ -415,8 +685,21 @@ bool ChatController::sendMessage()
         return false;
 
     if (m_live) {
+        if (m_engine == nullptr)
+            return false;
+        if (const LiveGroup *group = currentGroup()) {
+            if (group->members.isEmpty())
+                return false;
+            // One row, one ciphertext, an envelope per member.
+            QList<DeviceId> recipients;
+            for (const GroupMember &member : group->members)
+                recipients.append(member.device);
+            m_engine->enqueueGroupText(group->conversation, recipients, body);
+            setComposerText({});
+            return true;
+        }
         const auto chat = m_liveChats.constFind(m_currentContactId);
-        if (chat == m_liveChats.cend() || !chat->peerDevice || m_engine == nullptr)
+        if (chat == m_liveChats.cend() || !chat->peerDevice)
             return false;
         // The engine encrypts, commits the row durably and reports it back through
         // messageQueued, which is where the visible row is appended: the model only
@@ -463,6 +746,8 @@ int ChatController::chatUnreadCount() const
     int total = 0;
     for (const LiveChat &chat : m_liveChats)
         total += chat.unread;
+    for (const LiveGroup &group : m_liveGroups)
+        total += group.unread;
     return total;
 }
 
@@ -526,18 +811,20 @@ void ChatController::setNavSection(NavSection section)
 // ---------------------------------------------------------------------------
 
 void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine,
-                                     ContactRequestService *requests)
+                                     ContactRequestService *requests, GroupService *groups)
 {
     if (session == nullptr || engine == nullptr)
         return;
     m_session = session;
     m_engine = engine;
     m_requests = requests;
+    m_groups = groups;
     m_live = true;
 
     // Drop the reference mock entirely; the profile's roster replaces it.
     m_messagesByContact.clear();
     m_liveChats.clear();
+    m_liveGroups.clear();
     m_contactByConversation.clear();
     m_currentContactId.clear();
     m_contacts.setContacts({});
@@ -552,6 +839,14 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
     if (m_requests != nullptr) {
         connect(m_requests, &ContactRequestService::contactAccepted, this,
                 &ChatController::onContactAccepted);
+    }
+    if (m_groups != nullptr) {
+        connect(m_groups, &GroupService::groupCreated, this, &ChatController::onGroupCreated);
+        connect(m_groups, &GroupService::groupJoined, this, &ChatController::onGroupChanged);
+        connect(m_groups, &GroupService::groupChanged, this, &ChatController::onGroupChanged);
+        connect(m_groups, &GroupService::groupLeft, this, &ChatController::onGroupLeft);
+        connect(m_groups, &GroupService::groupActionFailed, this,
+                &ChatController::setGroupNotice);
     }
 
     // The profile as last saved. A picture that no longer decodes is dropped
@@ -662,10 +957,14 @@ void ChatController::loadRoster()
     }
     m_liveChats = std::move(chats);
     m_contactByConversation = std::move(byConversation);
+    // Groups come after the people, and need the people in place first: a
+    // member who is a contact is named from that contact's row.
+    m_contacts.setContacts(rows);
+    loadGroups(rows, m_contactByConversation);
     m_contacts.setContacts(std::move(rows));
 
     const bool wasSendable = canSend();
-    if (!m_liveChats.contains(m_currentContactId))
+    if (!m_liveChats.contains(m_currentContactId) && !m_liveGroups.contains(m_currentContactId))
         m_currentContactId.clear();
     if (m_currentContactId.isEmpty() && m_contacts.contactAt(0)) {
         // Open the first chat so the surface is never blank while one exists.
@@ -674,14 +973,100 @@ void ChatController::loadRoster()
         m_contacts.selectContact(first);
         if (const auto chat = m_liveChats.constFind(first); chat != m_liveChats.cend())
             m_messagesByContact.insert(first, loadHistory(chat->conversation));
+        if (const auto group = m_liveGroups.constFind(first); group != m_liveGroups.cend())
+            m_messagesByContact.insert(first, loadHistory(group->conversation));
     } else if (!m_currentContactId.isEmpty()) {
         m_contacts.selectContact(m_currentContactId);
     }
     refreshVisibleMessages();
     emit currentContactChanged();
+    emit groupCandidatesChanged();
     updateCanSend(wasSendable);
     if (m_presenceRelay)
         refreshPresence();
+}
+
+void ChatController::loadGroups(QVector<Contact> &rows, QHash<QByteArray, QString> &byConversation)
+{
+    QHash<QString, LiveGroup> groups;
+    if (m_groups != nullptr) {
+        for (const GroupService::Group &record : m_groups->groups()) {
+            const QString id = groupIdPrefix + record.conversation.toHex();
+            LiveGroup group{record.conversation, record.title, {}, 0};
+            if (const auto existing = m_liveGroups.constFind(id); existing != m_liveGroups.cend())
+                group.unread = existing->unread;
+            for (const GroupMemberRecord &member : record.members) {
+                GroupMember row{member.accountId, member.deviceId, QString(), member.displayName,
+                                QStringLiteral("userpfp_none")};
+                const QString contactId = member.accountId.toHex();
+                if (const auto chat = m_liveChats.constFind(contactId); chat != m_liveChats.cend()) {
+                    row.contactId = contactId;
+                    row.avatarKey = chat->avatarKey;
+                }
+                group.members.append(row);
+            }
+            groups.insert(id, group);
+            byConversation.insert(record.conversation.bytes(), id);
+            rows.append(groupRowFor(id, group));
+        }
+    }
+    m_liveGroups = std::move(groups);
+}
+
+QString ChatController::groupChatIdFor(const ConversationId &conversation) const
+{
+    const QString id = m_contactByConversation.value(conversation.bytes());
+    return m_liveGroups.contains(id) ? id : QString();
+}
+
+std::optional<CallEngine::GroupCallRoute>
+ChatController::groupCallRouteFor(const QString &chatId) const
+{
+    const auto group = m_liveGroups.constFind(chatId);
+    if (!m_live || group == m_liveGroups.cend() || group->members.isEmpty())
+        return std::nullopt;
+    CallEngine::GroupCallRoute route;
+    route.conversation = group->conversation;
+    route.title = groupDisplayName(*group);
+    for (const GroupMember &member : group->members) {
+        CallEngine::CallPeer peer;
+        peer.conversation = group->conversation;
+        peer.device = member.device;
+        peer.contactId = member.contactId;
+        peer.displayName = memberName(member);
+        peer.avatarKey = member.avatarKey;
+        route.members.append(peer);
+    }
+    return route;
+}
+
+std::optional<CallEngine::GroupCallRoute>
+ChatController::groupCallRouteFor(const ConversationId &conversation) const
+{
+    return groupCallRouteFor(groupChatIdFor(conversation));
+}
+
+void ChatController::onGroupCreated(const ConversationId &conversation)
+{
+    loadRoster();
+    // The group the user just made is what they want to look at.
+    const QString id = groupChatIdFor(conversation);
+    if (!id.isEmpty())
+        selectContact(id);
+}
+
+void ChatController::onGroupChanged(const ConversationId &conversation)
+{
+    loadRoster();
+    (void)conversation;
+}
+
+void ChatController::onGroupLeft(const ConversationId &conversation)
+{
+    const QString id = groupChatIdFor(conversation);
+    if (!id.isEmpty())
+        m_messagesByContact.remove(id);
+    loadRoster();
 }
 
 std::optional<ChatController::CallRoute>
@@ -783,8 +1168,23 @@ QVector<Message> ChatController::loadHistory(const ConversationId &conversation)
     const QVector<MessageRecord> &records = page.value();
     history.reserve(records.size());
     for (auto it = records.crbegin(); it != records.crend(); ++it)
-        history.append(toMessage(*it));
+        history.append(messageFor(*it));
     return history;
+}
+
+Message ChatController::messageFor(const MessageRecord &record) const
+{
+    Message message = toMessage(record);
+    // In a group the bubble alone does not say who spoke.
+    const auto group = m_liveGroups.constFind(contactForConversation(record.conversationId));
+    if (group != m_liveGroups.cend() && record.flow == MessageFlow::Incoming) {
+        for (const GroupMember &member : group->members)
+            if (member.device == record.senderDeviceId)
+                message.senderName = memberName(member);
+        if (message.senderName.isEmpty())
+            message.senderName = QStringLiteral("Former member");
+    }
+    return message;
 }
 
 Message ChatController::toMessage(const MessageRecord &record)
@@ -816,9 +1216,9 @@ void ChatController::onMessageQueued(const MessageRecord &record)
     const QString contactId = contactForConversation(record.conversationId);
     if (contactId.isEmpty())
         return;
-    m_messagesByContact[contactId].append(toMessage(record));
+    m_messagesByContact[contactId].append(messageFor(record));
     if (contactId == m_currentContactId && statePermitsPlaintext(m_sessionState))
-        m_messages.appendMessage(toMessage(record));
+        m_messages.appendMessage(messageFor(record));
 }
 
 void ChatController::onMessageReceived(const MessageRecord &record)
@@ -833,14 +1233,19 @@ void ChatController::onMessageReceived(const MessageRecord &record)
             return;
     }
     if (contactId == m_currentContactId) {
-        m_messagesByContact[contactId].append(toMessage(record));
+        m_messagesByContact[contactId].append(messageFor(record));
         if (statePermitsPlaintext(m_sessionState))
-            m_messages.appendMessage(toMessage(record));
+            m_messages.appendMessage(messageFor(record));
         return;
     }
     const auto chat = m_liveChats.find(contactId);
     if (chat != m_liveChats.end()) {
         ++chat->unread;
+        emit chatUnreadCountChanged();
+    }
+    const auto group = m_liveGroups.find(contactId);
+    if (group != m_liveGroups.end()) {
+        ++group->unread;
         emit chatUnreadCountChanged();
     }
 }

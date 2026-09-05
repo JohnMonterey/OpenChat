@@ -18,12 +18,21 @@ enum class EnvelopeMessageKind : quint8 {
     // content; the engine consumes it as a control receive and surfaces it as
     // contactAcceptReceived rather than as a visible message.
     ContactAccept = 4,
+    // Voice-call control: an MLS application message carrying an offer, ringing
+    // notice, answer or hangup. Reliable and ratcheted like any other control
+    // message, and consumed by the call engine rather than shown as a row.
+    CallSignal = 5,
+    // One 20 ms slice of call audio, sealed under the call's own media key
+    // rather than the group ratchet. Unlike every other kind this one travels
+    // the datagram path: it is never stored, never retried, and dropped when the
+    // recipient is offline, because a late voice frame is worse than none.
+    CallMedia = 6,
 };
 
 // The highest EnvelopeMessageKind the codec accepts on decode. Kept next to the
 // enum so a new kind cannot be added without widening the wire bound.
 inline constexpr quint8 maxEnvelopeMessageKind =
-    static_cast<quint8>(EnvelopeMessageKind::ContactAccept);
+    static_cast<quint8>(EnvelopeMessageKind::CallMedia);
 
 struct CiphertextEnvelopeV1 final {
     quint8 version = 1;

@@ -12,6 +12,9 @@ QtObject {
 
     readonly property int sidebarWidth: 268
     readonly property int conversationHeaderHeight: 111
+    // The in-call header replaces the conversation header and needs room for two
+    // callers side by side plus the call controls beneath them.
+    readonly property int callHeaderHeight: 212
     readonly property int composerHeight: 104
 
     readonly property color sidebarTop: "#f0f9fd"
@@ -41,4 +44,17 @@ QtObject {
     readonly property color declineMid: "#db7264"
     readonly property color declineBottom: "#c65a4c"
     readonly property color declineBorder: "#b04c40"
+
+    // In-call surface. The speaking ring is the one saturated green in the
+    // interface, so an active talker reads instantly against the Aero blues; the
+    // glow is the same hue at low alpha, spread outside the ring.
+    readonly property color callBackdropTop: "#eef6fb"
+    readonly property color callBackdropBottom: "#dfeef7"
+    readonly property color speakingRing: "#3fbf54"
+    readonly property color speakingGlow: "#5fd47a"
+    readonly property color idleRing: "#c3d3de"
+    readonly property color endCallTop: "#ef9a8f"
+    readonly property color endCallMid: "#d9604f"
+    readonly property color endCallBottom: "#bd4737"
+    readonly property color endCallBorder: "#a83e2f"
 }

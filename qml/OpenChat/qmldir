@@ -13,6 +13,9 @@ AddContactDialog 1.0 components/AddContactDialog.qml
 SafetyNumberDialog 1.0 components/SafetyNumberDialog.qml
 RequestRow 1.0 components/RequestRow.qml
 ConversationHeader 1.0 components/ConversationHeader.qml
+CallParticipant 1.0 components/CallParticipant.qml
+CallActionButton 1.0 components/CallActionButton.qml
+CallHeader 1.0 components/CallHeader.qml
 MessageDelegate 1.0 components/MessageDelegate.qml
 MessageHistory 1.0 components/MessageHistory.qml
 Composer 1.0 components/Composer.qml

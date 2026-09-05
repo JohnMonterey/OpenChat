@@ -19,7 +19,12 @@
 #include "app/ContactRequestService.h"
 #include "app/DeviceLink.h"
 #include "app/ProfileSession.h"
+#include "AudioTestSupport.h"
+#include "CallTestSupport.h"
+#include "call/CallEngine.h"
+#include "call/SyncCallTransport.h"
 #include "controllers/ChatController.h"
+#include "media/AudioConvert.h"
 #include "domain/ChatTypes.h"
 #include "domain/Contact.h"
 #include "network/RelayClient.h"
@@ -309,6 +314,7 @@ private slots:
 
     void pipelineDeliversMessagesOverRealTls();
     void relockedProfileRelinksWithoutTokens();
+    void voiceCallCarriesAudioOverRealTls();
 
 private:
     void bootstrapClient(ClientStack &stack, const QString &handlePrefix);
@@ -783,6 +789,184 @@ void EndToEndTest::relockedProfileRelinksWithoutTokens()
 
     carol.client->disconnect();
     carol.session->lock();
+}
+
+void EndToEndTest::voiceCallCarriesAudioOverRealTls()
+{
+    if (!m_available)
+        QSKIP("PostgreSQL not available for the E2E test");
+
+    // A whole voice call over the real stack: two bootstrapped profiles, real
+    // TLS, a real relay with real Postgres behind it, MLS-encrypted call
+    // signalling on the durable path and sealed audio frames on the unreliable
+    // datagram path the relay forwards without storing.
+    //
+    // The audio pushed in is a file from this machine, and what comes out of the
+    // far end's speaker is compared against it. Nothing here is simulated except
+    // the microphone and the speaker themselves.
+    ClientStack alice;
+    ClientStack bob;
+    bootstrapClient(alice, QStringLiteral("callera"));
+    if (QTest::currentTestFailed())
+        return;
+    bootstrapClient(bob, QStringLiteral("callerb"));
+    if (QTest::currentTestFailed())
+        return;
+    QTRY_VERIFY_WITH_TIMEOUT(alice.client->isConnected() && bob.client->isConnected(), 30000);
+
+    // --- Become contacts, which is what gives the call an MLS group to signal
+    //     through and a peer device to address. ---
+    ContactRequestService aliceRequests(*alice.session, *alice.session->syncEngine());
+    ContactRequestService bobRequests(*bob.session, *bob.session->syncEngine());
+    std::optional<ConversationId> bobIncoming;
+    connect(&bobRequests, &ContactRequestService::incomingRequest, this,
+            [&](const AccountId &, const ConversationId &conversation) {
+                bobIncoming = conversation;
+            });
+    bool aliceAccepted = false;
+    connect(&aliceRequests, &ContactRequestService::contactAccepted, this,
+            [&](const AccountId &) { aliceAccepted = true; });
+
+    AddContactService aliceAdd(*alice.session, *alice.client, *alice.session->syncEngine());
+    std::optional<ConversationId> aliceConversation;
+    connect(&aliceAdd, &AddContactService::succeeded, this,
+            [&](const ConversationId &conversation, const AccountId &) {
+                aliceConversation = conversation;
+            });
+    aliceAdd.startByHandle(bob.handle);
+    QTRY_VERIFY_WITH_TIMEOUT(aliceConversation.has_value(), 30000);
+    QTRY_VERIFY_WITH_TIMEOUT(bobIncoming.has_value(), 30000);
+    bobRequests.acceptContact(*bobIncoming);
+    QTRY_VERIFY_WITH_TIMEOUT(aliceAccepted, 30000);
+
+    // --- Bring up the call stack on both sides exactly as the app does. ---
+    SyncCallTransport aliceCallTransport(*alice.session->syncEngine());
+    SyncCallTransport bobCallTransport(*bob.session->syncEngine());
+    OpenChat::CallTest::ScriptedAudioDevices aliceDevices;
+    OpenChat::CallTest::ScriptedAudioDevices bobDevices;
+    // The lossless codec, so "the same sound came out the other end" can be
+    // checked as an exact comparison rather than as a similarity score.
+    CallEngine::Config callConfig;
+    callConfig.preferredCodec = AudioCodecKind::Pcm;
+    CallEngine aliceCall(callConfig, aliceCallTransport, aliceDevices.factory());
+    CallEngine bobCall(callConfig, bobCallTransport, bobDevices.factory());
+    // The call's own ring and pick-up tones mix into the same playback stream by
+    // design, which would make "what came out the far end" un-comparable. This
+    // test is about the transport carrying audio; the sounds have their own.
+    aliceCall.setSoundsEnabled(false);
+    bobCall.setSoundsEnabled(false);
+
+    bool bobRinging = false;
+    connect(&bobCall, &CallEngine::incomingCall, this, [&] { bobRinging = true; });
+
+    CallEngine::CallPeer peer;
+    peer.conversation = *aliceConversation;
+    peer.device = bob.deviceId;
+    peer.displayName = bob.handle;
+    QVERIFY(aliceCall.placeCall(peer));
+
+    // The offer crossed the relay as an MLS-encrypted control message and rang
+    // Bob's device.
+    QTRY_VERIFY_WITH_TIMEOUT(bobRinging, 30000);
+    QCOMPARE(bobCall.direction(), CallDirection::Incoming);
+    QCOMPARE(bobCall.peer().device.bytes(), alice.deviceId.bytes());
+    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.state(), CallState::Ringing, 30000);
+
+    bobCall.acceptCall();
+    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.state(), CallState::Connecting, 30000);
+    QVERIFY(aliceDevices.capture->started);
+    QVERIFY(bobDevices.playback->started);
+
+    // --- Push real audio through: a file from this machine if there is one,
+    //     otherwise a synthesised reference. ---
+    const std::optional<OpenChat::AudioTest::LoadedWav> file =
+        OpenChat::AudioTest::loadFirstSystemWav();
+    const QVector<qint16> source = file ? AudioConvert::toCallFormat(file->audio)
+                                        : OpenChat::AudioTest::syntheticSpeech(600);
+    QVERIFY(!source.isEmpty());
+    const QList<AudioFrame> spoken = AudioConvert::toFrames(source);
+
+    QList<AudioFrame> heard;
+    bool bobHeardAliceTalking = false;
+    for (const AudioFrame &frame : spoken) {
+        aliceDevices.speak(frame);
+        // Bob's microphone runs too, so Alice's end also sees media arrive and
+        // both ends reach Active, exactly as in a real call.
+        bobDevices.speak(silentAudioFrame());
+        // Let the relay actually carry the frames: this is a real socket.
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        heard.append(bobDevices.listen());
+        (void)aliceDevices.listen();
+        // Sampled while the audio is playing: the indicator is supposed to fall
+        // away once the talking stops, so checking it afterwards would prove the
+        // opposite of what it is for.
+        bobHeardAliceTalking = bobHeardAliceTalking || bobCall.isRemoteSpeaking();
+    }
+    // Drain whatever is still in flight or still buffered.
+    for (int i = 0; i < 40; ++i) {
+        QTest::qWait(2);
+        heard.append(bobDevices.listen());
+    }
+
+    QTRY_COMPARE_WITH_TIMEOUT(bobCall.state(), CallState::Active, 30000);
+    QCOMPARE(aliceCall.state(), CallState::Active);
+
+    // What Bob's speaker rendered contains Alice's audio, in order and byte for
+    // byte. A frame is only compared once, so a duplicate or a reordering would
+    // break the walk rather than pass it.
+    int matched = 0;
+    for (const AudioFrame &frame : heard) {
+        QVERIFY(isFullAudioFrame(frame));
+        if (matched < spoken.size() && frame == spoken.at(matched))
+            ++matched;
+    }
+    // The datagram path is best-effort by design, so a frame may legitimately be
+    // dropped; requiring the overwhelming majority proves the path works while
+    // leaving room for the one the network is entitled to lose.
+    QVERIFY2(matched >= spoken.size() * 9 / 10,
+             qPrintable(QStringLiteral("only %1 of %2 frames arrived intact")
+                            .arg(matched)
+                            .arg(spoken.size())));
+    // Bob's end could tell Alice was the one talking, and Bob's own silent
+    // microphone never claimed he was.
+    QVERIFY2(bobHeardAliceTalking, "Bob's end never registered Alice as speaking");
+    QVERIFY(!bobCall.isLocalSpeaking());
+    // And the indicator falls away again now that the audio has stopped, rather
+    // than latching on for the rest of the call.
+    QVERIFY(!bobCall.isRemoteSpeaking());
+
+    // Media rode the unreliable path, so none of it was stored in anyone's inbox
+    // and none of it became a message row.
+    {
+        QSqlQuery inbox(m_store->database());
+        inbox.prepare(QStringLiteral(
+            "SELECT count(*) FROM inbox_messages WHERE recipient_device_id = :device"));
+        inbox.bindValue(QStringLiteral(":device"), bob.deviceId.bytes());
+        QVERIFY(inbox.exec());
+        QVERIFY(inbox.next());
+        // Whatever is left is signalling and handshake traffic awaiting an ack;
+        // a stored media frame per 20 ms would put this in the hundreds.
+        QVERIFY2(inbox.value(0).toInt() < 20,
+                 qPrintable(QStringLiteral("the relay stored %1 envelopes for Bob; media must "
+                                           "not be persisted")
+                                .arg(inbox.value(0).toInt())));
+    }
+    auto bobMessages = bob.session->chats()->messages(*bobIncoming, 100, std::nullopt);
+    QVERIFY(bobMessages.hasValue());
+    QCOMPARE(bobMessages.value().size(), 0);
+
+    // --- Hanging up tears the call down on both sides through the relay. ---
+    aliceCall.hangUp();
+    QCOMPARE(aliceCall.state(), CallState::Ended);
+    QTRY_COMPARE_WITH_TIMEOUT(bobCall.state(), CallState::Ended, 30000);
+    QCOMPARE(bobCall.endReason(), CallEndReason::RemoteHangup);
+    QVERIFY(!aliceDevices.capture->started);
+    QVERIFY(!bobDevices.capture->started);
+
+    alice.client->disconnect();
+    bob.client->disconnect();
+    alice.session->lock();
+    bob.session->lock();
 }
 
 QTEST_GUILESS_MAIN(EndToEndTest)

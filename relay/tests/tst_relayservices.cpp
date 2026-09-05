@@ -124,6 +124,7 @@ private slots:
     void challengeExpiryRejected();
     void refreshRotationAndReuseRevokesFamily();
     void duplicateSendIsIdempotent();
+    void datagramValidationIsFullButStoresNothing();
     void keyPackageClaimIsOneTime();
     void concurrentKeyPackageClaimHasOneWinner();
     void concurrentClaimWithTwoPackagesGivesDistinct();
@@ -363,6 +364,68 @@ void RelayServicesTest::duplicateSendIsIdempotent()
                                          bytes);
     QVERIFY(!forged.hasValue());
     QCOMPARE(forged.error(), RelayError::Unauthorized);
+}
+
+void RelayServicesTest::datagramValidationIsFullButStoresNothing()
+{
+    // The unreliable media path forwards without storing, so validate() is the
+    // ONLY thing standing between an unauthenticated frame and a third party's
+    // socket. It must apply every check submit() does — and write nothing.
+    const auto sender = registerDevice(QStringLiteral("nina"));
+    const auto recipient = registerDevice(QStringLiteral("oscar"));
+
+    EnvelopeService envelopes(*m_store);
+    const CiphertextEnvelopeV1 envelope =
+        signedEnvelope(sender.key.pkey, sender.account, sender.device, recipient.device,
+                       "sealed-audio", m_now);
+    const QByteArray bytes = encodeCanonical(envelope);
+    const AuthenticatedDevice authSender{sender.account, sender.device};
+
+    const auto validated = envelopes.validate(authSender, bytes);
+    QVERIFY2(validated.hasValue(), "a well-formed signed envelope should validate");
+    QCOMPARE(validated.value().recipientDeviceId.bytes(), recipient.device.bytes());
+    QCOMPARE(validated.value().messageKind, envelope.messageKind);
+
+    // Nothing was written: the recipient's inbox is untouched, so a call does not
+    // leave thousands of rows behind.
+    const auto fetched = envelopes.fetchSince(recipient.device, 0, 100);
+    QVERIFY(fetched.hasValue());
+    QCOMPARE(fetched.value().items.size(), 0);
+
+    // Claiming to be somebody else is refused.
+    const auto impersonated =
+        envelopes.validate(AuthenticatedDevice{recipient.account, recipient.device}, bytes);
+    QVERIFY(!impersonated.hasValue());
+    QCOMPARE(impersonated.error(), RelayError::Unauthorized);
+
+    // A tampered signature is refused.
+    CiphertextEnvelopeV1 forged = envelope;
+    forged.senderSignature[0] = char(forged.senderSignature.at(0) ^ 0x01);
+    const auto badSignature = envelopes.validate(authSender, encodeCanonical(forged));
+    QVERIFY(!badSignature.hasValue());
+    QCOMPARE(badSignature.error(), RelayError::Unauthorized);
+
+    // A recipient the relay does not know is refused rather than forwarded blind.
+    const CiphertextEnvelopeV1 toNobody =
+        signedEnvelope(sender.key.pkey, sender.account, sender.device, DeviceId::generate(),
+                       "sealed-audio", m_now);
+    const auto unknownRecipient = envelopes.validate(authSender, encodeCanonical(toNobody));
+    QVERIFY(!unknownRecipient.hasValue());
+    QCOMPARE(unknownRecipient.error(), RelayError::NotFound);
+
+    // An expired envelope is refused, so a captured media frame cannot be
+    // replayed into a later call.
+    const CiphertextEnvelopeV1 stale =
+        signedEnvelope(sender.key.pkey, sender.account, sender.device, recipient.device,
+                       "sealed-audio", m_now - 120'000);
+    const auto expired = envelopes.validate(authSender, encodeCanonical(stale));
+    QVERIFY(!expired.hasValue());
+    QCOMPARE(expired.error(), RelayError::InvalidRequest);
+
+    // Garbage is refused before anything is allocated for it.
+    const auto garbage = envelopes.validate(authSender, QByteArray("not an envelope"));
+    QVERIFY(!garbage.hasValue());
+    QCOMPARE(garbage.error(), RelayError::InvalidRequest);
 }
 
 void RelayServicesTest::keyPackageClaimIsOneTime()

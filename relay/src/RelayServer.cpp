@@ -495,6 +495,28 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
             // Acknowledge: [3, envelopeId, watermark]
             const quint64 watermark = static_cast<quint64>(control.at(2).toInteger());
             (void)m_envelopes.acknowledge(device.deviceId, watermark);
+            return;
+        }
+        if (control.size() == 2 && control.at(0).toInteger() == 5 && control.at(1).isByteArray()) {
+            // Datagram submit: [5, envelope]. Fully authenticated like a durable
+            // submission — same decode, same sender check, same signature check —
+            // but never written to an inbox and never sequenced or acknowledged.
+            // A recipient that is not connected right now simply misses it; that
+            // is the point of the path, and it is why real-time media can use it
+            // without turning every call into thousands of stored rows.
+            const QByteArray envelopeBytes = control.at(1).toByteArray();
+            const auto validated = m_envelopes.validate(device, envelopeBytes);
+            if (!validated.hasValue())
+                return;
+            const QByteArray recipientKey = validated.value().recipientDeviceId.bytes().toHex();
+            QWebSocket *recipient = m_liveByDevice.value(recipientKey);
+            if (recipient == nullptr)
+                return;
+            QCborArray delivery;
+            delivery.append(6); // DatagramDelivery
+            delivery.append(envelopeBytes);
+            recipient->sendBinaryMessage(delivery.toCborValue().toCbor());
+            return;
         }
         return;
     }

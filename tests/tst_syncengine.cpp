@@ -291,6 +291,7 @@ class FakeTransport final : public SyncTransport
 public:
     bool isConnected() const override { return connected; }
     void sendEnvelope(const CiphertextEnvelopeV1 &envelope) override { sent.append(envelope); }
+    void sendDatagram(const CiphertextEnvelopeV1 &envelope) override { datagrams.append(envelope); }
     void acknowledge(const EnvelopeId &envelopeId, quint64 watermark) override
     {
         acks.append({envelopeId, watermark});
@@ -298,6 +299,7 @@ public:
 
     bool connected = true;
     QVector<CiphertextEnvelopeV1> sent;
+    QVector<CiphertextEnvelopeV1> datagrams;
     QVector<std::pair<EnvelopeId, quint64>> acks;
 };
 
@@ -387,6 +389,9 @@ private slots:
     void acceptHandshakeCommitFailureFailsClosed();
     void sendEmitsQueuedRowBeforeRelayAcceptance();
     void contactAcceptIsControlSentAndSurfacedOnReceive();
+    void callSignalIsControlSentAndSurfacedOnReceive();
+    void callMediaBypassesTheStoreAndTheRatchet();
+    void inboundDatagramsAreSurfacedWithoutTouchingTheStore();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -1081,6 +1086,158 @@ void SyncEngineTest::contactAcceptIsControlSentAndSurfacedOnReceive()
     QVERIFY(!acceptedConversation.has_value());
     QCOMPARE(transport.acks.size(), 2);
     QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::callSignalIsControlSentAndSurfacedOnReceive()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QByteArray receivedPayload;
+    std::optional<DeviceId> receivedFrom;
+    int visibleMessages = 0;
+    connect(&engine, &SyncEngine::callSignalReceived, &engine,
+            [&](const ConversationId &, const DeviceId &sender, const QByteArray &payload) {
+                receivedFrom = sender;
+                receivedPayload = payload;
+            });
+    connect(&engine, &SyncEngine::messageReceived, &engine,
+            [&](const MessageRecord &) { ++visibleMessages; });
+    engine.start();
+
+    // Call control travels the DURABLE path: encrypted under the group ratchet
+    // and queued in the outbox, so an offer or a hangup is retried rather than
+    // lost. It never becomes a visible message row.
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    engine.sendCallSignal(conversation, peer, QByteArray("OFFER"));
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.messages.size(), 0);
+    QCOMPARE(store.outboxes.size(), 1);
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(transport.datagrams.size(), 0);
+    QCOMPARE(transport.sent.first().messageKind, EnvelopeMessageKind::CallSignal);
+    QCOMPARE(transport.sent.first().ciphertext, QByteArray("ENC:OFFER"));
+
+    // Receiving one is a control receive: acked, replay-guarded, and surfaced as
+    // plaintext for the call layer rather than as conversation.
+    CiphertextEnvelopeV1 inbound =
+        incomingEnvelope(conversation, mls.senderDevice, QByteArray("ENC:ANSWER"));
+    inbound.messageKind = EnvelopeMessageKind::CallSignal;
+    engine.handleEnvelope(inbound, 31);
+    QCOMPARE(receivedPayload, QByteArray("ANSWER"));
+    QCOMPARE(receivedFrom->bytes(), mls.senderDevice.bytes());
+    QCOMPARE(visibleMessages, 0);
+    QCOMPARE(store.received.size(), 0);
+    QCOMPARE(transport.acks.size(), 1);
+
+    // A signal whose MLS credential names a different device is a relay trying
+    // to misattribute call control; it is dropped without being surfaced.
+    CiphertextEnvelopeV1 forged =
+        incomingEnvelope(conversation, DeviceId::generate(), QByteArray("ENC:HANGUP"));
+    forged.messageKind = EnvelopeMessageKind::CallSignal;
+    receivedPayload.clear();
+    engine.handleEnvelope(forged, 32);
+    QVERIFY(receivedPayload.isEmpty());
+    QCOMPARE(transport.acks.size(), 1);
+
+    // A redelivery is acked but surfaced only once, so a retried offer does not
+    // ring twice.
+    engine.handleEnvelope(inbound, 33);
+    QVERIFY(receivedPayload.isEmpty());
+    QCOMPARE(transport.acks.size(), 2);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::callMediaBypassesTheStoreAndTheRatchet()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    const QByteArray sealedFrame("already-sealed-audio");
+    engine.sendCallMedia(conversation, peer, sealedFrame);
+
+    // The whole point of this path: no durable write, no outbox entry, no
+    // ratchet advance, and no retry. Fifty of these a second must cost nothing
+    // but a signature and a socket write.
+    QCOMPARE(store.messages.size(), 0);
+    QCOMPARE(store.outboxes.size(), 0);
+    QCOMPARE(mls.encryptCount, 0);
+    QCOMPARE(transport.sent.size(), 0);
+    QCOMPARE(transport.datagrams.size(), 1);
+
+    const CiphertextEnvelopeV1 &sent = transport.datagrams.first();
+    QCOMPARE(sent.messageKind, EnvelopeMessageKind::CallMedia);
+    QCOMPARE(sent.recipientDeviceId.bytes(), peer.bytes());
+    QCOMPARE(sent.conversationId.bytes(), conversation.bytes());
+    // The payload is shipped verbatim: it is already sealed under the call's own
+    // media key, so re-encrypting it would be wrong as well as expensive.
+    QCOMPARE(sent.ciphertext, sealedFrame);
+    // It is still signed, so the relay and the recipient authenticate its origin
+    // exactly as they do a durable envelope.
+    QCOMPARE(sent.senderSignature.size(), 64);
+
+    // A signing failure drops the frame rather than failing the whole session:
+    // one lost 20 ms of audio must not end the call.
+    SyncEngine unsignable(makeConfig(), store, mls, transport,
+                          [](QByteArrayView) { return QByteArray(); }, clock());
+    unsignable.start();
+    unsignable.sendCallMedia(conversation, peer, sealedFrame);
+    QCOMPARE(transport.datagrams.size(), 1);
+    QVERIFY(!unsignable.isFailedClosed());
+}
+
+void SyncEngineTest::inboundDatagramsAreSurfacedWithoutTouchingTheStore()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QByteArray media;
+    connect(&engine, &SyncEngine::callMediaReceived, &engine,
+            [&](const ConversationId &, const DeviceId &, const QByteArray &payload) {
+                media = payload;
+            });
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    CiphertextEnvelopeV1 inbound =
+        incomingEnvelope(conversation, mls.senderDevice, QByteArray("sealed-audio"));
+    inbound.messageKind = EnvelopeMessageKind::CallMedia;
+    QVERIFY(transport.onDatagram);
+    transport.onDatagram(inbound);
+
+    QCOMPARE(media, QByteArray("sealed-audio"));
+    // Nothing was decrypted, stored, deduplicated or acknowledged: a datagram
+    // has no sequence to acknowledge and the engine holds no call keys.
+    QCOMPARE(mls.processCount, 0);
+    QCOMPARE(store.received.size(), 0);
+    QCOMPARE(transport.acks.size(), 0);
+    QVERIFY(store.seen.isEmpty());
+
+    // Any other kind arriving on the unreliable path is dropped rather than
+    // interpreted: a durable message must not be honoured without its guards.
+    media.clear();
+    CiphertextEnvelopeV1 smuggled =
+        incomingEnvelope(conversation, mls.senderDevice, QByteArray("ENC:hello"));
+    smuggled.messageKind = EnvelopeMessageKind::MlsPrivateMessage;
+    transport.onDatagram(smuggled);
+    QVERIFY(media.isEmpty());
+    QCOMPARE(mls.processCount, 0);
+    QCOMPARE(store.received.size(), 0);
+
+    // And after stop() the callback is uninstalled entirely.
+    engine.stop();
+    QVERIFY(!transport.onDatagram);
 }
 
 QTEST_MAIN(SyncEngineTest)

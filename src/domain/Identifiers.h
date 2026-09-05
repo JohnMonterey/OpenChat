@@ -82,6 +82,7 @@ struct ConversationIdTag final { };
 struct MessageIdTag final { };
 struct EnvelopeIdTag final { };
 struct AttachmentIdTag final { };
+struct CallIdTag final { };
 
 using ProfileId = StrongId<ProfileIdTag>;
 using AccountId = StrongId<AccountIdTag>;
@@ -90,5 +91,8 @@ using ConversationId = StrongId<ConversationIdTag>;
 using MessageId = StrongId<MessageIdTag>;
 using EnvelopeId = StrongId<EnvelopeIdTag>;
 using AttachmentId = StrongId<AttachmentIdTag>;
+// Names one voice call end to end. Both peers use the caller's value, so it is
+// what binds an answer, a hangup and every media packet to the same call.
+using CallId = StrongId<CallIdTag>;
 
 } // namespace OpenChat

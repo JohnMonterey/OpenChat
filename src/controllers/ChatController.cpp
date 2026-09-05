@@ -513,6 +513,23 @@ void ChatController::loadRoster()
     updateCanSend(wasSendable);
 }
 
+std::optional<ChatController::CallRoute>
+ChatController::callRouteFor(const QString &contactId) const
+{
+    const auto chat = m_liveChats.constFind(contactId);
+    if (chat == m_liveChats.cend() || !chat->peerDevice)
+        return std::nullopt;
+    const Contact row = contactRowFor(*chat);
+    return CallRoute{chat->conversation, *chat->peerDevice, contactId, row.name, row.avatarKey};
+}
+
+QString ChatController::localAvatarKey() const
+{
+    // The local user has no stored avatar yet, so the call screen shows the same
+    // neutral artwork the rest of the interface uses for an unset picture.
+    return QStringLiteral("userpfp_none");
+}
+
 Contact ChatController::contactRowFor(const LiveChat &chat)
 {
     Contact row;

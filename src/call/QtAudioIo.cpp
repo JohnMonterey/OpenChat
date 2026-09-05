@@ -1,0 +1,209 @@
+#include "call/QtAudioIo.h"
+
+#include "media/AudioTypes.h"
+
+#include <QAudioSink>
+#include <QAudioSource>
+#include <QMediaDevices>
+
+#include <algorithm>
+#include <cstring>
+
+namespace OpenChat {
+
+QAudioFormat callQAudioFormat()
+{
+    QAudioFormat format;
+    format.setSampleRate(CallAudioFormat::sampleRate);
+    format.setChannelCount(CallAudioFormat::channels);
+    format.setSampleFormat(QAudioFormat::Int16);
+    return format;
+}
+
+bool hasUsableCallAudioDevices()
+{
+    const QAudioFormat format = callQAudioFormat();
+    const QAudioDevice input = QMediaDevices::defaultAudioInput();
+    const QAudioDevice output = QMediaDevices::defaultAudioOutput();
+    return !input.isNull() && !output.isNull() && input.isFormatSupported(format)
+        && output.isFormatSupported(format);
+}
+
+// Accumulates whatever byte counts the audio backend hands over and emits
+// exactly one full frame at a time. Backends deliver wildly different chunk
+// sizes (and partial ones), so a call cannot assume its frames arrive
+// pre-aligned.
+class QtAudioCaptureSource::FrameSlicer final : public QIODevice
+{
+public:
+    explicit FrameSlicer(QtAudioCaptureSource &owner)
+        : m_owner(owner)
+    {
+    }
+
+protected:
+    qint64 readData(char *, qint64) override { return -1; } // write-only sink
+
+    qint64 writeData(const char *data, qint64 length) override
+    {
+        if (length <= 0)
+            return 0;
+        m_pending.append(data, static_cast<qsizetype>(length));
+        while (m_pending.size() >= CallAudioFormat::bytesPerFrame) {
+            const AudioFrame frame = m_pending.left(CallAudioFormat::bytesPerFrame);
+            m_pending.remove(0, CallAudioFormat::bytesPerFrame);
+            // Hop to the owner's thread before handing the frame on. Some Qt
+            // audio backends deliver from their own thread, and the call's
+            // reaction to a captured frame is to sign it and write it to a
+            // WebSocket — neither of which is safe off the owning thread. The
+            // queued hop costs one event-loop turn against a 20 ms budget.
+            QMetaObject::invokeMethod(
+                &m_owner,
+                [owner = &m_owner, frame] {
+                    if (owner->onFrame)
+                        owner->onFrame(frame);
+                },
+                Qt::QueuedConnection);
+        }
+        return length;
+    }
+
+private:
+    QtAudioCaptureSource &m_owner;
+    QByteArray m_pending;
+};
+
+QtAudioCaptureSource::QtAudioCaptureSource(QObject *parent)
+    : QObject(parent)
+{
+}
+
+QtAudioCaptureSource::~QtAudioCaptureSource()
+{
+    stop();
+}
+
+bool QtAudioCaptureSource::start()
+{
+    const QAudioDevice device = QMediaDevices::defaultAudioInput();
+    if (device.isNull())
+        return false;
+    m_source = std::make_unique<QAudioSource>(device, callQAudioFormat());
+    m_slicer = std::make_unique<FrameSlicer>(*this);
+    if (!m_slicer->open(QIODevice::WriteOnly))
+        return false;
+    m_source->start(m_slicer.get());
+    return m_source->error() == QAudio::NoError;
+}
+
+void QtAudioCaptureSource::stop()
+{
+    if (m_source) {
+        m_source->stop();
+        m_source.reset();
+    }
+    if (m_slicer) {
+        m_slicer->close();
+        m_slicer.reset();
+    }
+}
+
+// Supplies the sink with audio on demand, one frame at a time, padding whatever
+// the backend asks for out of the call. Returning short would let the sink
+// underrun; asking the call for more than one frame per read would drain the
+// jitter buffer faster than real time.
+//
+// Unlike capture this CANNOT hop threads: the backend wants the bytes now. The
+// call session it pulls from is internally synchronised for exactly this reason.
+class QtAudioPlaybackSink::FramePump final : public QIODevice
+{
+public:
+    explicit FramePump(QtAudioPlaybackSink &owner)
+        : m_owner(owner)
+    {
+    }
+
+protected:
+    qint64 writeData(const char *, qint64) override { return -1; } // read-only source
+
+    qint64 readData(char *data, qint64 maxLength) override
+    {
+        qint64 written = 0;
+        while (written < maxLength) {
+            if (m_pending.isEmpty()) {
+                if (!m_owner.pullFrame)
+                    break;
+                m_pending = m_owner.pullFrame();
+                if (m_pending.isEmpty())
+                    break;
+            }
+            const qint64 chunk = std::min<qint64>(maxLength - written, m_pending.size());
+            std::memcpy(data + written, m_pending.constData(), static_cast<size_t>(chunk));
+            m_pending.remove(0, static_cast<qsizetype>(chunk));
+            written += chunk;
+        }
+        // A sink that is handed 0 bytes stops asking on some backends, so fill
+        // the remainder with silence rather than returning short.
+        if (written < maxLength) {
+            std::memset(data + written, 0, static_cast<size_t>(maxLength - written));
+            written = maxLength;
+        }
+        return written;
+    }
+
+    // Pull-mode sinks poll this to decide whether to read; a call always has
+    // something to play (silence at worst), so it is never empty.
+    [[nodiscard]] qint64 bytesAvailable() const override
+    {
+        return CallAudioFormat::bytesPerFrame + QIODevice::bytesAvailable();
+    }
+
+private:
+    QtAudioPlaybackSink &m_owner;
+    QByteArray m_pending;
+};
+
+QtAudioPlaybackSink::QtAudioPlaybackSink(QObject *parent)
+    : QObject(parent)
+{
+}
+
+QtAudioPlaybackSink::~QtAudioPlaybackSink()
+{
+    stop();
+}
+
+bool QtAudioPlaybackSink::start()
+{
+    const QAudioDevice device = QMediaDevices::defaultAudioOutput();
+    if (device.isNull())
+        return false;
+    m_sink = std::make_unique<QAudioSink>(device, callQAudioFormat());
+    m_pump = std::make_unique<FramePump>(*this);
+    if (!m_pump->open(QIODevice::ReadOnly))
+        return false;
+    m_sink->start(m_pump.get());
+    return m_sink->error() == QAudio::NoError;
+}
+
+void QtAudioPlaybackSink::stop()
+{
+    if (m_sink) {
+        m_sink->stop();
+        m_sink.reset();
+    }
+    if (m_pump) {
+        m_pump->close();
+        m_pump.reset();
+    }
+}
+
+CallAudioIoFactory makeQtCallAudioIoFactory()
+{
+    CallAudioIoFactory factory;
+    factory.makeCapture = [] { return std::make_unique<QtAudioCaptureSource>(); };
+    factory.makePlayback = [] { return std::make_unique<QtAudioPlaybackSink>(); };
+    return factory;
+}
+
+} // namespace OpenChat

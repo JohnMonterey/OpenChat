@@ -92,8 +92,13 @@ public:
     {
         sent.append(envelope);
     }
+    void sendDatagram(const OpenChat::CiphertextEnvelopeV1 &envelope) override
+    {
+        datagrams.append(envelope);
+    }
     void acknowledge(const OpenChat::EnvelopeId &, quint64) override {}
     QVector<OpenChat::CiphertextEnvelopeV1> sent;
+    QVector<OpenChat::CiphertextEnvelopeV1> datagrams;
 };
 
 QByteArray credentialFor(const OpenChat::DeviceId &device)

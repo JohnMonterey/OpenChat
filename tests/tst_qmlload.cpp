@@ -1,3 +1,4 @@
+#include <QColor>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
@@ -7,6 +8,7 @@
 
 #include <optional>
 
+#include "controllers/CallController.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
@@ -851,6 +853,184 @@ private slots:
         QVERIFY(contactController.safetyNumberVerified());
         QVERIFY(badge->property("visible").toBool());
         QVERIFY(!markVerifiedButton->property("enabled").toBool());
+    }
+
+    void callScreenReplacesTheConversationHeader()
+    {
+        // The defining behaviour of the in-call surface: while a call is up, the
+        // conversation header — the contact's name, picture and call buttons —
+        // is gone, and one panel showing BOTH people takes its place. If the two
+        // were ever visible together the contact would be pictured twice.
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::CallController callController;
+        callController.setLocalIdentity(chatController.localUserName(),
+                                        chatController.localAvatarKey());
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        auto *conversationHeader =
+            root->findChild<QQuickItem *>(QStringLiteral("conversationHeader"));
+        QVERIFY(conversationHeader);
+        // Out of a call nothing changes: the conversation header is what shows,
+        // and the call surface is present but hidden.
+        QVERIFY(conversationHeader->isVisible());
+        auto *idleCallHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
+        QVERIFY(idleCallHeader);
+        QVERIFY(!idleCallHeader->isVisible());
+
+        callController.enableForPreview(OpenChat::CallState::Active,
+                                        QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"),
+                                        /*remoteSpeaking=*/true, /*localSpeaking=*/false);
+        QCoreApplication::processEvents();
+
+        auto *callHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
+        QVERIFY(callHeader);
+        QVERIFY(callHeader->isVisible());
+        QVERIFY(!conversationHeader->isVisible());
+        // The slot grows to make room for the two callers rather than cropping.
+        auto *slot = root->findChild<QQuickItem *>(QStringLiteral("conversationHeaderSlot"));
+        QVERIFY(slot);
+        QVERIFY(slot->height() > conversationHeader->implicitHeight());
+
+        // Both callers are shown, in one place, named.
+        auto *local = root->findChild<QQuickItem *>(QStringLiteral("localParticipant"));
+        auto *remote = root->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+        QVERIFY(local);
+        QVERIFY(remote);
+        QVERIFY(local->isVisible());
+        QVERIFY(remote->isVisible());
+        QCOMPARE(local->property("name").toString(), QStringLiteral("Developer"));
+        QCOMPARE(remote->property("name").toString(), QStringLiteral("Jessica"));
+        QCOMPARE(remote->property("avatarKey").toString(), QStringLiteral("jessica"));
+        // Side by side, so neither is subordinate to the other.
+        const QPointF localScene = local->mapToScene(QPointF(0, 0));
+        const QPointF remoteScene = remote->mapToScene(QPointF(0, 0));
+        QVERIFY(localScene.x() < remoteScene.x());
+        QCOMPARE(localScene.y(), remoteScene.y());
+        QCOMPARE(local->width(), remote->width());
+    }
+
+    void theTalkingCallerIsRingedInGreen()
+    {
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), /*remoteSpeaking=*/true,
+                                        /*localSpeaking=*/false);
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        auto *local = root->findChild<QQuickItem *>(QStringLiteral("localParticipant"));
+        auto *remote = root->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+        QVERIFY(local && remote);
+
+        auto *localRing = local->findChild<QQuickItem *>(QStringLiteral("speakingRing"));
+        auto *remoteRing = remote->findChild<QQuickItem *>(QStringLiteral("speakingRing"));
+        auto *remoteGlow = remote->findChild<QQuickItem *>(QStringLiteral("speakingGlow"));
+        auto *localGlow = local->findChild<QQuickItem *>(QStringLiteral("speakingGlow"));
+        QVERIFY(localRing && remoteRing && remoteGlow && localGlow);
+
+        const QColor speaking = remoteRing->property("border")
+                                    .value<QObject *>()
+                                    ->property("color")
+                                    .value<QColor>();
+        const QColor quiet =
+            localRing->property("border").value<QObject *>()->property("color").value<QColor>();
+
+        // The talker's ring is green; the listener's is not.
+        QVERIFY2(speaking.greenF() > speaking.redF() && speaking.greenF() > speaking.blueF(),
+                 "the speaking ring is not green");
+        QVERIFY(speaking != quiet);
+        // Green means green, not "slightly greener": it must be unmistakable.
+        QVERIFY(speaking.greenF() - speaking.redF() > 0.3);
+        // Only the talker glows.
+        QVERIFY(remoteGlow->opacity() > 0.0);
+        QCOMPARE(localGlow->opacity(), 0.0);
+        // The ring surrounds the picture rather than covering it.
+        auto *avatar = remote->findChild<QQuickItem *>(QStringLiteral("roundedAvatarArtwork"));
+        QVERIFY(avatar);
+        QVERIFY(remoteRing->width() > avatar->width());
+        QVERIFY(remoteRing->height() > avatar->height());
+
+        // Hand the floor to the other caller and the ring follows the voice.
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), /*remoteSpeaking=*/false,
+                                        /*localSpeaking=*/true);
+        QCoreApplication::processEvents();
+        QTRY_COMPARE(localRing->property("border")
+                         .value<QObject *>()
+                         ->property("color")
+                         .value<QColor>(),
+                     speaking);
+        QTRY_VERIFY(localGlow->opacity() > 0.0);
+    }
+
+    void theCallScreenOffersTheRightActionForEachStage()
+    {
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        callController.enableForPreview(OpenChat::CallState::Ringing, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        auto *accept = root->findChild<QQuickItem *>(QStringLiteral("acceptCallButton"));
+        auto *decline = root->findChild<QQuickItem *>(QStringLiteral("declineCallButton"));
+        auto *mute = root->findChild<QQuickItem *>(QStringLiteral("muteCallButton"));
+        auto *end = root->findChild<QQuickItem *>(QStringLiteral("endCallButton"));
+        auto *dismiss = root->findChild<QQuickItem *>(QStringLiteral("dismissCallButton"));
+        QVERIFY(accept && decline && mute && end && dismiss);
+
+        // Ringing: answer or refuse, and nothing else — there is no call to mute
+        // or hang up yet.
+        QVERIFY(accept->isVisible());
+        QVERIFY(decline->isVisible());
+        QVERIFY(!mute->isVisible());
+        QVERIFY(!end->isVisible());
+        QVERIFY(!dismiss->isVisible());
+
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), true, false);
+        QCoreApplication::processEvents();
+        QVERIFY(!accept->isVisible());
+        QVERIFY(mute->isVisible());
+        QVERIFY(end->isVisible());
+        // A live call shows how long it has been running.
+        auto *status = root->findChild<QQuickItem *>(QStringLiteral("callStatusText"));
+        QVERIFY(status);
+        QCOMPARE(status->property("text").toString(), QStringLiteral("2:34"));
+
+        callController.enableForPreview(OpenChat::CallState::Ended, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QCoreApplication::processEvents();
+        // Ended: only a way back to the conversation, plus why it ended.
+        QVERIFY(!mute->isVisible());
+        QVERIFY(!end->isVisible());
+        QVERIFY(dismiss->isVisible());
     }
 };
 

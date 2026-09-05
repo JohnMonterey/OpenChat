@@ -88,12 +88,14 @@ class FakeTransport final : public SyncTransport
 public:
     bool isConnected() const override { return true; }
     void sendEnvelope(const CiphertextEnvelopeV1 &envelope) override { sent.append(envelope); }
+    void sendDatagram(const CiphertextEnvelopeV1 &envelope) override { datagrams.append(envelope); }
     void acknowledge(const EnvelopeId &envelopeId, quint64 watermark) override
     {
         acks.append({envelopeId, watermark});
     }
 
     QVector<CiphertextEnvelopeV1> sent;
+    QVector<CiphertextEnvelopeV1> datagrams;
     QVector<std::pair<EnvelopeId, quint64>> acks;
 };
 

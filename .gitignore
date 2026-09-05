@@ -1,6 +1,7 @@
 .superpowers/
 .worktrees/
 build/
+Build/
 build-*/
 rust/openchat-mls/target/
 clearchat-reference-recreation.png

@@ -7,9 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui HttpServer Network Quick QuickControls2 Sql Svg Test WebSockets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui HttpServer Multimedia Network Quick QuickControls2 Sql Svg Test WebSockets)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
+include(cmake/dependencies/Opus.cmake)
 include(cmake/dependencies/QtKeychain.cmake)
 include(cmake/dependencies/SqlCipher.cmake)
 include(cmake/OpenChatRust.cmake)
@@ -29,6 +30,7 @@ qt_add_executable(OpenChat
     src/controllers/ChatController.cpp
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
+    src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/RequestListModel.cpp
@@ -56,6 +58,9 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/SafetyNumberDialog.qml
         qml/OpenChat/components/RequestRow.qml
         qml/OpenChat/components/ConversationHeader.qml
+        qml/OpenChat/components/CallParticipant.qml
+        qml/OpenChat/components/CallActionButton.qml
+        qml/OpenChat/components/CallHeader.qml
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
@@ -75,11 +80,42 @@ qt_add_qml_module(OpenChat
 target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
     openchat_app
+    openchat_call
     Qt6::Core
     Qt6::Gui
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Svg
+)
+
+# Renders the generated call sounds to WAV. Not part of the application: it is
+# how the sounds are auditioned and handed over, since they exist as code rather
+# than as bundled audio files.
+add_executable(openchat-render-call-sounds tools/render_call_sounds.cpp)
+target_include_directories(openchat-render-call-sounds PRIVATE src)
+target_link_libraries(openchat-render-call-sounds PRIVATE
+    openchat_call
+    openchat_media
+    Qt6::Core
+)
+
+# Runs one side of a real call against a real relay, so the two-machine question
+# can be answered by actually doing it rather than by inference.
+add_executable(openchat-call-check tools/call_check.cpp)
+target_include_directories(openchat-call-check PRIVATE src)
+target_link_libraries(openchat-call-check PRIVATE
+    openchat_app
+    openchat_call
+    openchat_media
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
 )
 
 enable_testing()
@@ -124,6 +160,25 @@ target_link_libraries(openchat_crypto
     PRIVATE openchat_mls_rust
 )
 
+# Format-agnostic audio: file decoding, rate/channel conditioning, the codec
+# surface (PCM and Opus), the adaptive jitter buffer, and the level meter.
+# Deliberately free of Qt Multimedia and of any call concept, so it is testable
+# with nothing but a file on disk.
+add_library(openchat_media STATIC
+    src/media/ToneSynth.cpp
+    src/media/WavFile.cpp
+    src/media/AudioConvert.cpp
+    src/media/AudioCodec.cpp
+    src/media/OpusAudioCodec.cpp
+    src/media/JitterBuffer.cpp
+    src/media/SpeechLevelMeter.cpp
+)
+target_include_directories(openchat_media PUBLIC src)
+target_link_libraries(openchat_media
+    PUBLIC openchat_domain Qt6::Core
+    PRIVATE openchat_opus
+)
+
 add_library(openchat_security STATIC
     src/security/SecureBuffer.cpp
     src/security/QtKeychainVault.cpp
@@ -166,6 +221,26 @@ target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
     PUBLIC openchat_domain Qt6::Core
     PRIVATE OpenSSL::Crypto qt6keychain
+)
+
+# The voice call itself: signalling codec, per-call media keys, the media
+# pipeline, the state machine, and the Qt Multimedia device adapters. Everything
+# except QtAudioIo is device- and network-free.
+add_library(openchat_call STATIC
+    src/call/CallTypes.cpp
+    src/call/CallSounds.cpp
+    src/call/CallSignal.cpp
+    src/call/CallMediaCrypto.cpp
+    src/call/CallMediaPacket.cpp
+    src/call/CallSession.cpp
+    src/call/CallEngine.cpp
+    src/call/SyncCallTransport.cpp
+    src/call/QtAudioIo.cpp
+)
+target_include_directories(openchat_call PUBLIC src)
+target_link_libraries(openchat_call
+    PUBLIC openchat_media openchat_network openchat_domain Qt6::Core Qt6::Multimedia
+    PRIVATE OpenSSL::Crypto
 )
 
 add_library(openchat_app STATIC
@@ -380,6 +455,8 @@ add_executable(tst_e2e
 target_include_directories(tst_e2e PRIVATE src tests relay/src)
 target_link_libraries(tst_e2e PRIVATE
     openchat_app
+    openchat_call
+    openchat_media
     openchat_network
     openchat_crypto
     openchat_storage
@@ -464,6 +541,39 @@ target_include_directories(tst_onboardingcontroller PRIVATE src)
 target_link_libraries(tst_onboardingcontroller PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_onboardingcontroller COMMAND tst_onboardingcontroller)
 
+# The voice-call test: pushes a real audio file (and synthesised references)
+# through the whole pipeline and checks what comes out the far end, plus the
+# malformed-input, loss, reordering, duplication, replay and tampering edges
+# that a real link produces. Runs headless -- no audio device is opened.
+add_executable(tst_voicecall tests/tst_voicecall.cpp)
+target_include_directories(tst_voicecall PRIVATE src tests)
+# So the test can check the rendered WAVs in assets/sounds still match the
+# sounds this code generates.
+target_compile_definitions(tst_voicecall PRIVATE
+    OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(tst_voicecall PRIVATE
+    openchat_call
+    openchat_media
+    openchat_domain
+    Qt6::Core
+    Qt6::Test
+)
+add_test(NAME tst_voicecall COMMAND tst_voicecall)
+
+# The call state machine over a scripted transport and scripted audio devices:
+# offers, answers, declines, hangups, timeouts, glare and busy handling.
+add_executable(tst_callengine tests/tst_callengine.cpp)
+target_include_directories(tst_callengine PRIVATE src tests)
+target_link_libraries(tst_callengine PRIVATE
+    openchat_call
+    openchat_media
+    openchat_domain
+    Qt6::Core
+    Qt6::Test
+)
+add_test(NAME tst_callengine COMMAND tst_callengine)
+
 add_executable(tst_bubblebackground
     tests/tst_bubblebackground.cpp
     src/render/BubbleBackground.cpp
@@ -478,6 +588,7 @@ add_executable(tst_qmlload
     src/controllers/ChatController.cpp
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
+    src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/RequestListModel.cpp
@@ -490,6 +601,7 @@ target_compile_definitions(tst_qmlload PRIVATE
 )
 target_link_libraries(tst_qmlload PRIVATE
     openchat_app
+    openchat_call
     openchat_network
     openchat_crypto
     openchat_storage
@@ -553,3 +665,18 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
 )
 set_tests_properties(capture_verify PROPERTIES TIMEOUT 5)
+
+# The in-call preview sub-mode: renders the call surface in place of the
+# conversation header, mid-call, with the far end talking so the green speaking
+# ring is in the capture.
+add_test(
+    NAME capture_call
+    COMMAND ${CMAKE_COMMAND}
+        -DOPENCHAT_EXECUTABLE=$<TARGET_FILE:OpenChat>
+        -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/capture_call.png
+        -DCAPTURE_WIDTH=900
+        -DCAPTURE_HEIGHT=680
+        -DCAPTURE_EXTRA_ARG=--call
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
+)
+set_tests_properties(capture_call PROPERTIES TIMEOUT 5)

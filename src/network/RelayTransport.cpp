@@ -19,6 +19,13 @@ RelayTransport::RelayTransport(RelayClient &relay, QObject *parent)
         },
         Qt::DirectConnection);
     QObject::connect(
+        &m_relay, &RelayClient::datagramReceived, this,
+        [this](const CiphertextEnvelopeV1 &envelope) {
+            if (onDatagram)
+                onDatagram(envelope);
+        },
+        Qt::DirectConnection);
+    QObject::connect(
         &m_relay, &RelayClient::relayAccepted, this,
         [this](const EnvelopeId &envelopeId, quint64 serverSequence) {
             if (onRelayAccepted)
@@ -44,6 +51,14 @@ void RelayTransport::sendEnvelope(const CiphertextEnvelopeV1 &envelope)
     // Swallow the synchronous not-connected / encode error: the engine resends
     // from the durable outbox and acceptance is reported asynchronously.
     (void)m_relay.sendEnvelope(envelope);
+}
+
+void RelayTransport::sendDatagram(const CiphertextEnvelopeV1 &envelope)
+{
+    // Nothing to swallow but the synchronous failure: an unreachable peer or a
+    // down link means the frame is simply not delivered, which is exactly the
+    // contract of this path.
+    (void)m_relay.sendDatagram(envelope);
 }
 
 void RelayTransport::acknowledge(const EnvelopeId &envelopeId, quint64 watermark)

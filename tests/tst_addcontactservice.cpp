@@ -90,9 +90,11 @@ class CapturingTransport final : public SyncTransport
 public:
     bool isConnected() const override { return true; }
     void sendEnvelope(const CiphertextEnvelopeV1 &envelope) override { sent.append(envelope); }
+    void sendDatagram(const CiphertextEnvelopeV1 &envelope) override { datagrams.append(envelope); }
     void acknowledge(const EnvelopeId &, quint64) override { }
 
     QVector<CiphertextEnvelopeV1> sent;
+    QVector<CiphertextEnvelopeV1> datagrams;
 };
 
 RelayDirectoryDevice device(const DeviceId &deviceId)

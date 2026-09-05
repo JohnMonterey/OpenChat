@@ -117,9 +117,17 @@ public:
     virtual void sendEnvelope(const CiphertextEnvelopeV1 &envelope) = 0;
     virtual void acknowledge(const EnvelopeId &envelopeId, quint64 watermark) = 0;
 
+    // Best-effort, live-only delivery: the relay forwards the envelope to a
+    // connected recipient and drops it otherwise. Nothing is stored, sequenced
+    // or acknowledged, so there is no watermark to advance and no retry. Real-
+    // time media is the only traffic that wants this; everything else wants the
+    // durable path above.
+    virtual void sendDatagram(const CiphertextEnvelopeV1 &envelope) = 0;
+
     // Set by the engine before use.
     std::function<void(const EnvelopeId &, quint64 serverSequence)> onRelayAccepted;
     std::function<void(const CiphertextEnvelopeV1 &, quint64 serverSequence)> onEnvelope;
+    std::function<void(const CiphertextEnvelopeV1 &)> onDatagram;
     std::function<void()> onConnected;
 };
 
@@ -179,8 +187,26 @@ public:
     void acceptHandshake(const ConversationId &conversation, const AccountId &senderAccount,
                          const DeviceId &claimedSenderDevice, const QByteArray &welcome);
 
+    // Sends a voice-call control message: an ordinary MLS application message on
+    // the durable path, so an offer or a hangup is retried until the relay takes
+    // it. Carries no visible message row.
+    void sendCallSignal(const ConversationId &conversation, const DeviceId &recipientDevice,
+                        const QByteArray &payload);
+
+    // Sends one sealed media frame on the unreliable datagram path. `payload` is
+    // already encrypted under the call's media key, so this deliberately skips
+    // the group ratchet: 50 frames a second through MLS would mean 50 durable
+    // state commits a second, and a frame that needs retrying is already too old
+    // to play. Dropped silently when the link is down.
+    void sendCallMedia(const ConversationId &conversation, const DeviceId &recipientDevice,
+                       const QByteArray &payload);
+
     // Processes an inbound envelope with its relay sequence.
     void handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);
+
+    // Processes an inbound datagram. Unlike handleEnvelope this touches neither
+    // the store nor the ratchet; it only surfaces the payload.
+    void handleDatagram(const CiphertextEnvelopeV1 &envelope);
 
     [[nodiscard]] bool isFailedClosed() const noexcept;
 
@@ -194,6 +220,15 @@ signals:
     // consumed: the peer joined the conversation's group.
     void contactAcceptReceived(const OpenChat::ConversationId &conversation,
                                const OpenChat::DeviceId &senderDevice);
+    // A CallSignal control message was decrypted, authenticated against the MLS
+    // sender credential, and durably consumed. `payload` is its plaintext.
+    void callSignalReceived(const OpenChat::ConversationId &conversation,
+                            const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
+    // A CallMedia datagram arrived. It has NOT been decrypted here (the engine
+    // holds no call keys); the payload is the sealed packet for the call layer
+    // to authenticate and open.
+    void callMediaReceived(const OpenChat::ConversationId &conversation,
+                           const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
     void failedClosed();
     // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
     void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,

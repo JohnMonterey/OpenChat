@@ -6,6 +6,9 @@ Item {
     id: header
     objectName: "conversationHeader"
     required property var controller
+    // Optional voice-call bridge; null in the default/capture paths, where the
+    // call button stays inert exactly as it was.
+    property var callController: null
     implicitHeight: Theme.conversationHeaderHeight
 
     Rectangle {
@@ -97,11 +100,16 @@ Item {
     Item {
         id: phoneButton
         objectName: "phoneCallButton"
+        // Calls need a bridge and a usable microphone; without either the button
+        // says so by dimming rather than by silently doing nothing when pressed.
+        readonly property bool callable: header.callController !== null
+                                         && header.callController.callsAvailable
         width: 42
         height: 42
         anchors.right: menuButton.left
         anchors.rightMargin: 20
         anchors.verticalCenter: parent.verticalCenter
+        opacity: callable || header.callController === null ? 1.0 : 0.4
 
         Image {
             id: phoneImage
@@ -125,7 +133,12 @@ Item {
                 }
             }
         }
-        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            enabled: phoneButton.callable
+            onClicked: header.callController.callCurrentContact()
+        }
     }
 
     Item {

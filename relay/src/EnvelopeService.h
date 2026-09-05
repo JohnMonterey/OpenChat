@@ -3,6 +3,7 @@
 #include "PostgresStore.h"
 #include "RelayTypes.h"
 #include "core/Result.h"
+#include "protocol/CiphertextEnvelope.h"
 #include "domain/Identifiers.h"
 
 #include <QByteArray>
@@ -49,6 +50,16 @@ public:
     // envelope's sender must equal it.
     [[nodiscard]] Result<SubmitResult, RelayError>
     submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes);
+
+    // Every check submit() makes before it writes anything: canonical decode,
+    // sender identity, expiry, the sender's Ed25519 signature over the canonical
+    // bytes, and that both devices exist and are unrevoked. Stores nothing.
+    //
+    // The datagram path uses this on its own: an unstored frame still has to be
+    // as thoroughly authenticated as a stored one, because the relay is
+    // forwarding it to a third party either way.
+    [[nodiscard]] Result<CiphertextEnvelopeV1, RelayError>
+    validate(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes);
 
     // Bounded catch-up: envelopes for the device with server_sequence > since,
     // in order, capped at limit (clamped to policy.maxFetch).

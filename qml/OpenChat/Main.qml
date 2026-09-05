@@ -11,6 +11,10 @@ Window {
     // add-contact surface binds to it in a later change; declaring it here keeps the
     // live and --add-contact initial properties valid with no rendering change.
     property var contactController: null
+    // Optional voice-call bridge; null in the default/capture paths. When it is
+    // null (or reports no call) the conversation pane renders exactly as before.
+    property var callController: null
+    readonly property bool inCall: callController !== null && callController.inCall
     readonly property int sidebarWidth: Math.round(
         Math.max(250, Math.min(300, width * Theme.sidebarWidth / 860)))
 
@@ -54,12 +58,45 @@ Window {
                 }
             }
 
-            ConversationHeader {
-                id: conversationHeader
+            // The top of the conversation pane is one slot with two occupants.
+            // Out of a call it holds the conversation header — the contact's
+            // name, picture, presence and call buttons. In a call that header is
+            // gone entirely and the call surface takes the slot, showing both
+            // people at once. They are never both present, so the contact is
+            // never pictured twice.
+            Item {
+                id: headerSlot
+                objectName: "conversationHeaderSlot"
                 width: parent.width
-                height: Theme.conversationHeaderHeight
-                controller: root.chatController
-                visible: root.chatController.hasCurrentContact
+                height: root.inCall ? Theme.callHeaderHeight : Theme.conversationHeaderHeight
+                visible: root.chatController.hasCurrentContact || root.inCall
+                clip: true
+
+                ConversationHeader {
+                    id: conversationHeader
+                    anchors.fill: parent
+                    controller: root.chatController
+                    callController: root.callController
+                    visible: !root.inCall
+                }
+
+                // Loaded only when a call bridge exists at all, so the default
+                // and capture paths never instantiate (or bind against) it.
+                Component {
+                    id: callHeaderComponent
+
+                    CallHeader {
+                        controller: root.callController
+                    }
+                }
+
+                Loader {
+                    id: callHeaderLoader
+                    anchors.fill: parent
+                    active: root.callController !== null
+                    visible: root.inCall
+                    sourceComponent: callHeaderComponent
+                }
             }
 
             // Shown instead of the conversation while no chat exists yet (a fresh
@@ -69,7 +106,7 @@ Window {
                 anchors.centerIn: parent
                 width: Math.min(360, parent.width - 48)
                 spacing: 10
-                visible: !root.chatController.hasCurrentContact
+                visible: !root.chatController.hasCurrentContact && !root.inCall
 
                 Text {
                     width: parent.width
@@ -103,7 +140,7 @@ Window {
                 readonly property bool active: root.chatController.sessionStateText.length > 0
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.top: conversationHeader.bottom
+                anchors.top: headerSlot.bottom
                 height: active ? 30 : 0
                 visible: active
                 clip: true

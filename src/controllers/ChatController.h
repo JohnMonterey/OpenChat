@@ -130,6 +130,27 @@ public:
     // refreshes its list row. Live mode only; hex is the AccountId hex.
     void refreshContact(const QString &accountHex);
 
+    // Everything a voice call needs to address a contact: the shared MLS
+    // conversation, the device its envelopes go to, and how to render it while
+    // ringing. Empty when the contact is unknown or has no resolved device yet
+    // (an accepted contact whose device is still unknown cannot be called), and
+    // always empty in mock mode, where no conversation exists to call over.
+    struct CallRoute final {
+        ConversationId conversation;
+        DeviceId device;
+        QString contactId;
+        QString displayName;
+        QString avatarKey;
+    };
+    [[nodiscard]] std::optional<CallRoute> callRouteFor(const QString &contactId) const;
+
+    // The contact currently open in the conversation pane, or empty when none
+    // is. This is what the header's call button acts on.
+    [[nodiscard]] QString currentContactId() const { return m_currentContactId; }
+
+    // The identity to show for this user on the call screen.
+    [[nodiscard]] QString localAvatarKey() const;
+
 signals:
     void currentContactChanged();
     void localUserNameChanged();

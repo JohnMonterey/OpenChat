@@ -26,6 +26,10 @@
 #include "app/ContactRequestService.h"
 #include "app/DeviceLink.h"
 #include "app/ProfileSession.h"
+#include "call/CallEngine.h"
+#include "call/QtAudioIo.h"
+#include "call/SyncCallTransport.h"
+#include "controllers/CallController.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
@@ -56,6 +60,9 @@ void registerQmlTypes()
     qmlRegisterUncreatableType<OpenChat::ContactController>(
         "OpenChat.Native", 1, 0, "ContactController",
         QStringLiteral("ContactController is provided by the application"));
+    qmlRegisterUncreatableType<OpenChat::CallController>(
+        "OpenChat.Native", 1, 0, "CallController",
+        QStringLiteral("CallController is provided by the application"));
 }
 
 // Applies an optional --width/--height override to a window, honouring the app's
@@ -247,6 +254,7 @@ private:
             m_chatController->setLocalUserName(displayName);
         }
         m_contactController = std::make_unique<OpenChat::ContactController>();
+        m_callController = std::make_unique<OpenChat::CallController>();
         // Install the live seams only when the contact services came up
         // (m_contactRequests implies a live relay/session/engine). Otherwise both
         // controllers stay in their harmless mock state.
@@ -255,13 +263,19 @@ private:
                                                  m_session.get(), m_session->syncEngine());
             m_chatController->setLiveServices(m_session.get(), m_session->syncEngine(),
                                               m_contactRequests.get());
-            // A resolved handle renames the chat row of an already-accepted peer.
+            // A resolved handle renames the chat row of an already-accepted peer,
+            // and the caller shown on a ringing call screen.
             QObject::connect(m_contactController.get(),
                              &OpenChat::ContactController::contactHandleResolved,
                              m_chatController.get(),
-                             [this](const QString &accountHex, const QString &) {
+                             [this](const QString &accountHex, const QString &handle) {
                                  m_chatController->refreshContact(accountHex);
+                                 if (m_callEngine
+                                     && m_callEngine->peer().contactId == accountHex)
+                                     m_callEngine->updatePeerIdentity(handle, QString());
                              });
+            if (m_callEngine)
+                m_callController->setLiveEngine(m_callEngine.get(), m_chatController.get());
         }
         m_engine = std::make_unique<QQmlApplicationEngine>();
         QObject::connect(
@@ -269,7 +283,8 @@ private:
             [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
         m_engine->setInitialProperties(
             {{QStringLiteral("chatController"), QVariant::fromValue(m_chatController.get())},
-             {QStringLiteral("contactController"), QVariant::fromValue(m_contactController.get())}});
+             {QStringLiteral("contactController"), QVariant::fromValue(m_contactController.get())},
+             {QStringLiteral("callController"), QVariant::fromValue(m_callController.get())}});
         m_engine->loadFromModule("OpenChat", "Main");
         if (m_engine->rootObjects().isEmpty()) {
             QCoreApplication::exit(EXIT_FAILURE);
@@ -317,6 +332,29 @@ private:
         m_contactRequests->reconcileOnStartup();
         m_deviceLink = std::make_unique<OpenChat::DeviceLink>(*m_session, *m_relay);
         m_deviceLink->start(linkStart);
+
+        // Voice calls ride the same engine: signalling as durable MLS control
+        // messages, media as unreliable datagrams. The transport tracks the live
+        // link so media is dropped rather than piling up while offline.
+        m_callTransport = std::make_unique<OpenChat::SyncCallTransport>(*engine);
+        m_callTransport->setConnected(m_relay->isConnected());
+        QObject::connect(m_relay.get(), &OpenChat::RelayClient::connected, m_callTransport.get(),
+                         [this] { m_callTransport->setConnected(true); });
+        QObject::connect(m_relay.get(), &OpenChat::RelayClient::disconnected,
+                         m_callTransport.get(),
+                         [this] { m_callTransport->setConnected(false); });
+        // A machine with no usable microphone or speaker cannot carry a call at
+        // all. Leaving the engine null makes the UI report calls as unavailable
+        // up front rather than letting one fail after it has started ringing.
+        if (OpenChat::hasUsableCallAudioDevices()) {
+            m_callEngine = std::make_unique<OpenChat::CallEngine>(
+                OpenChat::CallEngine::Config{}, *m_callTransport,
+                OpenChat::makeQtCallAudioIoFactory());
+        } else {
+            qWarning().noquote() << QStringLiteral(
+                "OpenChat: no usable audio input/output was found; voice calls are "
+                "disabled for this session.");
+        }
     }
 
     void startOnboarding()
@@ -486,6 +524,11 @@ private:
     // Keeps the relay session authenticated for the life of the profile session.
     // Declared after the relay it borrows (destroyed before it).
     std::unique_ptr<OpenChat::DeviceLink> m_deviceLink;
+    // The voice-call stack. Declared after the engine/relay they borrow, so both
+    // are torn down while the SyncEngine and RelayClient are still alive; the
+    // engine is destroyed before the transport it holds a reference to.
+    std::unique_ptr<OpenChat::SyncCallTransport> m_callTransport;
+    std::unique_ptr<OpenChat::CallEngine> m_callEngine;
 
     std::unique_ptr<OpenChat::OnboardingController> m_onboardingController;
     std::unique_ptr<OpenChat::ChatController> m_chatController;
@@ -493,6 +536,7 @@ private:
     // of m_contactRequests / m_session / m_transport / m_relay: its transient
     // AddContactService borrows the session, relay and engine by reference.
     std::unique_ptr<OpenChat::ContactController> m_contactController;
+    std::unique_ptr<OpenChat::CallController> m_callController;
     std::unique_ptr<QQuickView> m_onboardingView;
     std::unique_ptr<QQmlApplicationEngine> m_engine;
 };
@@ -646,6 +690,49 @@ int runVerifyWindow(QGuiApplication &application, QCommandLineParser &parser,
     return application.exec();
 }
 
+// Loads the chat window with a mock ChatController and a preview CallController
+// pinned into an active call, so the in-call surface — two callers side by side,
+// the speaker ringed in green — can be launched and captured without a peer, a
+// microphone or a network. The injected controllers stay in their harmless
+// disabled mock state.
+int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
+                  const QCommandLineOption &captureOption,
+                  const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
+                  const QCommandLineOption &heightOption, bool incoming)
+{
+    OpenChat::ChatController chatController;
+    chatController.setLocalUserName(QStringLiteral("Developer"));
+    OpenChat::CallController callController;
+    callController.setLocalIdentity(chatController.localUserName(),
+                                    chatController.localAvatarKey());
+    // Two states worth reviewing: a call still ringing, where the answer and
+    // decline pair is offered, and a live call with the far end talking, which
+    // is the state the green speaking ring exists for.
+    callController.enableForPreview(
+        incoming ? OpenChat::CallState::Ringing : OpenChat::CallState::Active,
+        QStringLiteral("Jessica"), QStringLiteral("jessica"),
+        /*remoteSpeaking=*/!incoming, /*localSpeaking=*/false);
+
+    QQmlApplicationEngine engine;
+    engine.setInitialProperties(
+        {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+         {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+    QObject::connect(
+        &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
+        [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
+    engine.loadFromModule("OpenChat", "Main");
+
+    if (engine.rootObjects().isEmpty())
+        return EXIT_FAILURE;
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window)
+        return EXIT_FAILURE;
+
+    applyWindowSizing(parser, window, widthOption, heightOption);
+    scheduleCaptureIfRequested(parser, window, captureOption, delayOption);
+    return application.exec();
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -683,8 +770,14 @@ int main(int argc, char *argv[])
     const QCommandLineOption verifyOption(
         QStringLiteral("verify"),
         QStringLiteral("Preview the contact-verification safety-number surface."));
+    const QCommandLineOption callOption(
+        QStringLiteral("call"), QStringLiteral("Preview the in-call surface."));
+    const QCommandLineOption callIncomingOption(
+        QStringLiteral("call-incoming"),
+        QStringLiteral("Preview the in-call surface while a call is ringing."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
-                       onboardingRecoveryOption, addContactOption, verifyOption});
+                       onboardingRecoveryOption, addContactOption, verifyOption, callOption,
+                       callIncomingOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -706,6 +799,13 @@ int main(int argc, char *argv[])
     if (parser.isSet(verifyOption))
         return runVerifyWindow(application, parser, captureOption, delayOption, widthOption,
                                heightOption);
+
+    // Call preview: render the in-call surface with a mock controller, checked
+    // before the plain capture path so --call --capture routes here.
+    const bool previewIncomingCall = parser.isSet(callIncomingOption);
+    if (parser.isSet(callOption) || previewIncomingCall)
+        return runCallWindow(application, parser, captureOption, delayOption, widthOption,
+                             heightOption, previewIncomingCall);
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

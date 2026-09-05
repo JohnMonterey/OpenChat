@@ -57,6 +57,8 @@ public:
                             0,          now(),     0,            OutboxState::Pending};
     }
 
+    [[nodiscard]] bool isFailed() const noexcept { return failed; }
+
     void failClosed()
     {
         if (failed)
@@ -234,6 +236,50 @@ public:
         drainOutbox();
     }
 
+    void doSendCallSignal(const ConversationId &conversation, const DeviceId &recipient,
+                          const QByteArray &payload)
+    {
+        if (failed)
+            return;
+        const auto ciphertext = mls.encrypt(conversation, payload);
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        const auto envelope = buildEnvelope(conversation, recipient, ciphertext.value(),
+                                            EnvelopeMessageKind::CallSignal);
+        if (!envelope) {
+            failClosed();
+            return;
+        }
+        // No visible message row: a call's control traffic is not conversation.
+        const OutboxRecord outbox = makeOutbox(envelope->envelopeId, MessageId::generate(),
+                                               conversation, encodeCanonical(*envelope));
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitControlSend(outbox, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        drainOutbox();
+    }
+
+    void doSendCallMedia(const ConversationId &conversation, const DeviceId &recipient,
+                         const QByteArray &payload)
+    {
+        if (failed)
+            return;
+        // Deliberately NO mls.encrypt and NO durable write. The payload arrives
+        // already sealed under the call's media key, and a media frame that
+        // needed persisting or retrying would be stale long before it was
+        // replayed. The envelope is still signed, so the relay and the recipient
+        // authenticate its origin exactly as they do a durable one.
+        const auto envelope = buildEnvelope(conversation, recipient, payload,
+                                            EnvelopeMessageKind::CallMedia);
+        if (!envelope)
+            return; // a signing failure drops this frame, it does not fail the session
+        transport.sendDatagram(*envelope);
+    }
+
     void drainOutbox()
     {
         if (failed || !transport.isConnected())
@@ -333,9 +379,13 @@ public:
                     return;
                 }
                 transport.acknowledge(envelope.envelopeId, serverSequence);
-                if (committed.value()
-                    && envelope.messageKind == EnvelopeMessageKind::ContactAccept)
+                if (!committed.value())
+                    return; // an idempotent redelivery; already surfaced once
+                if (envelope.messageKind == EnvelopeMessageKind::ContactAccept)
                     emit q->contactAcceptReceived(envelope.conversationId, envelope.senderDeviceId);
+                else if (envelope.messageKind == EnvelopeMessageKind::CallSignal)
+                    emit q->callSignalReceived(envelope.conversationId, envelope.senderDeviceId,
+                                               processed.value().applicationData);
                 return;
             }
 
@@ -482,6 +532,9 @@ void SyncEngine::start()
     d->transport.onEnvelope = [this](const CiphertextEnvelopeV1 &envelope, quint64 seq) {
         handleEnvelope(envelope, seq);
     };
+    d->transport.onDatagram = [this](const CiphertextEnvelopeV1 &envelope) {
+        handleDatagram(envelope);
+    };
     d->transport.onConnected = [this] {
         // Resume: drain the durable outbox once the link is up.
         d->drainOutbox();
@@ -495,6 +548,7 @@ void SyncEngine::stop()
     d->started = false;
     d->transport.onRelayAccepted = nullptr;
     d->transport.onEnvelope = nullptr;
+    d->transport.onDatagram = nullptr;
     d->transport.onConnected = nullptr;
 }
 
@@ -538,6 +592,36 @@ void SyncEngine::acceptHandshake(const ConversationId &conversation, const Accou
                                       welcome] {
         d->doAcceptHandshake(conversation, senderAccount, claimedSenderDevice, welcome);
     });
+}
+
+void SyncEngine::sendCallSignal(const ConversationId &conversation,
+                                const DeviceId &recipientDevice, const QByteArray &payload)
+{
+    d->coordinator.run(conversation, [this, conversation, recipientDevice, payload] {
+        d->doSendCallSignal(conversation, recipientDevice, payload);
+    });
+}
+
+void SyncEngine::sendCallMedia(const ConversationId &conversation,
+                               const DeviceId &recipientDevice, const QByteArray &payload)
+{
+    // Deliberately NOT serialized through the coordinator: it exists to keep MLS
+    // ratchet mutations for one conversation from interleaving, and this path
+    // touches neither the ratchet nor the store. Queueing media behind an
+    // in-flight durable send would add exactly the latency it must avoid.
+    d->doSendCallMedia(conversation, recipientDevice, payload);
+}
+
+void SyncEngine::handleDatagram(const CiphertextEnvelopeV1 &envelope)
+{
+    if (d->isFailed())
+        return;
+    // A datagram is not stored, sequenced or acknowledged, so there is no replay
+    // guard to consult and nothing to commit. The only kind that may arrive this
+    // way is call media; anything else is dropped rather than interpreted.
+    if (envelope.messageKind != EnvelopeMessageKind::CallMedia)
+        return;
+    emit callMediaReceived(envelope.conversationId, envelope.senderDeviceId, envelope.ciphertext);
 }
 
 void SyncEngine::handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence)

@@ -29,9 +29,11 @@ class DisconnectedTransport final : public SyncTransport {
 public:
   bool isConnected() const override { return false; }
   void sendEnvelope(const CiphertextEnvelopeV1 &) override { ++sendCount; }
+  void sendDatagram(const CiphertextEnvelopeV1 &) override { ++datagramCount; }
   void acknowledge(const EnvelopeId &, quint64) override { ++ackCount; }
 
   int sendCount = 0;
+  int datagramCount = 0;
   int ackCount = 0;
 };
 

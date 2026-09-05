@@ -142,6 +142,11 @@ struct Observer final {
                              acceptedIds.append(id.bytes());
                              acceptedSequences.append(sequence);
                          });
+        QObject::connect(client, &RelayClient::datagramReceived, client,
+                         [this](const CiphertextEnvelopeV1 &envelope) {
+                             ++datagramCount;
+                             lastDatagram = envelope;
+                         });
     }
 
     [[nodiscard]] RelayTransportError firstError() const
@@ -156,6 +161,8 @@ struct Observer final {
     quint64 lastSequence = 0;
     QList<QByteArray> acceptedIds;
     QList<quint64> acceptedSequences;
+    int datagramCount = 0;
+    std::optional<CiphertextEnvelopeV1> lastDatagram;
 };
 
 // Builds a server -> client Delivery control frame: [4, seq, canonicalEnvelope].
@@ -164,6 +171,16 @@ QByteArray deliveryFrame(const CiphertextEnvelopeV1 &envelope, quint64 serverSeq
     QCborArray frame;
     frame.append(4);
     frame.append(static_cast<qint64>(serverSequence));
+    frame.append(encodeCanonical(envelope));
+    return frame.toCborValue().toCbor();
+}
+
+// Builds a server -> client DatagramDelivery frame: [6, canonicalEnvelope]. It
+// carries no sequence because the relay never stored it.
+QByteArray datagramFrame(const CiphertextEnvelopeV1 &envelope)
+{
+    QCborArray frame;
+    frame.append(6);
     frame.append(encodeCanonical(envelope));
     return frame.toCborValue().toCbor();
 }
@@ -192,6 +209,9 @@ private slots:
     void connectLiveResumesFromWatermark();
     void sendEnvelopeIsAcknowledged();
     void sendEnvelopeBeforeConnectFails();
+    void sendDatagramUsesTheUnreliableFrame();
+    void deliveredDatagramIsSurfaced();
+    void badDatagramsAreDroppedNotTerminal();
 
     void authRequestBodiesMatchRelay();
     void emptyContextFailsClosed();
@@ -538,6 +558,121 @@ void RelayClientTest::sendEnvelopeBeforeConnectFails()
 }
 
 // --- Device authentication request composition ------------------------------
+
+void RelayClientTest::sendDatagramUsesTheUnreliableFrame()
+{
+    // A datagram goes out as a [5, envelope] control frame, not as a bare
+    // envelope, so the relay can tell "forward this live" from "store this".
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                    {QString::fromLatin1(relaySubprotocol)});
+    QList<QByteArray> received;
+    server.onConnected = [&received](QWebSocket *socket) {
+        QObject::connect(socket, &QWebSocket::binaryMessageReceived, socket,
+                         [&received](const QByteArray &message) { received.append(message); });
+    };
+    QVERIFY(server.isListening());
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(),
+                       wssOnly(server.liveUrl("localhost")), fixedCredentials("a", "r"),
+                       RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    Observer observer(&client);
+
+    // Before the link is up there is nowhere to send it, and unlike the durable
+    // path there is no outbox to fall back on, so the caller is told.
+    const CiphertextEnvelopeV1 envelope = makeEnvelope(DeviceId::generate());
+    const auto early = client.sendDatagram(envelope);
+    QVERIFY(!early.hasValue());
+    QCOMPARE(early.error(), RelayCallError::NotConnected);
+
+    client.connectLive(0);
+    QTRY_COMPARE(observer.connects.count(), 1);
+    QVERIFY(client.sendDatagram(envelope).hasValue());
+    QTRY_COMPARE(received.size(), 1);
+
+    const QCborValue value = QCborValue::fromCbor(received.first());
+    QVERIFY(value.isArray());
+    QCOMPARE(value.toArray().size(), 2);
+    QCOMPARE(value.toArray().at(0).toInteger(), 5); // DatagramSubmit
+    const auto carried = decodeEnvelope(value.toArray().at(1).toByteArray());
+    QVERIFY(carried.hasValue());
+    QCOMPARE(carried.value(), envelope);
+    // No acceptance is expected: nothing was stored, so there is nothing to ack.
+    QCOMPARE(observer.acceptedIds.count(), 0);
+}
+
+void RelayClientTest::deliveredDatagramIsSurfaced()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                    {QString::fromLatin1(relaySubprotocol)});
+    const DeviceId localDevice = DeviceId::generate();
+    const CiphertextEnvelopeV1 envelope = makeEnvelope(localDevice, "sealed-audio-frame");
+    server.onConnected = [envelope](QWebSocket *socket) {
+        socket->sendBinaryMessage(datagramFrame(envelope));
+    };
+    QVERIFY(server.isListening());
+
+    RelayClient client(localDevice, AccountId::generate(), wssOnly(server.liveUrl("localhost")),
+                       fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    Observer observer(&client);
+
+    client.connectLive(0);
+    QTRY_COMPARE(observer.datagramCount, 1);
+    QVERIFY(observer.lastDatagram.has_value());
+    QCOMPARE(*observer.lastDatagram, envelope);
+    // A datagram is not an envelope: it must not reach the durable receive path.
+    QCOMPARE(observer.envelopeCount, 0);
+    QCOMPARE(observer.errors.count(), 0);
+}
+
+void RelayClientTest::badDatagramsAreDroppedNotTerminal()
+{
+    // Media rides a deliberately lossy path, so one corrupt or misaddressed
+    // frame must be dropped in silence. Raising a transport error instead would
+    // tear down the connection — and with it the call — over one bad packet.
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                    {QString::fromLatin1(relaySubprotocol)});
+    const DeviceId localDevice = DeviceId::generate();
+    const CiphertextEnvelopeV1 good = makeEnvelope(localDevice, "good-frame");
+    server.onConnected = [localDevice, good](QWebSocket *socket) {
+        // Addressed to somebody else.
+        socket->sendBinaryMessage(datagramFrame(makeEnvelope(DeviceId::generate())));
+        // Not a decodable envelope at all.
+        QCborArray junk;
+        junk.append(6);
+        junk.append(QByteArray("not an envelope"));
+        socket->sendBinaryMessage(junk.toCborValue().toCbor());
+        // And then a good one, to prove the link survived both.
+        socket->sendBinaryMessage(datagramFrame(good));
+        // Finally a datagram frame of the wrong arity. That is not a damaged
+        // packet, it is the relay speaking the protocol wrongly, and it IS
+        // terminal — the distinction is the point of this test.
+        QCborArray malformed;
+        malformed.append(6);
+        malformed.append(QByteArray("a"));
+        malformed.append(QByteArray("b"));
+        socket->sendBinaryMessage(malformed.toCborValue().toCbor());
+    };
+    QVERIFY(server.isListening());
+
+    RelayClient client(localDevice, AccountId::generate(), wssOnly(server.liveUrl("localhost")),
+                       fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    Observer observer(&client);
+
+    client.connectLive(0);
+    // Exactly one datagram surfaced: the misaddressed and undecodable ones were
+    // dropped in silence, and neither raised a transport error.
+    QTRY_COMPARE(observer.datagramCount, 1);
+    QCOMPARE(*observer.lastDatagram, good);
+    QTRY_VERIFY(observer.errors.count() >= 1);
+    QCOMPARE(observer.firstError(), RelayTransportError::InvalidControlFrame);
+    QCOMPARE(observer.datagramCount, 1);
+}
 
 void RelayClientTest::authRequestBodiesMatchRelay()
 {

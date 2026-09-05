@@ -234,6 +234,13 @@ public:
     // acceptance arrives asynchronously through relayAccepted().
     [[nodiscard]] Result<void, RelayCallError> sendEnvelope(const CiphertextEnvelopeV1 &envelope);
 
+    // Sends one envelope on the unreliable live-only path: the relay validates
+    // and forwards it to a connected recipient and drops it otherwise. Nothing
+    // is stored, sequenced or acknowledged, so unlike sendEnvelope there is no
+    // asynchronous acceptance to wait for and no retry if the peer is offline.
+    // Intended for real-time media, where a redelivered frame is already stale.
+    [[nodiscard]] Result<void, RelayCallError> sendDatagram(const CiphertextEnvelopeV1 &envelope);
+
     // Sends a plaintext-free acknowledgement control frame (envelope id +
     // advanced watermark) over the live stream.
     [[nodiscard]] Result<void, RelayCallError> acknowledge(const EnvelopeId &envelopeId,
@@ -311,6 +318,11 @@ signals:
     // Delivered ciphertext plus its per-recipient relay sequence, which the
     // durable receive path uses as the inbox watermark.
     void envelopeReceived(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);
+    // An unreliable live-only delivery. It carries no relay sequence because the
+    // relay never stored it; a malformed or misaddressed one is dropped rather
+    // than surfaced, so every emission here is a well-formed envelope for this
+    // device.
+    void datagramReceived(const CiphertextEnvelopeV1 &envelope);
     void relayAccepted(const EnvelopeId &envelopeId, quint64 serverSequence);
     // Emitted after a successful refresh so the caller can persist rotated
     // tokens; RelayClient itself does not store them.

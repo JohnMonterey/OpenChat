@@ -33,6 +33,11 @@ enum class ControlType : int {
     AuthExpired = 2,   // server -> client: [2]
     Acknowledge = 3,   // client -> server: [3, bstr envelopeId(16), uint watermark]
     Delivery = 4,      // server -> client: [4, uint serverSequence, bstr canonicalEnvelope]
+    // The unreliable pair. A datagram is forwarded live to a connected recipient
+    // and dropped otherwise: it is never stored, never sequenced, and never
+    // acknowledged, which is why neither frame carries a server sequence.
+    DatagramSubmit = 5,   // client -> server: [5, bstr canonicalEnvelope]
+    DatagramDelivery = 6, // server -> client: [6, bstr canonicalEnvelope]
 };
 
 [[nodiscard]] bool isSecureScheme(const QUrl &url, QLatin1StringView scheme)
@@ -432,6 +437,20 @@ public:
         emit q->envelopeReceived(decoded.value(), serverSequence);
     }
 
+    // The datagram counterpart of deliverEnvelope. A malformed or misaddressed
+    // datagram is dropped in silence rather than raised as a transport error:
+    // every RelayTransportError is terminal for the connection, and a single bad
+    // media frame on a deliberately lossy path must not tear down a live call.
+    void deliverDatagram(const QByteArray &envelopeBytes)
+    {
+        DecodeLimits decodeLimits;
+        decodeLimits.envelopeBytes = static_cast<qsizetype>(limits.maxIncomingMessageBytes);
+        const auto decoded = decodeEnvelope(envelopeBytes, decodeLimits);
+        if (!decoded.hasValue() || decoded.value().recipientDeviceId != localDeviceId)
+            return;
+        emit q->datagramReceived(decoded.value());
+    }
+
     void handleControlFrame(const QByteArray &message)
     {
         const auto array = parseControlFrame(message);
@@ -469,12 +488,22 @@ public:
             deliverEnvelope(array->at(2).toByteArray(), static_cast<quint64>(sequence));
             return;
         }
+        case ControlType::DatagramDelivery: {
+            if (array->size() != 2 || !array->at(1).isByteArray()) {
+                emit q->transportError(RelayTransportError::InvalidControlFrame);
+                return;
+            }
+            deliverDatagram(array->at(1).toByteArray());
+            return;
+        }
         case ControlType::AuthExpired:
             attemptRefresh();
             return;
         case ControlType::Acknowledge:
+        case ControlType::DatagramSubmit:
         default:
-            // Acknowledge is a client->server frame; receiving it is invalid.
+            // Acknowledge and DatagramSubmit are client->server frames; receiving
+            // one means the peer is not speaking this protocol.
             emit q->transportError(RelayTransportError::InvalidControlFrame);
             return;
         }
@@ -777,6 +806,24 @@ Result<void, RelayCallError> RelayClient::sendEnvelope(const CiphertextEnvelopeV
         return Result<void, RelayCallError>::failure(RelayCallError::EncodeFailure);
 
     d->socket->sendBinaryMessage(frame);
+    return Result<void, RelayCallError>::success();
+}
+
+Result<void, RelayCallError> RelayClient::sendDatagram(const CiphertextEnvelopeV1 &envelope)
+{
+    if (!d->socket || !d->subprotocolVerified)
+        return Result<void, RelayCallError>::failure(RelayCallError::NotConnected);
+
+    const QByteArray encoded = encodeCanonical(envelope);
+    if (encoded.isEmpty()
+        || static_cast<quint64>(encoded.size()) > d->limits.maxIncomingFrameBytes)
+        return Result<void, RelayCallError>::failure(RelayCallError::EncodeFailure);
+
+    QCborArray control;
+    control.append(static_cast<int>(ControlType::DatagramSubmit));
+    control.append(encoded);
+
+    d->socket->sendBinaryMessage(control.toCborValue().toCbor());
     return Result<void, RelayCallError>::success();
 }
 

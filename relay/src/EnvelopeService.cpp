@@ -24,27 +24,30 @@ EnvelopeService::EnvelopeService(PostgresStore &store, Policy policy)
 {
 }
 
-Result<SubmitResult, RelayError>
-EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes)
+Result<CiphertextEnvelopeV1, RelayError>
+EnvelopeService::validate(const AuthenticatedDevice &authenticatedDevice,
+                          QByteArrayView envelopeBytes)
 {
+    using Failure = Result<CiphertextEnvelopeV1, RelayError>;
+
     // Decode through the strict bounded canonical decoder. This validates the
     // schema, field sizes, canonical form, expiry range, and that the embedded
     // ciphertext hash matches the ciphertext — all without touching plaintext.
     const auto decoded = decodeEnvelope(envelopeBytes);
     if (!decoded.hasValue())
-        return Result<SubmitResult, RelayError>::failure(RelayError::InvalidRequest);
+        return Failure::failure(RelayError::InvalidRequest);
     const CiphertextEnvelopeV1 &envelope = decoded.value();
 
     // The submitting device must be the envelope's sender.
     if (envelope.senderDeviceId != authenticatedDevice.deviceId
         || envelope.senderAccountId != authenticatedDevice.accountId)
-        return Result<SubmitResult, RelayError>::failure(RelayError::Unauthorized);
+        return Failure::failure(RelayError::Unauthorized);
 
     // Reject an envelope that has already expired. The codec bounds the
     // created/expiry range but not against the wall clock, so a replayed old
     // envelope would otherwise be stored and re-delivered until manual cleanup.
     if (envelope.expiresAtMs <= m_store.nowMs())
-        return Result<SubmitResult, RelayError>::failure(RelayError::InvalidRequest);
+        return Failure::failure(RelayError::InvalidRequest);
 
     QSqlDatabase &db = m_store.database();
 
@@ -55,26 +58,38 @@ EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArr
         "SELECT signing_key, revoked_at_ms FROM devices WHERE device_id = ?"));
     sender.addBindValue(envelope.senderDeviceId.bytes());
     if (!sender.exec())
-        return Result<SubmitResult, RelayError>::failure(RelayError::Internal);
+        return Failure::failure(RelayError::Internal);
     if (!sender.next())
-        return Result<SubmitResult, RelayError>::failure(RelayError::NotFound);
+        return Failure::failure(RelayError::NotFound);
     if (!sender.value(1).isNull())
-        return Result<SubmitResult, RelayError>::failure(RelayError::Revoked);
+        return Failure::failure(RelayError::Revoked);
     const QByteArray signingKey = sender.value(0).toByteArray();
     if (!verifyEd25519(signingKey, envelopeSigningInput(envelope), envelope.senderSignature))
-        return Result<SubmitResult, RelayError>::failure(RelayError::Unauthorized);
+        return Failure::failure(RelayError::Unauthorized);
 
     // The recipient device must exist and be active.
     QSqlQuery recipient(db);
     recipient.prepare(QStringLiteral("SELECT revoked_at_ms FROM devices WHERE device_id = ?"));
     recipient.addBindValue(envelope.recipientDeviceId.bytes());
     if (!recipient.exec())
-        return Result<SubmitResult, RelayError>::failure(RelayError::Internal);
+        return Failure::failure(RelayError::Internal);
     if (!recipient.next())
-        return Result<SubmitResult, RelayError>::failure(RelayError::NotFound);
+        return Failure::failure(RelayError::NotFound);
     if (!recipient.value(0).isNull())
-        return Result<SubmitResult, RelayError>::failure(RelayError::Revoked);
+        return Failure::failure(RelayError::Revoked);
 
+    return Result<CiphertextEnvelopeV1, RelayError>::success(envelope);
+}
+
+Result<SubmitResult, RelayError>
+EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes)
+{
+    const auto validated = validate(authenticatedDevice, envelopeBytes);
+    if (!validated.hasValue())
+        return Result<SubmitResult, RelayError>::failure(validated.error());
+    const CiphertextEnvelopeV1 &envelope = validated.value();
+
+    QSqlDatabase &db = m_store.database();
     const qint64 now = m_store.nowMs();
     QSqlQuery insert(db);
     insert.prepare(QStringLiteral(

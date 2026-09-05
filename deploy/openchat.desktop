@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenChat
+GenericName=Secure Chat
+Comment=End-to-end encrypted chat and calls
+Exec=OpenChat
+Icon=openchat
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+StartupWMClass=OpenChat
+StartupNotify=true

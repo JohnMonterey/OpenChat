@@ -832,6 +832,17 @@ void ChatController::onMessageReceived(const MessageRecord &record)
         if (contactId.isEmpty())
             return;
     }
+    // Announce it before deciding where it lands: an open conversation still
+    // deserves a notification when the window is not the one being looked at,
+    // and that is not something this controller can know.
+    if (const auto chat = m_liveChats.constFind(contactId); chat != m_liveChats.cend()) {
+        const Contact row = contactRowFor(*chat);
+        const bool showBody = statePermitsPlaintext(m_sessionState)
+            && (record.kind == ContentKind::Text || record.kind == ContentKind::Emoji);
+        emit messageNotificationRequested(contactId, row.name,
+                                          showBody ? record.body : QString(), row.avatarKey);
+    }
+
     if (contactId == m_currentContactId) {
         m_messagesByContact[contactId].append(toMessage(record));
         if (statePermitsPlaintext(m_sessionState))

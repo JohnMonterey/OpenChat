@@ -465,6 +465,46 @@ private slots:
         QCOMPARE(categorySpy.count(), 1);
     }
 
+    void anInboundMessageAsksForADesktopNotification()
+    {
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        OpenChat::ContactRequestService requests(*live.session, *live.session->syncEngine());
+
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QSignalSpy notified(&controller,
+                            &ChatController::messageNotificationRequested);
+
+        // Our own messages are not announced back to us.
+        controller.setComposerText(QStringLiteral("hello bob"));
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(notified.count(), 0);
+
+        // An inbound message asks for a notification naming the chat, the
+        // sender, what they wrote and their picture. It is asked for even
+        // though this is the conversation on screen: whether the user is
+        // looking at the window is not something the controller can know.
+        QVERIFY(live.deliverFromPeer(QStringLiteral("hi back")));
+        QCOMPARE(notified.count(), 1);
+        const QList<QVariant> first = notified.at(0);
+        QCOMPARE(first.at(0).toString(), controller.currentContactId());
+        QCOMPARE(first.at(1).toString(), QStringLiteral("bob"));
+        QCOMPARE(first.at(2).toString(), QStringLiteral("hi back"));
+        QCOMPARE(first.at(3).toString(), QStringLiteral("userpfp_none"));
+
+        // A state that withholds message plaintext from the interface also
+        // withholds it from the desktop: the arrival is announced, the words
+        // are not.
+        controller.setSessionState(ChatController::SessionState::Locked);
+        QVERIFY(live.deliverFromPeer(QStringLiteral("meet me at the docks")));
+        QCOMPARE(notified.count(), 2);
+        const QList<QVariant> second = notified.at(1);
+        QCOMPARE(second.at(1).toString(), QStringLiteral("bob"));
+        QVERIFY(second.at(2).toString().isEmpty());
+    }
+
     void liveRosterReplacesMockAndRoutesMessagesThroughEngine()
     {
         LiveFixture live;

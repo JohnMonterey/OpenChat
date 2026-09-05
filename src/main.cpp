@@ -35,6 +35,8 @@
 #include "controllers/OnboardingController.h"
 #include "domain/Identifiers.h"
 #include "network/RelayClient.h"
+#include "notify/NotificationBackend.h"
+#include "notify/NotificationService.h"
 #include "network/RelayTransport.h"
 #include "network/SyncEngine.h"
 #include "render/AvatarArtwork.h"
@@ -294,8 +296,65 @@ private:
             QCoreApplication::exit(EXIT_FAILURE);
             return;
         }
-        if (auto *window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().constFirst()))
+        if (auto *window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().constFirst())) {
             configureWindow(window);
+            enableNotifications(window);
+        }
+    }
+
+    // Announces inbound messages on the desktop and brings the window back when
+    // one is clicked.
+    //
+    // The service needs to know two things the controller cannot see — whether
+    // the window has focus, and which conversation is on screen — so both are
+    // fed to it here, and it decides for itself whether a message is worth
+    // interrupting the user for.
+    void enableNotifications(QQuickWindow *window)
+    {
+        if (m_chatController == nullptr)
+            return;
+
+        OpenChat::NotificationAppInfo appInfo;
+        appInfo.applicationName = OpenChat::AppMetadata::name.toString();
+        appInfo.desktopEntry = OpenChat::AppMetadata::desktopEntry.toString();
+        appInfo.appUserModelId = OpenChat::AppMetadata::appUserModelId.toString();
+        appInfo.iconName = OpenChat::AppMetadata::desktopEntry.toString();
+        m_notifications = std::make_unique<OpenChat::NotificationService>(
+            OpenChat::makeNotificationBackend(appInfo));
+
+        QObject::connect(m_chatController.get(),
+                         &OpenChat::ChatController::messageNotificationRequested,
+                         m_notifications.get(),
+                         [this](const QString &contactId, const QString &senderName,
+                                const QString &body, const QString &avatarKey) {
+                             m_notifications->postMessage(contactId, senderName, body, avatarKey);
+                         });
+
+        m_notifications->setWindowActive(window->isActive());
+        QObject::connect(window, &QQuickWindow::activeChanged, m_notifications.get(),
+                         [this, window] { m_notifications->setWindowActive(window->isActive()); });
+
+        m_notifications->setActiveConversation(m_chatController->currentContactId());
+        QObject::connect(m_chatController.get(), &OpenChat::ChatController::currentContactChanged,
+                         m_notifications.get(), [this] {
+                             m_notifications->setActiveConversation(
+                                 m_chatController->currentContactId());
+                         });
+
+        // Clicking a notification is a request to read that message: raise the
+        // window, leave any other section, and open the conversation.
+        QObject::connect(m_notifications.get(),
+                         &OpenChat::NotificationService::conversationActivated, window,
+                         [this, window](const QString &contactId) {
+                             window->show();
+                             window->raise();
+                             window->requestActivate();
+                             if (m_chatController == nullptr)
+                                 return;
+                             m_chatController->setNavSection(
+                                 OpenChat::ChatController::NavSection::Chat);
+                             m_chatController->selectContact(contactId);
+                         });
     }
 
     // Brings up the durable SyncEngine over the relay transport for a live unlocked
@@ -542,6 +601,11 @@ private:
     std::unique_ptr<OpenChat::ContactController> m_contactController;
     std::unique_ptr<OpenChat::CallController> m_callController;
     std::unique_ptr<QQuickView> m_onboardingView;
+    // Declared after the controllers it listens to, so it is destroyed while
+    // they are still alive, and before the engine that owns the window, whose
+    // connections to it are severed with the window. Its destructor takes back
+    // anything the application still has showing on the desktop.
+    std::unique_ptr<OpenChat::NotificationService> m_notifications;
     std::unique_ptr<QQmlApplicationEngine> m_engine;
 };
 
@@ -752,6 +816,11 @@ int main(int argc, char *argv[])
     QGuiApplication application(argc, argv);
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
+    // How the freedesktop desktops attribute this process: the basename of the
+    // installed .desktop file. Wayland compositors use it as the app id, and
+    // the notification daemons use it to find the application's name and icon
+    // for the notifications posted below.
+    QGuiApplication::setDesktopFileName(OpenChat::AppMetadata::desktopEntry.toString());
     QGuiApplication::setWindowIcon(
         QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.png")));
 

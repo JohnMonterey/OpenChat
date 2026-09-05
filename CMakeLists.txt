@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.21)
 
 project(OpenChat VERSION 0.1.0 LANGUAGES C CXX)
 
+# The macOS notification backend is Objective-C++ (UNUserNotificationCenter has
+# no C interface). Enabled here rather than beside the target, because a
+# language must be enabled in the top-level scope before anything uses it.
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -102,11 +109,39 @@ target_link_libraries(OpenChat PRIVATE
     openchat_app
     openchat_avatar
     openchat_call
+    openchat_notify
     Qt6::Core
     Qt6::Gui
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Svg
+)
+
+if(UNIX AND NOT APPLE)
+    # The desktop entry is how a freedesktop desktop learns OpenChat's name and
+    # icon. Notifications carry its basename in the "desktop-entry" hint, which
+    # is what puts the application's icon on the notification and its name in
+    # the notification settings. Nothing at build or run time depends on this
+    # being installed; without it the desktop falls back to the plain name.
+    include(GNUInstallDirs)
+    install(TARGETS OpenChat RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES deploy/openchat.desktop
+        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+    install(FILES assets/icons/openchat.png
+        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/256x256/apps
+        RENAME openchat.png)
+endif()
+
+# Posts one real desktop notification through the application's own code. Not
+# part of the application: it is how the platform backends are checked by hand
+# on a desktop session, which no automated test can do.
+add_executable(openchat-notify-check tools/notify_check.cpp)
+target_include_directories(openchat-notify-check PRIVATE src)
+target_link_libraries(openchat-notify-check PRIVATE
+    openchat_notify
+    openchat_avatar
+    Qt6::Core
+    Qt6::Gui
 )
 
 # Renders the generated call sounds to WAV. Not part of the application: it is
@@ -160,9 +195,67 @@ target_link_libraries(openchat_domain PUBLIC Qt6::Core)
 add_library(openchat_avatar STATIC
     src/render/ProfileImage.cpp
     src/render/AvatarStore.cpp
+    src/render/AvatarPainter.cpp
 )
 target_include_directories(openchat_avatar PUBLIC src)
 target_link_libraries(openchat_avatar PUBLIC openchat_domain Qt6::Core Qt6::Gui)
+
+# Desktop notifications. The policy (what is worth announcing, and what it says)
+# is platform-neutral and tested on its own; exactly one backend is compiled in,
+# chosen by the platform this binary targets. On the freedesktop desktops that
+# backend is a D-Bus client, so the same code serves Wayland and X11.
+set(openchat_notify_sources
+    src/notify/NotificationService.cpp
+    src/notify/NotificationBackendFactory.cpp
+    # Listed so AUTOMOC processes the QObject headers that have no source file
+    # of their own: the abstract backend and the do-nothing one.
+    src/notify/NotificationBackend.h
+    src/notify/NullNotifier.h
+)
+if(APPLE)
+    list(APPEND openchat_notify_sources
+        src/notify/MacNotifier.mm
+        src/notify/MacNotifier.h)
+elseif(WIN32)
+    list(APPEND openchat_notify_sources
+        src/notify/WindowsNotifier.cpp
+        src/notify/WindowsNotifier.h)
+elseif(UNIX)
+    list(APPEND openchat_notify_sources
+        src/notify/FreedesktopNotifier.cpp
+        src/notify/FreedesktopNotifier.h)
+endif()
+
+add_library(openchat_notify STATIC ${openchat_notify_sources})
+target_include_directories(openchat_notify PUBLIC src)
+target_link_libraries(openchat_notify PUBLIC openchat_avatar Qt6::Core Qt6::Gui)
+if(APPLE)
+    set_source_files_properties(src/notify/MacNotifier.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(openchat_notify PRIVATE
+        "-framework Foundation"
+        "-framework UserNotifications"
+    )
+elseif(WIN32)
+    # shell32/ole32/propsys register the Start Menu shortcut that gives an
+    # unpackaged application the identity Windows attributes its toasts to.
+    target_link_libraries(openchat_notify PRIVATE shell32 ole32 oleaut32 propsys uuid)
+    # C++/WinRT is what draws the sender's picture on a real toast. It ships
+    # with the Windows SDK and with recent mingw-w64, but not with every
+    # toolchain, so it is detected rather than assumed: the source picks the
+    # same branch through __has_include, and this keeps the libraries it needs
+    # in step with that choice.
+    include(CheckIncludeFileCXX)
+    check_include_file_cxx("winrt/Windows.UI.Notifications.h" OPENCHAT_HAVE_CPPWINRT)
+    if(OPENCHAT_HAVE_CPPWINRT)
+        target_link_libraries(openchat_notify PRIVATE runtimeobject windowsapp)
+    else()
+        message(STATUS
+            "OpenChat: no C++/WinRT; notifications fall back to shell balloons.")
+    endif()
+elseif(UNIX)
+    target_link_libraries(openchat_notify PUBLIC Qt6::DBus)
+endif()
 
 add_library(openchat_protocol STATIC
     src/protocol/CiphertextEnvelope.cpp
@@ -538,6 +631,38 @@ target_link_libraries(tst_contactcontroller PRIVATE
 )
 add_test(NAME tst_contactcontroller COMMAND tst_contactcontroller)
 set_tests_properties(tst_contactcontroller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# The notification policy, checked against a recording backend so no desktop
+# notification service is needed to run it.
+add_executable(tst_notifications tests/tst_notifications.cpp)
+target_include_directories(tst_notifications PRIVATE src)
+target_link_libraries(tst_notifications PRIVATE
+    openchat_notify
+    openchat_avatar
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+)
+add_test(NAME tst_notifications COMMAND tst_notifications)
+set_tests_properties(tst_notifications PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+if(UNIX AND NOT APPLE)
+    # The freedesktop backend against a notification daemon of the test's own,
+    # on a private session bus. Skips itself where dbus-daemon is absent.
+    add_executable(tst_freedesktopnotifier tests/tst_freedesktopnotifier.cpp)
+    target_include_directories(tst_freedesktopnotifier PRIVATE src)
+    target_link_libraries(tst_freedesktopnotifier PRIVATE
+        openchat_notify
+        openchat_avatar
+        Qt6::Core
+        Qt6::DBus
+        Qt6::Gui
+        Qt6::Test
+    )
+    add_test(NAME tst_freedesktopnotifier COMMAND tst_freedesktopnotifier)
+    set_tests_properties(tst_freedesktopnotifier PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
 
 add_executable(tst_models
     tests/tst_models.cpp

@@ -207,6 +207,21 @@ signals:
     void chatUnreadCountChanged();
     void currentSettingsCategoryChanged();
 
+    // A message arrived that the desktop should announce: the chat it belongs
+    // to (an AccountId hex, the same id selectContact takes), the sender's
+    // display name, what they wrote, and their avatar key.
+    //
+    // Emitted for every inbound message, including one in the conversation
+    // already on screen: whether the user is actually looking at it is a
+    // question about window focus, which the notification service answers.
+    // `body` carries the message text only in states whose plaintext the
+    // interface itself would show; the states that withhold plaintext
+    // (Locked, Quarantined, DeviceChanged) announce that a message arrived
+    // without repeating it to the desktop's notification service, which is a
+    // different trust domain from the encrypted store it came out of.
+    void messageNotificationRequested(const QString &contactId, const QString &senderName,
+                                      const QString &body, const QString &avatarKey);
+
 private:
     // A live chat's routing: the peer account, the 2-party MLS conversation, and
     // the peer device every envelope is addressed to.

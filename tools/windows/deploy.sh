@@ -29,7 +29,8 @@ QmlImports = qml
 CONF
 
 # Plugin categories a Qt Quick, Multimedia and Network app loads at runtime.
-for category in platforms imageformats iconengines tls multimedia networkinformation generic styles; do
+# (No `styles`: those are Qt Widgets styles, and nothing here uses Widgets.)
+for category in platforms imageformats iconengines tls multimedia networkinformation; do
     [ -d "$qt_plugins/$category" ] || continue
     mkdir -p "$dist/plugins/$category"
     cp "$qt_plugins/$category"/*.dll "$dist/plugins/$category/"
@@ -47,6 +48,19 @@ qmlimportscanner -rootPath "$source_dir/qml" -importPath "$qt_qml" \
         cp -r "$qt_qml/$rel"/. "$dist/qml/$rel/"
     done
 find "$dist/qml" -type d -name designer -prune -exec rm -rf {} +
+
+# The app imports no QtQuick.Controls itself; the Controls tree arrives only
+# through QtQuick.Dialogs' non-native fallback. Keep the styles that fallback
+# can actually select on Windows (Basic and the default FluentWinUI3) and drop
+# the rest, along with modules the sources never import. This is what keeps
+# Qt6Widgets and five style plugins out of the package. Must run before the
+# import-graph closure below, which would otherwise pull their DLLs back in.
+for unused in \
+    QtQuick/Controls/Material QtQuick/Controls/Universal QtQuick/Controls/Imagine \
+    QtQuick/Controls/Fusion QtQuick/Controls/Windows \
+    QtQuick/Particles QtQuick/LocalStorage QtQuick/tooling Qt/labs; do
+    rm -rf "$dist/qml/$unused"
+done
 
 # Close the DLL import graph. Names in import tables carry arbitrary case, so
 # match case-insensitively against the sysroot's bin directory.

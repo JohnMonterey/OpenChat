@@ -103,7 +103,7 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.margins: -4
-            color: "#f4f8fb"
+            color: Theme.outgoingBottom
             border.width: 1
             border.color: Theme.inputBorder
 

@@ -19,7 +19,7 @@ Item {
         id: header
         width: parent.width
         height: 40
-        color: "#27ffffff"
+        color: Theme.sectionHighlight
         border.width: 0
 
         Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
@@ -41,7 +41,7 @@ Item {
             anchors.rightMargin: 20
             anchors.verticalCenter: parent.verticalCenter
             text: "⌃"
-            color: "#557ca1"
+            color: Theme.categoryChevron
             font.family: Theme.uiFont
             font.bold: true
             font.pixelSize: 15
@@ -58,6 +58,7 @@ Item {
             ContactRow {
                 id: contactRowDelegate
                 objectName: "contactRow_" + contactRowDelegate.contactId
+                statusBubbleEnabled: !category.favoriteCategory
                 width: category.width
                 height: contactRowDelegate.favorite === category.favoriteCategory ? category.rowHeight : 0
                 visible: height > 0

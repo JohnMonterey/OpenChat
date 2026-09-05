@@ -7,6 +7,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTemporaryDir>
+#include <QSettings>
 #include <QUrl>
 #include <QWindow>
 #include <QtTest>
@@ -20,6 +21,7 @@
 #include "controllers/OnboardingController.h"
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
+#include "app/AppearanceSettings.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 
@@ -52,6 +54,8 @@ class QmlLoadTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void init() { QSettings().setValue(QStringLiteral("Appearance/darkMode"), false); }
+
     void requiredStructure()
     {
         OpenChat::ChatController controller;
@@ -294,6 +298,98 @@ private slots:
         QVERIFY(chatTab->property("active").toBool());
         QVERIFY(chatContactArea->property("visible").toBool());
         QVERIFY(!sidebarCallList->property("visible").toBool());
+    }
+
+    void darkModeSwitchUpdatesTheAppAndRemembersTheChoice()
+    {
+        OpenChat::ChatController chats;
+        chats.setLocalUserName(QStringLiteral("Developer"));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        chats.setCurrentSettingsCategory(5);
+        OpenChat::ContactController contacts;
+        contacts.enableForPreview();
+        contacts.setMockInvite(QStringLiteral("OPENCHAT-INV-TEST-0001"));
+        OpenChat::CallController calls;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("contactController"), QVariant::fromValue(&contacts)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *toggle = findVisualItem(window->contentItem(), QStringLiteral("darkModeSwitch"));
+        QVERIFY(toggle && toggle->isVisible());
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            "OpenChat.Native", "AppearanceSettings");
+        auto *theme = engine.singletonInstance<QObject *>("OpenChat", "Theme");
+        QVERIFY(appearance && theme);
+        QVERIFY(!appearance->darkMode());
+        const QColor lightBackground = window->color();
+        const QPoint switchCentre = toggle->mapToScene(QPointF(toggle->width() / 2,
+                                                               toggle->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, switchCentre);
+        QTRY_VERIFY(appearance->darkMode());
+        QVERIFY(toggle->property("checked").toBool());
+        QVERIFY(window->color().lightnessF() < 0.2);
+        for (const char *role : {"sidebarTop", "fieldBackground", "incomingTop", "outgoingTop",
+                                 "callBackdropTop", "tooltipBottom", "panelBackground"})
+            QVERIFY2(theme->property(role).value<QColor>().lightnessF() < 0.35, role);
+        QVERIFY(theme->property("textPrimary").value<QColor>().lightnessF() > 0.8);
+        QVERIFY(QSettings().value(QStringLiteral("Appearance/darkMode")).toBool());
+        // A new QML engine, as used when the application opens its next window,
+        // loads the saved preference without relying on this window's state.
+        {
+            QQmlEngine nextEngine;
+            nextEngine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            QQmlComponent component(&nextEngine);
+            component.setData("import QtQuick; import OpenChat; QtObject { property bool dark: Theme.darkMode }", QUrl());
+            std::unique_ptr<QObject> restored(component.create());
+            QVERIFY2(restored, qPrintable(component.errorString()));
+            QVERIFY(restored->property("dark").toBool());
+        }
+        const QString captureDir = qEnvironmentVariable("OPENCHAT_DARK_CAPTURE_DIR");
+        const auto capture = [&](const QString &name) {
+            QTest::qWait(80);
+            if (!captureDir.isEmpty())
+                return window->grabWindow().save(captureDir + QLatin1Char('/') + name + QStringLiteral(".png"));
+            return true;
+        };
+        QVERIFY(capture(QStringLiteral("settings")));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Chat);
+        QVERIFY(capture(QStringLiteral("chat")));
+        contacts.openDialog();
+        QVERIFY(capture(QStringLiteral("add-contact")));
+        contacts.closeDialog();
+        contacts.setMockSafetyNumber(QStringLiteral("12345 67890 24680 13579 11223 44556 77889 90011"), false,
+                                    QStringLiteral("Jessica"));
+        contacts.openSafetyNumberPreview();
+        QVERIFY(capture(QStringLiteral("verification")));
+        contacts.closeSafetyNumber();
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), true, false);
+        QVERIFY(capture(QStringLiteral("call")));
+        calls.enableForPreview(OpenChat::CallState::Idle, QString(), QString(), false, false);
+        // Onboarding uses the same singleton and therefore the same saved theme.
+        OpenChat::OnboardingController onboarding;
+        QQmlComponent onboardingComponent(&engine, QUrl::fromLocalFile(
+            QStringLiteral(OPENCHAT_SOURCE_DIR "/qml/OpenChat/Onboarding.qml")));
+        std::unique_ptr<QObject> screen(onboardingComponent.createWithInitialProperties(
+            {{QStringLiteral("controller"), QVariant::fromValue(&onboarding)}}));
+        auto *onboardingItem = qobject_cast<QQuickItem *>(screen.get());
+        QVERIFY2(onboardingItem, qPrintable(onboardingComponent.errorString()));
+        onboardingItem->setParentItem(window->contentItem());
+        onboardingItem->setSize(window->size());
+        QVERIFY(capture(QStringLiteral("onboarding")));
+        screen.reset();
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        toggle->forceActiveFocus();
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(!appearance->darkMode());
+        QCOMPARE(window->color(), lightBackground);
+        QVERIFY(!QSettings().value(QStringLiteral("Appearance/darkMode")).toBool());
     }
 
     void messageListStartsAtHistoryTopWithoutStationaryDivider()
@@ -618,6 +714,70 @@ private slots:
         QCoreApplication::processEvents();
         QCOMPARE(controller.step(), OpenChat::OnboardingController::Step::Done);
         QCOMPARE(completedSpy.count(), 1);
+    }
+
+    void friendStatusBubbleFollowsAvatarHover()
+    {
+        OpenChat::ChatController controller;
+        QVector<OpenChat::Contact> contacts;
+        const QString status = QStringLiteral("Taking a little break — back after coffee ☕");
+        for (int i = 0; i < controller.contacts()->rowCount(); ++i) {
+            auto contact = *controller.contacts()->contactAt(i);
+            if (contact.id == QStringLiteral("alex"))
+                contact.statusText = status;
+            contacts.append(contact);
+        }
+        controller.contacts()->setContacts(contacts);
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *category = window->findChild<QQuickItem *>(QStringLiteral("contactsCategory"));
+        QVERIFY(category);
+        auto *row = findVisualItem(category, QStringLiteral("contactRow_alex"));
+        QVERIFY(row);
+        auto *avatar = row->findChild<QQuickItem *>(QStringLiteral("contactAvatar"));
+        auto *bubble = row->findChild<QQuickItem *>(QStringLiteral("contactStatusBubble_alex"));
+        QVERIFY(avatar && bubble);
+        auto *text = bubble->findChild<QQuickItem *>(QStringLiteral("contactStatusBubbleText"));
+        QVERIFY(text);
+        const QPoint avatarPoint = avatar->mapToScene(QPointF(avatar->width() / 2,
+                                                              avatar->height() / 2)).toPoint();
+        const QPoint namePoint = row->mapToScene(QPointF(row->width() - 30, 14)).toPoint();
+        QTest::mouseMove(window, namePoint);
+        QVERIFY(!bubble->isVisible());
+        QTest::mouseMove(window, avatarPoint);
+        QVERIFY(!bubble->property("shown").toBool()); // passing over does not flash a tooltip
+        QTRY_COMPARE(bubble->opacity(), 1.0);
+        QCOMPARE(text->property("text").toString(), status);
+        QCOMPARE(text->property("textFormat").toInt(), 0); // PlainText
+        QVERIFY(bubble->parentItem() == window->contentItem());
+        QVERIFY(bubble->x() > avatarPoint.x());
+        QVERIFY(bubble->y() >= 0);
+        QVERIFY(bubble->x() + bubble->width() <= window->width());
+        QVERIFY(bubble->y() + bubble->height() <= window->height());
+        QVERIFY(bubble->findChild<QObject *>(QStringLiteral("statusBubbleSurface")));
+        const QString capture = qEnvironmentVariable("OPENCHAT_STATUS_BUBBLE_CAPTURE");
+        if (!capture.isEmpty())
+            QVERIFY(window->grabWindow().save(capture));
+        // The subtitle remains bound live, including text that resembles HTML.
+        QVERIFY(row->setProperty("statusText", QStringLiteral("<b>Back soon</b>")));
+        QCOMPARE(text->property("text").toString(), QStringLiteral("<b>Back soon</b>"));
+        QTest::mouseMove(window, namePoint);
+        QTRY_VERIFY(!bubble->isVisible());
+        QTest::mouseMove(window, avatarPoint);
+        QTRY_COMPARE(bubble->opacity(), 1.0);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, avatarPoint);
+        QCOMPARE(controller.currentContactId(), QStringLiteral("alex"));
+        QTRY_VERIFY(!bubble->isVisible());
+        QTest::mouseMove(window, namePoint);
+        QVERIFY(row->setProperty("statusText", QString()));
+        QTest::mouseMove(window, avatarPoint);
+        QVERIFY(!row->property("avatarHovered").toBool());
     }
 
     void localProfileEditorsAreWiredToTheController()
@@ -1259,6 +1419,14 @@ int main(int argc, char **argv)
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
     qputenv("QT_QUICK_BACKEND", QByteArrayLiteral("software"));
     QGuiApplication application(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("OpenChatTests"));
+    QCoreApplication::setApplicationName(QStringLiteral("qml-appearance"));
+    QTemporaryDir settingsDirectory;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDirectory.path());
+    qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
+        "OpenChat.Native", 1, 0, "AppearanceSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");

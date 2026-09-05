@@ -45,7 +45,7 @@ Item {
         anchors.rightMargin: delegateRoot.bubbleTailWidth
         y: bubble.y + bubble.height + 4
         text: "Not sent. Try again"
-        color: "#c62828"
+        color: Theme.retryText
         font.family: Theme.uiFont
         font.pixelSize: 12
         MouseArea {
@@ -78,7 +78,7 @@ Item {
             anchors.rightMargin: 10
             anchors.verticalCenter: parent.verticalCenter
             height: 1
-            color: "#d7e1e8"
+            color: Theme.dateRule
         }
         Text {
             id: dateText
@@ -96,7 +96,7 @@ Item {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             height: 1
-            color: "#d7e1e8"
+            color: Theme.dateRule
         }
     }
 
@@ -110,9 +110,9 @@ Item {
         radius: 6
         tailWidth: delegateRoot.bubbleTailWidth
         tailHeight: 13
-        fillTop: delegateRoot.outgoing ? "#fdfefe" : "#edf8ff"
-        fillBottom: delegateRoot.outgoing ? "#f4f8fb" : "#e2f2fc"
-        strokeColor: delegateRoot.outgoing ? "#b9c7d4" : "#8dbbe0"
+        fillTop: delegateRoot.outgoing ? Theme.outgoingTop : Theme.incomingTop
+        fillBottom: delegateRoot.outgoing ? Theme.outgoingBottom : Theme.incomingBottom
+        strokeColor: delegateRoot.outgoing ? Theme.outgoingBorder : Theme.incomingBorder
     }
 
     Text {
@@ -148,7 +148,7 @@ Item {
             ? implicitWidth
             : bubble.width - delegateRoot.horizontalContentInset
         text: String(delegateRoot.timestamp)
-        color: "#92a2b4"
+        color: Theme.timestampText
         font.family: Theme.uiFont
         font.pixelSize: 12
         horizontalAlignment: Text.AlignRight

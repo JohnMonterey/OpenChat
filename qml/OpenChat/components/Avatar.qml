@@ -1,4 +1,5 @@
 import QtQuick
+import OpenChat
 import OpenChat.Native
 
 Item {
@@ -28,6 +29,6 @@ Item {
         radius: avatar.cornerRadius
         color: "transparent"
         border.width: 1
-        border.color: "#8fa8b8"
+        border.color: Theme.avatarBorder
     }
 }

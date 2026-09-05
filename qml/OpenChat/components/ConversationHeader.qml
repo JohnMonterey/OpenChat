@@ -14,8 +14,8 @@ Item {
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0; color: "#fbfdff" }
-            GradientStop { position: 1; color: "#edf5fb" }
+            GradientStop { position: 0; color: Theme.headerTop }
+            GradientStop { position: 1; color: Theme.headerBottom }
         }
     }
 
@@ -71,7 +71,7 @@ Item {
             anchors.centerIn: parent
             width: 28
             height: 22
-            source: Qt.resolvedUrl("../../../assets/icons/video-call.svg")
+            source: Qt.resolvedUrl("../../../assets/icons/video-call" + (Theme.darkMode ? "-dark.svg" : ".svg"))
             sourceSize: Qt.size(width * 2, height * 2)
         }
         Item {
@@ -121,7 +121,7 @@ Item {
             anchors.centerIn: parent
             width: 28
             height: 28
-            source: Qt.resolvedUrl("../../../assets/icons/phone-call.svg")
+            source: Qt.resolvedUrl("../../../assets/icons/phone-call" + (Theme.darkMode ? "-dark.svg" : ".svg"))
             sourceSize: Qt.size(width * 2, height * 2)
         }
         Shape {
@@ -158,7 +158,7 @@ Item {
             anchors.centerIn: parent
             width: 13
             height: 9
-            source: Qt.resolvedUrl("../../../assets/icons/chevron-down.svg")
+            source: Qt.resolvedUrl("../../../assets/icons/chevron-down" + (Theme.darkMode ? "-dark.svg" : ".svg"))
         }
         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor }
     }

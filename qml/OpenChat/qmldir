@@ -6,9 +6,11 @@ PresenceBead 1.0 components/PresenceBead.qml
 Avatar 1.0 components/Avatar.qml
 AeroTextField 1.0 components/AeroTextField.qml
 AeroButton 1.0 components/AeroButton.qml
+AeroSwitch 1.0 components/AeroSwitch.qml
 ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml
 ContactRow 1.0 components/ContactRow.qml
+ContactStatusBubble 1.0 components/ContactStatusBubble.qml
 AddContactDialog 1.0 components/AddContactDialog.qml
 SafetyNumberDialog 1.0 components/SafetyNumberDialog.qml
 RequestRow 1.0 components/RequestRow.qml

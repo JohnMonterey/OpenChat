@@ -38,6 +38,7 @@
 #include "network/RelayTransport.h"
 #include "network/SyncEngine.h"
 #include "render/AvatarArtwork.h"
+#include "app/AppearanceSettings.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
@@ -50,6 +51,9 @@ namespace {
 // process, so every engine and view created below resolves the same types.
 void registerQmlTypes()
 {
+    qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
+        "OpenChat.Native", 1, 0, "AppearanceSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");

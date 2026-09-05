@@ -37,6 +37,7 @@ qt_add_executable(OpenChat
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
+    src/app/AppearanceSettings.cpp
 )
 
 if(APPLE)
@@ -64,9 +65,11 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/Avatar.qml
         qml/OpenChat/components/AeroTextField.qml
         qml/OpenChat/components/AeroButton.qml
+        qml/OpenChat/components/AeroSwitch.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
+        qml/OpenChat/components/ContactStatusBubble.qml
         qml/OpenChat/components/AddContactDialog.qml
         qml/OpenChat/components/SafetyNumberDialog.qml
         qml/OpenChat/components/RequestRow.qml
@@ -84,9 +87,13 @@ qt_add_qml_module(OpenChat
         assets/ryan.png
         assets/userpfp_none.png
         assets/icons/video-call.svg
+        assets/icons/video-call-dark.svg
         assets/icons/phone-call.svg
+        assets/icons/phone-call-dark.svg
         assets/icons/settings.svg
+        assets/icons/settings-dark.svg
         assets/icons/chevron-down.svg
+        assets/icons/chevron-down-dark.svg
         assets/icons/openchat.png
 )
 
@@ -642,6 +649,7 @@ add_executable(tst_qmlload
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
+    src/app/AppearanceSettings.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE

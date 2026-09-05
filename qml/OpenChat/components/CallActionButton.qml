@@ -23,13 +23,13 @@ Item {
     signal clicked
 
     readonly property color topColor: accent === "accept" ? Theme.acceptTop
-                                    : accent === "end" ? Theme.endCallTop : "#fafcfd"
+                                    : accent === "end" ? Theme.endCallTop : Theme.buttonTop
     readonly property color midColor: accent === "accept" ? Theme.acceptMid
-                                    : accent === "end" ? Theme.endCallMid : "#eef3f7"
+                                    : accent === "end" ? Theme.endCallMid : Theme.buttonMid
     readonly property color bottomColor: accent === "accept" ? Theme.acceptBottom
-                                       : accent === "end" ? Theme.endCallBottom : "#e2eaf1"
+                                       : accent === "end" ? Theme.endCallBottom : Theme.buttonBottom
     readonly property color rimColor: accent === "accept" ? Theme.acceptBorder
-                                    : accent === "end" ? Theme.endCallBorder : "#aebdca"
+                                    : accent === "end" ? Theme.endCallBorder : Theme.buttonBorder
     readonly property bool onAccent: accent === "accept" || accent === "end"
 
     implicitWidth: caption.implicitWidth + 34 + (cameraIcon ? 24 : 0)
@@ -41,7 +41,7 @@ Item {
         anchors.fill: parent
         radius: 4
         border.width: 1
-        border.color: button.activeFocus || button.checked ? "#4386b8" : button.rimColor
+        border.color: button.activeFocus || button.checked ? Theme.focusBorder : button.rimColor
         gradient: Gradient {
             GradientStop { position: 0; color: button.topColor }
             GradientStop { position: 0.5; color: button.midColor }
@@ -57,7 +57,7 @@ Item {
             radius: 3
             opacity: buttonMouse.containsMouse ? 0.42 : 0.28
             gradient: Gradient {
-                GradientStop { position: 0; color: "#ffffff" }
+                GradientStop { position: 0; color: Theme.glossStrong }
                 GradientStop { position: 1; color: "#ffffff00" }
             }
         }
@@ -72,12 +72,12 @@ Item {
             height: 17
             Rectangle {
                 x: 0; y: 4; width: 12; height: 10; radius: 2
-                color: button.checked ? "#287bad" : "#3f5570"
+                color: button.checked ? Theme.cameraAccent : Theme.buttonText
             }
             Shape {
                 x: 12; y: 4; width: 5; height: 10
                 ShapePath {
-                    fillColor: button.checked ? "#287bad" : "#3f5570"
+                    fillColor: button.checked ? Theme.cameraAccent : Theme.buttonText
                     strokeWidth: 0
                     PathSvg { path: "M 0 3 L 5 0 L 5 10 L 0 7 Z" }
                 }
@@ -86,7 +86,7 @@ Item {
         Text {
             id: caption
             text: button.label
-            color: button.onAccent ? "#ffffff" : "#3f5570"
+            color: button.onAccent ? Theme.onAccentText : Theme.buttonText
             font.family: Theme.uiFont
             font.pixelSize: 13
             renderType: Text.NativeRendering

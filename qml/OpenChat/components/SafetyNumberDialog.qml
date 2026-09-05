@@ -25,7 +25,7 @@ Item {
     // the dialog through the controller.
     Rectangle {
         anchors.fill: parent
-        color: "#66223247"
+        color: Theme.dialogScrim
 
         MouseArea {
             anchors.fill: parent
@@ -51,8 +51,8 @@ Item {
         MouseArea { anchors.fill: parent }
 
         // Aero inset along the top and bottom edges, matching the app's framed surfaces.
-        Rectangle { x: 6; y: 1; width: parent.width - 12; height: 1; color: "#24526878" }
-        Rectangle { x: 6; y: parent.height - 2; width: parent.width - 12; height: 1; color: "#70ffffff" }
+        Rectangle { x: 6; y: 1; width: parent.width - 12; height: 1; color: Theme.insetTop }
+        Rectangle { x: 6; y: parent.height - 2; width: parent.width - 12; height: 1; color: Theme.gloss }
 
         // Close affordance: a small "×" drawn from two crossed strokes.
         Item {
@@ -123,7 +123,7 @@ Item {
                 width: parent.width
                 height: numberContent.height + 24
                 radius: 6
-                color: "#eef6fb"
+                color: Theme.panelBackground
                 border.width: 1
                 border.color: Theme.inputBorder
 
@@ -145,8 +145,10 @@ Item {
                         visible: root.number.length > 0
                         readOnly: true
                         selectByMouse: true
+                        selectionColor: Theme.selectionBackground
+                        selectedTextColor: Theme.selectionText
                         text: root.number
-                        color: "#2b3b53"
+                        color: Theme.textPrimary
                         font.family: "Courier New"
                         font.pixelSize: 17
                         // WordWrap, not WrapAnywhere: the number arrives as
@@ -201,13 +203,13 @@ Item {
                     width: verifiedLabel.width + 26
                     height: 26
                     radius: 13
-                    color: "#2e7d4f"
+                    color: Theme.successFill
 
                     Text {
                         id: verifiedLabel
                         anchors.centerIn: parent
                         text: "Verified ✓"
-                        color: "#ffffff"
+                        color: Theme.onAccentText
                         font.family: Theme.uiFont
                         font.pixelSize: 13
                         renderType: Text.NativeRendering

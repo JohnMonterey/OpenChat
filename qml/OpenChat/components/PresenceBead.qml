@@ -1,4 +1,5 @@
 import QtQuick
+import OpenChat
 
 // One presence, as a glossy Aero bead: green Available (0), amber Away (1),
 // grey Offline (2), red Busy (3).
@@ -41,6 +42,6 @@ Item {
         width: Math.max(2, parent.width - 5)
         height: Math.max(1, parent.height / 3)
         radius: height / 2
-        color: "#70ffffff"
+        color: Theme.gloss
     }
 }

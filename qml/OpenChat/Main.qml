@@ -149,14 +149,14 @@ Window {
 
                 Rectangle {
                     anchors.fill: parent
-                    color: "#fdf3d8"
+                    color: Theme.warningBackground
 
                     Rectangle {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
                         height: 1
-                        color: "#e4d5a3"
+                        color: Theme.warningBorder
                     }
                     Text {
                         objectName: "securityBannerText"
@@ -167,7 +167,7 @@ Window {
                         anchors.verticalCenter: parent.verticalCenter
                         elide: Text.ElideRight
                         text: root.chatController.sessionStateText
-                        color: "#7a6828"
+                        color: Theme.warningText
                         font.family: Theme.uiFont
                         font.pixelSize: 13
                         renderType: Text.NativeRendering
@@ -280,20 +280,47 @@ Window {
                         Item {
                             id: settingsElementRow
                             property string elementLabel: modelData
+                            readonly property bool themeSetting:
+                                root.chatController.currentSettingsCategoryName === "Appearance"
+                                && elementLabel === "Theme"
                             width: parent.width
-                            height: 48
+                            height: themeSetting ? 70 : 48
 
                             Text {
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: settingsElementRow.elementLabel
+                                anchors.verticalCenterOffset: settingsElementRow.themeSetting ? -10 : 0
+                                text: settingsElementRow.themeSetting ? "Dark mode" : settingsElementRow.elementLabel
                                 color: Theme.textPrimary
                                 font.family: Theme.uiFont
                                 font.pixelSize: 15
                                 renderType: Text.NativeRendering
                             }
 
+                            Text {
+                                visible: settingsElementRow.themeSetting
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.verticalCenterOffset: 12
+                                width: parent.width - darkModeSwitch.width - 16
+                                text: "Use dark colors throughout OpenChat"
+                                elide: Text.ElideRight
+                                color: Theme.textSecondary
+                                font.family: Theme.uiFont
+                                font.pixelSize: 12
+                            }
+                            AeroSwitch {
+                                id: darkModeSwitch
+                                objectName: settingsElementRow.themeSetting ? "darkModeSwitch" : ""
+                                visible: settingsElementRow.themeSetting
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                checked: Theme.darkMode
+                                onToggled: checked => Theme.setDarkMode(checked)
+                            }
+
                             Item {
+                                visible: !settingsElementRow.themeSetting
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 14
@@ -305,8 +332,7 @@ Window {
                                     height: 8
                                     opacity: 0.45
                                     rotation: -90
-                                    source: Qt.resolvedUrl(
-                                                "../../assets/icons/chevron-down.svg")
+                                    source: Qt.resolvedUrl("../../assets/icons/chevron-down" + (Theme.darkMode ? "-dark.svg" : ".svg"))
                                     sourceSize: Qt.size(width * 2, height * 2)
                                 }
                             }
@@ -316,7 +342,7 @@ Window {
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
                                 height: 1
-                                color: "#e4edf3"
+                                color: Theme.softRule
                             }
                         }
                     }

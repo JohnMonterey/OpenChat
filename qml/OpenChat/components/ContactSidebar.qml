@@ -207,7 +207,7 @@ Item {
                 objectName: "localStatusHoverShade"
                 anchors.fill: parent
                 radius: 3
-                color: statusEditor.editing ? "#ffffff" : "#14000000"
+                color: statusEditor.editing ? Theme.fieldBackground : Theme.profileHover
                 border.width: statusEditor.editing ? 1 : 0
                 border.color: Theme.inputBorder
                 visible: statusMouse.containsMouse || statusEditor.editing
@@ -237,6 +237,8 @@ Item {
                 visible: statusEditor.editing
                 clip: true
                 selectByMouse: true
+                selectionColor: Theme.selectionBackground
+                selectedTextColor: Theme.selectionText
                 maximumLength: 80
                 color: Theme.textPrimary
                 font.family: Theme.uiFont
@@ -268,9 +270,9 @@ Item {
             width: localUser.width - x - 12
             height: noticeText.implicitHeight + 6
             radius: 3
-            color: "#fdf3d8"
+            color: Theme.warningBackground
             border.width: 1
-            border.color: "#e2c98a"
+            border.color: Theme.noticeBorder
             visible: sidebar.controller.profileNotice.length > 0
             z: 5
 
@@ -281,7 +283,7 @@ Item {
                 width: parent.width - 10
                 wrapMode: Text.WordWrap
                 text: sidebar.controller.profileNotice
-                color: "#6b5a2b"
+                color: Theme.noticeText
                 font.family: Theme.uiFont
                 font.pixelSize: 12
                 renderType: Text.NativeRendering
@@ -342,7 +344,7 @@ Item {
             width: parent.width - 26
             height: 32
             radius: 4
-            color: "#f9fcfe"
+            color: Theme.searchBackground
             border.width: 1
             border.color: Theme.inputBorder
 
@@ -358,6 +360,8 @@ Item {
                 font.pixelSize: 14
                 clip: true
                 selectByMouse: true
+                selectionColor: Theme.selectionBackground
+                selectedTextColor: Theme.selectionText
                 onTextEdited: {
                     sidebar.controller.setSearchQuery(text);
                     if (sidebar.contactController)
@@ -368,7 +372,7 @@ Item {
                     anchors.fill: parent
                     visible: !searchInput.text && !searchInput.activeFocus
                     text: "Search & Find"
-                    color: "#98a7ba"
+                    color: Theme.placeholderText
                     font: searchInput.font
                     verticalAlignment: Text.AlignVCenter
                 }
@@ -383,11 +387,11 @@ Item {
 
                 Rectangle {
                     x: 1; y: 1; width: 8; height: 8; radius: 4
-                    color: "transparent"; border.width: 2; border.color: "#8798aa"
+                    color: "transparent"; border.width: 2; border.color: Theme.searchIcon
                 }
                 Rectangle {
                     x: 9; y: 9; width: 7; height: 2
-                    rotation: 45; color: "#8798aa"; transformOrigin: Item.Left
+                    rotation: 45; color: Theme.searchIcon; transformOrigin: Item.Left
                 }
             }
         }
@@ -431,7 +435,7 @@ Item {
                     id: directoryHeader
                     width: parent.width
                     height: 40
-                    color: "#27ffffff"
+                    color: Theme.sectionHighlight
 
                     Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
                     Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.rule }
@@ -511,15 +515,15 @@ Item {
                                 || sidebar.contactController.lookupState
                                     === ContactController.LookupState.RequestPending)
                         readonly property color ink: directoryResult.canRequest
-                            ? (sendRequestMouse.containsMouse ? "#5f7386" : "#8798aa")
-                            : "#c3ccd5"
+                            ? (sendRequestMouse.containsMouse ? Theme.iconHover : Theme.searchIcon)
+                            : Theme.iconDisabled
                         visible: directoryResult.canRequest || sent
 
                         Rectangle {
                             anchors.fill: parent
                             radius: 15
                             color: directoryResult.canRequest
-                                   ? (sendRequestMouse.containsMouse ? "#e7f2f8" : "#f3f7fa")
+                                   ? (sendRequestMouse.containsMouse ? Theme.navSelected : Theme.requestButton)
                                    : "transparent"
                             border.width: 1
                             border.color: sendRequestButton.ink
@@ -552,12 +556,12 @@ Item {
                         Rectangle {
                             visible: sendRequestButton.sent
                             x: 18; y: 12; width: 4; height: 2; radius: 1; rotation: 45
-                            color: "#5aa06a"
+                            color: Theme.requestSuccess
                         }
                         Rectangle {
                             visible: sendRequestButton.sent
                             x: 20; y: 10; width: 7; height: 2; radius: 1; rotation: -50
-                            color: "#5aa06a"
+                            color: Theme.requestSuccess
                         }
 
                         MouseArea {
@@ -594,7 +598,7 @@ Item {
                     id: requestsHeader
                     width: parent.width
                     height: 40
-                    color: "#27ffffff"
+                    color: Theme.sectionHighlight
 
                     Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
                     Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.rule }
@@ -754,7 +758,7 @@ Item {
                     Rectangle {
                         anchors.fill: parent
                         visible: settingsCategoryRow.selected
-                        color: "#e7f2f8"
+                        color: Theme.navSelected
                     }
 
                     Text {
@@ -806,7 +810,7 @@ Item {
 
                 Rectangle {
                     anchors.fill: parent
-                    color: callTab.active ? "#e7f2f8" : "transparent"
+                    color: callTab.active ? Theme.navSelected : "transparent"
                 }
 
                 NavigationIcon {
@@ -817,7 +821,7 @@ Item {
                         anchors.centerIn: parent
                         width: 24
                         height: 24
-                        source: Qt.resolvedUrl("../../../assets/icons/phone-call.svg")
+                        source: Qt.resolvedUrl("../../../assets/icons/phone-call" + (Theme.darkMode ? "-dark.svg" : ".svg"))
                         sourceSize: Qt.size(width * 2, height * 2)
                     }
 
@@ -852,7 +856,7 @@ Item {
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 10
                     text: "Call"
-                    color: callTab.active ? Theme.categoryText : "#6f8eac"
+                    color: callTab.active ? Theme.categoryText : Theme.navText
                     font.family: Theme.uiFont
                     font.pixelSize: 13
                     renderType: Text.NativeRendering
@@ -875,7 +879,7 @@ Item {
 
                 Rectangle {
                     anchors.fill: parent
-                    color: chatTab.active ? "#e7f2f8" : "transparent"
+                    color: chatTab.active ? Theme.navSelected : "transparent"
                 }
 
                 NavigationIcon {
@@ -932,7 +936,7 @@ Item {
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 10
                     text: "Chat"
-                    color: chatTab.active ? Theme.categoryText : "#6f8eac"
+                    color: chatTab.active ? Theme.categoryText : Theme.navText
                     font.family: Theme.uiFont
                     font.pixelSize: 13
                     renderType: Text.NativeRendering
@@ -955,7 +959,7 @@ Item {
 
                 Rectangle {
                     anchors.fill: parent
-                    color: settingsTab.active ? "#e7f2f8" : "transparent"
+                    color: settingsTab.active ? Theme.navSelected : "transparent"
                 }
 
                 NavigationIcon {
@@ -965,7 +969,7 @@ Item {
                         anchors.centerIn: parent
                         width: 24
                         height: 24
-                        source: Qt.resolvedUrl("../../../assets/icons/settings.svg")
+                        source: Qt.resolvedUrl("../../../assets/icons/settings" + (Theme.darkMode ? "-dark.svg" : ".svg"))
                         sourceSize: Qt.size(width * 2, height * 2)
                     }
                 }
@@ -976,7 +980,7 @@ Item {
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 10
                     text: "Settings"
-                    color: settingsTab.active ? Theme.categoryText : "#6f8eac"
+                    color: settingsTab.active ? Theme.categoryText : Theme.navText
                     font.family: Theme.uiFont
                     font.pixelSize: 13
                     renderType: Text.NativeRendering
@@ -1027,7 +1031,7 @@ Item {
             border.color: Theme.inputBorder
         }
         // Aero inset along the top edge, matching the app's framed surfaces.
-        Rectangle { x: 6; y: 1; width: parent.width - 12; height: 1; color: "#70ffffff" }
+        Rectangle { x: 6; y: 1; width: parent.width - 12; height: 1; color: Theme.gloss }
 
         Column {
             id: presenceColumn
@@ -1055,8 +1059,8 @@ Item {
                     Rectangle {
                         anchors.fill: parent
                         radius: 3
-                        color: optionMouse.containsMouse ? "#d4e8f3"
-                             : presenceOption.current ? "#e7f2f8" : "transparent"
+                        color: optionMouse.containsMouse ? Theme.selectedTop
+                             : presenceOption.current ? Theme.navSelected : "transparent"
                     }
                     PresenceBead {
                         x: 8

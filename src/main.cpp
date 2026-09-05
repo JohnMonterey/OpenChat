@@ -103,6 +103,9 @@ OpenChat::RelayEndpoints buildEndpoints(const QString &base)
     endpoints.authRefresh = QUrl(base + QStringLiteral("/auth/refresh"));
     endpoints.sync = QUrl(base + QStringLiteral("/sync"));
     endpoints.keyPackages = QUrl(base + QStringLiteral("/key-packages"));
+    endpoints.directory = QUrl(base + QStringLiteral("/directory"));
+    endpoints.invites = QUrl(base + QStringLiteral("/invites"));
+    endpoints.invitesRedeem = QUrl(base + QStringLiteral("/invites/redeem"));
     QUrl live(base + QStringLiteral("/live"));
     if (live.scheme() == QStringLiteral("https"))
         live.setScheme(QStringLiteral("wss"));
@@ -695,7 +698,7 @@ int main(int argc, char *argv[])
     // run first-run onboarding driving the real account bootstrap.
     const QString base = [] {
         const QString value = QString::fromUtf8(qgetenv("OPENCHAT_RELAY_BASE_URL")).trimmed();
-        return value.isEmpty() ? QStringLiteral("https://localhost/v1") : value;
+        return value.isEmpty() ? QStringLiteral("https://chat.rigidstudios.de/v1") : value;
     }();
     const QString devCaPath = QString::fromUtf8(qgetenv("OPENCHAT_DEV_CA")).trimmed();
     const QString profilesRoot =

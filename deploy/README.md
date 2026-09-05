@@ -75,6 +75,15 @@ The relay API speaks CBOR over `/v1/accounts`, `/v1/auth/*`, `/v1/sync`,
 
 ## 4. Trusting the dev CA from the OpenChat client
 
+The client defaults to the hosted relay at `https://chat.rigidstudios.de/v1`.
+To connect to this local stack, launch from the repository root with:
+
+```sh
+OPENCHAT_RELAY_BASE_URL=https://localhost/v1 \
+OPENCHAT_DEV_CA="$PWD/deploy/dev-ca/out/rootCA.crt" \
+./Build/dev-release/OpenChat
+```
+
 Point the client's TLS trust store / CA-pin setting at:
 
 ```

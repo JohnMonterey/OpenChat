@@ -1,0 +1,54 @@
+name: openchat
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ocrelay
+      POSTGRES_PASSWORD: ${OPENCHAT_PG_PASSWORD:?Set OPENCHAT_PG_PASSWORD in deploy/.env.tunnel}
+      POSTGRES_DB: openchat_relay
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocrelay -d openchat_relay"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    restart: unless-stopped
+    environment:
+      OPENCHAT_RELAY_PG_HOST: postgres
+      OPENCHAT_RELAY_PG_PORT: "5432"
+      OPENCHAT_RELAY_PG_USER: ocrelay
+      OPENCHAT_RELAY_PG_PASSWORD: ${OPENCHAT_PG_PASSWORD:?Set OPENCHAT_PG_PASSWORD in deploy/.env.tunnel}
+      OPENCHAT_RELAY_PG_DATABASE: openchat_relay
+      OPENCHAT_RELAY_BIND: "0.0.0.0"
+      OPENCHAT_RELAY_PORT: "8443"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [relay]
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./Caddyfile.tunnel:/etc/caddy/Caddyfile:ro
+    networks: [edge, backend]
+
+networks:
+  edge:
+  backend:
+    internal: true
+
+volumes:
+  pgdata:

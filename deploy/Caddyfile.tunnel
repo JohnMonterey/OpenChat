@@ -1,0 +1,21 @@
+{
+    admin off
+    auto_https off
+}
+
+:8080 {
+    request_body {
+        max_size 2MB
+    }
+    handle /v1/live {
+        # Set the response header before proxying: header_down is skipped for 101.
+        header Sec-WebSocket-Protocol openchat.ciphertext.v1
+        reverse_proxy relay:8443
+    }
+    handle /v1/* {
+        reverse_proxy relay:8443
+    }
+    handle {
+        respond 404
+    }
+}

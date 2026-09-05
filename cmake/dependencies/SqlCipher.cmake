@@ -52,6 +52,20 @@ else()
 endif()
 
 add_library(openchat_sqlcipher STATIC "${_sqlcipher_c}")
+# GCC 16 on Linux x86-64 folds splitmix64's 64-bit seed constants into
+# 32-bit TLS relocations against xoshiro_s, causing link overflows. PIC with
+# initial-exec TLS avoids those relocations while retaining optimization.
+# Initial-exec is safe here: this static library is linked into executables.
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 16
+   AND CMAKE_C_COMPILER_VERSION VERSION_LESS 17
+   AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set_target_properties(openchat_sqlcipher PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_options(openchat_sqlcipher PRIVATE
+        "$<$<COMPILE_LANGUAGE:C>:-ftls-model=initial-exec>"
+    )
+endif()
 target_include_directories(openchat_sqlcipher PUBLIC "${_sqlcipher_generated_dir}")
 target_compile_definitions(openchat_sqlcipher
     PUBLIC SQLITE_HAS_CODEC

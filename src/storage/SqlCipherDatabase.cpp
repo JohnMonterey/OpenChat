@@ -257,7 +257,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
                                  ? sqlite3_column_int(versionStatement, 0)
                                  : -1;
   sqlite3_finalize(versionStatement);
-  constexpr int latestVersion = 12;
+  constexpr int latestVersion = 13;
   if (currentVersion < 0 || currentVersion > latestVersion)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
 
@@ -278,6 +278,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
       {10, ":/openchat/010_profile_display_name.sql"},
       {11, ":/openchat/011_contact_device.sql"},
       {12, ":/openchat/012_profiles.sql"},
+      {13, ":/openchat/013_group_chats.sql"},
   };
 
   if (!execute("BEGIN IMMEDIATE;").hasValue())

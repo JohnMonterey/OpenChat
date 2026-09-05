@@ -56,6 +56,23 @@ public:
                QByteArrayView mlsState) override;
     [[nodiscard]] Result<void, RepositoryError>
     commitControlSend(const OutboxRecord &outbox, QByteArrayView mlsState) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    commitGroupSend(const MessageRecord &message, const QVector<OutboxRecord> &outboxes,
+                    QByteArrayView mlsState) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    commitControlSendMany(const QVector<OutboxRecord> &outboxes,
+                          QByteArrayView mlsState) override;
+    [[nodiscard]] Result<void, RepositoryError> failEnvelope(const EnvelopeId &envelopeId) override;
+    [[nodiscard]] Result<void, RepositoryError> commitMlsStateOnly(QByteArrayView mlsState) override
+    {
+        return commitMlsState(mlsState);
+    }
+    [[nodiscard]] Result<bool, RepositoryError>
+    canJoinGroup(const AccountId &sender, const ConversationId &conversation) override;
+    [[nodiscard]] Result<bool, RepositoryError>
+    commitGroupWelcome(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
+                       const ConversationId &conversation, quint64 watermark, qint64 createdAtMs,
+                       QByteArrayView mlsState, bool joined) override;
 
     [[nodiscard]] Result<bool, RepositoryError>
     commitReceive(const MessageRecord &message, const EnvelopeId &envelopeId, quint64 watermark,

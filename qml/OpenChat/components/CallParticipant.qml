@@ -22,6 +22,12 @@ Item {
     property real level: 0.0
     property bool muted: false
     property int avatarSize: 74
+    // A word under the name saying what this person is doing in a group call
+    // ("Ringing…", "Declined", "Left"); empty while they are simply in it.
+    property string caption: ""
+    // True for someone no longer (or not yet) in the call: the picture fades
+    // so the people actually talking stand out.
+    property bool dimmed: false
 
     property bool cameraEnabled: false
     property var videoFrame
@@ -34,7 +40,7 @@ Item {
     readonly property real pictureHeight: cameraEnabled ? pictureWidth / videoAspect : avatarSize
 
     implicitWidth: cameraEnabled ? Math.max(100, pictureWidth) : 132
-    implicitHeight: pictureHeight + 40
+    implicitHeight: pictureHeight + 40 + (caption.length > 0 ? 16 : 0)
     width: implicitWidth
     height: implicitHeight
 
@@ -44,6 +50,7 @@ Item {
         height: participant.pictureHeight
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
+        opacity: participant.dimmed ? 0.45 : 1.0
 
         // The glow: outside the ring, keyed off the voice level so it breathes
         // with the speaker. Invisible when quiet, so it costs nothing to draw.
@@ -119,6 +126,7 @@ Item {
     }
 
     Text {
+        id: nameText
         objectName: "participantName"
         anchors.top: avatarBlock.bottom
         anchors.topMargin: 10
@@ -130,6 +138,22 @@ Item {
         color: Theme.textPrimary
         font.family: Theme.uiFont
         font.pixelSize: 14
+        renderType: Text.NativeRendering
+    }
+
+    Text {
+        objectName: "participantCaption"
+        anchors.top: nameText.bottom
+        anchors.topMargin: 1
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
+        visible: participant.caption.length > 0
+        text: participant.caption
+        color: Theme.textSecondary
+        font.family: Theme.uiFont
+        font.pixelSize: 12
         renderType: Text.NativeRendering
     }
 }

@@ -287,6 +287,26 @@ MlsClient::removeMembers(const ConversationId &conversation,
     return Result<QByteArray, MlsError>::success(takeBuffer(output));
 }
 
+Result<QList<QByteArray>, MlsError> MlsClient::groupMembers(const ConversationId &conversation)
+{
+    QMutexLocker locker(&m_mutex);
+    const QByteArray bytes = conversation.bytes();
+    oc_mls_buffer output{};
+    const int status = oc_mls_group_members(
+        m_handle, reinterpret_cast<const uint8_t *>(bytes.constData()), &output);
+    if (status != OC_MLS_OK)
+        return Result<QList<QByteArray>, MlsError>::failure(errorFromCode(status));
+    const QByteArray framed = takeBuffer(output);
+    // A group whose only member is this device frames as a zero-count list,
+    // which the bridge hands back as an empty buffer.
+    if (framed.isEmpty())
+        return Result<QList<QByteArray>, MlsError>::success(QList<QByteArray>{});
+    auto members = unframeList(framed);
+    if (!members)
+        return Result<QList<QByteArray>, MlsError>::failure(MlsError::Internal);
+    return Result<QList<QByteArray>, MlsError>::success(std::move(*members));
+}
+
 Result<MlsCiphertext, MlsError>
 MlsClient::encrypt(const ConversationId &conversation, QByteArrayView plaintext)
 {

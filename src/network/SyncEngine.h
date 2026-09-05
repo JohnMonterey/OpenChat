@@ -74,6 +74,40 @@ public:
     [[nodiscard]] virtual Result<void, RepositoryError>
     commitControlSend(const OutboxRecord &outbox, QByteArrayView mlsState) = 0;
 
+    // Fan-out variants for a group conversation: ONE message row (or none) and
+    // one outbox row per recipient device, all committed with the ratchet state
+    // in a single transaction. Every outbox row of a group send carries the
+    // same message id.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    commitGroupSend(const MessageRecord &message, const QVector<OutboxRecord> &outboxes,
+                    QByteArrayView mlsState) = 0;
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    commitControlSendMany(const QVector<OutboxRecord> &outboxes, QByteArrayView mlsState) = 0;
+    // Stops retrying ONE envelope of a multi-recipient message without failing
+    // the message itself (other recipients may still get, or have got, it).
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    failEnvelope(const EnvelopeId &envelopeId) = 0;
+    // Persists the ratchet state alone: a group membership change that had no
+    // envelope to ship with it still advanced the epoch.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    commitMlsStateOnly(QByteArrayView mlsState) = 0;
+
+    // True iff `sender` is an Accepted contact AND `conversation` is not yet a
+    // known conversation: the two conditions under which an inbound group
+    // Welcome is joined rather than dropped.
+    [[nodiscard]] virtual Result<bool, RepositoryError>
+    canJoinGroup(const AccountId &sender, const ConversationId &conversation) = 0;
+    // Atomic: replay-guard + conversation row (kind Group, untitled) + watermark
+    // + the just-joined MLS state. Returns true if newly applied, false if the
+    // envelope was already seen.
+    // With joined=false (and an empty mlsState) it only consumes the envelope:
+    // replay-guard + watermark, no conversation row, no state — the Welcome was
+    // refused or could not be joined and must stop being redelivered.
+    [[nodiscard]] virtual Result<bool, RepositoryError>
+    commitGroupWelcome(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
+                       const ConversationId &conversation, quint64 watermark,
+                       qint64 createdAtMs, QByteArrayView mlsState, bool joined) = 0;
+
     // Returns true if newly applied, false if the envelope was already seen.
     [[nodiscard]] virtual Result<bool, RepositoryError>
     commitReceive(const MessageRecord &message, const EnvelopeId &envelopeId, quint64 watermark,
@@ -205,6 +239,29 @@ public:
     void sendProfileUpdate(const ConversationId &conversation, const DeviceId &recipientDevice,
                            const QByteArray &payload);
 
+    // Group conversation sends. Each encrypts ONCE under the group ratchet (an
+    // MLS application message is readable by every member) and queues one
+    // envelope per recipient device, committed together with the ratchet
+    // state in a single transaction.
+    //
+    // A text is one visible message row whose envelopes all carry its id; the
+    // row reaches Sent on the first relay acceptance and Failed only when no
+    // recipient could be reached at all.
+    void enqueueGroupText(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                          const QString &text);
+    // A group control message (an encoded GroupUpdateMessage), no visible row.
+    void sendGroupControl(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                          const QByteArray &payload);
+    // A membership change: the raw MLS Commit for the members already in the
+    // group and the sealed Welcome for the members it adds, neither encrypted
+    // again (see sendHandshake). Either list may be empty. The pending MLS
+    // state is the addMembers/removeMembers snapshot the caller just produced,
+    // committed atomically with every envelope so "durable epoch <=> durable
+    // envelopes" always holds.
+    void sendGroupChange(const ConversationId &conversation,
+                         const QList<DeviceId> &existingRecipients, const QByteArray &commit,
+                         const QList<DeviceId> &newRecipients, const QByteArray &welcome);
+
     // Sends one sealed media frame on the unreliable datagram path. `payload` is
     // already encrypted under the call's media key, so this deliberately skips
     // the group ratchet: 50 frames a second through MLS would mean 50 durable
@@ -246,6 +303,18 @@ signals:
     // ProfileUpdateMessage plaintext.
     void profileUpdateReceived(const OpenChat::ConversationId &conversation,
                                const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
+    // A GroupControl message was decrypted, authenticated against the MLS
+    // sender credential, and durably consumed. `payload` is the encoded
+    // GroupUpdateMessage plaintext.
+    void groupControlReceived(const OpenChat::ConversationId &conversation,
+                              const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
+    // A group Welcome from an Accepted contact was authenticated (its
+    // membership names the sender's device), joined, and the join committed.
+    // `members` are the MLS credentials of every other member at that moment.
+    void groupWelcomeReceived(const OpenChat::ConversationId &conversation,
+                              const OpenChat::AccountId &senderAccount,
+                              const OpenChat::DeviceId &senderDevice,
+                              const QList<QByteArray> &members);
     void failedClosed();
     // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
     void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,

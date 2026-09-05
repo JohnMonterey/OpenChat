@@ -8,15 +8,19 @@
 
 #include <optional>
 
+#include "call/CallEngine.h"
 #include "domain/ChatTypes.h"
 #include "domain/Identifiers.h"
 #include "domain/ProfileUpdate.h"
 #include "models/ContactListModel.h"
 #include "models/MessageListModel.h"
 
+#include <QVariantList>
+
 namespace OpenChat {
 
 class ContactRequestService;
+class GroupService;
 class ProfileSession;
 class SyncEngine;
 class RelayClient;
@@ -52,6 +56,21 @@ class ChatController final : public QObject
     Q_PROPERTY(QString currentStatusText READ currentStatusText NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentAvatarKey READ currentAvatarKey NOTIFY currentContactChanged)
     Q_PROPERTY(int currentPresence READ currentPresence NOTIFY currentContactChanged)
+    // Group chats. currentIsGroup says whether the open chat is a group; the
+    // title is what the members named it (empty until someone does, in which
+    // case currentContactName lists the members instead); currentGroupMembers
+    // is the one-line roster shown under the title ("You, Alice, Bob").
+    Q_PROPERTY(bool currentIsGroup READ currentIsGroup NOTIFY currentContactChanged)
+    Q_PROPERTY(QString currentGroupTitle READ currentGroupTitle NOTIFY currentContactChanged)
+    Q_PROPERTY(QString currentGroupMembers READ currentGroupMembers NOTIFY currentContactChanged)
+    Q_PROPERTY(int currentGroupMemberCount READ currentGroupMemberCount NOTIFY currentContactChanged)
+    // A one-line explanation of why a group change was refused; empty when
+    // there is nothing to say.
+    Q_PROPERTY(QString groupNotice READ groupNotice NOTIFY groupNoticeChanged)
+    // Contacts the "+" next to the current chat's name can add: everyone
+    // accepted who is not already in it (for a one-to-one chat, everyone but
+    // the person it is with). Each entry is {contactId, name, avatarKey}.
+    Q_PROPERTY(QVariantList groupCandidates READ groupCandidates NOTIFY groupCandidatesChanged)
     Q_PROPERTY(QString composerText READ composerText WRITE setComposerText NOTIFY composerTextChanged)
     Q_PROPERTY(bool canSend READ canSend NOTIFY canSendChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY searchQueryChanged)
@@ -108,6 +127,12 @@ public:
     [[nodiscard]] QString currentStatusText() const;
     [[nodiscard]] QString currentAvatarKey() const;
     [[nodiscard]] int currentPresence() const;
+    [[nodiscard]] bool currentIsGroup() const;
+    [[nodiscard]] QString currentGroupTitle() const;
+    [[nodiscard]] QString currentGroupMembers() const;
+    [[nodiscard]] int currentGroupMemberCount() const;
+    [[nodiscard]] QString groupNotice() const { return m_groupNotice; }
+    [[nodiscard]] QVariantList groupCandidates() const;
     [[nodiscard]] QString localStatusText() const { return m_localStatusText; }
     [[nodiscard]] QString localStatusLine() const;
     [[nodiscard]] int localPresence() const { return m_localPresence; }
@@ -146,6 +171,17 @@ public:
     // and publishes it. Returns false and sets profileNotice on refusal.
     Q_INVOKABLE bool setLocalAvatarFromFile(const QUrl &file);
     Q_INVOKABLE void clearProfileNotice();
+    // The "+" next to the current chat's name. In a one-to-one chat it starts
+    // a new group with that person and `contactId`; in a group it adds
+    // `contactId` to it. Live mode claims KeyPackages first, so the new group
+    // appears (and is opened) a moment later, or groupNotice says why not.
+    Q_INVOKABLE void addToGroup(const QString &contactId);
+    // Renames the open group the way the status line is edited: trimmed,
+    // capped, told to every member. Returns false when no group is open.
+    Q_INVOKABLE bool renameCurrentGroup(const QString &title);
+    // Leaves the open group: the others are told and the chat disappears here.
+    Q_INVOKABLE void leaveCurrentGroup();
+    Q_INVOKABLE void clearGroupNotice();
     Q_INVOKABLE void setComposerText(const QString &text);
     Q_INVOKABLE bool sendMessage();
     Q_INVOKABLE void setSessionState(SessionState state);
@@ -159,7 +195,7 @@ public:
     // a chat through the request service's contactAccepted. All three are
     // borrowed and must outlive this controller.
     void setLiveServices(ProfileSession *session, SyncEngine *engine,
-                         ContactRequestService *requests);
+                         ContactRequestService *requests, GroupService *groups = nullptr);
 
     // Re-reads one contact's roster row (e.g. after its handle was resolved) and
     // refreshes its list row. Live mode only; hex is the AccountId hex.
@@ -182,6 +218,16 @@ public:
     // independently of the selected chat or roster search filter.
     [[nodiscard]] std::optional<CallRoute> callRouteFor(const ConversationId &conversation,
                                                       const DeviceId &device) const;
+    // The same for a group chat: every member as a call peer, so a group call
+    // can ring them all. Empty for anything but an open live group with at
+    // least one member.
+    [[nodiscard]] std::optional<CallEngine::GroupCallRoute>
+    groupCallRouteFor(const QString &chatId) const;
+    [[nodiscard]] std::optional<CallEngine::GroupCallRoute>
+    groupCallRouteFor(const ConversationId &conversation) const;
+    // The chat id ("group:" + conversation hex) of a live group, or empty.
+    [[nodiscard]] QString groupChatIdFor(const ConversationId &conversation) const;
+    [[nodiscard]] static bool isGroupChatId(const QString &chatId);
 
     // The contact currently open in the conversation pane, or empty when none
     // is. This is what the header's call button acts on.
@@ -206,6 +252,8 @@ signals:
     void localOnlineChanged();
     void chatUnreadCountChanged();
     void currentSettingsCategoryChanged();
+    void groupNoticeChanged();
+    void groupCandidatesChanged();
 
     // A message arrived that the desktop should announce: the chat it belongs
     // to (an AccountId hex, the same id selectContact takes), the sender's
@@ -237,7 +285,36 @@ private:
         QString avatarKey;
     };
 
+    // A group chat's routing and roster. In mock mode the same shape carries a
+    // group made from the reference contacts, so the surface can be exercised
+    // without a session.
+    struct GroupMember final {
+        AccountId account = AccountId::generate();
+        DeviceId device = DeviceId::generate();
+        QString contactId; // the roster row when the member is a contact
+        QString name;
+        QString avatarKey;
+    };
+    struct LiveGroup final {
+        ConversationId conversation = ConversationId::generate();
+        QString title;
+        QVector<GroupMember> members; // everyone but this device
+        int unread = 0;
+    };
+
     [[nodiscard]] std::optional<Contact> currentContact() const;
+    [[nodiscard]] const LiveGroup *currentGroup() const;
+    [[nodiscard]] Contact groupRowFor(const QString &id, const LiveGroup &group) const;
+    [[nodiscard]] QString groupDisplayName(const LiveGroup &group) const;
+    [[nodiscard]] QString memberName(const GroupMember &member) const;
+    void loadGroups(QVector<Contact> &rows, QHash<QByteArray, QString> &byConversation);
+    void onGroupCreated(const ConversationId &conversation);
+    void onGroupChanged(const ConversationId &conversation);
+    void onGroupLeft(const ConversationId &conversation);
+    void setGroupNotice(const QString &notice);
+    [[nodiscard]] Message messageFor(const MessageRecord &record) const;
+    // Mock-mode group operations, so the QML surface works in previews.
+    void mockAddToGroup(const QString &contactId);
     // True only in states whose already-verified, locally-stored history is safe
     // to display. Locked/Quarantined/DeviceChanged withhold plaintext.
     [[nodiscard]] static bool statePermitsPlaintext(SessionState state);
@@ -280,6 +357,7 @@ private:
     QByteArray m_localAvatarJpeg;
     QString m_localAvatarKey = QStringLiteral("userpfp_none");
     QString m_profileNotice;
+    QString m_groupNotice;
     QString m_composerText;
     QString m_searchQuery;
     SessionState m_sessionState = SessionState::Ready;
@@ -296,8 +374,11 @@ private:
     ProfileSession *m_session = nullptr;
     SyncEngine *m_engine = nullptr;
     ContactRequestService *m_requests = nullptr;
+    GroupService *m_groups = nullptr;
     QHash<QString, LiveChat> m_liveChats;          // keyed by AccountId hex (== Contact.id)
+    QHash<QString, LiveGroup> m_liveGroups;        // keyed by "group:" + ConversationId hex
     QHash<QByteArray, QString> m_contactByConversation; // ConversationId bytes -> Contact.id
+    int m_mockGroupCounter = 0;
 };
 
 } // namespace OpenChat

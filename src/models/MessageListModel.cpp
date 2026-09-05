@@ -48,6 +48,8 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         return message.senderDevice;
     case SecurityEventRole:
         return static_cast<int>(message.securityEvent);
+    case SenderNameRole:
+        return message.senderName;
     default:
         return {};
     }
@@ -67,6 +69,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {FailureReasonRole, "failureReason"},
         {SenderDeviceRole, "senderDevice"},
         {SecurityEventRole, "securityEvent"},
+        {SenderNameRole, "senderName"},
     };
 }
 

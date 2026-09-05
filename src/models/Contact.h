@@ -31,6 +31,9 @@ struct Contact {
     QString avatarKey;
     // Optional row subtitle. When empty the current presence text is shown.
     QString statusText;
+    // A group chat rather than a person: no presence bead, a group picture,
+    // and the subtitle is the member count rather than a status.
+    bool isGroup = false;
 };
 
 inline QString presenceText(Presence presence)

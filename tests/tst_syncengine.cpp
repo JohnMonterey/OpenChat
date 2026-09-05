@@ -254,6 +254,94 @@ public:
         return ok();
     }
 
+    // Group fan-out: one message row, every outbox row, one state — or nothing.
+    Result<void, RepositoryError> commitGroupSend(const MessageRecord &message,
+                                                  const QVector<OutboxRecord> &records,
+                                                  QByteArrayView mlsState) override
+    {
+        if (failSendCommit)
+            return err();
+        messages.append(message);
+        for (const OutboxRecord &outbox : records)
+            outboxes.append(StoredOutbox{outbox});
+        lastMlsState = mlsState.toByteArray();
+        ++commitGroupSendCount;
+        return ok();
+    }
+
+    Result<void, RepositoryError> commitControlSendMany(const QVector<OutboxRecord> &records,
+                                                        QByteArrayView mlsState) override
+    {
+        if (failSendCommit)
+            return err();
+        for (const OutboxRecord &outbox : records)
+            outboxes.append(StoredOutbox{outbox});
+        lastMlsState = mlsState.toByteArray();
+        ++commitControlSendManyCount;
+        return ok();
+    }
+
+    Result<void, RepositoryError> failEnvelope(const EnvelopeId &id) override
+    {
+        for (auto &outbox : outboxes) {
+            if (outbox.record.envelopeId == id) {
+                outbox.record.state = OutboxState::Failed;
+                ++failEnvelopeCount;
+                return ok();
+            }
+        }
+        return err();
+    }
+
+    Result<void, RepositoryError> commitMlsStateOnly(QByteArrayView mlsState) override
+    {
+        lastMlsState = mlsState.toByteArray();
+        ++commitMlsStateOnlyCount;
+        return ok();
+    }
+
+    Result<bool, RepositoryError> canJoinGroup(const AccountId &sender,
+                                               const ConversationId &conversation) override
+    {
+        ++canJoinGroupCount;
+        if (failCanJoinGroup)
+            return Result<bool, RepositoryError>::failure(error());
+        return Result<bool, RepositoryError>::success(
+            acceptedAccounts.contains(sender.bytes()) && !knownConversations.contains(conversation.bytes()));
+    }
+
+    Result<bool, RepositoryError> commitGroupWelcome(const EnvelopeId &envelopeId,
+                                                     const DeviceId &, const ConversationId &conversation,
+                                                     quint64 watermark, qint64,
+                                                     QByteArrayView mlsState, bool joined) override
+    {
+        if (failReceive)
+            return Result<bool, RepositoryError>::failure(error());
+        if (seen.contains(envelopeId.bytes()))
+            return Result<bool, RepositoryError>::success(false);
+        seen.insert(envelopeId.bytes());
+        watermarkValue = std::max(watermarkValue, watermark);
+        if (joined) {
+            knownConversations.insert(conversation.bytes());
+            lastMlsState = mlsState.toByteArray();
+            ++groupWelcomeJoinCount;
+        } else {
+            ++groupWelcomeRefuseCount;
+        }
+        return Result<bool, RepositoryError>::success(true);
+    }
+
+    int commitGroupSendCount = 0;
+    int commitControlSendManyCount = 0;
+    int failEnvelopeCount = 0;
+    int commitMlsStateOnlyCount = 0;
+    int canJoinGroupCount = 0;
+    bool failCanJoinGroup = false;
+    QSet<QByteArray> acceptedAccounts;
+    QSet<QByteArray> knownConversations;
+    int groupWelcomeJoinCount = 0;
+    int groupWelcomeRefuseCount = 0;
+
     QVector<MessageRecord> messages;
     QVector<MessageRecord> received;
     QVector<StoredOutbox> outboxes;
@@ -433,6 +521,13 @@ private slots:
     void profileUpdateIsControlSentAndSurfacedOnReceive();
     void callMediaBypassesTheStoreAndTheRatchet();
     void inboundDatagramsAreSurfacedWithoutTouchingTheStore();
+    void groupTextIsEncryptedOnceAndFannedOutUnderOneMessage();
+    void groupTextFailsOnlyWhenNoRecipientTookIt();
+    void groupControlAndChangesFanOut();
+    void groupWelcomeFromAcceptedContactIsJoinedAndSurfaced();
+    void groupWelcomeFromStrangerOrForKnownGroupIsConsumedNotJoined();
+    void groupWelcomeNotNamingTheSenderIsRefused();
+    void groupControlIsSurfacedOnReceive();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -1130,6 +1225,351 @@ void SyncEngineTest::contactAcceptIsControlSentAndSurfacedOnReceive()
     QVERIFY(!acceptedConversation.has_value());
     QCOMPARE(transport.acks.size(), 2);
     QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::groupTextIsEncryptedOnceAndFannedOutUnderOneMessage()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy queued(&engine, &SyncEngine::messageQueued);
+    QSignalSpy stateSpy(&engine, &SyncEngine::messageStateChanged);
+    engine.start();
+
+    const ConversationId group = ConversationId::generate();
+    const QList<DeviceId> members{DeviceId::generate(), DeviceId::generate(), DeviceId::generate()};
+    engine.enqueueGroupText(group, members, QStringLiteral("hello all"));
+
+    // One ratchet step, one visible row, one durable commit holding every
+    // envelope; each envelope carries the same ciphertext and message id but
+    // its own envelope id, addressed to its own member.
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.commitGroupSendCount, 1);
+    QCOMPARE(store.messages.size(), 1);
+    QCOMPARE(store.outboxes.size(), 3);
+    QCOMPARE(queued.count(), 1);
+    QCOMPARE(transport.sent.size(), 3);
+    QSet<QByteArray> envelopeIds;
+    QSet<QByteArray> recipients;
+    for (const CiphertextEnvelopeV1 &sent : transport.sent) {
+        QCOMPARE(sent.messageKind, EnvelopeMessageKind::MlsPrivateMessage);
+        QCOMPARE(sent.ciphertext, QByteArray("ENC:hello all"));
+        QCOMPARE(sent.conversationId, group);
+        envelopeIds.insert(sent.envelopeId.bytes());
+        recipients.insert(sent.recipientDeviceId.bytes());
+    }
+    QCOMPARE(envelopeIds.size(), 3);
+    for (const DeviceId &member : members)
+        QVERIFY(recipients.contains(member.bytes()));
+    for (const auto &outbox : store.outboxes)
+        QCOMPARE(outbox.record.messageId, store.messages.first().id);
+    // The row is Sent on the first acceptance and stays Sent.
+    transport.onRelayAccepted(transport.sent.at(1).envelopeId, 5);
+    QCOMPARE(store.deliveryStates.value(store.messages.first().id.bytes()), DeliveryState::Sent);
+    transport.onRelayAccepted(transport.sent.at(0).envelopeId, 6);
+    transport.onRelayAccepted(transport.sent.at(2).envelopeId, 7);
+    QCOMPARE(store.deliveryStates.value(store.messages.first().id.bytes()), DeliveryState::Sent);
+    QCOMPARE(store.failEnvelopeCount, 0);
+    // Nobody to send to: nothing happens.
+    engine.enqueueGroupText(group, {}, QStringLiteral("nobody"));
+    QCOMPARE(store.messages.size(), 1);
+}
+
+void SyncEngineTest::groupTextFailsOnlyWhenNoRecipientTookIt()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    const ConversationId group = ConversationId::generate();
+    engine.enqueueGroupText(group, {DeviceId::generate(), DeviceId::generate()},
+                            QStringLiteral("anyone there?"));
+    QCOMPARE(transport.sent.size(), 2);
+    const MessageId messageId = store.messages.first().id;
+
+    // One member is offline: only their envelope is retired, the row is not
+    // failed, because the other member may still get it.
+    transport.onRecipientUnavailable(transport.sent.at(0).envelopeId);
+    QCOMPARE(store.failEnvelopeCount, 1);
+    QVERIFY(store.deliveryStates.value(messageId.bytes()) != DeliveryState::Failed);
+    QCOMPARE(store.outboxes.at(0).record.state, OutboxState::Failed);
+    QVERIFY(store.outboxes.at(1).record.state != OutboxState::Failed);
+    // The other one is accepted: the row is Sent.
+    transport.onRelayAccepted(transport.sent.at(1).envelopeId, 9);
+    QCOMPARE(store.deliveryStates.value(messageId.bytes()), DeliveryState::Sent);
+
+    // A second message nobody can receive fails as a whole, once, when the
+    // last envelope is retired.
+    engine.enqueueGroupText(group, {DeviceId::generate(), DeviceId::generate()},
+                            QStringLiteral("hello?"));
+    const MessageId second = store.messages.at(1).id;
+    QSignalSpy stateSpy(&engine, &SyncEngine::messageStateChanged);
+    transport.onRecipientUnavailable(transport.sent.at(2).envelopeId);
+    QVERIFY(store.deliveryStates.value(second.bytes()) != DeliveryState::Failed);
+    QCOMPARE(stateSpy.count(), 0);
+    transport.onRecipientUnavailable(transport.sent.at(3).envelopeId);
+    QCOMPARE(store.deliveryStates.value(second.bytes()), DeliveryState::Failed);
+    QCOMPARE(stateSpy.count(), 1);
+    QCOMPARE(store.failEnvelopeCount, 3);
+    QVERIFY(!engine.isFailedClosed());
+
+    // An ordinary one-to-one send still fails the message outright.
+    engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("direct"));
+    const MessageId direct = store.messages.at(2).id;
+    transport.onRecipientUnavailable(transport.sent.at(4).envelopeId);
+    QCOMPARE(store.deliveryStates.value(direct.bytes()), DeliveryState::Failed);
+    QCOMPARE(store.failEnvelopeCount, 3);
+}
+
+void SyncEngineTest::groupControlAndChangesFanOut()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+    const ConversationId group = ConversationId::generate();
+    const DeviceId existingA = DeviceId::generate();
+    const DeviceId existingB = DeviceId::generate();
+    const DeviceId newcomer = DeviceId::generate();
+
+    // A control message is encrypted once and shipped to everyone, with no
+    // visible row.
+    engine.sendGroupControl(group, {existingA, existingB}, QByteArray("INFO"));
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.messages.size(), 0);
+    QCOMPARE(store.commitControlSendManyCount, 1);
+    QCOMPARE(transport.sent.size(), 2);
+    QCOMPARE(transport.sent.at(0).messageKind, EnvelopeMessageKind::GroupControl);
+    QCOMPARE(transport.sent.at(0).ciphertext, QByteArray("ENC:INFO"));
+
+    // A membership change ships the Commit to the existing members and the
+    // Welcome to the newcomer, neither encrypted again, with the caller's
+    // pending MLS snapshot committed alongside all three envelopes.
+    mls.stateVersion = 42;
+    engine.sendGroupChange(group, {existingA, existingB}, QByteArray("COMMIT"), {newcomer},
+                           QByteArray("WELCOME"));
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.commitControlSendManyCount, 2);
+    QCOMPARE(store.lastMlsState, QByteArray("state-42"));
+    QCOMPARE(transport.sent.size(), 5);
+    int commits = 0;
+    int welcomes = 0;
+    for (int i = 2; i < 5; ++i) {
+        const CiphertextEnvelopeV1 &sent = transport.sent.at(i);
+        if (sent.messageKind == EnvelopeMessageKind::MlsCommit) {
+            ++commits;
+            QCOMPARE(sent.ciphertext, QByteArray("COMMIT"));
+            QVERIFY(sent.recipientDeviceId == existingA || sent.recipientDeviceId == existingB);
+        } else if (sent.messageKind == EnvelopeMessageKind::GroupWelcome) {
+            ++welcomes;
+            QCOMPARE(sent.ciphertext, QByteArray("WELCOME"));
+            QCOMPARE(sent.recipientDeviceId, newcomer);
+        }
+    }
+    QCOMPARE(commits, 2);
+    QCOMPARE(welcomes, 1);
+    // The Welcome is queued after the Commits, so the newcomer's roster (sent
+    // next, under the new epoch) always follows the join.
+    QCOMPARE(transport.sent.at(4).messageKind, EnvelopeMessageKind::GroupWelcome);
+
+    // A change with nobody left to tell still persists the epoch.
+    mls.stateVersion = 43;
+    engine.sendGroupChange(group, {}, QByteArray("COMMIT"), {}, QByteArray());
+    QCOMPARE(store.commitMlsStateOnlyCount, 1);
+    QCOMPARE(store.lastMlsState, QByteArray("state-43"));
+    QCOMPARE(transport.sent.size(), 5);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::groupWelcomeFromAcceptedContactIsJoinedAndSurfaced()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    struct Seen final {
+        std::optional<ConversationId> conversation;
+        std::optional<AccountId> account;
+        std::optional<DeviceId> device;
+        QList<QByteArray> members;
+        int count = 0;
+    } seen;
+    connect(&engine, &SyncEngine::groupWelcomeReceived, &engine,
+            [&](const ConversationId &c, const AccountId &a, const DeviceId &d,
+                const QList<QByteArray> &m) {
+                seen.conversation = c;
+                seen.account = a;
+                seen.device = d;
+                seen.members = m;
+                ++seen.count;
+            });
+    QSignalSpy handshakes(&engine, &SyncEngine::handshakeReceived);
+    engine.start();
+
+    const ConversationId group = ConversationId::generate();
+    const AccountId inviter = AccountId::generate();
+    store.acceptedAccounts.insert(inviter.bytes());
+    // The Welcome's membership names the inviter's device and one more.
+    const DeviceId third = DeviceId::generate();
+    mls.inspectMembers = {credentialBytes(mls.senderDevice), credentialBytes(third)};
+
+    CiphertextEnvelopeV1 welcome =
+        incomingHandshakeEnvelope(group, inviter, mls.senderDevice, QByteArray("welcome-bytes"));
+    welcome.messageKind = EnvelopeMessageKind::GroupWelcome;
+    engine.handleEnvelope(welcome, 21);
+
+    // Inspected, joined, committed with the joined state, acked, surfaced —
+    // and never stashed as a contact request.
+    QCOMPARE(mls.inspectWelcomeCount, 1);
+    QCOMPARE(mls.joinGroupCount, 1);
+    QCOMPARE(mls.lastJoinedWelcome, QByteArray("welcome-bytes"));
+    QCOMPARE(store.groupWelcomeJoinCount, 1);
+    QCOMPARE(store.commitHandshakeReceiveCount, 0);
+    QCOMPARE(handshakes.count(), 0);
+    QCOMPARE(transport.acks.size(), 1);
+    QCOMPARE(seen.count, 1);
+    QCOMPARE(seen.conversation->bytes(), group.bytes());
+    QCOMPARE(seen.account->bytes(), inviter.bytes());
+    QCOMPARE(seen.device->bytes(), mls.senderDevice.bytes());
+    QCOMPARE(seen.members.size(), 2);
+    QVERIFY(store.knownConversations.contains(group.bytes()));
+
+    // A redelivery is acked and joins nothing twice.
+    engine.handleEnvelope(welcome, 22);
+    QCOMPARE(mls.joinGroupCount, 1);
+    QCOMPARE(seen.count, 1);
+    QCOMPARE(transport.acks.size(), 2);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::groupWelcomeFromStrangerOrForKnownGroupIsConsumedNotJoined()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy joined(&engine, &SyncEngine::groupWelcomeReceived);
+    engine.start();
+
+    // A stranger (not an Accepted contact) cannot put this device into a group.
+    CiphertextEnvelopeV1 fromStranger = incomingHandshakeEnvelope(
+        ConversationId::generate(), AccountId::generate(), mls.senderDevice, QByteArray("w"));
+    fromStranger.messageKind = EnvelopeMessageKind::GroupWelcome;
+    engine.handleEnvelope(fromStranger, 31);
+    QCOMPARE(mls.inspectWelcomeCount, 0);
+    QCOMPARE(mls.joinGroupCount, 0);
+    QCOMPARE(store.groupWelcomeRefuseCount, 1);
+    QCOMPARE(transport.acks.size(), 1); // consumed, so it is not redelivered forever
+    QCOMPARE(joined.count(), 0);
+
+    // A Welcome for a group this device already holds would overwrite it.
+    const AccountId contact = AccountId::generate();
+    store.acceptedAccounts.insert(contact.bytes());
+    const ConversationId known = ConversationId::generate();
+    store.knownConversations.insert(known.bytes());
+    CiphertextEnvelopeV1 forKnown =
+        incomingHandshakeEnvelope(known, contact, mls.senderDevice, QByteArray("w2"));
+    forKnown.messageKind = EnvelopeMessageKind::GroupWelcome;
+    engine.handleEnvelope(forKnown, 32);
+    QCOMPARE(mls.joinGroupCount, 0);
+    QCOMPARE(store.groupWelcomeRefuseCount, 2);
+    QCOMPARE(transport.acks.size(), 2);
+
+    // A store failure on the trust check fails closed without acking.
+    store.failCanJoinGroup = true;
+    CiphertextEnvelopeV1 another = incomingHandshakeEnvelope(ConversationId::generate(), contact,
+                                                             mls.senderDevice, QByteArray("w3"));
+    another.messageKind = EnvelopeMessageKind::GroupWelcome;
+    engine.handleEnvelope(another, 33);
+    QVERIFY(engine.isFailedClosed());
+    QCOMPARE(transport.acks.size(), 2);
+    QCOMPARE(joined.count(), 0);
+}
+
+void SyncEngineTest::groupWelcomeNotNamingTheSenderIsRefused()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy joined(&engine, &SyncEngine::groupWelcomeReceived);
+    engine.start();
+    const AccountId contact = AccountId::generate();
+    store.acceptedAccounts.insert(contact.bytes());
+
+    // The relay claims the contact's device sent it, but the Welcome's own
+    // membership names a different device: a misattribution, refused before
+    // any join.
+    mls.inspectMembers = {credentialBytes(DeviceId::generate())};
+    CiphertextEnvelopeV1 forged = incomingHandshakeEnvelope(ConversationId::generate(), contact,
+                                                            mls.senderDevice, QByteArray("w"));
+    forged.messageKind = EnvelopeMessageKind::GroupWelcome;
+    engine.handleEnvelope(forged, 41);
+    QCOMPARE(mls.inspectWelcomeCount, 1);
+    QCOMPARE(mls.joinGroupCount, 0);
+    QCOMPARE(store.groupWelcomeRefuseCount, 1);
+    QCOMPARE(joined.count(), 0);
+    QCOMPARE(transport.acks.size(), 1);
+
+    // A Welcome that will not even inspect is consumed the same way.
+    mls.failInspect = true;
+    CiphertextEnvelopeV1 broken = incomingHandshakeEnvelope(ConversationId::generate(), contact,
+                                                            mls.senderDevice, QByteArray("x"));
+    broken.messageKind = EnvelopeMessageKind::GroupWelcome;
+    engine.handleEnvelope(broken, 42);
+    QCOMPARE(store.groupWelcomeRefuseCount, 2);
+    QCOMPARE(transport.acks.size(), 2);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::groupControlIsSurfacedOnReceive()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QByteArray payload;
+    std::optional<DeviceId> from;
+    int visible = 0;
+    connect(&engine, &SyncEngine::groupControlReceived, &engine,
+            [&](const ConversationId &, const DeviceId &sender, const QByteArray &bytes) {
+                from = sender;
+                payload = bytes;
+            });
+    connect(&engine, &SyncEngine::messageReceived, &engine, [&](const MessageRecord &) { ++visible; });
+    engine.start();
+
+    const ConversationId group = ConversationId::generate();
+    CiphertextEnvelopeV1 inbound = incomingEnvelope(group, mls.senderDevice, QByteArray("ENC:RENAME"));
+    inbound.messageKind = EnvelopeMessageKind::GroupControl;
+    engine.handleEnvelope(inbound, 51);
+    QCOMPARE(payload, QByteArray("RENAME"));
+    QCOMPARE(from->bytes(), mls.senderDevice.bytes());
+    QCOMPARE(visible, 0);
+    QCOMPARE(store.received.size(), 0);
+    QCOMPARE(transport.acks.size(), 1);
+
+    // A forged sender is dropped; a redelivery is acked once more but not
+    // surfaced again.
+    CiphertextEnvelopeV1 forged = incomingEnvelope(group, DeviceId::generate(), QByteArray("ENC:LEAVE"));
+    forged.messageKind = EnvelopeMessageKind::GroupControl;
+    payload.clear();
+    engine.handleEnvelope(forged, 52);
+    QVERIFY(payload.isEmpty());
+    engine.handleEnvelope(inbound, 53);
+    QVERIFY(payload.isEmpty());
+    QCOMPARE(transport.acks.size(), 2);
 }
 
 void SyncEngineTest::callSignalIsControlSentAndSurfacedOnReceive()

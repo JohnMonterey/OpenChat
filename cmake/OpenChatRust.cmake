@@ -4,12 +4,34 @@ function(add_openchat_rust_library)
     set(OPENCHAT_MLS_MANIFEST
         "${CMAKE_CURRENT_SOURCE_DIR}/rust/openchat-mls/Cargo.toml")
     set(OPENCHAT_MLS_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
-    if(WIN32)
-        set(OPENCHAT_MLS_LIBRARY
-            "${OPENCHAT_MLS_TARGET_DIR}/release/openchat_mls.lib")
+
+    # Cross-compiling (a MinGW build of the Windows app from Linux, say) needs
+    # cargo told which target to build for; a native build must not be, since
+    # `--target` moves the output under a per-target subdirectory. Cargo's
+    # triple can be given explicitly through OPENCHAT_RUST_TARGET; otherwise it
+    # is derived from the toolchain for the one cross case this project knows.
+    set(OPENCHAT_RUST_TARGET "" CACHE STRING
+        "Rust target triple to pass to cargo (empty: cargo's host default)")
+    set(_openchat_rust_target "${OPENCHAT_RUST_TARGET}")
+    if(NOT _openchat_rust_target AND CMAKE_CROSSCOMPILING AND MINGW
+       AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        set(_openchat_rust_target "x86_64-pc-windows-gnu")
+    endif()
+
+    set(_openchat_cargo_target_args)
+    set(_openchat_cargo_output_dir "${OPENCHAT_MLS_TARGET_DIR}/release")
+    if(_openchat_rust_target)
+        set(_openchat_cargo_target_args --target "${_openchat_rust_target}")
+        set(_openchat_cargo_output_dir
+            "${OPENCHAT_MLS_TARGET_DIR}/${_openchat_rust_target}/release")
+    endif()
+
+    # MSVC names the static library openchat_mls.lib; every GNU-flavoured
+    # toolchain, MinGW included, names it libopenchat_mls.a.
+    if(MSVC)
+        set(OPENCHAT_MLS_LIBRARY "${_openchat_cargo_output_dir}/openchat_mls.lib")
     else()
-        set(OPENCHAT_MLS_LIBRARY
-            "${OPENCHAT_MLS_TARGET_DIR}/release/libopenchat_mls.a")
+        set(OPENCHAT_MLS_LIBRARY "${_openchat_cargo_output_dir}/libopenchat_mls.a")
     endif()
 
     file(GLOB_RECURSE OPENCHAT_MLS_SOURCES CONFIGURE_DEPENDS
@@ -25,6 +47,7 @@ function(add_openchat_rust_library)
                 --manifest-path "${OPENCHAT_MLS_MANIFEST}"
                 --release
                 --locked
+                ${_openchat_cargo_target_args}
         DEPENDS
             ${OPENCHAT_MLS_SOURCES}
             "${OPENCHAT_MLS_MANIFEST}"

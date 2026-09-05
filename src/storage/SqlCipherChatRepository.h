@@ -24,6 +24,16 @@ public:
                   quint64 watermark) override;
     [[nodiscard]] Result<void, RepositoryError>
     advanceDeliveryState(const MessageId &messageId, DeliveryState state) override;
+    [[nodiscard]] Result<QVector<GroupMemberRecord>, RepositoryError>
+    groupMembers(const ConversationId &conversationId) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    upsertGroupMember(const GroupMemberRecord &member) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    removeGroupMember(const ConversationId &conversationId, const DeviceId &deviceId) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    setConversationTitle(const ConversationId &conversationId, const QString &title) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    markConversationLeft(const ConversationId &conversationId, qint64 leftAtMs) override;
 
 private:
     SqlCipherDatabase &m_database;

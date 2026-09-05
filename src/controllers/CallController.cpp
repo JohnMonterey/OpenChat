@@ -92,8 +92,11 @@ QString CallController::statusText() const
     case CallState::Idle:
         return QString();
     case CallState::Dialing:
-        return QStringLiteral("Calling…");
+        return m_isGroupCall ? QStringLiteral("Calling the group…") : QStringLiteral("Calling…");
     case CallState::Ringing:
+        if (m_isGroupCall)
+            return m_direction == CallDirection::Incoming ? QStringLiteral("Incoming group call")
+                                                          : QStringLiteral("Ringing everyone…");
         return m_direction == CallDirection::Incoming ? QStringLiteral("Incoming call")
                                                       : QStringLiteral("Ringing…");
     case CallState::Connecting:
@@ -126,6 +129,11 @@ void CallController::callContact(const QString &contactId)
 {
     if (m_engine == nullptr || m_chats == nullptr || contactId.isEmpty())
         return;
+    if (ChatController::isGroupChatId(contactId)) {
+        if (const auto group = m_chats->groupCallRouteFor(contactId))
+            (void)m_engine->placeGroupCall(*group);
+        return;
+    }
     const std::optional<ChatController::CallRoute> route = m_chats->callRouteFor(contactId);
     if (!route)
         return;
@@ -238,8 +246,18 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
     connect(engine, &CallEngine::mutedChanged, this, &CallController::syncFromEngine);
     connect(engine, &CallEngine::levelsChanged, this, &CallController::syncLevels);
     connect(engine, &CallEngine::incomingCall, this, &CallController::incomingCall);
+    connect(engine, &CallEngine::participantsChanged, this, &CallController::syncParticipants);
+    connect(engine, &CallEngine::participantVideoFrame, this,
+            [this](const DeviceId &device, const QImage &image) {
+                m_participants.setVideoFrame(device.toHex(), image);
+            });
     connect(chats->contacts(), &QAbstractItemModel::modelReset,
             this, &CallController::syncFromEngine);
+    // An offer on a group conversation rings the group. The roster answers
+    // which conversations are groups and who is in them.
+    engine->groupRouteResolver = [chats](const ConversationId &conversation) {
+        return chats->groupCallRouteFor(conversation);
+    };
     connect(chats, &ChatController::localUserNameChanged, this, [this] {
         setLocalIdentity(m_chats->localUserName(), m_chats->localAvatarKey());
     });
@@ -265,13 +283,29 @@ void CallController::syncFromEngine()
     }
 
     const CallEngine::CallPeer &peer = m_engine->peer();
-    // Incoming offers carry routing IDs, not display names. Use the same saved
-    // identity as the chat roster, including handles resolved while ringing.
-    const auto route = m_chats->callRouteFor(peer.conversation, peer.device);
-    const QString name = route ? route->displayName : peer.displayName;
-    const QString avatarKey = route ? route->avatarKey : peer.avatarKey;
-    m_peerName = name.isEmpty() ? QStringLiteral("Unknown caller") : name;
-    m_peerAvatarKey = avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : avatarKey;
+    m_isGroupCall = m_engine->isGroupCall();
+    if (m_isGroupCall) {
+        // The headline is the group; the members are the participant rows.
+        const auto route = m_chats->groupCallRouteFor(peer.conversation);
+        m_groupTitle = route ? route->title : m_engine->groupTitle();
+        if (m_groupTitle.isEmpty())
+            m_groupTitle = QStringLiteral("Group call");
+        m_peerName = m_groupTitle;
+        m_peerAvatarKey = QStringLiteral("group");
+        syncParticipants();
+    } else {
+        m_groupTitle.clear();
+        // Incoming offers carry routing IDs, not display names. Use the same saved
+        // identity as the chat roster, including handles resolved while ringing.
+        const auto route = m_chats->callRouteFor(peer.conversation, peer.device);
+        const QString name = route ? route->displayName : peer.displayName;
+        const QString avatarKey = route ? route->avatarKey : peer.avatarKey;
+        m_peerName = name.isEmpty() ? QStringLiteral("Unknown caller") : name;
+        m_peerAvatarKey = avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : avatarKey;
+        if (m_participants.count() > 0)
+            m_participants.setParticipants({});
+        m_joinedCount = 0;
+    }
 
     if (m_state == CallState::Active) {
         m_durationTimer->start();
@@ -290,6 +324,66 @@ void CallController::syncFromEngine()
         emit levelsChanged();
     }
     emit callChanged();
+    emit durationChanged();
+}
+
+void CallController::syncParticipants()
+{
+    if (m_engine == nullptr)
+        return;
+    QVector<CallParticipantRow> rows;
+    int joined = 0;
+    for (const CallEngine::Participant &participant : m_engine->participants()) {
+        CallParticipantRow row;
+        row.deviceId = participant.peer.device.toHex();
+        // The roster's current name for a member who is a contact beats the
+        // one the call was placed with (a handle can resolve mid-call).
+        const auto route = m_chats->callRouteFor(participant.peer.contactId);
+        row.name = route ? route->displayName : participant.peer.displayName;
+        if (row.name.isEmpty())
+            row.name = QStringLiteral("Unknown");
+        row.avatarKey = route ? route->avatarKey : participant.peer.avatarKey;
+        if (row.avatarKey.isEmpty())
+            row.avatarKey = QStringLiteral("userpfp_none");
+        row.stateText = callParticipantStateName(participant.state);
+        row.joined = participant.state == CallParticipantState::Joined;
+        row.ringing = participant.state == CallParticipantState::Ringing;
+        row.speaking = participant.speaking;
+        row.level = participant.level;
+        if (row.joined)
+            ++joined;
+        rows.append(row);
+    }
+    m_participants.setParticipants(std::move(rows));
+    if (joined != m_joinedCount) {
+        m_joinedCount = joined;
+        emit callChanged();
+    }
+}
+
+void CallController::enableForGroupPreview(CallState state, const QString &title,
+                                           const QVector<CallParticipantRow> &participants)
+{
+    if (m_engine != nullptr)
+        return; // a live controller is never overwritten by preview state
+    m_state = state;
+    m_direction = state == CallState::Ringing ? CallDirection::Incoming : CallDirection::Outgoing;
+    m_isGroupCall = state != CallState::Idle;
+    m_groupTitle = title;
+    m_peerName = title;
+    m_peerAvatarKey = QStringLiteral("group");
+    m_joinedCount = 0;
+    for (const CallParticipantRow &row : participants)
+        if (row.joined)
+            ++m_joinedCount;
+    m_participants.setParticipants(participants);
+    m_remoteSpeaking = false;
+    m_localSpeaking = false;
+    m_remoteLevel = 0.0;
+    m_localLevel = 0.0;
+    m_durationMs = state == CallState::Active ? 154'000 : 0;
+    emit callChanged();
+    emit levelsChanged();
     emit durationChanged();
 }
 
@@ -328,6 +422,11 @@ void CallController::enableForPreview(CallState state, const QString &peerName,
         return; // a live controller is never overwritten by preview state
     m_state = state;
     m_direction = state == CallState::Ringing ? CallDirection::Incoming : CallDirection::Outgoing;
+    m_isGroupCall = false;
+    m_groupTitle.clear();
+    m_joinedCount = 0;
+    if (m_participants.count() > 0)
+        m_participants.setParticipants({});
     m_peerName = peerName;
     m_peerAvatarKey = peerAvatarKey;
     m_remoteSpeaking = remoteSpeaking;

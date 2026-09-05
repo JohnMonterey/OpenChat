@@ -3,6 +3,7 @@
 #include "call/CallEngine.h"
 #include "call/CallTypes.h"
 #include "call/QtVideoCapture.h"
+#include "models/CallParticipantModel.h"
 
 #include <QObject>
 #include <QString>
@@ -62,6 +63,14 @@ class CallController final : public QObject
     // True when this build/machine can actually place a call, so the header's
     // call button can explain itself instead of failing silently.
     Q_PROPERTY(bool callsAvailable READ callsAvailable NOTIFY callChanged)
+    // Group calls: every other member is a row in `participants`, each with
+    // its own picture, name, state ("Ringing…", "Left", ...), speaking ring and
+    // camera. The one-to-one properties above keep working for the group's
+    // headline (peerName is the group's name).
+    Q_PROPERTY(bool isGroupCall READ isGroupCall NOTIFY callChanged)
+    Q_PROPERTY(QString groupTitle READ groupTitle NOTIFY callChanged)
+    Q_PROPERTY(int joinedCount READ joinedCount NOTIFY callChanged)
+    Q_PROPERTY(CallParticipantModel *participants READ participants CONSTANT)
 
 public:
     explicit CallController(QObject *parent = nullptr);
@@ -85,9 +94,14 @@ public:
     [[nodiscard]] bool muted() const noexcept { return m_muted; }
     [[nodiscard]] QString durationText() const;
     [[nodiscard]] bool callsAvailable() const noexcept { return m_engine != nullptr; }
+    [[nodiscard]] bool isGroupCall() const noexcept { return m_isGroupCall; }
+    [[nodiscard]] QString groupTitle() const { return m_groupTitle; }
+    [[nodiscard]] int joinedCount() const noexcept { return m_joinedCount; }
+    [[nodiscard]] CallParticipantModel *participants() { return &m_participants; }
 
     // Calls whoever is open in the conversation pane. No-op when nothing is
     // open, when the contact has no reachable device, or when a call is running.
+    // An open group chat rings every member.
     Q_INVOKABLE void callCurrentContact(bool video = false);
     Q_INVOKABLE void callContact(const QString &contactId);
     Q_INVOKABLE void acceptCall();
@@ -128,6 +142,10 @@ public:
     void enableForPreview(CallState state, const QString &peerName,
                           const QString &peerAvatarKey, bool remoteSpeaking,
                           bool localSpeaking);
+    // The group form: a scripted roster with per-member states, for the
+    // --call-group capture and the QML tests.
+    void enableForGroupPreview(CallState state, const QString &title,
+                               const QVector<CallParticipantRow> &participants);
 
 signals:
     void callChanged();
@@ -141,6 +159,7 @@ signals:
 
 private:
     void syncFromEngine();
+    void syncParticipants();
     void stopCamera();
     void setRemoteVideo(const QImage &image);
     void syncLevels();
@@ -153,6 +172,7 @@ private:
     CallEngine *m_engine = nullptr;
     ChatController *m_chats = nullptr;
     QTimer *m_durationTimer = nullptr;
+    CallParticipantModel m_participants;
 
     CallState m_state = CallState::Idle;
     CallEndReason m_endReason = CallEndReason::None;
@@ -167,6 +187,9 @@ private:
     double m_remoteLevel = 0.0;
     bool m_muted = false;
     qint64 m_durationMs = 0;
+    bool m_isGroupCall = false;
+    QString m_groupTitle;
+    int m_joinedCount = 0;
 };
 
 } // namespace OpenChat

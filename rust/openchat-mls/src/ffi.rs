@@ -277,6 +277,28 @@ pub unsafe extern "C" fn oc_mls_inspect_welcome(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn oc_mls_group_members(
+    client: *mut OcMlsClient,
+    conversation_id: *const u8,
+    out_members: *mut OcMlsBuffer,
+) -> i32 {
+    ffi_guard(|| {
+        // SAFETY: validated by helper functions.
+        let handle = unsafe { handle(client)? };
+        // SAFETY: out parameter is checked by clear_buffer_out.
+        unsafe { clear_buffer_out(out_members)? };
+        // SAFETY: conversation IDs always contain exactly 16 bytes by ABI contract.
+        let conversation = unsafe { conversation_id_from_ptr(conversation_id)? };
+        // Read-only: routed through `inspect`, which never invokes the store
+        // callback, so listing leaves the persisted snapshot untouched.
+        let members = inspect(handle, |client| client.group_members(conversation))?;
+        let framed = frame_list(&members)?;
+        // SAFETY: out parameter remains valid for this call.
+        unsafe { write_buffer(out_members, framed) }
+    })
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn oc_mls_inspect_key_package(
     client: *mut OcMlsClient,
     key_package: *const u8,

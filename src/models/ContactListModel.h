@@ -24,6 +24,7 @@ public:
         FavoriteRole,
         SelectedRole,
         AvatarKeyRole,
+        IsGroupRole,
     };
     Q_ENUM(Role)
 

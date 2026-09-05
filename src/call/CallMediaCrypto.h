@@ -46,6 +46,15 @@ struct CallMediaKeySchedule final {
     [[nodiscard]] const CallMediaKeys &receiveKeys(CallDirection direction) const noexcept;
 };
 
+// The secret one PAIR of group-call members key their media from. A group
+// call has one call secret but many media paths, and two paths must never
+// share a (key, nonce) pair; expanding the call secret with both device ids
+// (ordered, so both ends derive the same value) gives every pair its own
+// secret, from which the usual per-direction schedule is then derived. Empty
+// if the secret is the wrong length or the KDF fails.
+[[nodiscard]] QByteArray deriveGroupPairSecret(QByteArrayView callSecret, const CallId &callId,
+                                               const DeviceId &first, const DeviceId &second);
+
 // AES-256-GCM sealing of one media frame, with the frame's sequence number as
 // both the nonce input and additional authenticated data.
 class CallMediaSealer final

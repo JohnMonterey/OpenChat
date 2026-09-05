@@ -101,7 +101,274 @@ private slots:
     void commitHandshakeAcceptWithEmptyKeyBindsNull();
     void commitHandshakeAcceptRollsBackWhenNotPendingIncoming();
     void deletePendingHandshakeRemovesRowAndListIsOrdered();
+    void groupSendCommitsOneRowAndEveryEnvelopeOrNothing();
+    void controlSendManyIsAtomic();
+    void failEnvelopeRetiresOneEnvelopeAndLeavesTheMessage();
+    void claimDueHandsOutEnvelopesInTheOrderTheyWereQueued();
+    void canJoinGroupNeedsAnAcceptedContactAndAnUnknownConversation();
+    void commitGroupWelcomeCreatesTheGroupRowOnceAndCanRefuse();
+    void emptyMlsStateNeverOverwritesTheStoredBlob();
 };
+
+void SyncStoreTest::groupSendCommitsOneRowAndEveryEnvelopeOrNothing()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto messageId = MessageId::generate();
+    const auto sender = DeviceId::generate();
+    const QVector<OutboxRecord> three{outbox(EnvelopeId::generate(), messageId, conversationId),
+                                      outbox(EnvelopeId::generate(), messageId, conversationId),
+                                      outbox(EnvelopeId::generate(), messageId, conversationId)};
+    QVERIFY(store.commitGroupSend(outgoingMessage(messageId, conversationId, sender), three,
+                                  QByteArray("group-1"))
+                .hasValue());
+    QCOMPARE(chats.messages(conversationId, 50, std::nullopt).value().size(), 1);
+    QCOMPARE(store.claimDue(3'000, 10, 8'000).value().size(), 3);
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("group-1"));
+
+    // An outbox row that mismatches the message is refused up front.
+    const auto other = MessageId::generate();
+    QVERIFY(!store.commitGroupSend(outgoingMessage(other, conversationId, sender),
+                                   {outbox(EnvelopeId::generate(), messageId, conversationId)},
+                                   QByteArray("group-2"))
+                 .hasValue());
+    // A duplicate envelope id in the middle rolls the whole send back: no
+    // message row, no first envelope, and the state blob untouched.
+    const auto duplicate = three.first().envelopeId;
+    QVERIFY(!store.commitGroupSend(outgoingMessage(other, conversationId, sender),
+                                   {outbox(EnvelopeId::generate(), other, conversationId),
+                                    outbox(duplicate, other, conversationId)},
+                                   QByteArray("group-3"))
+                 .hasValue());
+    QCOMPARE(chats.messages(conversationId, 50, std::nullopt).value().size(), 1);
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("group-1"));
+    QVERIFY(!store.commitGroupSend(outgoingMessage(other, conversationId, sender), {},
+                                   QByteArray("group-4"))
+                 .hasValue());
+}
+
+void SyncStoreTest::controlSendManyIsAtomic()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto first = EnvelopeId::generate();
+    QVERIFY(store.commitControlSendMany({outbox(first, MessageId::generate(), conversationId),
+                                         outbox(EnvelopeId::generate(), MessageId::generate(),
+                                                conversationId)},
+                                        QByteArray("ctrl-many"))
+                .hasValue());
+    QCOMPARE(store.claimDue(3'000, 10, 8'000).value().size(), 2);
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("ctrl-many"));
+
+    // A conflicting row anywhere in the batch leaves nothing behind.
+    QVERIFY(!store.commitControlSendMany({outbox(EnvelopeId::generate(), MessageId::generate(),
+                                                 conversationId),
+                                          outbox(first, MessageId::generate(), conversationId)},
+                                         QByteArray("ctrl-many-2"))
+                 .hasValue());
+    QCOMPARE(store.claimDue(3'000, 10, 8'000).value().size(), 0); // the two are leased
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("ctrl-many"));
+    QVERIFY(!store.commitControlSendMany({}, QByteArray("x")).hasValue());
+}
+
+void SyncStoreTest::failEnvelopeRetiresOneEnvelopeAndLeavesTheMessage()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto messageId = MessageId::generate();
+    const auto unreachable = EnvelopeId::generate();
+    const auto reachable = EnvelopeId::generate();
+    QVERIFY(store.commitGroupSend(outgoingMessage(messageId, conversationId, DeviceId::generate()),
+                                  {outbox(unreachable, messageId, conversationId),
+                                   outbox(reachable, messageId, conversationId)},
+                                  QByteArray("g"))
+                .hasValue());
+    QVERIFY(store.failEnvelope(unreachable).hasValue());
+    // Only the other envelope is still claimable, and the message is not Failed.
+    auto claimed = store.claimDue(3'000, 10, 8'000);
+    QCOMPARE(claimed.value().size(), 1);
+    QCOMPARE(claimed.value().first().envelopeId, reachable);
+    QCOMPARE(chats.messages(conversationId, 50, std::nullopt).value().first().deliveryState,
+             DeliveryState::Queued);
+    // Failing it again, or an unknown envelope, is reported.
+    QVERIFY(!store.failEnvelope(unreachable).hasValue());
+    QVERIFY(!store.failEnvelope(EnvelopeId::generate()).hasValue());
+}
+
+void SyncStoreTest::claimDueHandsOutEnvelopesInTheOrderTheyWereQueued()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+
+    // Queued in the same instant with deliberately descending envelope ids:
+    // a Welcome must leave before the roster encrypted under its epoch, so the
+    // order of queueing, not the random id, is what claimDue follows.
+    QVector<EnvelopeId> queued;
+    for (int i = 9; i >= 0; --i) {
+        const auto id = EnvelopeId::fromBytes(QByteArray(15, '\0') + char('0' + i));
+        QVERIFY(id.has_value());
+        queued.append(*id);
+        QVERIFY(store.commitControlSend(outbox(*id, MessageId::generate(), conversationId, 3'000),
+                                        QByteArray("s"))
+                    .hasValue());
+    }
+    auto claimed = store.claimDue(3'000, 10, 8'000);
+    QVERIFY(claimed.hasValue());
+    QCOMPARE(claimed.value().size(), 10);
+    for (int i = 0; i < 10; ++i)
+        QCOMPARE(claimed.value().at(i).envelopeId, queued.at(i));
+}
+
+void SyncStoreTest::canJoinGroupNeedsAnAcceptedContactAndAnUnknownConversation()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherContactRepository contacts(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto stranger = AccountId::generate();
+    const auto pending = AccountId::generate();
+    const auto friendly = AccountId::generate();
+    const auto direct = ConversationId::generate();
+    QVERIFY(contacts.recordIncomingRequest(incomingContact(pending)).hasValue());
+    QVERIFY(contacts.recordIncomingRequest(incomingContact(friendly)).hasValue());
+    QVERIFY(contacts.markAccepted(friendly, direct, 2'000).hasValue());
+    QVERIFY(chats.upsertConversation(conversation(direct)).hasValue());
+
+    const auto group = ConversationId::generate();
+    QCOMPARE(store.canJoinGroup(stranger, group).value(), false);
+    QCOMPARE(store.canJoinGroup(pending, group).value(), false);
+    QCOMPARE(store.canJoinGroup(friendly, group).value(), true);
+    // A group this device already holds is never re-joined from a Welcome.
+    QCOMPARE(store.canJoinGroup(friendly, direct).value(), false);
+}
+
+void SyncStoreTest::commitGroupWelcomeCreatesTheGroupRowOnceAndCanRefuse()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    SqlCipherSyncRepository cursors(database);
+
+    const auto group = ConversationId::generate();
+    const auto sender = DeviceId::generate();
+    const auto envelope = EnvelopeId::generate();
+    auto joined = store.commitGroupWelcome(envelope, sender, group, 41, 5'000,
+                                           QByteArray("joined-state"), /*joined=*/true);
+    QVERIFY(joined.hasValue());
+    QVERIFY(joined.value());
+    auto all = chats.conversations();
+    QCOMPARE(all.value().size(), 1);
+    QCOMPARE(all.value().first().id, group);
+    QCOMPARE(all.value().first().kind, ConversationKind::Group);
+    QCOMPARE(all.value().first().createdAtMs, qint64(5'000));
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("joined-state"));
+    QVERIFY(store.hasSeen(envelope).value());
+    QCOMPARE(cursors.cursor(sender).value().serverWatermark, quint64(41));
+
+    // A redelivery is consumed without touching anything.
+    auto again = store.commitGroupWelcome(envelope, sender, group, 42, 5'000,
+                                          QByteArray("other"), /*joined=*/true);
+    QVERIFY(again.hasValue());
+    QVERIFY(!again.value());
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("joined-state"));
+    QCOMPARE(cursors.cursor(sender).value().serverWatermark, quint64(41));
+
+    // A refused Welcome only consumes its envelope: no row, no state change,
+    // watermark advanced so it is not redelivered.
+    const auto refused = EnvelopeId::generate();
+    const auto other = ConversationId::generate();
+    auto consumed =
+        store.commitGroupWelcome(refused, sender, other, 43, 6'000, QByteArrayView(), /*joined=*/false);
+    QVERIFY(consumed.hasValue());
+    QVERIFY(consumed.value());
+    QCOMPARE(chats.conversations().value().size(), 1);
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("joined-state"));
+    QCOMPARE(cursors.cursor(sender).value().serverWatermark, quint64(43));
+    QVERIFY(store.hasSeen(refused).value());
+    // The two flags must agree with the state handed in.
+    QVERIFY(!store.commitGroupWelcome(EnvelopeId::generate(), sender, other, 44, 1, QByteArrayView(), true)
+                 .hasValue());
+    QVERIFY(!store.commitGroupWelcome(EnvelopeId::generate(), sender, other, 44, 1, QByteArray("s"), false)
+                 .hasValue());
+}
+
+void SyncStoreTest::emptyMlsStateNeverOverwritesTheStoredBlob()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+
+    QVERIFY(store.commitMlsState(QByteArray("durable")).hasValue());
+    // A control send whose lane already surrendered its state hands in an
+    // empty blob; that must keep the durable one rather than erase every group.
+    QVERIFY(store.commitControlSend(outbox(EnvelopeId::generate(), MessageId::generate(), conversationId),
+                                    QByteArrayView())
+                .hasValue());
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("durable"));
+    QVERIFY(store.commitControlReceive(EnvelopeId::generate(), DeviceId::generate(), 7, QByteArrayView())
+                .hasValue());
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("durable"));
+}
 
 void SyncStoreTest::atomicSendPersistsMessageOutboxAndMlsState()
 {

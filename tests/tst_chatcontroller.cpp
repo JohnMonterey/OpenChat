@@ -2,7 +2,9 @@
 
 #include "CallTestSupport.h"
 #include "app/ContactRequestService.h"
+#include "app/GroupService.h"
 #include "app/ProfileSession.h"
+#include "domain/GroupUpdate.h"
 #include "call/CallSignal.h"
 #include "call/SyncCallTransport.h"
 #include "controllers/CallController.h"
@@ -264,6 +266,77 @@ int countProfileUpdates(const LiveFixture &live)
         if (envelope.messageKind == OpenChat::EnvelopeMessageKind::ProfileUpdate)
             ++count;
     return count;
+}
+
+// A second Accepted contact with its own MLS client, so a group can be made
+// from two people. Its 2-party conversation with us is recorded but never used.
+struct ExtraPeer final {
+    std::unique_ptr<OpenChat::SqlCipherDatabase> db;
+    std::unique_ptr<OpenChat::CapturingMlsStateStore> capture;
+    std::unique_ptr<OpenChat::MlsClient> mls;
+    OpenChat::AccountId account = OpenChat::AccountId::generate();
+    OpenChat::DeviceId device = OpenChat::DeviceId::generate();
+
+    bool setUp(LiveFixture &live, const QString &handle)
+    {
+        using namespace OpenChat;
+        auto opened = SqlCipherDatabase::open(live.dir.filePath(handle + QStringLiteral(".sqlite3")),
+                                              SecureBuffer::random(32));
+        if (!opened.hasValue())
+            return false;
+        db = std::make_unique<SqlCipherDatabase>(std::move(opened).value());
+        capture = std::make_unique<CapturingMlsStateStore>(*db, ProfileId::generate());
+        auto client = MlsClient::create(credentialFor(device), capture.get());
+        if (!client.hasValue())
+            return false;
+        mls = std::move(client).value();
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const ConversationId direct = ConversationId::generate();
+        ContactRecord record{account, handle, QString(), ContactState::PendingOutgoing, direct,
+                             now, now};
+        record.peerDeviceId = device;
+        return live.session->contacts()->recordOutgoingRequest(record).hasValue()
+            && live.session->contacts()->markAccepted(account, direct, now).hasValue()
+            && live.session->chats()
+                   ->upsertConversation(ConversationRecord{direct, direct.bytes(), QString(),
+                                                           ConversationKind::Direct, now})
+                   .hasValue();
+    }
+};
+
+// Delivers one envelope of `kind` from `device`/`account` into `conversation`.
+void deliver(LiveFixture &live, const OpenChat::AccountId &account, const OpenChat::DeviceId &device,
+             const OpenChat::ConversationId &conversation, OpenChat::EnvelopeMessageKind kind,
+             const QByteArray &ciphertext)
+{
+    using namespace OpenChat;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const CiphertextEnvelopeV1 envelope{
+        1,
+        EnvelopeId::generate(),
+        account,
+        device,
+        DeviceId::generate(),
+        conversation,
+        kind,
+        now,
+        now + 3'600'000,
+        EnvelopeId::generate(),
+        ciphertext,
+        QCryptographicHash::hash(ciphertext, QCryptographicHash::Sha256),
+        QByteArray(64, '\x03')};
+    live.session->syncEngine()->handleEnvelope(envelope, ++live.sequence);
+}
+
+// The envelopes of `kind` the transport saw addressed to `device`, in order.
+QVector<OpenChat::CiphertextEnvelopeV1> sentTo(const LiveFixture &live, const OpenChat::DeviceId &device,
+                                               OpenChat::EnvelopeMessageKind kind)
+{
+    QVector<OpenChat::CiphertextEnvelopeV1> result;
+    for (const auto &envelope : live.transport->sent)
+        if (envelope.messageKind == kind && envelope.recipientDeviceId == device)
+            result.append(envelope);
+    return result;
 }
 
 } // namespace
@@ -621,6 +694,336 @@ private slots:
         QVERIFY(live.deliverFromPeer(QStringLiteral("first")));
         // `other` has the chat open (it is the only one), so it reads it directly.
         QCOMPARE(other.messages()->rowCount(), 1);
+    }
+
+    void groupIsCreatedFromContactsMessagedRenamedAndLeft()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ExtraPeer carol;
+        QVERIFY(carol.setUp(live, QStringLiteral("carol")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        // KeyPackages come straight from the peers' own MLS clients, standing in
+        // for the relay claim.
+        GroupService groups(*live.session, *live.session->syncEngine(),
+                            [&](const DeviceId &device, std::function<void(const QByteArray &)> done) {
+                                if (device == live.peerDevice)
+                                    done(live.peer->generateKeyPackage().value());
+                                else if (device == carol.device)
+                                    done(carol.mls->generateKeyPackage().value());
+                                else
+                                    done({});
+                            });
+        QSignalSpy failures(&groups, &GroupService::groupActionFailed);
+
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests, &groups);
+        QCOMPARE(controller.contacts()->rowCount(), 2);
+        QVERIFY(controller.selectContact(live.peerAccount.toHex()));
+        QVERIFY(!controller.currentIsGroup());
+        // From Bob's chat the "+" offers everyone else: Carol.
+        const QVariantList candidates = controller.groupCandidates();
+        QCOMPARE(candidates.size(), 1);
+        QCOMPARE(candidates.first().toMap().value(QStringLiteral("contactId")).toString(),
+                 carol.account.toHex());
+
+        // Starting a group with Carol makes and opens it.
+        controller.addToGroup(carol.account.toHex());
+        QCOMPARE(failures.count(), 0);
+        QVERIFY(controller.currentIsGroup());
+        QCOMPARE(controller.contacts()->rowCount(), 3);
+        QCOMPARE(controller.currentGroupMemberCount(), 3);
+        QCOMPARE(controller.currentGroupMembers(), QStringLiteral("You, bob, carol"));
+        QVERIFY(controller.currentGroupTitle().isEmpty());
+        QCOMPARE(controller.currentContactName(), QStringLiteral("bob, carol")); // untitled
+        QCOMPARE(controller.currentStatusText(), QStringLiteral("You, bob, carol"));
+        QCOMPARE(controller.currentAvatarKey(), QStringLiteral("group"));
+        QVERIFY(controller.groupCandidates().isEmpty()); // nobody left to add
+        const QString groupId = controller.currentContactId();
+        QVERIFY(ChatController::isGroupChatId(groupId));
+        const auto route = controller.groupCallRouteFor(groupId);
+        QVERIFY(route.has_value());
+        QCOMPARE(route->members.size(), 2);
+
+        // Each member got the Welcome and then the roster; both join and read it.
+        const auto bobWelcome = sentTo(live, live.peerDevice, EnvelopeMessageKind::GroupWelcome);
+        const auto carolWelcome = sentTo(live, carol.device, EnvelopeMessageKind::GroupWelcome);
+        QCOMPARE(bobWelcome.size(), 1);
+        QCOMPARE(carolWelcome.size(), 1);
+        const ConversationId groupConversation = bobWelcome.first().conversationId;
+        QCOMPARE(route->conversation, groupConversation);
+        QVERIFY(live.peer->joinGroup(groupConversation, bobWelcome.first().ciphertext).hasValue());
+        QVERIFY(carol.mls->joinGroup(groupConversation, carolWelcome.first().ciphertext).hasValue());
+        const auto bobInfo = sentTo(live, live.peerDevice, EnvelopeMessageKind::GroupControl);
+        QCOMPARE(bobInfo.size(), 1);
+        auto opened = live.peer->process(groupConversation, bobInfo.first().ciphertext);
+        QVERIFY(opened.hasValue());
+        const auto info = decodeGroupUpdate(opened.value().applicationData);
+        QVERIFY(info.has_value());
+        QCOMPARE(info->type, GroupUpdateType::Info);
+        QCOMPARE(info->members.size(), 3);
+        // Carol reads the same roster from her own copy.
+        QVERIFY(carol.mls->process(groupConversation,
+                                   sentTo(live, carol.device, EnvelopeMessageKind::GroupControl)
+                                       .first()
+                                       .ciphertext)
+                    .hasValue());
+        // The Welcome was queued before the roster, so the join always
+        // precedes the message encrypted under the joined epoch.
+        int welcomeAt = -1;
+        int infoAt = -1;
+        for (int i = 0; i < live.transport->sent.size(); ++i) {
+            const auto &envelope = live.transport->sent.at(i);
+            if (envelope.recipientDeviceId != live.peerDevice)
+                continue;
+            if (envelope.messageKind == EnvelopeMessageKind::GroupWelcome)
+                welcomeAt = i;
+            if (envelope.messageKind == EnvelopeMessageKind::GroupControl && infoAt < 0)
+                infoAt = i;
+        }
+        QVERIFY(welcomeAt >= 0 && infoAt > welcomeAt);
+
+        // A message into the group: one row here, one envelope per member, one
+        // ciphertext both can read.
+        controller.setComposerText(QStringLiteral("hi group"));
+        QVERIFY(controller.canSend());
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(controller.messages()->rowCount(), 1);
+        const auto toBob = sentTo(live, live.peerDevice, EnvelopeMessageKind::MlsPrivateMessage);
+        const auto toCarol = sentTo(live, carol.device, EnvelopeMessageKind::MlsPrivateMessage);
+        QCOMPARE(toBob.size(), 1);
+        QCOMPARE(toCarol.size(), 1);
+        QCOMPARE(toBob.first().ciphertext, toCarol.first().ciphertext);
+        QCOMPARE(live.peer->process(groupConversation, toBob.first().ciphertext)
+                     .value()
+                     .applicationData,
+                 QByteArray("hi group"));
+        QCOMPARE(carol.mls->process(groupConversation, toCarol.first().ciphertext)
+                     .value()
+                     .applicationData,
+                 QByteArray("hi group"));
+
+        // A member's message lands in the open group, named after its sender.
+        auto fromCarol = carol.mls->encrypt(groupConversation, QByteArray("carol here"));
+        QVERIFY(fromCarol.hasValue());
+        deliver(live, carol.account, carol.device, groupConversation,
+                EnvelopeMessageKind::MlsPrivateMessage, fromCarol.value().bytes);
+        QCOMPARE(controller.messages()->rowCount(), 2);
+        const QModelIndex inRow = controller.messages()->index(1);
+        QCOMPARE(controller.messages()->data(inRow, MessageListModel::BodyRole).toString(),
+                 QStringLiteral("carol here"));
+        QCOMPARE(controller.messages()->data(inRow, MessageListModel::SenderNameRole).toString(),
+                 QStringLiteral("carol"));
+        // Our own row carries no sender name; a one-to-one message neither.
+        QVERIFY(controller.messages()
+                    ->data(controller.messages()->index(0), MessageListModel::SenderNameRole)
+                    .toString()
+                    .isEmpty());
+
+        // Renaming, the way the status line is edited, reaches every member.
+        QVERIFY(controller.renameCurrentGroup(QStringLiteral("  Weekend plans  ")));
+        QCOMPARE(controller.currentGroupTitle(), QStringLiteral("Weekend plans"));
+        QCOMPARE(controller.currentContactName(), QStringLiteral("Weekend plans"));
+        const auto bobControls = sentTo(live, live.peerDevice, EnvelopeMessageKind::GroupControl);
+        QCOMPARE(bobControls.size(), 2);
+        auto renamed = decodeGroupUpdate(
+            live.peer->process(groupConversation, bobControls.at(1).ciphertext).value().applicationData);
+        QVERIFY(renamed.has_value());
+        QCOMPARE(renamed->type, GroupUpdateType::Rename);
+        QCOMPARE(renamed->title, QStringLiteral("Weekend plans"));
+        // It is durable: a fresh controller shows the title and the history.
+        ChatController reloaded;
+        reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests, &groups);
+        QVERIFY(reloaded.selectContact(groupId));
+        QCOMPARE(reloaded.currentGroupTitle(), QStringLiteral("Weekend plans"));
+        QCOMPARE(reloaded.messages()->rowCount(), 2);
+
+        // Leaving tells everyone and drops the chat here; the view falls back
+        // to a person.
+        controller.leaveCurrentGroup();
+        QVERIFY(!controller.currentIsGroup());
+        QCOMPARE(controller.contacts()->rowCount(), 2);
+        QVERIFY(!controller.groupCallRouteFor(groupId).has_value());
+        const auto afterLeave = sentTo(live, live.peerDevice, EnvelopeMessageKind::GroupControl);
+        QCOMPARE(afterLeave.size(), 3);
+        auto left = decodeGroupUpdate(
+            live.peer->process(groupConversation, afterLeave.at(2).ciphertext).value().applicationData);
+        QVERIFY(left.has_value());
+        QCOMPARE(left->type, GroupUpdateType::Leave);
+        QCOMPARE(failures.count(), 0);
+        QVERIFY(!live.session->syncEngine()->isFailedClosed());
+    }
+
+    void inboundGroupWelcomeOpensTheChatAndMembersComeAndGo()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        GroupService groups(*live.session, *live.session->syncEngine(), {});
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests, &groups);
+        QCOMPARE(controller.contacts()->rowCount(), 1);
+
+        // Bob makes a group with us and a stranger (not our contact), from a
+        // KeyPackage we published.
+        auto ourKeyPackage = live.session->mls()->generateKeyPackage();
+        QVERIFY(ourKeyPackage.hasValue());
+        QVERIFY(live.session->persistMlsState().hasValue());
+        auto stranger = std::move(MlsClient::create(credentialFor(DeviceId::generate()))).value();
+        const DeviceId strangerDevice = DeviceId::generate();
+        const AccountId strangerAccount = AccountId::generate();
+        auto strangerClient = std::move(MlsClient::create(credentialFor(strangerDevice))).value();
+        const ConversationId group = ConversationId::generate();
+        QVERIFY(live.peer->createGroup(group).hasValue());
+        auto added = live.peer->addMembers(
+            group, {ourKeyPackage.value(), strangerClient->generateKeyPackage().value()});
+        QVERIFY(added.hasValue());
+        QVERIFY(strangerClient->joinGroup(group, added.value().welcome).hasValue());
+
+        // The Welcome from an accepted contact joins us straight away, and the
+        // chat appears with the one member we can already name.
+        QSignalSpy joined(&groups, &GroupService::groupJoined);
+        deliver(live, live.peerAccount, live.peerDevice, group, EnvelopeMessageKind::GroupWelcome,
+                added.value().welcome);
+        QCOMPARE(joined.count(), 1);
+        QCOMPARE(controller.contacts()->rowCount(), 2);
+        const QString groupId = controller.groupChatIdFor(group);
+        QVERIFY(!groupId.isEmpty());
+        QVERIFY(controller.selectContact(groupId));
+        QCOMPARE(controller.currentGroupMembers(), QStringLiteral("You, bob"));
+
+        // The roster follows: title, and the stranger under the name Bob gave.
+        const auto ourDevice = live.session->publicCredential().value().deviceId;
+        const auto ourAccount = live.session->accountId().value();
+        const auto info = GroupUpdateMessage::info(
+            QStringLiteral("Lunch"),
+            {GroupMemberInfo{live.peerAccount, live.peerDevice, QStringLiteral("Robert")},
+             GroupMemberInfo{ourAccount, ourDevice, QStringLiteral("me")},
+             GroupMemberInfo{strangerAccount, strangerDevice, QStringLiteral("dana")}});
+        deliver(live, live.peerAccount, live.peerDevice, group, EnvelopeMessageKind::GroupControl,
+                live.peer->encrypt(group, encodeGroupUpdate(info)).value().bytes);
+        QCOMPARE(controller.currentGroupTitle(), QStringLiteral("Lunch"));
+        QCOMPARE(controller.currentContactName(), QStringLiteral("Lunch"));
+        // Bob keeps our roster's name, not the one he sent for himself.
+        QCOMPARE(controller.currentGroupMembers(), QStringLiteral("You, bob, dana"));
+        QCOMPARE(controller.currentGroupMemberCount(), 3);
+        // The stranger is not a contact, so cannot be offered by the "+".
+        QVERIFY(controller.groupCandidates().isEmpty());
+
+        // A message from the stranger is readable and named.
+        deliver(live, strangerAccount, strangerDevice, group, EnvelopeMessageKind::MlsPrivateMessage,
+                strangerClient->encrypt(group, QByteArray("hey")).value().bytes);
+        QCOMPARE(controller.messages()->rowCount(), 1);
+        QCOMPARE(controller.messages()
+                     ->data(controller.messages()->index(0), MessageListModel::SenderNameRole)
+                     .toString(),
+                 QStringLiteral("dana"));
+
+        // Someone renames it.
+        deliver(live, strangerAccount, strangerDevice, group, EnvelopeMessageKind::GroupControl,
+                strangerClient->encrypt(group, encodeGroupUpdate(GroupUpdateMessage::rename(
+                                                   QStringLiteral("Late lunch"))))
+                    .value()
+                    .bytes);
+        QCOMPARE(controller.currentGroupTitle(), QStringLiteral("Late lunch"));
+
+        // The stranger leaves: gone from the roster, and whoever has the lowest
+        // device id re-keys the group without them.
+        deliver(live, strangerAccount, strangerDevice, group, EnvelopeMessageKind::GroupControl,
+                strangerClient->encrypt(group, encodeGroupUpdate(GroupUpdateMessage::leave()))
+                    .value()
+                    .bytes);
+        QCOMPARE(controller.currentGroupMembers(), QStringLiteral("You, bob"));
+        QCoreApplication::processEvents();
+        const bool weCommit = ourDevice.bytes() < live.peerDevice.bytes();
+        const auto commits = sentTo(live, live.peerDevice, EnvelopeMessageKind::MlsCommit);
+        QCOMPARE(commits.size(), weCommit ? 1 : 0);
+        if (weCommit) {
+            // Bob applies our removal commit; the stranger can no longer read.
+            auto applied = live.peer->process(group, commits.first().ciphertext);
+            QVERIFY(applied.hasValue());
+            QCOMPARE(applied.value().kind, MlsProcessKind::Commit);
+            QCOMPARE(live.peer->groupMembers(group).value().size(), qsizetype(1));
+            auto afterwards = live.peer->encrypt(group, QByteArray("just us"));
+            QVERIFY(!strangerClient->process(group, afterwards.value().bytes).hasValue());
+            deliver(live, live.peerAccount, live.peerDevice, group,
+                    EnvelopeMessageKind::MlsPrivateMessage, afterwards.value().bytes);
+            QCOMPARE(controller.messages()->rowCount(), 2);
+        }
+        QVERIFY(!live.session->syncEngine()->isFailedClosed());
+        (void)stranger;
+    }
+
+    void inboundGroupWelcomeFromAStrangerIsIgnored()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        GroupService groups(*live.session, *live.session->syncEngine(), {});
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests, &groups);
+
+        // Bob is NOT an accepted contact here: his Welcome is consumed unjoined.
+        auto ourKeyPackage = live.session->mls()->generateKeyPackage();
+        QVERIFY(ourKeyPackage.hasValue());
+        QVERIFY(live.session->persistMlsState().hasValue());
+        const ConversationId group = ConversationId::generate();
+        QVERIFY(live.peer->createGroup(group).hasValue());
+        auto added = live.peer->addMembers(group, {ourKeyPackage.value()});
+        QVERIFY(added.hasValue());
+        QSignalSpy joined(&groups, &GroupService::groupJoined);
+        deliver(live, live.peerAccount, live.peerDevice, group, EnvelopeMessageKind::GroupWelcome,
+                added.value().welcome);
+        QCOMPARE(joined.count(), 0);
+        QCOMPARE(controller.contacts()->rowCount(), 0);
+        QVERIFY(controller.groupChatIdFor(group).isEmpty());
+        QVERIFY(!live.session->syncEngine()->isFailedClosed());
+    }
+
+    void mockGroupsWorkWithoutServices()
+    {
+        ChatController controller;
+        QCOMPARE(controller.currentContactName(), QStringLiteral("Michael"));
+        QVERIFY(!controller.currentIsGroup());
+        // Everyone but Michael can be added.
+        QCOMPARE(controller.groupCandidates().size(), 5);
+        QSignalSpy changed(&controller, &ChatController::currentContactChanged);
+
+        controller.addToGroup(QStringLiteral("sarah"));
+        QVERIFY(controller.currentIsGroup());
+        QCOMPARE(controller.currentContactName(), QStringLiteral("Michael, Sarah"));
+        QCOMPARE(controller.currentGroupMembers(), QStringLiteral("You, Michael, Sarah"));
+        QCOMPARE(controller.currentAvatarKey(), QStringLiteral("group"));
+        QCOMPARE(controller.contacts()->rowCount(), 7);
+        QCOMPARE(controller.groupCandidates().size(), 4);
+        QVERIFY(changed.count() >= 1);
+        const QString groupId = controller.currentContactId();
+
+        // Adding to the open group grows it; adding a member twice is a no-op.
+        controller.addToGroup(QStringLiteral("alex"));
+        controller.addToGroup(QStringLiteral("alex"));
+        QCOMPARE(controller.currentContactId(), groupId);
+        QCOMPARE(controller.currentGroupMemberCount(), 4);
+        QCOMPARE(controller.groupCandidates().size(), 3);
+
+        // Rename, and the row follows; leave, and the chat is gone.
+        QVERIFY(controller.renameCurrentGroup(QStringLiteral("Weekend plans")));
+        QCOMPARE(controller.currentContactName(), QStringLiteral("Weekend plans"));
+        QCOMPARE(controller.contacts()->contactById(groupId)->name, QStringLiteral("Weekend plans"));
+        controller.setComposerText(QStringLiteral("hello group"));
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(controller.messages()->rowCount(), 1);
+        controller.leaveCurrentGroup();
+        QVERIFY(!controller.currentIsGroup());
+        QCOMPARE(controller.contacts()->rowCount(), 6);
+        QVERIFY(!controller.contacts()->contactById(groupId).has_value());
+        // Renaming with no group open is refused.
+        QVERIFY(!controller.renameCurrentGroup(QStringLiteral("x")));
     }
 
     void incomingCallUsesSavedContactIdentity_data()

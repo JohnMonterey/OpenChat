@@ -33,12 +33,27 @@ enum class EnvelopeMessageKind : quint8 {
     // receive, and never a visible row. The relay sees only ciphertext, so a
     // picture or status never leaves the two devices in the clear.
     ProfileUpdate = 7,
+    // A group chat invitation: the ciphertext IS an MLS Welcome for a group
+    // with more than two members, shipped verbatim (it is already HPKE-sealed
+    // to the recipient's KeyPackage). Unlike MlsHandshake it is never stashed
+    // as a contact request: a device joins it straight away, but only when the
+    // sender is an already-accepted contact and the Welcome's membership names
+    // the sender's device.
+    GroupWelcome = 8,
+    // Group chat control: an MLS application message carrying an encoded
+    // GroupUpdateMessage (the roster and title, a rename, or a member leaving).
+    // Durable and retried, consumed as a control receive, never a visible row.
+    GroupControl = 9,
+    // A raw MLS Commit (a member added or removed) for the members already in
+    // the group. Processed by the ratchet to advance the epoch; carries no
+    // application plaintext and is never a visible row.
+    MlsCommit = 10,
 };
 
 // The highest EnvelopeMessageKind the codec accepts on decode. Kept next to the
 // enum so a new kind cannot be added without widening the wire bound.
 inline constexpr quint8 maxEnvelopeMessageKind =
-    static_cast<quint8>(EnvelopeMessageKind::ProfileUpdate);
+    static_cast<quint8>(EnvelopeMessageKind::MlsCommit);
 
 struct CiphertextEnvelopeV1 final {
     quint8 version = 1;

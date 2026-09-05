@@ -6,6 +6,7 @@
 #include <QCryptographicHash>
 #include <QTimer>
 
+#include <algorithm>
 #include <utility>
 
 namespace OpenChat {
@@ -293,6 +294,134 @@ public:
         drainOutbox();
     }
 
+    // One envelope per recipient over the same ciphertext, each with its own
+    // envelope id, idempotency key and signature.
+    [[nodiscard]] std::optional<QVector<OutboxRecord>>
+    buildFanOut(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                const QByteArray &ciphertext, EnvelopeMessageKind kind, const MessageId &messageId)
+    {
+        QVector<OutboxRecord> outboxes;
+        outboxes.reserve(recipients.size());
+        for (const DeviceId &recipient : recipients) {
+            const auto envelope = buildEnvelope(conversation, recipient, ciphertext, kind);
+            if (!envelope)
+                return std::nullopt;
+            outboxes.append(makeOutbox(envelope->envelopeId, messageId, conversation,
+                                       encodeCanonical(*envelope)));
+        }
+        return outboxes;
+    }
+
+    void doEnqueueGroupText(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                            const QString &text)
+    {
+        if (failed || recipients.isEmpty())
+            return;
+        const auto ciphertext = mls.encrypt(conversation, text.toUtf8());
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        MessageRecord message{MessageId::generate(),
+                              conversation,
+                              config.localDeviceId,
+                              MessageFlow::Outgoing,
+                              ContentKind::Text,
+                              text,
+                              now(),
+                              transport.isConnected() ? DeliveryState::Queued
+                                                      : DeliveryState::Failed,
+                              std::nullopt,
+                              std::nullopt};
+        auto outboxes = buildFanOut(conversation, recipients, ciphertext.value(),
+                                    EnvelopeMessageKind::MlsPrivateMessage, message.id);
+        if (!outboxes) {
+            failClosed();
+            return;
+        }
+        if (message.deliveryState == DeliveryState::Failed)
+            for (OutboxRecord &outbox : *outboxes)
+                outbox.state = OutboxState::Failed;
+
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitGroupSend(message, *outboxes, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        if (message.deliveryState != DeliveryState::Failed)
+            fanOut.insert(message.id.bytes(), FanOutProgress{outboxes->size(), false});
+        emit q->messageQueued(message);
+        emit q->messageStateChanged(message.id, message.deliveryState);
+        drainOutbox();
+    }
+
+    void doSendGroupControl(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                            const QByteArray &payload)
+    {
+        if (failed || recipients.isEmpty())
+            return;
+        const auto ciphertext = mls.encrypt(conversation, payload);
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        auto outboxes = buildFanOut(conversation, recipients, ciphertext.value(),
+                                    EnvelopeMessageKind::GroupControl, MessageId::generate());
+        if (!outboxes) {
+            failClosed();
+            return;
+        }
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitControlSendMany(*outboxes, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        drainOutbox();
+    }
+
+    void doSendGroupChange(const ConversationId &conversation,
+                           const QList<DeviceId> &existingRecipients, const QByteArray &commit,
+                           const QList<DeviceId> &newRecipients, const QByteArray &welcome)
+    {
+        if (failed)
+            return;
+        // Deliberately NO mls.encrypt: a Commit is group handshake traffic the
+        // members' ratchets process as-is, and a Welcome is already sealed to
+        // its recipients' KeyPackages (see doSendHandshake).
+        QVector<OutboxRecord> outboxes;
+        if (!existingRecipients.isEmpty() && !commit.isEmpty()) {
+            auto commits = buildFanOut(conversation, existingRecipients, commit,
+                                       EnvelopeMessageKind::MlsCommit, MessageId::generate());
+            if (!commits) {
+                failClosed();
+                return;
+            }
+            outboxes += *commits;
+        }
+        if (!newRecipients.isEmpty() && !welcome.isEmpty()) {
+            auto welcomes = buildFanOut(conversation, newRecipients, welcome,
+                                        EnvelopeMessageKind::GroupWelcome, MessageId::generate());
+            if (!welcomes) {
+                failClosed();
+                return;
+            }
+            outboxes += *welcomes;
+        }
+        const QByteArray mlsState = mls.takePendingState();
+        if (outboxes.isEmpty()) {
+            // Nobody else to tell (a group created with members who all failed
+            // to claim, or the last member removed): persist the epoch alone.
+            if (!mlsState.isEmpty() && !store.commitMlsStateOnly(mlsState).hasValue())
+                failClosed();
+            return;
+        }
+        if (!store.commitControlSendMany(outboxes, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
+        drainOutbox();
+    }
+
     void doSendCallMedia(const ConversationId &conversation, const DeviceId &recipient,
                          const QByteArray &payload)
     {
@@ -320,10 +449,8 @@ public:
             return;
         for (const OutboxRecord &record : due.value()) {
             if (record.attemptCount >= config.maxSendAttempts) {
-                if (store.failSend(record.envelopeId, record.messageId).hasValue()) {
-                    inflight.remove(record.envelopeId.bytes());
-                    emit q->messageStateChanged(record.messageId, DeliveryState::Failed);
-                }
+                inflight.remove(record.envelopeId.bytes());
+                failOne(record.envelopeId, record.messageId);
                 continue;
             }
             const auto decoded = decodeEnvelope(record.envelope);
@@ -344,18 +471,35 @@ public:
         }
     }
 
+    // Gives up on one envelope. For an ordinary send that fails the message; for
+    // a multi-recipient message it only retires this recipient's envelope, and
+    // the message fails only once every envelope has failed without a single
+    // relay acceptance.
+    void failOne(const EnvelopeId &envelopeId, const MessageId &messageId)
+    {
+        const auto progress = fanOut.find(messageId.bytes());
+        if (progress == fanOut.end()) {
+            if (store.failSend(envelopeId, messageId).hasValue())
+                emit q->messageStateChanged(messageId, DeliveryState::Failed);
+            return;
+        }
+        if (!store.failEnvelope(envelopeId).hasValue())
+            return;
+        if (--progress->pending > 0 || progress->accepted)
+            return;
+        fanOut.erase(progress);
+        if (store.advanceDeliveryState(messageId, DeliveryState::Failed).hasValue())
+            emit q->messageStateChanged(messageId, DeliveryState::Failed);
+    }
+
     void onUnavailable(const EnvelopeId &envelopeId)
     {
         const auto it = inflight.constFind(envelopeId.bytes());
         if (it == inflight.cend())
             return;
         const auto messageId = it.value();
-        if (!store.failSend(envelopeId, messageId).hasValue()) {
-            failClosed();
-            return;
-        }
         inflight.remove(envelopeId.bytes());
-        emit q->messageStateChanged(messageId, DeliveryState::Failed);
+        failOne(envelopeId, messageId);
     }
 
     void onAccepted(const EnvelopeId &envelopeId, quint64 /*serverSequence*/)
@@ -365,6 +509,12 @@ public:
         if (it != inflight.cend()) {
             const MessageId messageId = it.value();
             inflight.erase(it);
+            const auto progress = fanOut.find(messageId.bytes());
+            if (progress != fanOut.end()) {
+                progress->accepted = true;
+                if (--progress->pending <= 0)
+                    fanOut.erase(progress);
+            }
             if (store.advanceDeliveryState(messageId, DeliveryState::Sent).hasValue())
                 emit q->messageStateChanged(messageId, DeliveryState::Sent);
         }
@@ -394,6 +544,12 @@ public:
         // to mls.process would fail. Stash it durably instead and never auto-join.
         if (envelope.messageKind == EnvelopeMessageKind::MlsHandshake) {
             doHandleHandshake(envelope, serverSequence);
+            return;
+        }
+        // A group Welcome likewise names a group we have not joined, but it is
+        // joined outright (from a trusted sender) rather than stashed.
+        if (envelope.messageKind == EnvelopeMessageKind::GroupWelcome) {
+            doHandleGroupWelcome(envelope, serverSequence);
             return;
         }
 
@@ -435,6 +591,10 @@ public:
                     emit q->profileUpdateReceived(envelope.conversationId,
                                                   envelope.senderDeviceId,
                                                   processed.value().applicationData);
+                else if (envelope.messageKind == EnvelopeMessageKind::GroupControl)
+                    emit q->groupControlReceived(envelope.conversationId,
+                                                 envelope.senderDeviceId,
+                                                 processed.value().applicationData);
                 return;
             }
 
@@ -494,6 +654,65 @@ public:
         if (outcome.value() == HandshakeReceiveOutcome::Stashed)
             emit q->handshakeReceived(envelope.senderAccountId, envelope.senderDeviceId,
                                       envelope.conversationId, envelope.createdAtMs);
+    }
+
+    void doHandleGroupWelcome(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence)
+    {
+        if (failed)
+            return;
+        // Consumes the envelope without joining: replay-guard + watermark only,
+        // then acknowledge so the relay stops redelivering it.
+        const auto refuse = [&] {
+            const auto consumed = store.commitGroupWelcome(
+                envelope.envelopeId, envelope.senderDeviceId, envelope.conversationId,
+                serverSequence, envelope.createdAtMs, QByteArrayView(), /*joined=*/false);
+            if (!consumed.hasValue()) {
+                failClosed();
+                return;
+            }
+            transport.acknowledge(envelope.envelopeId, serverSequence);
+        };
+
+        // Only an Accepted contact may put this device into a group, and only
+        // into one it does not already hold: a Welcome for a known group would
+        // overwrite the ratchet state this device already has for it.
+        const auto allowed = store.canJoinGroup(envelope.senderAccountId, envelope.conversationId);
+        if (!allowed.hasValue()) {
+            failClosed();
+            return;
+        }
+        if (!allowed.value()) {
+            refuse();
+            return;
+        }
+        // Authenticate BEFORE joining: the Welcome's membership must name the
+        // relay-claimed sender device, so a relay cannot attribute a contact's
+        // group to a stranger. inspectWelcome is read-only.
+        const auto members = mls.inspectWelcome(envelope.ciphertext);
+        if (!members.hasValue()) {
+            refuse();
+            return;
+        }
+        const bool namesSender = std::any_of(
+            members.value().cbegin(), members.value().cend(), [&](const QByteArray &credential) {
+                return credentialNamesDevice(credential, envelope.senderDeviceId);
+            });
+        if (!namesSender || !mls.joinGroup(envelope.conversationId, envelope.ciphertext).hasValue()) {
+            refuse();
+            return;
+        }
+        const QByteArray mlsState = mls.takePendingState();
+        const auto committed = store.commitGroupWelcome(
+            envelope.envelopeId, envelope.senderDeviceId, envelope.conversationId, serverSequence,
+            envelope.createdAtMs, mlsState, /*joined=*/true);
+        if (!committed.hasValue()) {
+            failClosed();
+            return;
+        }
+        transport.acknowledge(envelope.envelopeId, serverSequence);
+        if (committed.value())
+            emit q->groupWelcomeReceived(envelope.conversationId, envelope.senderAccountId,
+                                         envelope.senderDeviceId, members.value());
     }
 
     void doAcceptHandshake(const ConversationId &conversation, const AccountId &senderAccount,
@@ -556,6 +775,13 @@ public:
     Clock clock;
     MlsTransactionCoordinator coordinator;
     QHash<QByteArray, MessageId> inflight;
+    // Multi-recipient messages still waiting on some envelope, keyed by message
+    // id: how many envelopes are unresolved and whether any was accepted.
+    struct FanOutProgress final {
+        int pending = 0;
+        bool accepted = false;
+    };
+    QHash<QByteArray, FanOutProgress> fanOut;
     QTimer retryTimer;
     bool failed = false;
     bool started = false;
@@ -664,6 +890,33 @@ void SyncEngine::sendProfileUpdate(const ConversationId &conversation,
 {
     d->coordinator.run(conversation, [this, conversation, recipientDevice, payload] {
         d->doSendProfileUpdate(conversation, recipientDevice, payload);
+    });
+}
+
+void SyncEngine::enqueueGroupText(const ConversationId &conversation,
+                                  const QList<DeviceId> &recipients, const QString &text)
+{
+    d->coordinator.run(conversation, [this, conversation, recipients, text] {
+        d->doEnqueueGroupText(conversation, recipients, text);
+    });
+}
+
+void SyncEngine::sendGroupControl(const ConversationId &conversation,
+                                  const QList<DeviceId> &recipients, const QByteArray &payload)
+{
+    d->coordinator.run(conversation, [this, conversation, recipients, payload] {
+        d->doSendGroupControl(conversation, recipients, payload);
+    });
+}
+
+void SyncEngine::sendGroupChange(const ConversationId &conversation,
+                                 const QList<DeviceId> &existingRecipients,
+                                 const QByteArray &commit, const QList<DeviceId> &newRecipients,
+                                 const QByteArray &welcome)
+{
+    d->coordinator.run(conversation, [this, conversation, existingRecipients, commit,
+                                      newRecipients, welcome] {
+        d->doSendGroupChange(conversation, existingRecipients, commit, newRecipients, welcome);
     });
 }
 

@@ -1,3 +1,8 @@
+#include "RelayServer.h"
+#include <QWebSocket>
+#include <QCborArray>
+#include <QNetworkRequest>
+#include <QSignalSpy>
 #include "AuthService.h"
 #include "DirectoryService.h"
 #include "EnvelopeService.h"
@@ -123,7 +128,9 @@ private slots:
     void challengeReplayRejected();
     void challengeExpiryRejected();
     void refreshRotationAndReuseRevokesFamily();
+    void livePresenceRejectionAndReconnectReplay();
     void duplicateSendIsIdempotent();
+    void offlineRejectionAndLostAcceptanceAreUnambiguous();
     void datagramValidationIsFullButStoresNothing();
     void keyPackageClaimIsOneTime();
     void concurrentKeyPackageClaimHasOneWinner();
@@ -195,7 +202,8 @@ void RelayServicesTest::initTestCase()
     const QStringList migrations{QStringLiteral(":/relay/001_accounts_devices.sql"),
                                  QStringLiteral(":/relay/002_tokens_keypackages.sql"),
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
-                                 QStringLiteral(":/relay/004_invites.sql")};
+                                 QStringLiteral(":/relay/004_invites.sql"),
+                                 QStringLiteral(":/relay/005_envelope_acceptances.sql")};
     QVERIFY2(m_store->applyMigrations(migrations, &error), qPrintable(error));
     m_available = true;
 }
@@ -214,7 +222,7 @@ void RelayServicesTest::init()
     QVERIFY(truncate.exec(QStringLiteral(
         "TRUNCATE accounts, devices, auth_challenges, token_families, refresh_tokens, "
         "access_tokens, key_packages, inbox_messages, device_watermarks, attachments, "
-        "rate_limits, invites RESTART IDENTITY CASCADE")));
+        "rate_limits, invites, envelope_acceptances RESTART IDENTITY CASCADE")));
 }
 
 RelayServicesTest::Registered RelayServicesTest::registerDevice(const QString &handle)
@@ -364,6 +372,94 @@ void RelayServicesTest::duplicateSendIsIdempotent()
                                          bytes);
     QVERIFY(!forged.hasValue());
     QCOMPARE(forged.error(), RelayError::Unauthorized);
+}
+
+void RelayServicesTest::livePresenceRejectionAndReconnectReplay()
+{
+    const auto sender = registerDevice(QStringLiteral("live_sender"));
+    const auto recipient = registerDevice(QStringLiteral("live_recipient"));
+    AuthService auth(*m_store);
+    EnvelopeService envelopes(*m_store);
+    KeyPackageService packages(*m_store);
+    DirectoryService directory(*m_store);
+    RelayServer::Limits limits;
+    limits.syncLimit = 1; // exercise replay across multiple pages
+    RelayServer server(*m_store, auth, envelopes, packages, directory, limits, nullptr);
+    const auto port = server.start(QHostAddress::LocalHost, 0);
+    QVERIFY(port);
+    const AuthenticatedDevice identity{sender.account, sender.device};
+    for (int i = 0; i < 2; ++i) {
+        const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device,
+                                             recipient.device, "backlog", m_now);
+        QVERIFY(envelopes.submit(identity, encodeCanonical(envelope)).hasValue());
+    }
+    const auto request = [port](const QByteArray &token) {
+        QNetworkRequest req(QUrl(QStringLiteral("ws://127.0.0.1:%1/v1/live?since=0").arg(port)));
+        req.setRawHeader("Authorization", "Bearer " + token);
+        return req;
+    };
+    QWebSocket peer;
+    QSignalSpy received(&peer, &QWebSocket::binaryMessageReceived);
+    peer.open(request(recipient.tokens.accessToken));
+    QTRY_COMPARE(received.size(), 2);
+    QWebSocket local;
+    QSignalSpy replies(&local, &QWebSocket::binaryMessageReceived);
+    local.open(request(sender.tokens.accessToken));
+    QTRY_COMPARE(local.state(), QAbstractSocket::ConnectedState);
+    QCborArray ids; ids.append(recipient.device.bytes());
+    QCborArray query; query.append(7); query.append(ids);
+    local.sendBinaryMessage(query.toCborValue().toCbor());
+    QTRY_COMPARE(replies.size(), 1);
+    auto response = QCborValue::fromCbor(replies.takeFirst().first().toByteArray()).toArray();
+    QCOMPARE(response.at(0).toInteger(), 8);
+    QVERIFY(response.at(1).toArray().first().toArray().at(1).toBool());
+    peer.close();
+    QTRY_COMPARE(peer.state(), QAbstractSocket::UnconnectedState);
+    local.sendBinaryMessage(query.toCborValue().toCbor());
+    QTRY_COMPARE(replies.size(), 1);
+    response = QCborValue::fromCbor(replies.takeFirst().first().toByteArray()).toArray();
+    QVERIFY(!response.at(1).toArray().first().toArray().at(1).toBool());
+    const auto rejected = signedEnvelope(sender.key.pkey, sender.account, sender.device,
+                                         recipient.device, "offline", m_now);
+    local.sendBinaryMessage(encodeCanonical(rejected));
+    QTRY_COMPARE(replies.size(), 1);
+    response = QCborValue::fromCbor(replies.takeFirst().first().toByteArray()).toArray();
+    QCOMPARE(response.at(0).toInteger(), 9);
+    QCOMPARE(response.at(1).toByteArray(), rejected.envelopeId.bytes());
+    received.clear();
+    peer.open(request(recipient.tokens.accessToken));
+    QTRY_COMPARE(received.size(), 2); // only the pre-existing backlog
+    for (const auto &frame : received) {
+        const auto delivery = QCborValue::fromCbor(frame.first().toByteArray()).toArray();
+        QCOMPARE(delivery.at(0).toInteger(), 4);
+    }
+    peer.close();
+    local.close();
+    QTRY_COMPARE(peer.state(), QAbstractSocket::UnconnectedState);
+    QTRY_COMPARE(local.state(), QAbstractSocket::UnconnectedState);
+}
+
+void RelayServicesTest::offlineRejectionAndLostAcceptanceAreUnambiguous()
+{
+    const auto sender = registerDevice(QStringLiteral("retry_sender"));
+    const auto recipient = registerDevice(QStringLiteral("retry_recipient"));
+    EnvelopeService envelopes(*m_store);
+    const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device,
+                                         recipient.device, "hello", m_now);
+    const auto bytes = encodeCanonical(envelope);
+    const AuthenticatedDevice identity{sender.account, sender.device};
+    const auto rejected = envelopes.submit(identity, bytes, false);
+    QVERIFY(!rejected.hasValue());
+    QCOMPARE(rejected.error(), RelayError::RecipientUnavailable);
+    QVERIFY(envelopes.fetchSince(recipient.device, 0, 100).value().items.isEmpty());
+    const auto accepted = envelopes.submit(identity, bytes, true);
+    QVERIFY(accepted.hasValue());
+    QVERIFY(envelopes.acknowledge(recipient.device, accepted.value().serverSequence).hasValue());
+    const auto retry = envelopes.submit(identity, bytes, false);
+    QVERIFY(retry.hasValue());
+    QVERIFY(retry.value().duplicate);
+    QCOMPARE(retry.value().serverSequence, accepted.value().serverSequence);
+    QVERIFY(envelopes.fetchSince(recipient.device, 0, 100).value().items.isEmpty());
 }
 
 void RelayServicesTest::datagramValidationIsFullButStoresNothing()

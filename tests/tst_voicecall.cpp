@@ -6,6 +6,7 @@
 #include "call/CallSession.h"
 #include "call/CallSignal.h"
 #include "call/CallSounds.h"
+#include "call/QtAudioIo.h"
 #include "media/AudioCodec.h"
 #include "media/AudioConvert.h"
 #include "media/JitterBuffer.h"
@@ -370,6 +371,30 @@ class VoiceCallTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void captureMixesEitherInterfaceInputToMono()
+    {
+        QAudioFormat format = callQAudioFormat();
+        format.setChannelCount(2);
+        for (int activeChannel : {0, 1}) {
+            QVector<qint16> stereo(CallAudioFormat::samplesPerFrame * 2, 0);
+            for (int i = 0; i < CallAudioFormat::samplesPerFrame; ++i)
+                stereo[i * 2 + activeChannel] = 12000;
+            const auto frame = mixCaptureFrame(AudioConvert::frameOf(stereo), format);
+            QVERIFY(isFullAudioFrame(frame));
+            for (auto sample : AudioConvert::samplesOf(frame))
+                QVERIFY(std::abs(sample - 6000) <= 1);
+        }
+        format.setSampleFormat(QAudioFormat::Float);
+        format.setSampleRate(44100);
+        QVector<float> stereo(882 * 2, 0.5f);
+        const QByteArray bytes(reinterpret_cast<const char *>(stereo.constData()), stereo.size() * sizeof(float));
+        const auto frame = mixCaptureFrame(bytes, format);
+        QVERIFY(isFullAudioFrame(frame));
+        for (auto sample : AudioConvert::samplesOf(frame))
+            QCOMPARE(sample, 16384);
+        QVERIFY(mixCaptureFrame(bytes.left(5), format).isEmpty());
+    }
+
 
     // ---------------------------------------------------------------- WAV in
 

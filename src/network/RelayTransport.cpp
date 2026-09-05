@@ -7,6 +7,11 @@ namespace OpenChat {
 RelayTransport::RelayTransport(RelayClient &relay, QObject *parent)
     : QObject(parent), m_relay(relay)
 {
+    QObject::connect(&m_relay, &RelayClient::recipientUnavailable, this,
+                     [this](const EnvelopeId &id) {
+                         if (onRecipientUnavailable)
+                             onRecipientUnavailable(id);
+                     });
     // Republish RelayClient's inbound signals through the SyncTransport
     // callbacks. Each callback is null until the engine installs it in start(),
     // so every forward is guarded. Direct connections keep the engine's

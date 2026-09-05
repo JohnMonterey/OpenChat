@@ -16,7 +16,7 @@ namespace OpenChat {
 class OpusAudioCodec final : public AudioCodec
 {
 public:
-    static constexpr int defaultBitrate = 24'000;
+    static constexpr int defaultBitrate = 64'000;
     // An Opus packet for one 20 ms mono frame never approaches this; it bounds
     // the encode buffer and rejects an absurd payload before decoding it.
     static constexpr int maxPacketBytes = 4'000;

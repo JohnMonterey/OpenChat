@@ -74,7 +74,7 @@ qt_add_qml_module(OpenChat
         assets/icons/phone-call.svg
         assets/icons/settings.svg
         assets/icons/chevron-down.svg
-        assets/icons/openchat.svg
+        assets/icons/openchat.png
 )
 
 target_include_directories(OpenChat PRIVATE src)

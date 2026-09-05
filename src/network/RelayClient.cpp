@@ -29,6 +29,9 @@ namespace {
 // array. Delivery frames are top-level CBOR maps (canonical envelopes) and are
 // never handled here, so the two categories can never be confused.
 enum class ControlType : int {
+    PresenceQuery = 7, // client -> server: [7, [deviceId, ...]]
+    PresenceResult = 8, // server -> client: [8, [[deviceId, online], ...]]
+    RecipientUnavailable = 9, // server -> client: [9, envelopeId]; never stored
     RelayAccepted = 1, // server -> client: [1, bstr envelopeId(16), uint sequence]
     AuthExpired = 2,   // server -> client: [2]
     Acknowledge = 3,   // client -> server: [3, bstr envelopeId(16), uint watermark]
@@ -157,6 +160,17 @@ public:
         reconnectTimer->setSingleShot(true);
         QObject::connect(reconnectTimer, &QTimer::timeout, q, [this] { openSocket(); });
 
+        heartbeat = new QTimer(q);
+        QObject::connect(heartbeat, &QTimer::timeout, q, [this] {
+            if (!socket || !subprotocolVerified)
+                return;
+            if (awaitingPong) {
+                socket->abort();
+                return;
+            }
+            awaitingPong = true;
+            socket->ping();
+        });
         connectDeadline = new QTimer(q);
         connectDeadline->setSingleShot(true);
         QObject::connect(connectDeadline, &QTimer::timeout, q, [this] { onConnectTimeout(); });
@@ -270,6 +284,7 @@ public:
         socket->setMaxAllowedIncomingFrameSize(limits.maxIncomingFrameBytes);
         socket->setMaxAllowedIncomingMessageSize(limits.maxIncomingMessageBytes);
 
+        QObject::connect(socket, &QWebSocket::pong, q, [this] { awaitingPong = false; });
         QObject::connect(socket, &QWebSocket::connected, q, [this] { onSocketConnected(); });
         QObject::connect(socket, &QWebSocket::disconnected, q, [this] { onSocketDisconnected(); });
         QObject::connect(socket, &QWebSocket::binaryMessageReceived, q,
@@ -322,6 +337,8 @@ public:
         }
 
         subprotocolVerified = true;
+        awaitingPong = false;
+        heartbeat->start(10'000);
         reconnectAttempt = 0;
         refreshAttemptedThisCycle = false;
         emit q->connected();
@@ -329,6 +346,7 @@ public:
 
     void onSocketDisconnected()
     {
+        heartbeat->stop();
         connectDeadline->stop();
         // A frame/message that overruns the incoming bound makes QWebSocket
         // close with CloseCodeTooMuchData, often without a separate error
@@ -460,6 +478,34 @@ public:
         }
 
         switch (static_cast<ControlType>(array->at(0).toInteger())) {
+        case ControlType::PresenceResult: {
+            if (array->size() != 2 || !array->at(1).isArray()) {
+                emit q->transportError(RelayTransportError::InvalidControlFrame);
+                return;
+            }
+            const auto rows = array->at(1).toArray();
+            if (rows.size() > 256)
+                return;
+            for (const auto &value : rows) {
+                const auto row = value.toArray();
+                if (row.size() != 2 || !row.at(1).isBool())
+                    continue;
+                const auto id = DeviceId::fromBytes(fixedBytes(row.at(0), DeviceId::byteCount));
+                if (id)
+                    emit q->devicePresenceChanged(*id, row.at(1).toBool());
+            }
+            return;
+        }
+        case ControlType::RecipientUnavailable: {
+            const auto id = array->size() == 2
+                ? EnvelopeId::fromBytes(fixedBytes(array->at(1), EnvelopeId::byteCount)) : std::nullopt;
+            if (!id) {
+                emit q->transportError(RelayTransportError::InvalidControlFrame);
+                return;
+            }
+            emit q->recipientUnavailable(*id);
+            return;
+        }
         case ControlType::RelayAccepted: {
             if (array->size() != 3 || !array->at(2).isInteger()) {
                 emit q->transportError(RelayTransportError::InvalidControlFrame);
@@ -647,6 +693,7 @@ public:
 
     void teardownSocket()
     {
+        heartbeat->stop();
         if (!socket)
             return;
         QObject::disconnect(socket, nullptr, q, nullptr);
@@ -666,6 +713,8 @@ public:
     QNetworkAccessManager *network = nullptr;
     QWebSocket *socket = nullptr;
     QTimer *reconnectTimer = nullptr;
+    QTimer *heartbeat = nullptr;
+    bool awaitingPong = false;
     QTimer *connectDeadline = nullptr;
 
     QSslConfiguration tlsConfig;
@@ -840,6 +889,21 @@ Result<void, RelayCallError> RelayClient::acknowledge(const EnvelopeId &envelope
 
     d->socket->sendBinaryMessage(control.toCborValue().toCbor());
     return Result<void, RelayCallError>::success();
+}
+
+void RelayClient::requestPresence(const QList<DeviceId> &devices)
+{
+    if (!isConnected())
+        return;
+    for (qsizetype offset = 0; offset < devices.size(); offset += 256) {
+        QCborArray ids;
+        for (qsizetype i = offset; i < std::min(offset + 256, devices.size()); ++i)
+            ids.append(devices.at(i).bytes());
+        QCborArray request;
+        request.append(7);
+        request.append(ids);
+        d->socket->sendBinaryMessage(request.toCborValue().toCbor());
+    }
 }
 
 void RelayClient::fetchSince(quint64 watermark)

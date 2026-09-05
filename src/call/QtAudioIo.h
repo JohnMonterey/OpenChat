@@ -15,9 +15,11 @@ QT_END_NAMESPACE
 
 namespace OpenChat {
 
-// The QAudioFormat matching CallAudioFormat exactly: what the microphone is
-// opened with, and the shape of every frame inside the call.
+// The format of every frame inside the call.
 [[nodiscard]] QAudioFormat callQAudioFormat();
+
+// Convert one complete device frame to mono, including float/multichannel inputs.
+[[nodiscard]] AudioFrame mixCaptureFrame(const QByteArray &pcm, const QAudioFormat &format);
 
 // The format the speaker is opened with: the call format widened to stereo.
 // A mono output stream lands on the left channel alone on common backends, so

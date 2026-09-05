@@ -358,6 +358,26 @@ private slots:
         QCOMPARE(frame->property("height").toReal(), singleLineHeight);
     }
 
+    void failedMessageShowsRetryBelowBubble()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QScopedPointer<QObject> item(component.createWithInitialProperties({
+            {"direction", 1}, {"deliveryState", 6}, {"body", "hello"},
+            {"timestamp", "10:15 AM"}, {"kind", 0}, {"dateLabel", ""},
+            {"showDateDivider", false}, {"width", 540}}));
+        QVERIFY2(item, qPrintable(component.errorString()));
+        auto *retry = item->findChild<QObject *>("messageRetry");
+        QVERIFY(retry);
+        QVERIFY(retry->property("visible").toBool());
+        QCOMPARE(retry->property("color").value<QColor>(), QColor("#c62828"));
+        QVERIFY(retry->property("y").toDouble() >= item->property("bubbleHeight").toDouble());
+        item->setProperty("deliveryState", 3);
+        QVERIFY(!retry->property("visible").toBool());
+    }
+
     void messageTimestampFormatting()
     {
         QQmlEngine engine;
@@ -367,7 +387,8 @@ private slots:
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
 
         QScopedPointer<QObject> delegate(component.createWithInitialProperties(
-            {{QStringLiteral("direction"), 0},
+            {{QStringLiteral("deliveryState"), 0},
+             {QStringLiteral("direction"), 0},
              {QStringLiteral("body"), QStringLiteral("Hello")},
              {QStringLiteral("timestamp"), QStringLiteral("10:15 AM")},
              {QStringLiteral("kind"), 0},
@@ -485,7 +506,8 @@ private slots:
 
         const auto bubbleWidth = [&component](const QString &body) {
             QScopedPointer<QObject> delegate(component.createWithInitialProperties(
-                {{QStringLiteral("direction"), 0},
+                {{QStringLiteral("deliveryState"), 0},
+             {QStringLiteral("direction"), 0},
                  {QStringLiteral("body"), body},
                  {QStringLiteral("timestamp"), QStringLiteral("10:15 AM")},
                  {QStringLiteral("kind"), 0},

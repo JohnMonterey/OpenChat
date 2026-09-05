@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QTimer>
 #include <QStringList>
 
 #include <optional>
@@ -16,6 +17,7 @@ namespace OpenChat {
 class ContactRequestService;
 class ProfileSession;
 class SyncEngine;
+class RelayClient;
 
 // The QML-facing bridge for the conversation surface: the chat list, the open
 // conversation's history, and the composer.
@@ -31,6 +33,7 @@ class ChatController final : public QObject
     Q_OBJECT
     Q_PROPERTY(ContactListModel *contacts READ contacts CONSTANT)
     Q_PROPERTY(MessageListModel *messages READ messages CONSTANT)
+    Q_PROPERTY(bool localOnline READ localOnline NOTIFY localOnlineChanged)
     Q_PROPERTY(QString localUserName READ localUserName NOTIFY localUserNameChanged)
     Q_PROPERTY(bool hasCurrentContact READ hasCurrentContact NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentContactName READ currentContactName NOTIFY currentContactChanged)
@@ -106,6 +109,8 @@ public:
     [[nodiscard]] int currentSettingsCategory() const;
     [[nodiscard]] QString currentSettingsCategoryName() const;
     [[nodiscard]] QStringList currentSettingsElements() const;
+    void setPresenceRelay(RelayClient *relay);
+    [[nodiscard]] bool localOnline() const { return m_localOnline; }
     [[nodiscard]] bool isLive() const noexcept { return m_live; }
 
     Q_INVOKABLE bool selectContact(const QString &id);
@@ -159,6 +164,7 @@ signals:
     void searchQueryChanged();
     void sessionStateChanged();
     void navSectionChanged();
+    void localOnlineChanged();
     void chatUnreadCountChanged();
     void currentSettingsCategoryChanged();
 
@@ -185,7 +191,9 @@ private:
 
     // Live roster and history.
     void loadRoster();
-    [[nodiscard]] static Contact contactRowFor(const LiveChat &chat);
+    void refreshPresence();
+    void setDevicePresence(const DeviceId &device, bool online);
+    [[nodiscard]] Contact contactRowFor(const LiveChat &chat) const;
     [[nodiscard]] QVector<Message> loadHistory(const ConversationId &conversation) const;
     [[nodiscard]] static Message toMessage(const MessageRecord &record);
     [[nodiscard]] QString contactForConversation(const ConversationId &conversation) const;
@@ -209,6 +217,10 @@ private:
     // Live seam (null in mock mode). Borrowed; owned by the app runtime and kept
     // alive past this controller.
     bool m_live = false;
+    bool m_localOnline = true; // reference rendering
+    RelayClient *m_presenceRelay = nullptr;
+    QTimer m_presenceTimer;
+    QHash<QByteArray, qint64> m_onlineDevices;
     ProfileSession *m_session = nullptr;
     SyncEngine *m_engine = nullptr;
     ContactRequestService *m_requests = nullptr;

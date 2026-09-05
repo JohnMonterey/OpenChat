@@ -1,4 +1,5 @@
 #include "controllers/ChatController.h"
+#include "network/RelayClient.h"
 
 #include "app/ContactRequestService.h"
 #include "app/ProfileSession.h"
@@ -463,6 +464,63 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
     emit chatUnreadCountChanged();
 }
 
+void ChatController::setPresenceRelay(RelayClient *relay)
+{
+    if (m_presenceRelay == relay)
+        return;
+    if (m_presenceRelay)
+        disconnect(m_presenceRelay, nullptr, this, nullptr);
+    m_presenceRelay = relay;
+    m_onlineDevices.clear();
+    disconnect(&m_presenceTimer, nullptr, this, nullptr);
+    connect(&m_presenceTimer, &QTimer::timeout, this, &ChatController::refreshPresence);
+    if (relay) {
+        connect(relay, &RelayClient::connected, this, &ChatController::refreshPresence);
+        connect(relay, &RelayClient::disconnected, this, &ChatController::refreshPresence);
+        connect(relay, &RelayClient::devicePresenceChanged, this, &ChatController::setDevicePresence);
+        m_presenceTimer.start(5000);
+    } else {
+        m_presenceTimer.stop();
+    }
+    refreshPresence();
+}
+
+void ChatController::refreshPresence()
+{
+    const bool online = m_presenceRelay && m_presenceRelay->isConnected();
+    if (m_localOnline != online) {
+        m_localOnline = online;
+        emit localOnlineChanged();
+    }
+    QList<DeviceId> devices;
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    for (const auto &chat : m_liveChats) {
+        if (!chat.peerDevice)
+            continue;
+        devices.append(*chat.peerDevice);
+        if (!online || now - m_onlineDevices.value(chat.peerDevice->bytes(), 0) > 15'000)
+            setDevicePresence(*chat.peerDevice, false);
+    }
+    if (online)
+        m_presenceRelay->requestPresence(devices);
+}
+
+void ChatController::setDevicePresence(const DeviceId &device, bool online)
+{
+    for (const auto &chat : m_liveChats) {
+        if (!chat.peerDevice || *chat.peerDevice != device)
+            continue;
+        if (online && m_presenceRelay && m_presenceRelay->isConnected())
+            m_onlineDevices.insert(device.bytes(), QDateTime::currentMSecsSinceEpoch());
+        else
+            m_onlineDevices.remove(device.bytes());
+        m_contacts.setPresence(chat.account.toHex(), m_onlineDevices.contains(device.bytes())
+            ? Presence::Available : Presence::Offline);
+        if (chat.account.toHex() == m_currentContactId)
+            emit currentContactChanged();
+    }
+}
+
 void ChatController::loadRoster()
 {
     if (m_session == nullptr)
@@ -511,6 +569,8 @@ void ChatController::loadRoster()
     refreshVisibleMessages();
     emit currentContactChanged();
     updateCanSend(wasSendable);
+    if (m_presenceRelay)
+        refreshPresence();
 }
 
 std::optional<ChatController::CallRoute>
@@ -530,16 +590,15 @@ QString ChatController::localAvatarKey() const
     return QStringLiteral("userpfp_none");
 }
 
-Contact ChatController::contactRowFor(const LiveChat &chat)
+Contact ChatController::contactRowFor(const LiveChat &chat) const
 {
     Contact row;
     row.id = chat.account.toHex();
     row.name = chat.handle.isEmpty() ? shortIdLabel(chat.account) : chat.handle;
-    row.presence = Presence::Offline; // no presence exchange exists yet
+    row.presence = chat.peerDevice && m_onlineDevices.contains(chat.peerDevice->bytes())
+        ? Presence::Available : Presence::Offline;
     row.favorite = false;
     row.avatarKey = QStringLiteral("userpfp_none");
-    row.statusText = chat.handle.isEmpty() ? QStringLiteral("Contact")
-                                           : QStringLiteral("@") + chat.handle;
     return row;
 }
 

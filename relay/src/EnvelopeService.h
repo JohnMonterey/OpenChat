@@ -49,7 +49,8 @@ public:
     // authenticatedDevice is the device resolved from the bearer token; the
     // envelope's sender must equal it.
     [[nodiscard]] Result<SubmitResult, RelayError>
-    submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes);
+    submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes,
+           bool recipientAvailable = true);
 
     // Every check submit() makes before it writes anything: canonical decode,
     // sender identity, expiry, the sender's Ed25519 signature over the canonical

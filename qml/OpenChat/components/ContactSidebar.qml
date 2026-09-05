@@ -68,12 +68,12 @@ Item {
             x: localAvatar.x + localAvatar.width + localUser.beadSpacing
             y: 51
             beadSize: 11
-            presence: 0
+            presence: sidebar.controller.localOnline ? 0 : 2
         }
         Text {
             x: localBead.x + localBead.width + localUser.beadSpacing
             y: 46
-            text: "Available"
+            text: sidebar.controller.localOnline ? "Available" : "Offline"
             color: Theme.textSecondary
             font.family: Theme.uiFont
             font.pixelSize: 14

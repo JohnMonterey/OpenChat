@@ -4,6 +4,8 @@ import OpenChat.Native
 
 Item {
     id: delegateRoot
+    required property int deliveryState
+    signal retryRequested(string messageBody)
     required property int direction
     required property string body
     required property string timestamp
@@ -33,7 +35,25 @@ Item {
         : Math.max(54, messageBody.paintedHeight + messageTime.implicitHeight + 21)
     readonly property real dateSectionHeight: showDateDivider ? 64 : 0
 
-    implicitHeight: dateSectionHeight + bubbleHeight + 20
+    implicitHeight: dateSectionHeight + bubbleHeight + 20 + (retryText.visible ? 20 : 0)
+
+    Text {
+        id: retryText
+        objectName: "messageRetry"
+        visible: delegateRoot.outgoing && delegateRoot.deliveryState === 6
+        anchors.right: bubble.right
+        anchors.rightMargin: delegateRoot.bubbleTailWidth
+        y: bubble.y + bubble.height + 4
+        text: "Not sent. Try again"
+        color: "#c62828"
+        font.family: Theme.uiFont
+        font.pixelSize: 12
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: delegateRoot.retryRequested(delegateRoot.body)
+        }
+    }
 
     Text {
         id: naturalMessageBody

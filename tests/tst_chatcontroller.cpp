@@ -426,7 +426,7 @@ private slots:
         QCOMPARE(controller.contacts()->rowCount(), 1);
         QVERIFY(controller.hasCurrentContact());
         QCOMPARE(controller.currentContactName(), QStringLiteral("bob"));
-        QCOMPARE(controller.currentStatusText(), QStringLiteral("@bob"));
+        QCOMPARE(controller.currentStatusText(), QStringLiteral("Offline"));
         QCOMPARE(controller.messages()->rowCount(), 0);
         QCOMPARE(controller.chatUnreadCount(), 0);
         QVERIFY(contactSpy.count() >= 1);
@@ -444,7 +444,7 @@ private slots:
         QCOMPARE(controller.messages()->data(sentRow, MessageListModel::DirectionRole).toInt(),
                  static_cast<int>(OpenChat::MessageDirection::Outgoing));
         QCOMPARE(controller.messages()->data(sentRow, MessageListModel::DeliveryStateRole).toInt(),
-                 static_cast<int>(OpenChat::MessageDeliveryState::Queued));
+                 static_cast<int>(OpenChat::MessageDeliveryState::Sending));
         QVERIFY(!controller.messages()
                      ->data(sentRow, MessageListModel::StableIdRole)
                      .toString()

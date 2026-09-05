@@ -82,7 +82,8 @@ EnvelopeService::validate(const AuthenticatedDevice &authenticatedDevice,
 }
 
 Result<SubmitResult, RelayError>
-EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes)
+EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes,
+                        bool recipientAvailable)
 {
     const auto validated = validate(authenticatedDevice, envelopeBytes);
     if (!validated.hasValue())
@@ -91,13 +92,34 @@ EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArr
 
     QSqlDatabase &db = m_store.database();
     const qint64 now = m_store.nowMs();
+    QSqlQuery accepted(db);
+    accepted.prepare(QStringLiteral(
+        "SELECT server_sequence, accepted_at_ms, envelope_id, ciphertext_sha256 FROM envelope_acceptances "
+        "WHERE recipient_device_id=? AND sender_device_id=? AND idempotency_key=?"));
+    accepted.addBindValue(envelope.recipientDeviceId.bytes());
+    accepted.addBindValue(envelope.senderDeviceId.bytes());
+    accepted.addBindValue(envelope.idempotencyKey.bytes());
+    if (!accepted.exec())
+        return Result<SubmitResult, RelayError>::failure(RelayError::Internal);
+    if (accepted.next()) {
+        if (accepted.value(2).toByteArray() != envelope.envelopeId.bytes()
+            || accepted.value(3).toByteArray() != envelope.ciphertextSha256)
+            return Result<SubmitResult, RelayError>::failure(RelayError::Conflict);
+        return Result<SubmitResult, RelayError>::success(
+            {static_cast<quint64>(accepted.value(0).toLongLong()), accepted.value(1).toLongLong(), true});
+    }
+    if (!recipientAvailable && envelope.messageKind == EnvelopeMessageKind::MlsPrivateMessage)
+        return Result<SubmitResult, RelayError>::failure(RelayError::RecipientUnavailable);
     QSqlQuery insert(db);
     insert.prepare(QStringLiteral(
-        "INSERT INTO inbox_messages (recipient_device_id, envelope_id, idempotency_key, "
+        "WITH inserted AS (INSERT INTO inbox_messages (recipient_device_id, envelope_id, idempotency_key, "
         "sender_device_id, envelope, ciphertext_sha256, created_at_ms, accepted_at_ms, "
         "expires_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT (recipient_device_id, sender_device_id, idempotency_key) DO NOTHING "
-        "RETURNING server_sequence, accepted_at_ms"));
+        "RETURNING recipient_device_id, sender_device_id, idempotency_key, envelope_id, "
+        "ciphertext_sha256, server_sequence, accepted_at_ms, expires_at_ms) "
+        "INSERT INTO envelope_acceptances SELECT * FROM inserted "
+        "ON CONFLICT DO NOTHING RETURNING server_sequence, accepted_at_ms"));
     insert.addBindValue(envelope.recipientDeviceId.bytes());
     insert.addBindValue(envelope.envelopeId.bytes());
     insert.addBindValue(envelope.idempotencyKey.bytes());
@@ -127,7 +149,7 @@ EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArr
     // Return the original acceptance idempotently.
     QSqlQuery existing(db);
     existing.prepare(QStringLiteral(
-        "SELECT server_sequence, accepted_at_ms FROM inbox_messages "
+        "SELECT server_sequence, accepted_at_ms FROM envelope_acceptances "
         "WHERE recipient_device_id = ? AND sender_device_id = ? AND idempotency_key = ?"));
     existing.addBindValue(envelope.recipientDeviceId.bytes());
     existing.addBindValue(envelope.senderDeviceId.bytes());
@@ -222,6 +244,11 @@ Result<void, RelayError> EnvelopeService::acknowledge(const DeviceId &deviceId, 
     prune.addBindValue(static_cast<qlonglong>(watermark));
     prune.addBindValue(m_store.nowMs());
     if (!prune.exec())
+        return Result<void, RelayError>::failure(RelayError::Internal);
+    QSqlQuery pruneAcceptances(db);
+    pruneAcceptances.prepare(QStringLiteral("DELETE FROM envelope_acceptances WHERE expires_at_ms < ?"));
+    pruneAcceptances.addBindValue(m_store.nowMs());
+    if (!pruneAcceptances.exec())
         return Result<void, RelayError>::failure(RelayError::Internal);
     return Result<void, RelayError>::success();
 }

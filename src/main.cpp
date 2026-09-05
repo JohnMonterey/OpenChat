@@ -263,6 +263,7 @@ private:
                                                  m_session.get(), m_session->syncEngine());
             m_chatController->setLiveServices(m_session.get(), m_session->syncEngine(),
                                               m_contactRequests.get());
+            m_chatController->setPresenceRelay(m_relay.get());
             // A resolved handle renames the chat row of an already-accepted peer,
             // and the caller shown on a ringing call screen.
             QObject::connect(m_contactController.get(),
@@ -741,7 +742,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
     QGuiApplication::setWindowIcon(
-        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.svg")));
+        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.png")));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("OpenChat secure chat client"));

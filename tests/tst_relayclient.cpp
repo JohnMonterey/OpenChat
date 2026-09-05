@@ -217,6 +217,7 @@ private slots:
     void refreshCycleResetsAfterSuccess();
     void httpsTlsFailureIsTls();
     void insecureEndpointsAreRejected();
+    void baseUrlPopulatesEveryEndpoint();
 
     void backoffRespectsFullJitterBounds();
     void backoffSaturatesAtCap();
@@ -1417,14 +1418,25 @@ void RelayClientTest::httpsTlsFailureIsTls()
     QCOMPARE(complete.count(), 0);
 }
 
+// Every endpoint the client dials must be derived from the base URL. A field left
+// default-constructed reaches its caller as an empty QUrl, which the scheme guard
+// reports as InsecureEndpoint -- a transport failure indistinguishable from an
+// unreachable relay. Asserting the whole set (via isSecure(), which covers every
+// field) means a newly added endpoint cannot be silently left unwired.
+void RelayClientTest::baseUrlPopulatesEveryEndpoint()
+{
+    const RelayEndpoints endpoints =
+        RelayEndpoints::fromBaseUrl(QStringLiteral("https://relay.example/v1"));
+    QVERIFY(endpoints.isSecure());
+    QCOMPARE(endpoints.keyPackagesClaim,
+             QUrl(QStringLiteral("https://relay.example/v1/key-packages/claim")));
+    QCOMPARE(endpoints.live, QUrl(QStringLiteral("wss://relay.example/v1/live")));
+}
+
 void RelayClientTest::insecureEndpointsAreRejected()
 {
-    RelayEndpoints secure;
-    secure.authChallenge = QUrl(QStringLiteral("https://relay.example/auth/challenge"));
-    secure.authComplete = QUrl(QStringLiteral("https://relay.example/auth/complete"));
-    secure.authRefresh = QUrl(QStringLiteral("https://relay.example/auth/refresh"));
-    secure.sync = QUrl(QStringLiteral("https://relay.example/sync"));
-    secure.live = QUrl(QStringLiteral("wss://relay.example/live"));
+    const RelayEndpoints secure = RelayEndpoints::fromBaseUrl(
+        QStringLiteral("https://relay.example/v1"));
     QVERIFY(secure.isSecure());
 
     RelayEndpoints wsDowngrade = secure;

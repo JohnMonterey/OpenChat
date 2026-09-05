@@ -46,6 +46,15 @@ struct RelayEndpoints final {
     QUrl invitesRedeem; // POST { token } -> CBOR { account_id, devices } (authenticated)
     QUrl live;          // wss:// live envelope stream
 
+    // Derives the full endpoint set from a base URL, e.g. https://host/v1. The
+    // live stream reuses the same host/path over wss (ws for a plaintext base, so
+    // local test servers still work; isSecure() is what rejects that in
+    // production). This is the single place endpoints are spelled out -- building
+    // a set field by field risks leaving one default-constructed, which surfaces
+    // downstream as a bogus InsecureEndpoint transport failure.
+    [[nodiscard]] static RelayEndpoints fromBaseUrl(const QString &base);
+
+    // True only when every endpoint is a valid https:// URL (wss:// for live).
     [[nodiscard]] bool isSecure() const;
 };
 

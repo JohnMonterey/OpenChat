@@ -93,30 +93,6 @@ void scheduleCaptureIfRequested(QCommandLineParser &parser, QQuickWindow *window
     });
 }
 
-// Builds the relay endpoint set from a base URL, e.g. https://host/v1. The live
-// stream uses the same host/path over the wss (or ws) scheme.
-OpenChat::RelayEndpoints buildEndpoints(const QString &base)
-{
-    OpenChat::RelayEndpoints endpoints;
-    endpoints.accounts = QUrl(base + QStringLiteral("/accounts"));
-    endpoints.authChallenge = QUrl(base + QStringLiteral("/auth/challenge"));
-    endpoints.authComplete = QUrl(base + QStringLiteral("/auth/complete"));
-    endpoints.authRefresh = QUrl(base + QStringLiteral("/auth/refresh"));
-    endpoints.sync = QUrl(base + QStringLiteral("/sync"));
-    endpoints.keyPackages = QUrl(base + QStringLiteral("/key-packages"));
-    endpoints.directory = QUrl(base + QStringLiteral("/directory"));
-    endpoints.directoryAccount = QUrl(base + QStringLiteral("/directory/account"));
-    endpoints.invites = QUrl(base + QStringLiteral("/invites"));
-    endpoints.invitesRedeem = QUrl(base + QStringLiteral("/invites/redeem"));
-    QUrl live(base + QStringLiteral("/live"));
-    if (live.scheme() == QStringLiteral("https"))
-        live.setScheme(QStringLiteral("wss"));
-    else if (live.scheme() == QStringLiteral("http"))
-        live.setScheme(QStringLiteral("ws"));
-    endpoints.live = live;
-    return endpoints;
-}
-
 // When a dev-CA path is configured, returns a TLS configuration that ADDS that CA
 // on top of the system trust roots while keeping full peer verification. Returns
 // nullopt when no dev CA is configured (the client then uses system trust only).
@@ -752,7 +728,8 @@ int main(int argc, char *argv[])
     const int requestedWidth = parser.value(widthOption).toInt(&widthValid);
     const int requestedHeight = parser.value(heightOption).toInt(&heightValid);
 
-    AppRuntime runtime(profilesRoot, buildEndpoints(base), buildDevCaTls(devCaPath),
+    AppRuntime runtime(profilesRoot, OpenChat::RelayEndpoints::fromBaseUrl(base),
+                       buildDevCaTls(devCaPath),
                        OpenChat::AccountBootstrap::defaultKeyPackageCount,
                        widthValid ? std::optional<int>(requestedWidth) : std::nullopt,
                        heightValid ? std::optional<int>(requestedHeight) : std::nullopt);

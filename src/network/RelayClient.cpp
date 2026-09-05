@@ -94,10 +94,38 @@ constexpr qsizetype maxInviteTokenBytes = 4096;
 
 } // namespace
 
+RelayEndpoints RelayEndpoints::fromBaseUrl(const QString &base)
+{
+    RelayEndpoints endpoints;
+    endpoints.accounts = QUrl(base + QStringLiteral("/accounts"));
+    endpoints.authChallenge = QUrl(base + QStringLiteral("/auth/challenge"));
+    endpoints.authComplete = QUrl(base + QStringLiteral("/auth/complete"));
+    endpoints.authRefresh = QUrl(base + QStringLiteral("/auth/refresh"));
+    endpoints.sync = QUrl(base + QStringLiteral("/sync"));
+    endpoints.keyPackages = QUrl(base + QStringLiteral("/key-packages"));
+    endpoints.keyPackagesClaim = QUrl(base + QStringLiteral("/key-packages/claim"));
+    endpoints.directory = QUrl(base + QStringLiteral("/directory"));
+    endpoints.directoryAccount = QUrl(base + QStringLiteral("/directory/account"));
+    endpoints.invites = QUrl(base + QStringLiteral("/invites"));
+    endpoints.invitesRedeem = QUrl(base + QStringLiteral("/invites/redeem"));
+    QUrl live(base + QStringLiteral("/live"));
+    if (live.scheme() == QStringLiteral("https"))
+        live.setScheme(QStringLiteral("wss"));
+    else if (live.scheme() == QStringLiteral("http"))
+        live.setScheme(QStringLiteral("ws"));
+    endpoints.live = live;
+    return endpoints;
+}
+
 bool RelayEndpoints::isSecure() const
 {
-    return isHttps(authChallenge) && isHttps(authComplete) && isHttps(authRefresh)
-        && isHttps(sync) && isWss(live);
+    // Every field, not just the auth/sync core: an endpoint that is missing here
+    // fails at its first use with InsecureEndpoint, far from the configuration
+    // that omitted it.
+    return isHttps(accounts) && isHttps(authChallenge) && isHttps(authComplete)
+        && isHttps(authRefresh) && isHttps(sync) && isHttps(keyPackages)
+        && isHttps(keyPackagesClaim) && isHttps(directory) && isHttps(directoryAccount)
+        && isHttps(invites) && isHttps(invitesRedeem) && isWss(live);
 }
 
 // ---------------------------------------------------------------------------

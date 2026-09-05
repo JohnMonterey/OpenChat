@@ -55,6 +55,12 @@ public:
     // Remove the row for a conversation / account. Returns whether a row was removed.
     bool removeByConversation(const ConversationId &conversation);
     bool removeByAccount(const AccountId &account);
+    // Fill in the sender's handle once a reverse directory lookup resolves it,
+    // refreshing the row's name and subtitle. Returns whether a row was found.
+    bool updateHandle(const AccountId &account, const QString &handle);
+    // The row copy shown for a request from `handle` (empty when unknown).
+    [[nodiscard]] static QString displayNameForHandle(const QString &handle);
+    [[nodiscard]] static QString subtitleForHandle(const QString &handle, const AccountId &account);
     // Look a row up by its hex `requestId` (the ConversationId hex the QML holds).
     [[nodiscard]] std::optional<RequestEntry> byConversationHex(const QString &hex) const;
 

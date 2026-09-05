@@ -132,6 +132,7 @@ private slots:
   void removalRequiresExactProfileAndPathConfirmation();
   void recoveryCodeIsRevealedAndConsumedOnce();
   void createPersistsAStableAccountId();
+  void profileDisplayNameSurvivesUnlock();
   void persistMlsStateMakesKeyPackageMaterialDurable();
   void offlineDurableSendSurvivesRestart();
 };
@@ -184,6 +185,23 @@ void ProfileSessionTest::createThenUnlockRestoresTheSameDevice() {
       reopened.value()->signChallenge("server-challenge", "openchat-auth-v1");
   QVERIFY(secondSignature.hasValue());
   QCOMPARE(secondSignature.value(), firstSignature.value());
+}
+
+void ProfileSessionTest::profileDisplayNameSurvivesUnlock() {
+  QTemporaryDir directory;
+  SessionVault vault;
+  const auto profileId = ProfileId::generate();
+  const auto paths = ProfilePaths::forProfile(directory.path(), profileId);
+
+  auto created = ProfileSession::create(profileId, vault, paths);
+  QVERIFY(created.hasValue());
+  QVERIFY(created.value()->setDisplayName(QStringLiteral("Ada Lovelace")).hasValue());
+  QCOMPARE(created.value()->displayName(), QStringLiteral("Ada Lovelace"));
+  created.value()->lock();
+
+  auto reopened = ProfileSession::unlock(profileId, vault, paths);
+  QVERIFY(reopened.hasValue());
+  QCOMPARE(reopened.value()->displayName(), QStringLiteral("Ada Lovelace"));
 }
 
 void ProfileSessionTest::failedBootstrapRollsBackBothVaultEntries() {

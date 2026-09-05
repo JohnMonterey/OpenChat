@@ -5,6 +5,7 @@
 #include "domain/Contact.h"
 #include "network/SyncEngine.h"
 #include "repositories/RepositoryError.h"
+#include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 
 #include <QDateTime>
@@ -142,6 +143,7 @@ void AddContactService::onKeyPackageClaimed(const QByteArray &keyPackage)
     // benign PendingOutgoing row with no durable group, which is retryable and
     // strictly better than a durable group/Welcome with no roster row.
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const DeviceId peerDevice = m_entry->devices[m_deviceIndex].deviceId;
     ContactRecord record{m_entry->accountId,
                          m_handle,
                          QString(),
@@ -149,6 +151,9 @@ void AddContactService::onKeyPackageClaimed(const QByteArray &keyPackage)
                          conversation,
                          now,
                          now};
+    // The device whose KeyPackage sealed this group is the recipient of every
+    // envelope in the conversation (the accept, then the messages).
+    record.peerDeviceId = peerDevice;
     // Capture the peer's MLS-authenticated Ed25519 identity key from the claimed
     // KeyPackage credential (version(1) || deviceId(16) || signingKey(32)), so a
     // later checkpoint can compute the safety number. A failed or short inspect
@@ -164,8 +169,19 @@ void AddContactService::onKeyPackageClaimed(const QByteArray &keyPackage)
                                                                     : Error::Storage);
         return;
     }
+    // Materialise the durable conversation row now: the peer's acceptance and
+    // their first message land in this group, and the message store's foreign
+    // key requires the row before either can be committed.
+    SqlCipherChatRepository *chats = m_session.chats();
+    if (chats == nullptr
+        || !chats->upsertConversation(ConversationRecord{conversation, conversation.bytes(),
+                                                         QString(), ConversationKind::Direct, now})
+                .hasValue()) {
+        fail(Error::Storage);
+        return;
+    }
 
-    m_engine.sendHandshake(conversation, m_entry->devices[m_deviceIndex].deviceId, welcome);
+    m_engine.sendHandshake(conversation, peerDevice, welcome);
     succeed(conversation, m_entry->accountId);
 }
 

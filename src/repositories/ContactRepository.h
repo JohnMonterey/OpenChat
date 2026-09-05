@@ -72,6 +72,16 @@ public:
     // when the peer is unknown and InvalidInput when the key is not 32 bytes.
     [[nodiscard]] virtual Result<void, RepositoryError>
     setPeerSigningKey(const AccountId &accountId, QByteArrayView key32) = 0;
+
+    // Bind (or rebind) the peer device the contact's conversation is addressed
+    // to. Returns NotFound when the peer is unknown.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    setPeerDeviceId(const AccountId &accountId, const DeviceId &deviceId) = 0;
+
+    // Refresh a contact's directory handle (for example after a reverse lookup
+    // of an inbound request's sender). Returns NotFound when the peer is unknown.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    setHandle(const AccountId &accountId, const QString &handle) = 0;
 };
 
 } // namespace OpenChat

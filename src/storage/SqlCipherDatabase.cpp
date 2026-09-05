@@ -257,7 +257,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
                                  ? sqlite3_column_int(versionStatement, 0)
                                  : -1;
   sqlite3_finalize(versionStatement);
-  constexpr int latestVersion = 9;
+  constexpr int latestVersion = 11;
   if (currentVersion < 0 || currentVersion > latestVersion)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
 
@@ -275,6 +275,8 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
       {7, ":/openchat/007_contacts.sql"},
       {8, ":/openchat/008_pending_handshakes.sql"},
       {9, ":/openchat/009_contact_verification.sql"},
+      {10, ":/openchat/010_profile_display_name.sql"},
+      {11, ":/openchat/011_contact_device.sql"},
   };
 
   if (!execute("BEGIN IMMEDIATE;").hasValue())
@@ -565,6 +567,52 @@ SqlCipherDatabase::loadAccountId(const ProfileId &profileId) {
     return Result<AccountId, StorageError>::failure(
         StorageError::AuthenticationFailed);
   return Result<AccountId, StorageError>::success(*accountId);
+}
+
+Result<void, StorageError>
+SqlCipherDatabase::storeProfileDisplayName(const ProfileId &profileId,
+                                           const QString &displayName) {
+  if (!m_database)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql = "UPDATE local_profiles SET display_name = ?1 WHERE profile_id = ?2";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_text(statement, 1, displayName.toUtf8().constData(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 2, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  const int changes = sqlite3_changes(m_database);
+  sqlite3_finalize(statement);
+  if (step != SQLITE_DONE)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  if (changes == 0)
+    return Result<void, StorageError>::failure(StorageError::NotFound);
+  return Result<void, StorageError>::success();
+}
+
+Result<QString, StorageError>
+SqlCipherDatabase::loadProfileDisplayName(const ProfileId &profileId) {
+  if (!m_database)
+    return Result<QString, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql = "SELECT display_name FROM local_profiles WHERE profile_id = ?1";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<QString, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  if (step != SQLITE_ROW) {
+    sqlite3_finalize(statement);
+    return Result<QString, StorageError>::failure(
+        step == SQLITE_DONE ? StorageError::NotFound : StorageError::QueryFailed);
+  }
+  const auto *text = reinterpret_cast<const char *>(sqlite3_column_text(statement, 0));
+  const QString displayName = text ? QString::fromUtf8(text) : QString();
+  sqlite3_finalize(statement);
+  return Result<QString, StorageError>::success(displayName);
 }
 
 void SqlCipherDatabase::close() noexcept {

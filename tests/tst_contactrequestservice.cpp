@@ -8,6 +8,7 @@
 #include "security/KeyVault.h"
 #include "security/SecureBuffer.h"
 #include "storage/CapturingMlsStateStore.h"
+#include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherDatabase.h"
 #include "storage/SqlCipherSyncStore.h"
@@ -124,6 +125,8 @@ private slots:
     void blockedPeerInboundProducesNoPending();
     void reconcileRecreatesMissingAndDropsOrphans();
     void authFailureDropsStashWithoutAccepting();
+    void acceptSendsContactAcceptAndOpensConversation();
+    void contactAcceptFromPeerPromotesOutgoingRequest();
 
 private:
     // A genuine inbound handshake: our fresh KeyPackage is added to a new group the
@@ -134,10 +137,20 @@ private:
     {
         const ConversationId conversation = ConversationId::generate();
         auto ourKeyPackage = m_session->mls()->generateKeyPackage();
-        Q_ASSERT(ourKeyPackage.hasValue());
-        Q_ASSERT(m_sender->createGroup(conversation).hasValue());
+        if (!ourKeyPackage.hasValue()) {
+            qWarning("fixture: generateKeyPackage failed (%d)",
+                     static_cast<int>(ourKeyPackage.error()));
+            return conversation;
+        }
+        if (auto created = m_sender->createGroup(conversation); !created.hasValue()) {
+            qWarning("fixture: createGroup failed (%d)", static_cast<int>(created.error()));
+            return conversation;
+        }
         auto add = m_sender->addMembers(conversation, {ourKeyPackage.value()});
-        Q_ASSERT(add.hasValue());
+        if (!add.hasValue()) {
+            qWarning("fixture: addMembers failed (%d)", static_cast<int>(add.error()));
+            return conversation;
+        }
         const QByteArray welcome = add.value().welcome;
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -478,6 +491,114 @@ void ContactRequestServiceTest::authFailureDropsStashWithoutAccepting()
     auto stash = m_session->syncStore()->loadPendingHandshake(conversation);
     QVERIFY(stash.hasValue());
     QVERIFY(!stash.value().has_value());
+}
+
+void ContactRequestServiceTest::acceptSendsContactAcceptAndOpensConversation()
+{
+    ContactRequestService service(*m_session, *m_session->syncEngine());
+    std::optional<AccountId> accepted;
+    connect(&service, &ContactRequestService::contactAccepted, this,
+            [&](const AccountId &a) { accepted = a; });
+
+    const ConversationId conversation = feedInboundHandshake();
+    // The inbound request bound the sender device for later addressing.
+    {
+        auto pending = m_session->contacts()->find(m_senderAccount);
+        QVERIFY(pending.hasValue() && pending.value().has_value());
+        QVERIFY(pending.value()->peerDeviceId.has_value());
+        QCOMPARE(pending.value()->peerDeviceId->bytes(), m_senderDevice.bytes());
+    }
+
+    service.acceptContact(conversation);
+    QCoreApplication::processEvents();
+    QVERIFY(accepted.has_value());
+
+    // The accept shipped a ContactAccept control message to the requester's
+    // device through the just-joined group (and nothing else left the device).
+    QCOMPARE(m_transport->sent.size(), qsizetype(1));
+    const CiphertextEnvelopeV1 &sent = m_transport->sent.first();
+    QCOMPARE(sent.messageKind, EnvelopeMessageKind::ContactAccept);
+    QCOMPARE(sent.recipientDeviceId.bytes(), m_senderDevice.bytes());
+    QCOMPARE(sent.conversationId.bytes(), conversation.bytes());
+    // The requester can decrypt it at the joined epoch: proof of membership.
+    auto processed = m_sender->process(conversation, sent.ciphertext);
+    QVERIFY(processed.hasValue());
+    QCOMPARE(processed.value().kind, MlsProcessKind::Application);
+    QCOMPARE(processed.value().applicationData, QByteArray("ACCEPT"));
+
+    // The durable conversation row exists so messages can be committed.
+    auto conversations = m_session->chats()->conversations();
+    QVERIFY(conversations.hasValue());
+    bool present = false;
+    for (const ConversationRecord &record : conversations.value())
+        present = present || record.id == conversation;
+    QVERIFY(present);
+}
+
+void ContactRequestServiceTest::contactAcceptFromPeerPromotesOutgoingRequest()
+{
+    // Requester side: WE formed the group around the peer's KeyPackage and hold a
+    // PendingOutgoing row (what AddContactService leaves behind). The peer joins
+    // the Welcome and answers with a ContactAccept under the group ratchet.
+    ContactRequestService service(*m_session, *m_session->syncEngine());
+    std::optional<AccountId> accepted;
+    connect(&service, &ContactRequestService::contactAccepted, this,
+            [&](const AccountId &a) { accepted = a; });
+
+    const ConversationId conversation = ConversationId::generate();
+    auto peerKeyPackage = m_sender->generateKeyPackage();
+    QVERIFY(peerKeyPackage.hasValue());
+    QVERIFY(m_session->mls()->createGroup(conversation).hasValue());
+    auto add = m_session->mls()->addMembers(conversation, {peerKeyPackage.value()});
+    QVERIFY(add.hasValue());
+    QVERIFY(m_session->persistMlsState().hasValue());
+    QVERIFY(m_sender->joinGroup(conversation, add.value().welcome).hasValue());
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    ContactRecord outgoing{m_senderAccount, QStringLiteral("peer"), QString(),
+                           ContactState::PendingOutgoing, conversation, now, now};
+    outgoing.peerDeviceId = m_senderDevice;
+    QVERIFY(m_session->contacts()->recordOutgoingRequest(outgoing).hasValue());
+    QVERIFY(m_session->chats()
+                ->upsertConversation(ConversationRecord{conversation, conversation.bytes(),
+                                                        QString(), ConversationKind::Direct, now})
+                .hasValue());
+
+    auto ciphertext = m_sender->encrypt(conversation, QByteArrayView("ACCEPT"));
+    QVERIFY(ciphertext.hasValue());
+    const CiphertextEnvelopeV1 envelope{
+        1,
+        EnvelopeId::generate(),
+        m_senderAccount,
+        m_senderDevice,
+        DeviceId::generate(),
+        conversation,
+        EnvelopeMessageKind::ContactAccept,
+        now,
+        now + 3'600'000,
+        EnvelopeId::generate(),
+        ciphertext.value().bytes,
+        QCryptographicHash::hash(ciphertext.value().bytes, QCryptographicHash::Sha256),
+        QByteArray(64, '\x03')};
+    m_session->syncEngine()->handleEnvelope(envelope, ++m_sequence);
+    QCoreApplication::processEvents();
+
+    // Promoted to Accepted, surfaced, acknowledged, and never shown as a message.
+    QVERIFY(accepted.has_value());
+    QCOMPARE(accepted->bytes(), m_senderAccount.bytes());
+    auto found = m_session->contacts()->find(m_senderAccount);
+    QVERIFY(found.hasValue() && found.value().has_value());
+    QCOMPARE(found.value()->state, ContactState::Accepted);
+    QCOMPARE(m_transport->acks.size(), qsizetype(1));
+    auto history = m_session->chats()->messages(conversation, 10, std::nullopt);
+    QVERIFY(history.hasValue());
+    QVERIFY(history.value().isEmpty());
+
+    // A redelivered accept is a no-op: still Accepted, no second signal.
+    accepted.reset();
+    m_session->syncEngine()->handleEnvelope(envelope, ++m_sequence);
+    QCoreApplication::processEvents();
+    QVERIFY(!accepted.has_value());
 }
 
 QTEST_GUILESS_MAIN(ContactRequestServiceTest)

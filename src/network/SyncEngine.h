@@ -158,6 +158,12 @@ public:
     void acknowledgeRead(const ConversationId &conversation, const DeviceId &recipientDevice,
                          const MessageId &messageId);
 
+    // Tells the peer that their contact request was accepted: an MLS application
+    // message encrypted under the just-joined group's ratchet, shipped with
+    // EnvelopeMessageKind::ContactAccept and no visible row. Only a member of the
+    // group can produce it, so its arrival is the requester's proof of acceptance.
+    void sendContactAccept(const ConversationId &conversation, const DeviceId &recipientDevice);
+
     // Sends an MLS Welcome to a peer device as a content-blind handshake control
     // send (no visible message row). Unlike acknowledgeRead the ciphertext is NOT
     // produced by the group ratchet: `welcome` is the already-sealed Welcome the
@@ -179,8 +185,15 @@ public:
     [[nodiscard]] bool isFailedClosed() const noexcept;
 
 signals:
+    // An outgoing text was durably committed (Queued) and is the exact row the
+    // store holds, so the UI can show it before relay acceptance.
+    void messageQueued(const MessageRecord &message);
     void messageStateChanged(const MessageId &messageId, DeliveryState state);
     void messageReceived(const MessageRecord &message);
+    // A ContactAccept control message from `senderDevice` was authenticated and
+    // consumed: the peer joined the conversation's group.
+    void contactAcceptReceived(const OpenChat::ConversationId &conversation,
+                               const OpenChat::DeviceId &senderDevice);
     void failedClosed();
     // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
     void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,

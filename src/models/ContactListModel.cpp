@@ -26,7 +26,8 @@ QVariant ContactListModel::data(const QModelIndex &index, int role) const
     case NameRole:
         return contact->name;
     case StatusTextRole:
-        return presenceText(contact->presence);
+        return contact->statusText.isEmpty() ? presenceText(contact->presence)
+                                             : contact->statusText;
     case PresenceRole:
         return static_cast<int>(contact->presence);
     case FavoriteRole:

@@ -137,7 +137,34 @@ public:
             failClosed(); // in-memory ratchet may be ahead of the store; stop.
             return;
         }
+        emit q->messageQueued(message);
         emit q->messageStateChanged(message.id, DeliveryState::Queued);
+        drainOutbox();
+    }
+
+    void doSendContactAccept(const ConversationId &conversation, const DeviceId &recipient)
+    {
+        if (failed)
+            return;
+        // A fixed, content-free payload: the proof is the ratchet, not the bytes.
+        const auto ciphertext = mls.encrypt(conversation, QByteArrayView("ACCEPT"));
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        const auto envelope = buildEnvelope(conversation, recipient, ciphertext.value(),
+                                            EnvelopeMessageKind::ContactAccept);
+        if (!envelope) {
+            failClosed();
+            return;
+        }
+        const OutboxRecord outbox = makeOutbox(envelope->envelopeId, MessageId::generate(),
+                                               conversation, encodeCanonical(*envelope));
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitControlSend(outbox, mlsState).hasValue()) {
+            failClosed();
+            return;
+        }
         drainOutbox();
     }
 
@@ -293,6 +320,24 @@ public:
             // message. Drop without surfacing or acknowledging.
             if (!credentialNamesDevice(processed.value().senderIdentity, envelope.senderDeviceId))
                 return;
+
+            // Application-layer control traffic (a receipt, a contact-accept) never
+            // becomes a visible message row: consume it as a control receive and
+            // surface only the typed outcome.
+            if (envelope.messageKind != EnvelopeMessageKind::MlsPrivateMessage) {
+                const QByteArray mlsState = mls.takePendingState();
+                const auto committed = store.commitControlReceive(
+                    envelope.envelopeId, envelope.senderDeviceId, serverSequence, mlsState);
+                if (!committed.hasValue()) {
+                    failClosed();
+                    return;
+                }
+                transport.acknowledge(envelope.envelopeId, serverSequence);
+                if (committed.value()
+                    && envelope.messageKind == EnvelopeMessageKind::ContactAccept)
+                    emit q->contactAcceptReceived(envelope.conversationId, envelope.senderDeviceId);
+                return;
+            }
 
             const MessageRecord message{MessageId::generate(),
                                         envelope.conversationId,
@@ -460,6 +505,14 @@ void SyncEngine::enqueueText(const ConversationId &conversation, const DeviceId 
                        [this, conversation, recipientDevice, text] {
                            d->doEnqueueText(conversation, recipientDevice, text);
                        });
+}
+
+void SyncEngine::sendContactAccept(const ConversationId &conversation,
+                                   const DeviceId &recipientDevice)
+{
+    d->coordinator.run(conversation, [this, conversation, recipientDevice] {
+        d->doSendContactAccept(conversation, recipientDevice);
+    });
 }
 
 void SyncEngine::acknowledgeRead(const ConversationId &conversation, const DeviceId &recipientDevice,

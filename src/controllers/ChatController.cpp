@@ -1,10 +1,21 @@
 #include "controllers/ChatController.h"
 
+#include "app/ContactRequestService.h"
+#include "app/ProfileSession.h"
+#include "domain/Contact.h"
+#include "network/SyncEngine.h"
+#include "storage/SqlCipherChatRepository.h"
+#include "storage/SqlCipherContactRepository.h"
+
 #include <QDateTime>
+
+#include <algorithm>
 
 namespace OpenChat {
 
 namespace {
+
+constexpr int historyPageSize = 200;
 
 QVector<Contact> referenceContacts()
 {
@@ -77,6 +88,33 @@ QStringList settingsElementsForCategory(int index)
     }
 }
 
+MessageDeliveryState toModelState(DeliveryState state)
+{
+    switch (state) {
+    case DeliveryState::Draft:
+        return MessageDeliveryState::None;
+    case DeliveryState::Queued:
+        return MessageDeliveryState::Queued;
+    case DeliveryState::Sending:
+        return MessageDeliveryState::Sending;
+    case DeliveryState::Sent:
+        return MessageDeliveryState::Sent;
+    case DeliveryState::Delivered:
+        return MessageDeliveryState::Delivered;
+    case DeliveryState::Read:
+        return MessageDeliveryState::Read;
+    case DeliveryState::Failed:
+        return MessageDeliveryState::Failed;
+    }
+    return MessageDeliveryState::None;
+}
+
+// A short, id-free label for a contact whose handle is not (yet) known.
+QString shortIdLabel(const AccountId &account)
+{
+    return QStringLiteral("ID ") + account.toHex().left(10);
+}
+
 } // namespace
 
 ChatController::ChatController(QObject *parent)
@@ -95,6 +133,8 @@ ChatController::ChatController(QObject *parent)
     refreshVisibleMessages();
 }
 
+ChatController::~ChatController() = default;
+
 ContactListModel *ChatController::contacts()
 {
     return &m_contacts;
@@ -103,6 +143,16 @@ ContactListModel *ChatController::contacts()
 MessageListModel *ChatController::messages()
 {
     return &m_messages;
+}
+
+QString ChatController::localUserName() const
+{
+    return m_localUserName;
+}
+
+bool ChatController::hasCurrentContact() const
+{
+    return currentContact().has_value();
 }
 
 QString ChatController::currentContactName() const
@@ -114,7 +164,9 @@ QString ChatController::currentContactName() const
 QString ChatController::currentStatusText() const
 {
     const auto contact = currentContact();
-    return contact ? presenceText(contact->presence) : QString();
+    if (!contact)
+        return QString();
+    return contact->statusText.isEmpty() ? presenceText(contact->presence) : contact->statusText;
 }
 
 QString ChatController::currentAvatarKey() const
@@ -130,7 +182,15 @@ QString ChatController::composerText() const
 
 bool ChatController::canSend() const
 {
-    return m_sessionState == SessionState::Ready && !m_composerText.trimmed().isEmpty();
+    if (m_sessionState != SessionState::Ready || m_composerText.trimmed().isEmpty())
+        return false;
+    return !m_live || currentLiveChatSendable();
+}
+
+bool ChatController::currentLiveChatSendable() const
+{
+    const auto chat = m_liveChats.constFind(m_currentContactId);
+    return chat != m_liveChats.cend() && chat->peerDevice.has_value() && m_engine != nullptr;
 }
 
 QString ChatController::searchQuery() const
@@ -197,10 +257,24 @@ bool ChatController::selectContact(const QString &id)
     if (!contact)
         return false;
 
+    const bool wasSendable = canSend();
     m_currentContactId = id;
     m_contacts.selectContact(id);
+    if (m_live) {
+        // History is read on demand: the open conversation is the only one whose
+        // plaintext sits in a model. Opening also clears its unread count.
+        const auto chat = m_liveChats.find(id);
+        if (chat != m_liveChats.end()) {
+            m_messagesByContact.insert(id, loadHistory(chat->conversation));
+            if (chat->unread != 0) {
+                chat->unread = 0;
+                emit chatUnreadCountChanged();
+            }
+        }
+    }
     refreshVisibleMessages();
     emit currentContactChanged();
+    updateCanSend(wasSendable);
     return true;
 }
 
@@ -215,6 +289,15 @@ void ChatController::setSearchQuery(const QString &query)
     emit searchQueryChanged();
 }
 
+void ChatController::setLocalUserName(const QString &name)
+{
+    const QString normalized = name.trimmed();
+    if (m_localUserName == normalized)
+        return;
+    m_localUserName = normalized;
+    emit localUserNameChanged();
+}
+
 void ChatController::setComposerText(const QString &text)
 {
     if (m_composerText == text)
@@ -223,8 +306,7 @@ void ChatController::setComposerText(const QString &text)
     const bool wasSendable = canSend();
     m_composerText = text;
     emit composerTextChanged();
-    if (wasSendable != canSend())
-        emit canSendChanged();
+    updateCanSend(wasSendable);
 }
 
 bool ChatController::sendMessage()
@@ -238,6 +320,18 @@ bool ChatController::sendMessage()
     const QString body = m_composerText.trimmed();
     if (body.isEmpty())
         return false;
+
+    if (m_live) {
+        const auto chat = m_liveChats.constFind(m_currentContactId);
+        if (chat == m_liveChats.cend() || !chat->peerDevice || m_engine == nullptr)
+            return false;
+        // The engine encrypts, commits the row durably and reports it back through
+        // messageQueued, which is where the visible row is appended: the model only
+        // ever shows what the store holds.
+        m_engine->enqueueText(chat->conversation, *chat->peerDevice, body);
+        setComposerText({});
+        return true;
+    }
 
     const QDateTime sentAt = QDateTime::currentDateTime();
     if (!m_messages.appendOutgoing(body, sentAt))
@@ -261,8 +355,7 @@ void ChatController::setSessionState(SessionState state)
     if (visibilityChanged)
         refreshVisibleMessages();
     emit sessionStateChanged();
-    if (wasSendable != canSend())
-        emit canSendChanged();
+    updateCanSend(wasSendable);
 }
 
 ChatController::NavSection ChatController::navSection() const
@@ -272,8 +365,12 @@ ChatController::NavSection ChatController::navSection() const
 
 int ChatController::chatUnreadCount() const
 {
-    // Static mock until the sync engine feeds real unread counts.
-    return 3;
+    if (!m_live)
+        return 3; // static mock for the reference rendering
+    int total = 0;
+    for (const LiveChat &chat : m_liveChats)
+        total += chat.unread;
+    return total;
 }
 
 int ChatController::callMissedCount() const
@@ -329,6 +426,221 @@ void ChatController::setNavSection(NavSection section)
 
     m_navSection = section;
     emit navSectionChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Live seam
+// ---------------------------------------------------------------------------
+
+void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine,
+                                     ContactRequestService *requests)
+{
+    if (session == nullptr || engine == nullptr)
+        return;
+    m_session = session;
+    m_engine = engine;
+    m_requests = requests;
+    m_live = true;
+
+    // Drop the reference mock entirely; the profile's roster replaces it.
+    m_messagesByContact.clear();
+    m_liveChats.clear();
+    m_contactByConversation.clear();
+    m_currentContactId.clear();
+    m_contacts.setContacts({});
+    m_messages.setMessages({});
+
+    connect(m_engine, &SyncEngine::messageQueued, this, &ChatController::onMessageQueued);
+    connect(m_engine, &SyncEngine::messageReceived, this, &ChatController::onMessageReceived);
+    connect(m_engine, &SyncEngine::messageStateChanged, this,
+            &ChatController::onMessageStateChanged);
+    if (m_requests != nullptr) {
+        connect(m_requests, &ContactRequestService::contactAccepted, this,
+                &ChatController::onContactAccepted);
+    }
+
+    loadRoster();
+    emit chatUnreadCountChanged();
+}
+
+void ChatController::loadRoster()
+{
+    if (m_session == nullptr)
+        return;
+    SqlCipherContactRepository *contacts = m_session->contacts();
+    if (contacts == nullptr)
+        return;
+    auto all = contacts->contacts();
+    if (!all.hasValue())
+        return;
+
+    QVector<Contact> rows;
+    QHash<QString, LiveChat> chats;
+    QHash<QByteArray, QString> byConversation;
+    for (const ContactRecord &record : all.value()) {
+        // Only a mutual contact backed by an MLS group is a chat.
+        if (record.state != ContactState::Accepted || !record.conversationId)
+            continue;
+        const QString id = record.accountId.toHex();
+        int unread = 0;
+        if (const auto existing = m_liveChats.constFind(id); existing != m_liveChats.cend())
+            unread = existing->unread;
+        const LiveChat chat{record.accountId, *record.conversationId, record.peerDeviceId,
+                            record.handle, unread};
+        chats.insert(id, chat);
+        byConversation.insert(record.conversationId->bytes(), id);
+        rows.append(contactRowFor(chat));
+    }
+    m_liveChats = std::move(chats);
+    m_contactByConversation = std::move(byConversation);
+    m_contacts.setContacts(std::move(rows));
+
+    const bool wasSendable = canSend();
+    if (!m_liveChats.contains(m_currentContactId))
+        m_currentContactId.clear();
+    if (m_currentContactId.isEmpty() && m_contacts.contactAt(0)) {
+        // Open the first chat so the surface is never blank while one exists.
+        const QString first = m_contacts.contactAt(0)->id;
+        m_currentContactId = first;
+        m_contacts.selectContact(first);
+        if (const auto chat = m_liveChats.constFind(first); chat != m_liveChats.cend())
+            m_messagesByContact.insert(first, loadHistory(chat->conversation));
+    } else if (!m_currentContactId.isEmpty()) {
+        m_contacts.selectContact(m_currentContactId);
+    }
+    refreshVisibleMessages();
+    emit currentContactChanged();
+    updateCanSend(wasSendable);
+}
+
+Contact ChatController::contactRowFor(const LiveChat &chat)
+{
+    Contact row;
+    row.id = chat.account.toHex();
+    row.name = chat.handle.isEmpty() ? shortIdLabel(chat.account) : chat.handle;
+    row.presence = Presence::Offline; // no presence exchange exists yet
+    row.favorite = false;
+    row.avatarKey = QStringLiteral("userpfp_none");
+    row.statusText = chat.handle.isEmpty() ? QStringLiteral("Contact")
+                                           : QStringLiteral("@") + chat.handle;
+    return row;
+}
+
+QVector<Message> ChatController::loadHistory(const ConversationId &conversation) const
+{
+    QVector<Message> history;
+    if (m_session == nullptr)
+        return history;
+    SqlCipherChatRepository *chats = m_session->chats();
+    if (chats == nullptr)
+        return history;
+    auto page = chats->messages(conversation, historyPageSize, std::nullopt);
+    if (!page.hasValue())
+        return history;
+    // The store returns newest-first; the view reads oldest-first.
+    const QVector<MessageRecord> &records = page.value();
+    history.reserve(records.size());
+    for (auto it = records.crbegin(); it != records.crend(); ++it)
+        history.append(toMessage(*it));
+    return history;
+}
+
+Message ChatController::toMessage(const MessageRecord &record)
+{
+    const QDateTime sentAt = QDateTime::fromMSecsSinceEpoch(record.sentAtMs).toLocalTime();
+    Message message;
+    message.direction = record.flow == MessageFlow::Outgoing ? MessageDirection::Outgoing
+                                                             : MessageDirection::Incoming;
+    message.body = record.body;
+    message.timestamp = sentAt.time();
+    message.kind = record.kind == ContentKind::Emoji ? MessageKind::Emoji : MessageKind::Text;
+    message.date = sentAt.date();
+    message.stableId = record.id.toHex();
+    message.deliveryState = toModelState(record.deliveryState);
+    message.failureReason = record.deliveryState == DeliveryState::Failed
+        ? MessageFailureReason::Network
+        : MessageFailureReason::None;
+    message.senderDevice = record.senderDeviceId.toHex();
+    return message;
+}
+
+QString ChatController::contactForConversation(const ConversationId &conversation) const
+{
+    return m_contactByConversation.value(conversation.bytes());
+}
+
+void ChatController::onMessageQueued(const MessageRecord &record)
+{
+    const QString contactId = contactForConversation(record.conversationId);
+    if (contactId.isEmpty())
+        return;
+    m_messagesByContact[contactId].append(toMessage(record));
+    if (contactId == m_currentContactId && statePermitsPlaintext(m_sessionState))
+        m_messages.appendMessage(toMessage(record));
+}
+
+void ChatController::onMessageReceived(const MessageRecord &record)
+{
+    QString contactId = contactForConversation(record.conversationId);
+    if (contactId.isEmpty()) {
+        // A first message from a peer whose acceptance we learned only now: the
+        // request service has already promoted the roster row, so re-read it.
+        loadRoster();
+        contactId = contactForConversation(record.conversationId);
+        if (contactId.isEmpty())
+            return;
+    }
+    if (contactId == m_currentContactId) {
+        m_messagesByContact[contactId].append(toMessage(record));
+        if (statePermitsPlaintext(m_sessionState))
+            m_messages.appendMessage(toMessage(record));
+        return;
+    }
+    const auto chat = m_liveChats.find(contactId);
+    if (chat != m_liveChats.end()) {
+        ++chat->unread;
+        emit chatUnreadCountChanged();
+    }
+}
+
+void ChatController::onMessageStateChanged(const MessageId &messageId, DeliveryState state)
+{
+    const QString stableId = messageId.toHex();
+    const MessageDeliveryState modelState = toModelState(state);
+    const MessageFailureReason reason = state == DeliveryState::Failed
+        ? MessageFailureReason::Network
+        : MessageFailureReason::None;
+    m_messages.updateDeliveryState(stableId, modelState, reason);
+    for (auto &history : m_messagesByContact) {
+        for (Message &message : history) {
+            if (message.stableId == stableId) {
+                message.deliveryState = modelState;
+                message.failureReason = reason;
+            }
+        }
+    }
+}
+
+void ChatController::onContactAccepted(const AccountId &account)
+{
+    (void)account;
+    // Either side of a request completed: the roster now has a new Accepted row
+    // with a conversation. Re-read it so the chat appears (and opens if nothing
+    // else is open).
+    loadRoster();
+}
+
+void ChatController::refreshContact(const QString &accountHex)
+{
+    if (!m_live || !m_liveChats.contains(accountHex))
+        return;
+    loadRoster();
+}
+
+void ChatController::updateCanSend(bool wasSendable)
+{
+    if (wasSendable != canSend())
+        emit canSendChanged();
 }
 
 std::optional<Contact> ChatController::currentContact() const

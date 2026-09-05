@@ -33,6 +33,12 @@ public:
     // No prefix match, listing, or enumeration is offered.
     [[nodiscard]] Result<AccountDirectoryEntry, RelayError> resolveHandle(const QString &handle);
 
+    // Reverse lookup: the handle registered for an account id, or NotFound when
+    // the account is unknown or has no active device (a fully revoked account
+    // is not discoverable in either direction). Account ids are 128-bit random
+    // values, so this offers no enumeration surface beyond the forward lookup.
+    [[nodiscard]] Result<QString, RelayError> resolveAccount(const AccountId &account);
+
     // Mints a one-time invite for the account with the given TTL and returns the
     // PLAINTEXT token — the only moment it exists; only its hash is stored.
     [[nodiscard]] Result<QByteArray, RelayError> createInvite(const AccountId &account,

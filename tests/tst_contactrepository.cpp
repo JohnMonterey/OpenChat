@@ -42,6 +42,7 @@ private slots:
     void setVerifiedFlipsFlagAndRejectsUnknown();
     void setPeerSigningKeyIsSetIfNullAndValidated();
     void stateTransitionsDoNotClobberPeerKeyOrVerified();
+    void peerDeviceAndHandlePersistAndUpdate();
 };
 
 void ContactRepositoryTest::emptyRosterReturnsEmptyList()
@@ -585,6 +586,65 @@ void ContactRepositoryTest::stateTransitionsDoNotClobberPeerKeyOrVerified()
     QVERIFY(accepted.value().value().peerSigningKey.has_value());
     QCOMPARE(*accepted.value().value().peerSigningKey, peerKey);
     QVERIFY(accepted.value().value().verified);
+}
+
+void ContactRepositoryTest::peerDeviceAndHandlePersistAndUpdate()
+{
+    // Exercises migration 011: the peer device bound at request time round-trips
+    // through a reopen, an update without a device keeps the known one, and the
+    // handle/device setters refresh a row (and reject an unknown peer).
+    QTemporaryDir directory;
+    const QString path = directory.filePath("profile.sqlite3");
+    auto key = SecureBuffer::random(32);
+    const auto accountId = AccountId::generate();
+    const auto device = DeviceId::generate();
+
+    {
+        auto opened = SqlCipherDatabase::open(path, key);
+        QVERIFY(opened.hasValue());
+        auto database = std::move(opened).value();
+        SqlCipherContactRepository contacts(database);
+
+        ContactRecord record = contactRecord(accountId, ContactState::PendingIncoming, 1'000,
+                                             1'000, QString());
+        record.peerDeviceId = device;
+        QVERIFY(contacts.recordIncomingRequest(record).hasValue());
+
+        auto found = contacts.find(accountId);
+        QVERIFY(found.hasValue());
+        QVERIFY(found.value().has_value());
+        QVERIFY(found.value()->peerDeviceId.has_value());
+        QCOMPARE(found.value()->peerDeviceId->bytes(), device.bytes());
+        QVERIFY(found.value()->handle.isEmpty());
+
+        // A metadata refresh that names no device leaves the bound device alone.
+        ContactRecord refresh = contactRecord(accountId, ContactState::PendingIncoming, 1'000,
+                                              2'000, QString());
+        QVERIFY(contacts.recordIncomingRequest(refresh).hasValue());
+        auto kept = contacts.find(accountId);
+        QVERIFY(kept.hasValue() && kept.value().has_value());
+        QCOMPARE(kept.value()->peerDeviceId->bytes(), device.bytes());
+
+        QVERIFY(contacts.setHandle(accountId, QStringLiteral("alice")).hasValue());
+        const auto missing = contacts.setHandle(AccountId::generate(), QStringLiteral("x"));
+        QVERIFY(!missing.hasValue());
+        QCOMPARE(missing.error().code, RepositoryErrorCode::NotFound);
+        QVERIFY(!contacts.setPeerDeviceId(AccountId::generate(), device).hasValue());
+    }
+
+    auto reopened = SqlCipherDatabase::open(path, key);
+    QVERIFY(reopened.hasValue());
+    auto database = std::move(reopened).value();
+    SqlCipherContactRepository contacts(database);
+    auto found = contacts.find(accountId);
+    QVERIFY(found.hasValue());
+    QVERIFY(found.value().has_value());
+    QCOMPARE(found.value()->handle, QStringLiteral("alice"));
+    QCOMPARE(found.value()->peerDeviceId->bytes(), device.bytes());
+
+    const auto other = DeviceId::generate();
+    QVERIFY(contacts.setPeerDeviceId(accountId, other).hasValue());
+    QCOMPARE(contacts.find(accountId).value()->peerDeviceId->bytes(), other.bytes());
 }
 
 QTEST_GUILESS_MAIN(ContactRepositoryTest)

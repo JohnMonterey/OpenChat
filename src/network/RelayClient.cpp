@@ -968,6 +968,75 @@ void RelayClient::resolveHandle(const QString &handle)
     });
 }
 
+void RelayClient::resolveAccount(const AccountId &account)
+{
+    if (!isHttps(d->endpoints.directoryAccount)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        return;
+    }
+
+    QUrl url = d->endpoints.directoryAccount;
+    QUrlQuery query(url);
+    query.removeQueryItem(QStringLiteral("account_id"));
+    query.addQueryItem(QStringLiteral("account_id"), account.toHex());
+    url.setQuery(query);
+
+    QNetworkRequest request = d->authorizedRequest(url);
+    QNetworkReply *reply = d->network->get(request);
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, account] {
+        const bool oversized = reply->property("oc_oversized").toBool();
+        reply->deleteLater();
+        if (oversized) {
+            emit accountResolutionFailed(account, RelayDirectoryError::Transport);
+            return;
+        }
+
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 401) {
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight)
+                refreshThenRetry([this, account] { resolveAccount(account); });
+            else
+                emit authExpired();
+            return;
+        }
+        if (status == 404) {
+            emit accountResolutionFailed(account, RelayDirectoryError::NotFound);
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit accountResolutionFailed(account, RelayDirectoryError::Transport);
+            return;
+        }
+
+        const QByteArray body = reply->readAll();
+        if (body.size() > d->limits.maxHttpBodyBytes) {
+            emit accountResolutionFailed(account, RelayDirectoryError::Transport);
+            return;
+        }
+        // Shape: { handle: text }. The handle is bounded exactly as the relay
+        // bounds it at registration (1..64 characters, no whitespace).
+        QCborParserError error{};
+        const QCborValue value = QCborValue::fromCbor(body, &error);
+        if (error.error != QCborError::NoError || error.offset != body.size() || !value.isMap()) {
+            emit accountResolutionFailed(account, RelayDirectoryError::Malformed);
+            return;
+        }
+        const QCborValue handleValue = value.toMap().value(QLatin1StringView("handle"));
+        const QString handle = handleValue.isString() ? handleValue.toString() : QString();
+        if (handle.isEmpty() || handle.size() > 64
+            || std::any_of(handle.cbegin(), handle.cend(), [](QChar c) { return c.isSpace(); })) {
+            emit accountResolutionFailed(account, RelayDirectoryError::Malformed);
+            return;
+        }
+        d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
+        emit accountResolved(account, handle);
+    });
+}
+
 void RelayClient::createInvite(qint64 ttlMs)
 {
     if (!isHttps(d->endpoints.invites)) {

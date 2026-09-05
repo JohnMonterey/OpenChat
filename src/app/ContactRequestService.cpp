@@ -1,8 +1,10 @@
 #include "app/ContactRequestService.h"
 
 #include "app/ProfileSession.h"
+#include "domain/ChatTypes.h"
 #include "domain/Contact.h"
 #include "network/SyncEngine.h"
+#include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherSyncStore.h"
 
@@ -34,12 +36,19 @@ ContactRequestService::ContactRequestService(ProfileSession &session, SyncEngine
                              &ContactRequestService::onHandshakeAccepted);
     m_connections << connect(&m_engine, &SyncEngine::handshakeAuthFailed, this,
                              &ContactRequestService::onHandshakeAuthFailed);
+    // Requester side: the peer's acceptance arrives as a ContactAccept control
+    // message. Any authenticated application message in the group proves the
+    // same thing, so it promotes too (robust to a lost or reordered accept).
+    m_connections << connect(&m_engine, &SyncEngine::contactAcceptReceived, this,
+                             &ContactRequestService::onContactAcceptReceived);
+    m_connections << connect(&m_engine, &SyncEngine::messageReceived, this,
+                             &ContactRequestService::onMessageReceived);
 }
 
 ContactRequestService::~ContactRequestService() { teardown(); }
 
 void ContactRequestService::onHandshakeReceived(const AccountId &sender,
-                                                const DeviceId & /*senderDevice*/,
+                                                const DeviceId &senderDevice,
                                                 const ConversationId &conversation,
                                                 qint64 receivedAtMs)
 {
@@ -50,13 +59,16 @@ void ContactRequestService::onHandshakeReceived(const AccountId &sender,
     // PendingIncoming row for a new peer, never resurrects Blocked, and never
     // regresses Accepted/PendingOutgoing. The engine already dropped blocked
     // senders before emitting, so this normally lands a fresh PendingIncoming row.
-    const ContactRecord record{sender,
-                               QString(),
-                               QString(),
-                               ContactState::PendingIncoming,
-                               conversation,
-                               receivedAtMs,
-                               receivedAtMs};
+    // The sender device is bound now: it is the device every later envelope in
+    // this conversation is addressed to.
+    ContactRecord record{sender,
+                         QString(),
+                         QString(),
+                         ContactState::PendingIncoming,
+                         conversation,
+                         receivedAtMs,
+                         receivedAtMs};
+    record.peerDeviceId = senderDevice;
     if (!contacts->recordIncomingRequest(record).hasValue())
         return;
     emit incomingRequest(sender, conversation);
@@ -134,12 +146,73 @@ void ContactRequestService::blockContact(const ConversationId &conversation)
     (void)store->deletePendingHandshake(conversation);
 }
 
-void ContactRequestService::onHandshakeAccepted(const ConversationId & /*conversation*/,
+void ContactRequestService::onHandshakeAccepted(const ConversationId &conversation,
                                                 const AccountId &sender)
 {
     // commitHandshakeAccept already flipped the roster to Accepted and deleted the
-    // stash atomically; nothing to clean up here. Surface the outcome for the UI.
+    // stash atomically. Materialise the conversation row so messages can land,
+    // then tell the requester through the group they can now decrypt: only a
+    // member can encrypt under this ratchet, so the control message is proof.
+    (void)ensureConversationRow(conversation);
+    if (SqlCipherContactRepository *contacts = m_session.contacts()) {
+        auto found = contacts->find(sender);
+        if (found.hasValue() && found.value().has_value() && found.value()->peerDeviceId)
+            m_engine.sendContactAccept(conversation, *found.value()->peerDeviceId);
+    }
     emit contactAccepted(sender);
+}
+
+void ContactRequestService::onContactAcceptReceived(const ConversationId &conversation,
+                                                    const DeviceId &senderDevice)
+{
+    promoteOutgoing(conversation, senderDevice);
+}
+
+void ContactRequestService::onMessageReceived(const MessageRecord &message)
+{
+    promoteOutgoing(message.conversationId, message.senderDeviceId);
+}
+
+void ContactRequestService::promoteOutgoing(const ConversationId &conversation,
+                                            const DeviceId &peerDevice)
+{
+    SqlCipherContactRepository *contacts = m_session.contacts();
+    if (contacts == nullptr)
+        return;
+    auto all = contacts->contacts();
+    if (!all.hasValue())
+        return;
+    for (const ContactRecord &record : all.value()) {
+        if (!record.conversationId || *record.conversationId != conversation)
+            continue;
+        if (record.state != ContactState::PendingOutgoing)
+            return;
+        // Only the requester's own PendingOutgoing row is promoted, and only from
+        // an authenticated message inside the group it created for that peer.
+        if (!contacts->markAccepted(record.accountId, conversation, nowMs()).hasValue())
+            return;
+        if (!record.peerDeviceId)
+            (void)contacts->setPeerDeviceId(record.accountId, peerDevice);
+        (void)ensureConversationRow(conversation);
+        emit contactAccepted(record.accountId);
+        return;
+    }
+}
+
+bool ContactRequestService::ensureConversationRow(const ConversationId &conversation)
+{
+    SqlCipherChatRepository *chats = m_session.chats();
+    if (chats == nullptr)
+        return false;
+    auto existing = chats->conversations();
+    if (existing.hasValue()) {
+        for (const ConversationRecord &record : existing.value())
+            if (record.id == conversation)
+                return true;
+    }
+    const ConversationRecord record{conversation, conversation.bytes(), QString(),
+                                    ConversationKind::Direct, nowMs()};
+    return chats->upsertConversation(record).hasValue();
 }
 
 void ContactRequestService::onHandshakeAuthFailed(const ConversationId &conversation,

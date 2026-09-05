@@ -105,6 +105,34 @@ bool MessageListModel::appendOutgoing(const QString &body, const QDateTime &sent
     return true;
 }
 
+void MessageListModel::appendMessage(Message message)
+{
+    const int row = m_messages.size();
+    beginInsertRows({}, row, row);
+    m_messages.append(std::move(message));
+    endInsertRows();
+    emit countChanged();
+}
+
+bool MessageListModel::updateDeliveryState(const QString &stableId, MessageDeliveryState state,
+                                           MessageFailureReason failureReason)
+{
+    if (stableId.isEmpty())
+        return false;
+    for (int row = m_messages.size() - 1; row >= 0; --row) {
+        Message &message = m_messages[row];
+        if (message.stableId != stableId)
+            continue;
+        if (message.deliveryState == state && message.failureReason == failureReason)
+            return true;
+        message.deliveryState = state;
+        message.failureReason = failureReason;
+        emit dataChanged(index(row), index(row), {DeliveryStateRole, FailureReasonRole});
+        return true;
+    }
+    return false;
+}
+
 std::optional<Message> MessageListModel::messageAt(int row) const
 {
     if (row < 0 || row >= m_messages.size())

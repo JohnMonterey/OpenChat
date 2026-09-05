@@ -24,6 +24,7 @@
 #include "app/AccountBootstrap.h"
 #include "app/AppMetadata.h"
 #include "app/ContactRequestService.h"
+#include "app/DeviceLink.h"
 #include "app/ProfileSession.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
@@ -104,6 +105,7 @@ OpenChat::RelayEndpoints buildEndpoints(const QString &base)
     endpoints.sync = QUrl(base + QStringLiteral("/sync"));
     endpoints.keyPackages = QUrl(base + QStringLiteral("/key-packages"));
     endpoints.directory = QUrl(base + QStringLiteral("/directory"));
+    endpoints.directoryAccount = QUrl(base + QStringLiteral("/directory/account"));
     endpoints.invites = QUrl(base + QStringLiteral("/invites"));
     endpoints.invitesRedeem = QUrl(base + QStringLiteral("/invites/redeem"));
     QUrl live(base + QStringLiteral("/live"));
@@ -230,7 +232,10 @@ public:
                 return false;
             }
             m_session = std::move(unlocked).value();
-            enableContactServices();
+            // An unlocked profile holds no relay tokens: the device link
+            // re-authenticates and opens the live stream (retrying with backoff
+            // while offline), so restarts come back online without user action.
+            enableContactServices(OpenChat::DeviceLink::Start::NeedsAuthentication);
             loadMainWindow();
             return true;
         }
@@ -253,13 +258,34 @@ private:
     void loadMainWindow()
     {
         m_chatController = std::make_unique<OpenChat::ChatController>();
+        if (m_session) {
+            QString displayName = m_session->displayName();
+            // Profiles created before display names were stored have no value to
+            // restore. Seed those once from the signed-in desktop account so the
+            // sidebar remains useful until profile editing is available.
+            if (displayName.isEmpty()) {
+                displayName = qEnvironmentVariable("USER").trimmed();
+                if (!displayName.isEmpty())
+                    (void)m_session->setDisplayName(displayName);
+            }
+            m_chatController->setLocalUserName(displayName);
+        }
         m_contactController = std::make_unique<OpenChat::ContactController>();
-        // Install the live add-contact seam only when the contact services came up
-        // (m_contactRequests implies a live relay/session/engine). Otherwise the
-        // controller stays in its harmless disabled mock state.
+        // Install the live seams only when the contact services came up
+        // (m_contactRequests implies a live relay/session/engine). Otherwise both
+        // controllers stay in their harmless mock state.
         if (m_contactRequests) {
             m_contactController->setLiveServices(m_contactRequests.get(), m_relay.get(),
                                                  m_session.get(), m_session->syncEngine());
+            m_chatController->setLiveServices(m_session.get(), m_session->syncEngine(),
+                                              m_contactRequests.get());
+            // A resolved handle renames the chat row of an already-accepted peer.
+            QObject::connect(m_contactController.get(),
+                             &OpenChat::ContactController::contactHandleResolved,
+                             m_chatController.get(),
+                             [this](const QString &accountHex, const QString &) {
+                                 m_chatController->refreshContact(accountHex);
+                             });
         }
         m_engine = std::make_unique<QQmlApplicationEngine>();
         QObject::connect(
@@ -282,8 +308,10 @@ private:
     // stashed inbound requests. Builds the relay/transport lazily (the unlock path
     // has none; the bootstrap path already made them), and is a no-op once the
     // services exist. The engine tolerates an offline relay: it queues until a link
-    // comes up, so this never blocks or fails startup on connectivity.
-    void enableContactServices()
+    // comes up, so this never blocks or fails startup on connectivity. The device
+    // link keeps the relay session authenticated: `linkStart` says whether the
+    // bootstrap already did the first authentication or this launch must.
+    void enableContactServices(OpenChat::DeviceLink::Start linkStart)
     {
         if (!m_session || m_contactRequests)
             return;
@@ -311,6 +339,8 @@ private:
         m_contactRequests =
             std::make_unique<OpenChat::ContactRequestService>(*m_session, *engine);
         m_contactRequests->reconcileOnStartup();
+        m_deviceLink = std::make_unique<OpenChat::DeviceLink>(*m_session, *m_relay);
+        m_deviceLink->start(linkStart);
     }
 
     void startOnboarding()
@@ -347,8 +377,6 @@ private:
     // the controller through onCreationSucceeded()/onCreationFailed().
     void beginAccountCreation(const QString &displayName, const QString &handle)
     {
-        Q_UNUSED(displayName); // Not persisted in this phase; the relay owns @handle.
-
         const OpenChat::ProfileId profileId = OpenChat::ProfileId::generate();
         const OpenChat::ProfilePaths paths =
             OpenChat::ProfilePaths::forProfile(m_profilesRoot, profileId);
@@ -360,6 +388,11 @@ private:
         }
         m_session = std::move(created).value();
         m_pendingProfileId = profileId;
+        if (!m_session->setDisplayName(displayName).hasValue()) {
+            rollbackPendingProfile();
+            reportFailure(QStringLiteral("Couldn't create your profile. Please try again."));
+            return;
+        }
 
         // Reveal the recovery code up front; it is orthogonal to the network flow.
         QString recoveryCode;
@@ -445,7 +478,7 @@ private:
     // surface on a later event-loop turn (never from inside its own callback).
     void swapToMain()
     {
-        enableContactServices();
+        enableContactServices(OpenChat::DeviceLink::Start::AlreadyLive);
         loadMainWindow();
         if (m_onboardingView)
             m_onboardingView->hide();
@@ -474,6 +507,9 @@ private:
     // are all still alive. Only populated on a live unlocked session
     // (enableContactServices).
     std::unique_ptr<OpenChat::ContactRequestService> m_contactRequests;
+    // Keeps the relay session authenticated for the life of the profile session.
+    // Declared after the relay it borrows (destroyed before it).
+    std::unique_ptr<OpenChat::DeviceLink> m_deviceLink;
 
     std::unique_ptr<OpenChat::OnboardingController> m_onboardingController;
     std::unique_ptr<OpenChat::ChatController> m_chatController;
@@ -566,7 +602,11 @@ int runContactWindow(QGuiApplication &application, QCommandLineParser &parser,
     contactController.addMockRequest(QStringLiteral("New contact request"),
                                      QStringLiteral("ID a1b2c3d4e5"));
     contactController.setMockInvite(QStringLiteral("OPENCHAT-INV-9F3K-77QX-2M8D-4T1P"));
-    contactController.openDialog();
+    // Preview the Search & Find row too: a seeded directory handle typed into the
+    // search resolves as Found with the send-request affordance.
+    contactController.setMockDirectory({QStringLiteral("ada")});
+    chatController.setSearchQuery(QStringLiteral("ada"));
+    contactController.lookup(QStringLiteral("ada"));
 
     QQmlApplicationEngine engine;
     engine.setInitialProperties(

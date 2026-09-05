@@ -41,6 +41,12 @@ public:
     void setMessages(QVector<Message> messages);
     bool appendOutgoing(const QString &body, const QTime &timestamp);
     bool appendOutgoing(const QString &body, const QDateTime &sentAt);
+    // Append a fully-formed row (a durable record from the engine).
+    void appendMessage(Message message);
+    // Update the delivery state of the row with `stableId`. Returns whether a
+    // row was found.
+    bool updateDeliveryState(const QString &stableId, MessageDeliveryState state,
+                             MessageFailureReason failureReason = MessageFailureReason::None);
     [[nodiscard]] std::optional<Message> messageAt(int row) const;
 
 signals:

@@ -1,7 +1,10 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
 #include <QString>
+#include <QStringList>
+#include <QTimer>
 
 #include <memory>
 #include <optional>
@@ -43,10 +46,35 @@ class ContactController final : public QObject
     Q_PROPERTY(QString safetyNumber READ safetyNumber NOTIFY safetyNumberChanged)
     Q_PROPERTY(bool safetyNumberVerified READ safetyNumberVerified NOTIFY safetyNumberChanged)
     Q_PROPERTY(QString safetyNumberContact READ safetyNumberContact NOTIFY safetyNumberChanged)
+    // Search & Find: the exact-handle directory lookup behind the sidebar search.
+    Q_PROPERTY(LookupState lookupState READ lookupState NOTIFY lookupChanged)
+    Q_PROPERTY(QString lookupHandle READ lookupHandle NOTIFY lookupChanged)
+    Q_PROPERTY(QString lookupSubtitle READ lookupSubtitle NOTIFY lookupChanged)
+    Q_PROPERTY(bool lookupVisible READ lookupVisible NOTIFY lookupChanged)
+    Q_PROPERTY(bool lookupCanRequest READ lookupCanRequest NOTIFY lookupChanged)
 
 public:
     enum class Status { Idle, Working, Success, Error };
     Q_ENUM(Status)
+
+    // Outcome of the exact-handle lookup for the current search text. Only
+    // Found offers the send-request affordance; RequestPending / RequestSent /
+    // IncomingPending describe a peer already in the roster; AlreadyContact and
+    // Blocked hide the row (the chat list, or nothing, already covers them).
+    enum class LookupState {
+        Idle,
+        Searching,
+        Found,
+        RequestPending,
+        RequestSent,
+        IncomingPending,
+        AlreadyContact,
+        Blocked,
+        Self,
+        NotFound,
+        Failed,
+    };
+    Q_ENUM(LookupState)
 
     explicit ContactController(QObject *parent = nullptr);
     ~ContactController() override;
@@ -65,6 +93,18 @@ public:
     [[nodiscard]] QString safetyNumber() const;
     [[nodiscard]] bool safetyNumberVerified() const;
     [[nodiscard]] QString safetyNumberContact() const;
+    [[nodiscard]] LookupState lookupState() const;
+    [[nodiscard]] QString lookupHandle() const;
+    [[nodiscard]] QString lookupSubtitle() const;
+    [[nodiscard]] bool lookupVisible() const;
+    [[nodiscard]] bool lookupCanRequest() const;
+
+    // Search & Find. lookup(text) normalises the search text (trims, drops a
+    // leading '@') and, after a short debounce, resolves it as an exact handle
+    // against the directory; the result is classified against the local roster.
+    // requestLookup() sends a contact request to the Found peer.
+    Q_INVOKABLE void lookup(const QString &query);
+    Q_INVOKABLE void requestLookup();
 
     Q_INVOKABLE void openDialog();
     Q_INVOKABLE void closeDialog();
@@ -99,6 +139,9 @@ public:
     void setMockSafetyNumber(const QString &groupedNumber, bool verified,
                              const QString &contactLabel);
     void openSafetyNumberPreview();
+    // C++-only mock directory for the lookup in mock mode: these handles resolve
+    // as Found; anything else is NotFound.
+    void setMockDirectory(const QStringList &handles);
 
 signals:
     void enabledChanged();
@@ -106,6 +149,10 @@ signals:
     void statusChanged();
     void myInviteChanged();
     void safetyNumberChanged();
+    void lookupChanged();
+    // A roster contact's handle became known through a reverse directory
+    // lookup (hex is the AccountId hex the chat list keys its rows by).
+    void contactHandleResolved(const QString &accountHex, const QString &handle);
 
 private:
     void setStatus(Status status, const QString &message);
@@ -114,6 +161,14 @@ private:
     AddContactService *beginAdd();
     void seedFromRoster();
     void clearInviteConnections();
+
+    // Lookup state machine.
+    void setLookup(LookupState state, const QString &message = QString());
+    void runLookup();
+    void classifyLookup(const AccountId &account);
+    void clearLookupConnections();
+    // Reverse directory resolution of an inbound request's sender.
+    void resolveHandleFor(const AccountId &account);
 
     RequestListModel m_requests;
     bool m_enabled = false;
@@ -142,8 +197,26 @@ private:
 
     // Per-attempt send state machine; recreated on every add.
     std::unique_ptr<AddContactService> m_pendingAdd;
+    QString m_pendingAddHandle; // the handle the in-flight add targets (empty for invites)
     // One-shot connections to the shared relay for a createMyInvite() attempt.
     QList<QMetaObject::Connection> m_inviteConnections;
+
+    // Search & Find lookup. m_lookupHandle is the normalised text being looked
+    // up; m_lookupInFlight guards the single outstanding directory call, and
+    // m_lookupDirty remembers that the text changed while one was in flight.
+    LookupState m_lookupState = LookupState::Idle;
+    QString m_lookupHandle;
+    QString m_lookupMessage;
+    std::optional<AccountId> m_lookupAccount;
+    QTimer m_lookupDebounce;
+    bool m_lookupInFlight = false;
+    bool m_lookupDirty = false;
+    QList<QMetaObject::Connection> m_lookupConnections;
+    QStringList m_mockDirectory;
+    QHash<QString, AccountId> m_mockAccounts; // stable mock ids per handle
+    // Persistent reverse-lookup connections (live mode) and the accounts whose
+    // handle is being resolved.
+    QList<QMetaObject::Connection> m_reverseConnections;
 };
 
 } // namespace OpenChat

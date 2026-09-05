@@ -385,6 +385,8 @@ private slots:
     void acceptHandshakeAuthenticatesJoinsAndCommits();
     void acceptHandshakeRejectsMismatchedCredential();
     void acceptHandshakeCommitFailureFailsClosed();
+    void sendEmitsQueuedRowBeforeRelayAcceptance();
+    void contactAcceptIsControlSentAndSurfacedOnReceive();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -989,6 +991,96 @@ void SyncEngineTest::acceptHandshakeCommitFailureFailsClosed()
     QVERIFY(engine.isFailedClosed());
     QCOMPARE(accepted, 0);
     QCOMPARE(authFailed, 0);
+}
+
+void SyncEngineTest::sendEmitsQueuedRowBeforeRelayAcceptance()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    std::optional<MessageRecord> queued;
+    connect(&engine, &SyncEngine::messageQueued, &engine,
+            [&](const MessageRecord &record) { queued = record; });
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    engine.enqueueText(conversation, DeviceId::generate(), QStringLiteral("hello"));
+
+    // The queued row is exactly the committed store row, so a UI can render it
+    // (with its stable id for later state updates) before the relay accepts.
+    QVERIFY(queued.has_value());
+    QCOMPARE(store.messages.size(), 1);
+    QCOMPARE(queued->id.bytes(), store.messages.first().id.bytes());
+    QCOMPARE(queued->body, QStringLiteral("hello"));
+    QCOMPARE(queued->flow, MessageFlow::Outgoing);
+    QCOMPARE(queued->deliveryState, DeliveryState::Queued);
+    QCOMPARE(queued->conversationId.bytes(), conversation.bytes());
+}
+
+void SyncEngineTest::contactAcceptIsControlSentAndSurfacedOnReceive()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    std::optional<ConversationId> acceptedConversation;
+    std::optional<DeviceId> acceptedDevice;
+    int visibleMessages = 0;
+    connect(&engine, &SyncEngine::contactAcceptReceived, &engine,
+            [&](const ConversationId &c, const DeviceId &d) {
+                acceptedConversation = c;
+                acceptedDevice = d;
+            });
+    connect(&engine, &SyncEngine::messageReceived, &engine,
+            [&](const MessageRecord &) { ++visibleMessages; });
+    engine.start();
+
+    // --- Send: encrypted under the group ratchet, shipped as ContactAccept with
+    //     no visible message row. ---
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    engine.sendContactAccept(conversation, peer);
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.messages.size(), 0); // control send: no message row
+    QCOMPARE(store.outboxes.size(), 1);
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(transport.sent.first().messageKind, EnvelopeMessageKind::ContactAccept);
+    QCOMPARE(transport.sent.first().recipientDeviceId.bytes(), peer.bytes());
+    QCOMPARE(transport.sent.first().conversationId.bytes(), conversation.bytes());
+    QVERIFY(transport.sent.first().ciphertext.startsWith("ENC:"));
+
+    // --- Receive: an authenticated ContactAccept is consumed as a control
+    //     receive (acked, replay-guarded, never a message) and surfaced typed. ---
+    CiphertextEnvelopeV1 inbound =
+        incomingEnvelope(conversation, mls.senderDevice, QByteArray("ENC:ACCEPT"));
+    inbound.messageKind = EnvelopeMessageKind::ContactAccept;
+    engine.handleEnvelope(inbound, 21);
+
+    QVERIFY(acceptedConversation.has_value());
+    QCOMPARE(acceptedConversation->bytes(), conversation.bytes());
+    QCOMPARE(acceptedDevice->bytes(), mls.senderDevice.bytes());
+    QCOMPARE(visibleMessages, 0);
+    QCOMPARE(store.received.size(), 0);
+    QCOMPARE(transport.acks.size(), 1);
+    QCOMPARE(transport.acks.first().second, quint64(21));
+    QVERIFY(store.seen.contains(inbound.envelopeId.bytes()));
+
+    // A forged sender (credential names another device) is dropped silently.
+    CiphertextEnvelopeV1 forged =
+        incomingEnvelope(conversation, DeviceId::generate(), QByteArray("ENC:ACCEPT"));
+    forged.messageKind = EnvelopeMessageKind::ContactAccept;
+    acceptedConversation.reset();
+    engine.handleEnvelope(forged, 22);
+    QVERIFY(!acceptedConversation.has_value());
+    QCOMPARE(transport.acks.size(), 1);
+
+    // A redelivery of the consumed accept is acked but not surfaced twice.
+    engine.handleEnvelope(inbound, 23);
+    QVERIFY(!acceptedConversation.has_value());
+    QCOMPARE(transport.acks.size(), 2);
+    QVERIFY(!engine.isFailedClosed());
 }
 
 QTEST_MAIN(SyncEngineTest)

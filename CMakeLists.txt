@@ -67,6 +67,7 @@ qt_add_qml_module(OpenChat
         assets/userpfp_none.png
         assets/icons/video-call.svg
         assets/icons/phone-call.svg
+        assets/icons/settings.svg
         assets/icons/chevron-down.svg
         assets/icons/openchat.svg
 )
@@ -158,6 +159,8 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/007_contacts.sql
         src/storage/migrations/008_pending_handshakes.sql
         src/storage/migrations/009_contact_verification.sql
+        src/storage/migrations/010_profile_display_name.sql
+        src/storage/migrations/011_contact_device.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -170,6 +173,7 @@ add_library(openchat_app STATIC
     src/app/AccountBootstrap.cpp
     src/app/AddContactService.cpp
     src/app/ContactRequestService.cpp
+    src/app/DeviceLink.cpp
 )
 target_include_directories(openchat_app PUBLIC src)
 target_link_libraries(openchat_app
@@ -369,6 +373,9 @@ set_tests_properties(tst_contactrequestservice PROPERTIES ENVIRONMENT "QT_QPA_PL
 add_executable(tst_e2e
     tests/tst_e2e.cpp
     tests/relay/RelayTestSupport.cpp
+    src/controllers/ChatController.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
 )
 target_include_directories(tst_e2e PRIVATE src tests relay/src)
 target_link_libraries(tst_e2e PRIVATE
@@ -432,9 +439,22 @@ add_executable(tst_chatcontroller
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
 )
-target_include_directories(tst_chatcontroller PRIVATE src)
-target_link_libraries(tst_chatcontroller PRIVATE Qt6::Core Qt6::Test)
+target_include_directories(tst_chatcontroller PRIVATE src tests)
+target_link_libraries(tst_chatcontroller PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test
+)
 add_test(NAME tst_chatcontroller COMMAND tst_chatcontroller)
+set_tests_properties(tst_chatcontroller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_onboardingcontroller
     tests/tst_onboardingcontroller.cpp

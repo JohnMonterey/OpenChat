@@ -29,6 +29,10 @@ public:
     setVerified(const AccountId &accountId, bool verified, qint64 updatedAtMs) override;
     [[nodiscard]] Result<void, RepositoryError>
     setPeerSigningKey(const AccountId &accountId, QByteArrayView key32) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    setPeerDeviceId(const AccountId &accountId, const DeviceId &deviceId) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    setHandle(const AccountId &accountId, const QString &handle) override;
 
 private:
     SqlCipherDatabase &m_database;

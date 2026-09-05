@@ -433,7 +433,7 @@ Result<CiphertextEnvelopeV1, DecodeError> decodeEnvelope(QByteArrayView encoded,
             break;
         case MessageKind: {
             const auto value = reader.readUnsigned();
-            if (!value || *value > static_cast<quint64>(EnvelopeMessageKind::AttachmentControl))
+            if (!value || *value > static_cast<quint64>(maxEnvelopeMessageKind))
                 return failure(reader, DecodeError::InvalidFieldValue);
             messageKind = static_cast<EnvelopeMessageKind>(*value);
             break;

@@ -81,6 +81,9 @@ public:
   [[nodiscard]] Result<QByteArray, ProfileSessionError>
   signChallenge(QByteArrayView challenge, QByteArrayView context) const;
   [[nodiscard]] Result<AccountId, ProfileSessionError> accountId() const;
+  [[nodiscard]] QString displayName() const;
+  [[nodiscard]] Result<void, ProfileSessionError>
+  setDisplayName(const QString &displayName);
   [[nodiscard]] Result<RecoveryCode, ProfileSessionError> takeRecoveryCode();
 
   // Durably commits any MLS ratchet state captured by an out-of-band mutation
@@ -147,6 +150,7 @@ private:
   std::unique_ptr<MlsSyncSession> m_mlsSyncSession;
   std::unique_ptr<SyncEngine> m_syncEngine;
   std::optional<AccountId> m_accountId;
+  QString m_displayName;
   SecureBuffer m_databaseKey;
   SecureBuffer m_wrappingKey;
   std::unique_ptr<RecoveryCode> m_recoveryCode;

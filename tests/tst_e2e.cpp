@@ -17,7 +17,9 @@
 #include "app/AccountBootstrap.h"
 #include "app/AddContactService.h"
 #include "app/ContactRequestService.h"
+#include "app/DeviceLink.h"
 #include "app/ProfileSession.h"
+#include "controllers/ChatController.h"
 #include "domain/ChatTypes.h"
 #include "domain/Contact.h"
 #include "network/RelayClient.h"
@@ -40,6 +42,7 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
 #include <QHostAddress>
 #include <QSslServer>
 #include <QSslSocket>
@@ -305,6 +308,7 @@ private slots:
     void cleanupTestCase();
 
     void pipelineDeliversMessagesOverRealTls();
+    void relockedProfileRelinksWithoutTokens();
 
 private:
     void bootstrapClient(ClientStack &stack, const QString &handlePrefix);
@@ -425,6 +429,7 @@ RelayEndpoints EndToEndTest::proxyEndpoints() const
     endpoints.keyPackages = QUrl(base + QStringLiteral("/key-packages"));
     endpoints.keyPackagesClaim = QUrl(base + QStringLiteral("/key-packages/claim"));
     endpoints.directory = QUrl(base + QStringLiteral("/directory"));
+    endpoints.directoryAccount = QUrl(base + QStringLiteral("/directory/account"));
     endpoints.invites = QUrl(base + QStringLiteral("/invites"));
     endpoints.invitesRedeem = QUrl(base + QStringLiteral("/invites/redeem"));
     endpoints.live = QUrl(QStringLiteral("wss://localhost:%1/v1/live").arg(m_proxyPort));
@@ -510,6 +515,12 @@ void EndToEndTest::pipelineDeliversMessagesOverRealTls()
     connect(&bobRequests, &ContactRequestService::securityNotice, this,
             [&](const ConversationId &, const AccountId &) { bobSecurityNotice = true; });
 
+    // Alice's own request service closes the loop when Bob accepts.
+    ContactRequestService aliceRequests(*alice.session, *alice.session->syncEngine());
+    std::optional<AccountId> aliceAccepted;
+    connect(&aliceRequests, &ContactRequestService::contactAccepted, this,
+            [&](const AccountId &peer) { aliceAccepted = peer; });
+
     AddContactService aliceAdd(*alice.session, *alice.client, *alice.session->syncEngine());
     std::optional<ConversationId> aliceConversation;
     std::optional<AccountId> alicePeer;
@@ -566,39 +577,87 @@ void EndToEndTest::pipelineDeliversMessagesOverRealTls()
         QCOMPARE(*found.value()->peerSigningKey, alice.signingPublicKey);
     }
 
-    // The message store's foreign key requires a durable `conversations` row for
-    // every message. Establishing that row is the chat-open layer's job, not the
-    // content-blind contact handshake's (which materialises only the MLS group and
-    // the roster). Create it on both sides here, mirroring the setup every
-    // SyncStore/SyncEngine test performs, so the application-message send/receive
-    // path has its conversation to write into.
-    const ConversationRecord conversationRecord{conversation, conversation.bytes(), QString(),
-                                                ConversationKind::Direct,
-                                                QDateTime::currentMSecsSinceEpoch()};
-    QVERIFY(alice.session->chats()->upsertConversation(conversationRecord).hasValue());
-    QVERIFY(bob.session->chats()->upsertConversation(conversationRecord).hasValue());
+    // --- Bob's acceptance travels back to Alice as a ContactAccept control
+    //     message through the relay: her PendingOutgoing row becomes Accepted,
+    //     and both sides now hold the durable conversation row (created by the
+    //     services, not by this test). ---
+    QTRY_VERIFY_WITH_TIMEOUT(aliceAccepted.has_value(), 30000);
+    QCOMPARE(aliceAccepted->bytes(), bob.account.bytes());
+    {
+        auto found = alice.session->contacts()->find(bob.account);
+        QVERIFY(found.hasValue());
+        QVERIFY(found.value().has_value());
+        QCOMPARE(found.value()->state, ContactState::Accepted);
+        QVERIFY(found.value()->peerDeviceId.has_value());
+        QCOMPARE(found.value()->peerDeviceId->bytes(), bob.deviceId.bytes());
+    }
+    for (ClientStack *stack : {&alice, &bob}) {
+        auto rows = stack->session->chats()->conversations();
+        QVERIFY(rows.hasValue());
+        bool present = false;
+        for (const ConversationRecord &record : rows.value())
+            present = present || record.id == conversation;
+        QVERIFY(present);
+    }
 
-    // --- Alice -> Bob application message over the live stream. ---
+    // --- The chat surface on both sides, exactly as the app wires it: Bob's
+    //     accepted contact is his chat; Alice's accepted request is hers. ---
+    ChatController aliceChat;
+    aliceChat.setLiveServices(alice.session.get(), alice.session->syncEngine(), &aliceRequests);
+    ChatController bobChat;
+    bobChat.setLiveServices(bob.session.get(), bob.session->syncEngine(), &bobRequests);
+    QCOMPARE(aliceChat.contacts()->rowCount(), 1);
+    QCOMPARE(bobChat.contacts()->rowCount(), 1);
+    QCOMPARE(aliceChat.currentContactName(), bob.handle); // typed at add time
+    QVERIFY(aliceChat.hasCurrentContact());
+    QVERIFY(bobChat.hasCurrentContact());
+
+    // --- Alice -> Bob application message over the live stream, sent from the
+    //     composer and received into Bob's open conversation. ---
     std::optional<MessageRecord> bobReceived;
     connect(bob.session->syncEngine(), &SyncEngine::messageReceived, this,
             [&](const MessageRecord &message) { bobReceived = message; });
-    alice.session->syncEngine()->enqueueText(conversation, bob.deviceId,
-                                             QStringLiteral("hello from Alice"));
+    aliceChat.setComposerText(QStringLiteral("hello from Alice"));
+    QVERIFY(aliceChat.canSend());
+    QVERIFY(aliceChat.sendMessage());
+    QCOMPARE(aliceChat.messages()->rowCount(), 1);
     QTRY_VERIFY_WITH_TIMEOUT(bobReceived.has_value(), 30000);
     QCOMPARE(bobReceived->body, QStringLiteral("hello from Alice"));
     QCOMPARE(bobReceived->flow, MessageFlow::Incoming);
     QCOMPARE(bobReceived->conversationId.bytes(), conversation.bytes());
+    QCOMPARE(bobChat.messages()->rowCount(), 1);
+    QCOMPARE(bobChat.messages()->data(bobChat.messages()->index(0), MessageListModel::BodyRole)
+                 .toString(),
+             QStringLiteral("hello from Alice"));
+    // Relay acceptance advanced Alice's visible row past Queued.
+    QTRY_VERIFY_WITH_TIMEOUT(
+        aliceChat.messages()->data(aliceChat.messages()->index(0),
+                                   MessageListModel::DeliveryStateRole).toInt()
+            == static_cast<int>(MessageDeliveryState::Sent),
+        30000);
 
     // --- Bob -> Alice application message, symmetric. ---
     std::optional<MessageRecord> aliceReceived;
     connect(alice.session->syncEngine(), &SyncEngine::messageReceived, this,
             [&](const MessageRecord &message) { aliceReceived = message; });
-    bob.session->syncEngine()->enqueueText(conversation, alice.deviceId,
-                                           QStringLiteral("hi back from Bob"));
+    bobChat.setComposerText(QStringLiteral("hi back from Bob"));
+    QVERIFY(bobChat.sendMessage());
     QTRY_VERIFY_WITH_TIMEOUT(aliceReceived.has_value(), 30000);
     QCOMPARE(aliceReceived->body, QStringLiteral("hi back from Bob"));
     QCOMPARE(aliceReceived->flow, MessageFlow::Incoming);
     QCOMPARE(aliceReceived->conversationId.bytes(), conversation.bytes());
+    QCOMPARE(aliceChat.messages()->rowCount(), 2);
+
+    // --- Reverse directory lookup: Bob learns Alice's handle from her id. ---
+    std::optional<QString> resolvedHandle;
+    connect(bob.client.get(), &RelayClient::accountResolved, this,
+            [&](const AccountId &account, const QString &handle) {
+                if (account == alice.account)
+                    resolvedHandle = handle;
+            });
+    bob.client->resolveAccount(alice.account);
+    QTRY_VERIFY_WITH_TIMEOUT(resolvedHandle.has_value(), 30000);
+    QCOMPARE(*resolvedHandle, alice.handle);
 
     // Neither engine tripped its fail-closed guard along the way.
     QVERIFY(!alice.session->syncEngine()->isFailedClosed());
@@ -664,6 +723,66 @@ void EndToEndTest::pipelineDeliversMessagesOverRealTls()
     bob.client->disconnect();
     alice.session->lock();
     bob.session->lock();
+}
+
+void EndToEndTest::relockedProfileRelinksWithoutTokens()
+{
+    if (!m_available)
+        QSKIP("PostgreSQL not available for the E2E test");
+
+    // A registered account, then the exact app-restart sequence: the live
+    // socket closes, the session locks, and the profile is unlocked again with a
+    // brand-new RelayClient holding no tokens at all.
+    ClientStack carol;
+    bootstrapClient(carol, QStringLiteral("carol"));
+    if (QTest::currentTestFailed())
+        return;
+    QTRY_VERIFY_WITH_TIMEOUT(carol.client->isConnected(), 30000);
+    const auto profileId = ProfileId::fromBytes(
+        QByteArray::fromHex(QDir(carol.dir.path()).entryList(QDir::Dirs | QDir::NoDotAndDotDot)
+                                .constFirst()
+                                .toLatin1()));
+    QVERIFY(profileId.has_value());
+
+    carol.client->disconnect();
+    carol.session->lock();
+    carol.transport.reset();
+    carol.client.reset();
+
+    auto unlocked = ProfileSession::unlock(*profileId, carol.vault,
+                                           ProfilePaths::forProfile(carol.dir.path(), *profileId));
+    QVERIFY(unlocked.hasValue());
+    carol.session = std::move(unlocked).value();
+    carol.client = std::make_unique<RelayClient>(carol.deviceId, carol.account, proxyEndpoints(),
+                                                 RelayCredentials{});
+    carol.client->setTlsConfiguration(RelayTest::clientConfigTrusting(m_ca->caCertPem()));
+    carol.transport = std::make_unique<RelayTransport>(*carol.client);
+    QVERIFY(carol.session->startNetworking(*carol.transport).hasValue());
+    QVERIFY(!carol.client->isConnected());
+
+    // The device link runs the challenge/response with the stored identity,
+    // installs the fresh tokens and reopens the live stream.
+    DeviceLink link(*carol.session, *carol.client);
+    int linked = 0;
+    int failed = 0;
+    connect(&link, &DeviceLink::linked, this, [&] { ++linked; });
+    connect(&link, &DeviceLink::authenticationFailed, this, [&] { ++failed; });
+    link.start(DeviceLink::Start::NeedsAuthentication);
+    QTRY_VERIFY_WITH_TIMEOUT(linked == 1, 30000);
+    QCOMPARE(failed, 0);
+    QVERIFY(link.isAuthenticated());
+    QTRY_VERIFY_WITH_TIMEOUT(carol.client->isConnected(), 30000);
+
+    // The new tokens authorize real calls: an exact-handle lookup resolves.
+    std::optional<AccountId> resolved;
+    connect(carol.client.get(), &RelayClient::handleResolved, this,
+            [&](const RelayDirectoryEntry &entry) { resolved = entry.accountId; });
+    carol.client->resolveHandle(carol.handle);
+    QTRY_VERIFY_WITH_TIMEOUT(resolved.has_value(), 30000);
+    QCOMPARE(resolved->bytes(), carol.account.bytes());
+
+    carol.client->disconnect();
+    carol.session->lock();
 }
 
 QTEST_GUILESS_MAIN(EndToEndTest)

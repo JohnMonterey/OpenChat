@@ -135,6 +135,7 @@ private slots:
     void revokedDeviceIsRejectedEverywhere();
     void directoryResolvesHandleToActiveDevices();
     void directoryExcludesRevokedDevices();
+    void directoryResolvesAccountToHandle();
     void inviteRedeemsOnceAndReturnsInviter();
     void inviteExpiryRejectsRedemption();
 
@@ -742,6 +743,30 @@ void RelayServicesTest::inviteExpiryRejectsRedemption()
     const auto expired = directory.redeemInvite(created.value());
     QVERIFY(!expired.hasValue());
     QCOMPARE(expired.error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::directoryResolvesAccountToHandle()
+{
+    const auto frank = registerDevice(QStringLiteral("frank"));
+    DirectoryService directory(*m_store);
+
+    // The reverse lookup returns exactly the registered handle.
+    const auto resolved = directory.resolveAccount(frank.account);
+    QVERIFY(resolved.hasValue());
+    QCOMPARE(resolved.value(), QStringLiteral("frank"));
+
+    // An unknown account discloses nothing.
+    const auto missing = directory.resolveAccount(AccountId::generate());
+    QVERIFY(!missing.hasValue());
+    QCOMPARE(missing.error(), RelayError::NotFound);
+
+    // Once every device is revoked the account is undiscoverable in reverse too,
+    // matching the forward lookup.
+    AuthService auth(*m_store);
+    QVERIFY(auth.revokeDevice(frank.device).hasValue());
+    const auto after = directory.resolveAccount(frank.account);
+    QVERIFY(!after.hasValue());
+    QCOMPARE(after.error(), RelayError::NotFound);
 }
 
 QTEST_GUILESS_MAIN(RelayServicesTest)

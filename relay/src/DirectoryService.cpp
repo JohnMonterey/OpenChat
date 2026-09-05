@@ -75,6 +75,21 @@ Result<AccountDirectoryEntry, RelayError> DirectoryService::resolveHandle(const 
     return loadActiveDevices(*accountId);
 }
 
+Result<QString, RelayError> DirectoryService::resolveAccount(const AccountId &account)
+{
+    QSqlQuery query(m_store.database());
+    query.prepare(QStringLiteral(
+        "SELECT a.handle FROM accounts a "
+        "WHERE a.account_id = ? AND EXISTS ("
+        "  SELECT 1 FROM devices d WHERE d.account_id = a.account_id AND d.revoked_at_ms IS NULL)"));
+    query.addBindValue(account.bytes());
+    if (!query.exec())
+        return fail<QString>(RelayError::Internal);
+    if (!query.next())
+        return fail<QString>(RelayError::NotFound);
+    return Result<QString, RelayError>::success(query.value(0).toString());
+}
+
 Result<QByteArray, RelayError> DirectoryService::createInvite(const AccountId &account,
                                                               qint64 ttlMs)
 {

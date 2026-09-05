@@ -226,6 +226,10 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
   if (!storedAccount.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::DatabaseFailure);
+  auto storedDisplayName = database->loadProfileDisplayName(profileId);
+  if (!storedDisplayName.hasValue())
+    return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
+        ProfileSessionError::DatabaseFailure);
 
   auto session = std::unique_ptr<ProfileSession>(
       new ProfileSession(profileId, vault, paths, std::move(hooks)));
@@ -237,6 +241,7 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
   if (!activated.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         activated.error());
+  session->m_displayName = std::move(storedDisplayName).value();
   return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::success(
       std::move(session));
 }
@@ -309,6 +314,7 @@ void ProfileSession::lock() noexcept {
   m_mlsStateStore.reset();
   m_identity.reset();
   m_accountId.reset();
+  m_displayName.clear();
   m_databaseKey = {};
   m_wrappingKey = {};
   m_recoveryCode.reset();
@@ -350,6 +356,23 @@ Result<AccountId, ProfileSessionError> ProfileSession::accountId() const {
     return Result<AccountId, ProfileSessionError>::failure(
         ProfileSessionError::NotUnlocked);
   return Result<AccountId, ProfileSessionError>::success(*m_accountId);
+}
+
+QString ProfileSession::displayName() const {
+  return m_unlocked ? m_displayName : QString();
+}
+
+Result<void, ProfileSessionError>
+ProfileSession::setDisplayName(const QString &displayName) {
+  if (!m_unlocked || !m_database)
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::NotUnlocked);
+  const QString normalized = displayName.trimmed();
+  if (normalized.isEmpty())
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  if (!m_database->storeProfileDisplayName(m_profileId, normalized).hasValue())
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  m_displayName = normalized;
+  return Result<void, ProfileSessionError>::success();
 }
 
 Result<RecoveryCode, ProfileSessionError> ProfileSession::takeRecoveryCode() {

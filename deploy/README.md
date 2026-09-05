@@ -71,7 +71,9 @@ curl --cacert deploy/dev-ca/out/rootCA.crt \
 ```
 
 The relay API speaks CBOR over `/v1/accounts`, `/v1/auth/*`, `/v1/sync`,
-`/v1/key-packages*`, and a binary WebSocket at `/v1/live`.
+`/v1/key-packages*`, `/v1/directory` (exact handle lookup), `/v1/directory/account`
+(reverse account-id → handle lookup, used to name inbound friend requests),
+`/v1/invites*`, and a binary WebSocket at `/v1/live`.
 
 ## 4. Trusting the dev CA from the OpenChat client
 

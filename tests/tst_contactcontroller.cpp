@@ -140,6 +140,7 @@ private slots:
     void mockAcceptDeclineBlockRemoveRow();
     void openResetsStatusAndTogglesDialog();
     void mockSafetyNumberReflectsPresetAndToggles();
+    void mockLookupFindsSeededHandleAndSendsRequest();
 
     // Live services (real session + engine + request service).
     void liveIncomingRequestAppearsThenAcceptClearsIt();
@@ -157,10 +158,20 @@ private:
     {
         const ConversationId conversation = ConversationId::generate();
         auto ourKeyPackage = m_session->mls()->generateKeyPackage();
-        Q_ASSERT(ourKeyPackage.hasValue());
-        Q_ASSERT(m_sender->createGroup(conversation).hasValue());
+        if (!ourKeyPackage.hasValue()) {
+            qWarning("fixture: generateKeyPackage failed (%d)",
+                     static_cast<int>(ourKeyPackage.error()));
+            return conversation;
+        }
+        if (auto created = m_sender->createGroup(conversation); !created.hasValue()) {
+            qWarning("fixture: createGroup failed (%d)", static_cast<int>(created.error()));
+            return conversation;
+        }
         auto add = m_sender->addMembers(conversation, {ourKeyPackage.value()});
-        Q_ASSERT(add.hasValue());
+        if (!add.hasValue()) {
+            qWarning("fixture: addMembers failed (%d)", static_cast<int>(add.error()));
+            return conversation;
+        }
         const QByteArray welcome = add.value().welcome;
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -241,6 +252,48 @@ void ContactControllerTest::cleanup()
 }
 
 // ---- Mock mode ----------------------------------------------------------------
+
+void ContactControllerTest::mockLookupFindsSeededHandleAndSendsRequest()
+{
+    ContactController controller;
+    controller.enableForPreview();
+    controller.setMockDirectory({QStringLiteral("alice")});
+    QSignalSpy lookupSpy(&controller, &ContactController::lookupChanged);
+
+    // Nothing to look up: idle and hidden.
+    controller.lookup(QStringLiteral("   "));
+    QCOMPARE(controller.lookupState(), ContactController::LookupState::Idle);
+    QVERIFY(!controller.lookupVisible());
+
+    // A handle (with a leading '@' and padding) is normalised, shows the row as
+    // Searching immediately, then resolves after the debounce.
+    controller.lookup(QStringLiteral(" @alice "));
+    QCOMPARE(controller.lookupHandle(), QStringLiteral("alice"));
+    QCOMPARE(controller.lookupState(), ContactController::LookupState::Searching);
+    QVERIFY(controller.lookupVisible());
+    QVERIFY(!controller.lookupCanRequest());
+    QTRY_COMPARE(controller.lookupState(), ContactController::LookupState::Found);
+    QVERIFY(controller.lookupCanRequest());
+    QVERIFY(!controller.lookupSubtitle().isEmpty());
+
+    // Sending from the row flips it to RequestSent (mock add resolves at once).
+    controller.requestLookup();
+    QCOMPARE(controller.lookupState(), ContactController::LookupState::RequestSent);
+    QVERIFY(controller.lookupVisible());
+    QVERIFY(!controller.lookupCanRequest());
+    QCOMPARE(controller.status(), ContactController::Status::Success);
+
+    // An unknown handle resolves to NotFound (still visible, no affordance); text
+    // with inner whitespace can never be a handle and hides the row.
+    controller.lookup(QStringLiteral("nobody"));
+    QTRY_COMPARE(controller.lookupState(), ContactController::LookupState::NotFound);
+    QVERIFY(controller.lookupVisible());
+    QVERIFY(!controller.lookupCanRequest());
+    controller.lookup(QStringLiteral("two words"));
+    QCOMPARE(controller.lookupState(), ContactController::LookupState::Idle);
+    QVERIFY(!controller.lookupVisible());
+    QVERIFY(lookupSpy.count() >= 5);
+}
 
 void ContactControllerTest::previewEnablesAndSeedsMockRequests()
 {

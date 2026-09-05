@@ -12,6 +12,14 @@ Item {
     property var contactController: null
     readonly property real contactRowHeight: Math.max(44, Math.min(65, (height - 290) / 6))
 
+    // Navigation artwork uses a fixed slot, independent of font glyph metrics.
+    component NavigationIcon: Item {
+        width: 26
+        height: 26
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: 10
+    }
+
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
@@ -41,8 +49,9 @@ Item {
             avatarKey: "userpfp_none"
         }
         Text {
+            objectName: "localUserName"
             x: 67; y: 22
-            text: "Daniel"
+            text: sidebar.controller.localUserName
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 17
@@ -57,11 +66,41 @@ Item {
             font.pixelSize: 14
             renderType: Text.NativeRendering
         }
-        Text {
-            x: 159; y: 28
-            text: "▾"
-            color: Theme.iconInk
-            font.pixelSize: 13
+
+        // Primitive "+" affordance drawn from two crossed strokes, opening the
+        // add-contact dialog (invite codes). Present only with a contact bridge.
+        Item {
+            objectName: "addContactButton"
+            anchors.right: parent.right
+            anchors.rightMargin: 18
+            y: 34
+            width: 20
+            height: 20
+            visible: sidebar.contactController && sidebar.contactController.enabled
+
+            Rectangle {
+                anchors.centerIn: parent
+                width: 14
+                height: 2
+                radius: 1
+                color: Theme.categoryText
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 2
+                height: 14
+                radius: 1
+                color: Theme.categoryText
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (sidebar.contactController)
+                        sidebar.contactController.openDialog();
+                }
+            }
         }
     }
 
@@ -93,7 +132,11 @@ Item {
                 font.pixelSize: 14
                 clip: true
                 selectByMouse: true
-                onTextEdited: sidebar.controller.setSearchQuery(text)
+                onTextEdited: {
+                    sidebar.controller.setSearchQuery(text);
+                    if (sidebar.contactController)
+                        sidebar.contactController.lookup(text);
+                }
 
                 Text {
                     anchors.fill: parent
@@ -142,10 +185,174 @@ Item {
             anchors.top: parent.top
             width: parent.width
 
-            // Inbound contact requests, shown above the categories. Present only
-            // when a live/preview ContactController is attached and enabled;
-            // otherwise it collapses to zero height and the Column skips it, so the
-            // categories below render exactly as before.
+            // Search & Find: the exact-handle directory match for the search
+            // text, with a grey "add person" affordance that sends a friend
+            // request. Collapses to zero height while there is nothing to show.
+            Item {
+                id: directoryResult
+                objectName: "directoryResult"
+                width: parent.width
+                readonly property bool shown:
+                    sidebar.contactController && sidebar.contactController.enabled
+                    && sidebar.contactController.lookupVisible
+                readonly property bool canRequest:
+                    shown && sidebar.contactController.lookupCanRequest
+                visible: shown
+                height: shown ? 40 + sidebar.contactRowHeight : 0
+                clip: true
+
+                Rectangle {
+                    id: directoryHeader
+                    width: parent.width
+                    height: 40
+                    color: "#27ffffff"
+
+                    Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.rule }
+                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.rule }
+
+                    Text {
+                        x: 15
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: 1
+                        text: "Search & Find"
+                        color: Theme.categoryText
+                        font.family: Theme.uiFont
+                        font.pixelSize: 17
+                        renderType: Text.NativeRendering
+                    }
+                }
+
+                Item {
+                    id: directoryRow
+                    objectName: "directoryResultRow"
+                    anchors.top: directoryHeader.bottom
+                    width: parent.width
+                    height: sidebar.contactRowHeight
+                    readonly property bool compact: height < 55
+
+                    Avatar {
+                        id: directoryAvatar
+                        x: 13
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.min(44, directoryRow.height - 6)
+                        height: width
+                        avatarKey: "userpfp_none"
+                    }
+
+                    Text {
+                        objectName: "directoryResultName"
+                        x: 70
+                        y: directoryRow.compact ? 3 : 11
+                        width: sendRequestButton.x - x - 8
+                        text: sidebar.contactController
+                              ? "@" + sidebar.contactController.lookupHandle : ""
+                        color: Theme.textPrimary
+                        font.family: Theme.uiFont
+                        font.pixelSize: 16
+                        elide: Text.ElideRight
+                        renderType: Text.NativeRendering
+                    }
+
+                    Text {
+                        objectName: "directoryResultSubtitle"
+                        x: 70
+                        y: directoryRow.compact ? 26 : 34
+                        width: sendRequestButton.x - x - 8
+                        text: sidebar.contactController
+                              ? sidebar.contactController.lookupSubtitle : ""
+                        color: Theme.textSecondary
+                        font.family: Theme.uiFont
+                        font.pixelSize: 14
+                        elide: Text.ElideRight
+                        renderType: Text.NativeRendering
+                    }
+
+                    // Grey "add person" icon: a head, shoulders and a small plus,
+                    // drawn from primitives. Enabled only while a request can be
+                    // sent; afterwards it dims to show the request went out.
+                    Item {
+                        id: sendRequestButton
+                        objectName: "sendRequestButton"
+                        anchors.right: parent.right
+                        anchors.rightMargin: 14
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 30
+                        height: 30
+                        readonly property bool sent:
+                            sidebar.contactController
+                            && (sidebar.contactController.lookupState
+                                    === ContactController.LookupState.RequestSent
+                                || sidebar.contactController.lookupState
+                                    === ContactController.LookupState.RequestPending)
+                        readonly property color ink: directoryResult.canRequest
+                            ? (sendRequestMouse.containsMouse ? "#5f7386" : "#8798aa")
+                            : "#c3ccd5"
+                        visible: directoryResult.canRequest || sent
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 15
+                            color: directoryResult.canRequest
+                                   ? (sendRequestMouse.containsMouse ? "#e7f2f8" : "#f3f7fa")
+                                   : "transparent"
+                            border.width: 1
+                            border.color: sendRequestButton.ink
+                        }
+                        // Head.
+                        Rectangle {
+                            x: 9; y: 6; width: 8; height: 8; radius: 4
+                            color: sendRequestButton.ink
+                        }
+                        // Shoulders.
+                        Rectangle {
+                            x: 6; y: 15; width: 14; height: 8; radius: 4
+                            color: sendRequestButton.ink
+                        }
+                        Rectangle {
+                            x: 6; y: 19; width: 14; height: 4
+                            color: sendRequestButton.ink
+                        }
+                        // Plus (or a check once the request went out).
+                        Rectangle {
+                            visible: !sendRequestButton.sent
+                            x: 19; y: 9; width: 6; height: 2; radius: 1
+                            color: sendRequestButton.ink
+                        }
+                        Rectangle {
+                            visible: !sendRequestButton.sent
+                            x: 21; y: 7; width: 2; height: 6; radius: 1
+                            color: sendRequestButton.ink
+                        }
+                        Rectangle {
+                            visible: sendRequestButton.sent
+                            x: 18; y: 12; width: 4; height: 2; radius: 1; rotation: 45
+                            color: "#5aa06a"
+                        }
+                        Rectangle {
+                            visible: sendRequestButton.sent
+                            x: 20; y: 10; width: 7; height: 2; radius: 1; rotation: -50
+                            color: "#5aa06a"
+                        }
+
+                        MouseArea {
+                            id: sendRequestMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: directoryResult.canRequest
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (sidebar.contactController)
+                                    sidebar.contactController.requestLookup();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Inbound friend requests, shown as a category above Chats only while
+            // one is pending. Present only when a live/preview ContactController is
+            // attached and enabled; otherwise it collapses to zero height and the
+            // Column skips it, so the categories below render exactly as before.
             Item {
                 id: requestsPanel
                 objectName: "requestsPanel"
@@ -153,9 +360,8 @@ Item {
                 readonly property bool hasRequests:
                     sidebar.contactController && sidebar.contactController.requests.count > 0
                 visible: sidebar.contactController && sidebar.contactController.enabled
-                height: visible ? requestsHeader.height
-                                  + (hasRequests ? requestsColumn.height : 46)
-                                : 0
+                         && hasRequests
+                height: visible ? requestsHeader.height + requestsColumn.height : 0
                 clip: true
 
                 Rectangle {
@@ -171,45 +377,32 @@ Item {
                         x: 15
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.verticalCenterOffset: 1
-                        text: "Requests"
+                        text: "Friend requests"
                         color: Theme.categoryText
                         font.family: Theme.uiFont
                         font.pixelSize: 17
                         renderType: Text.NativeRendering
                     }
 
-                    // Primitive "+" affordance drawn from two crossed strokes,
-                    // opening the add-contact dialog.
-                    Item {
-                        objectName: "addContactButton"
+                    Rectangle {
+                        objectName: "requestsBadge"
                         anchors.right: parent.right
                         anchors.rightMargin: 16
                         anchors.verticalCenter: parent.verticalCenter
-                        width: 18
                         height: 18
+                        width: Math.max(18, requestsBadgeLabel.implicitWidth + 10)
+                        radius: height / 2
+                        color: "#e0503d"
 
-                        Rectangle {
+                        Text {
+                            id: requestsBadgeLabel
                             anchors.centerIn: parent
-                            width: 14
-                            height: 2
-                            radius: 1
-                            color: Theme.categoryText
-                        }
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 2
-                            height: 14
-                            radius: 1
-                            color: Theme.categoryText
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (sidebar.contactController)
-                                    sidebar.contactController.openDialog();
-                            }
+                            text: sidebar.contactController
+                                  ? sidebar.contactController.requests.count : ""
+                            color: "white"
+                            font.family: Theme.uiFont
+                            font.pixelSize: 11
+                            font.bold: true
                         }
                     }
                 }
@@ -230,19 +423,6 @@ Item {
                             controller: sidebar.contactController
                         }
                     }
-                }
-
-                Text {
-                    objectName: "noRequests"
-                    anchors.top: requestsHeader.bottom
-                    anchors.topMargin: 14
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    visible: !requestsPanel.hasRequests
-                    text: "No pending requests"
-                    color: Theme.textSecondary
-                    font.family: Theme.uiFont
-                    font.pixelSize: 14
-                    renderType: Text.NativeRendering
                 }
             }
 
@@ -275,9 +455,17 @@ Item {
             anchors.top: parent.top
             anchors.topMargin: 30
             anchors.horizontalCenter: parent.horizontalCenter
+            width: parent.width - 40
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            readonly property bool liveEmpty:
+                sidebar.contactController && sidebar.contactController.enabled
+                && sidebar.controller.searchQuery.length === 0
             visible: sidebar.controller.contacts.favoriteCount
                      + sidebar.controller.contacts.regularCount === 0
-            text: "No contacts found"
+                     && !directoryResult.shown && !requestsPanel.visible
+            text: liveEmpty ? "No chats yet. Search a username above to add a friend."
+                            : "No contacts found"
             color: Theme.textSecondary
             font.family: Theme.uiFont
             font.pixelSize: 14
@@ -395,12 +583,9 @@ Item {
                     color: callTab.active ? "#e7f2f8" : "transparent"
                 }
 
-                Item {
+                NavigationIcon {
                     id: callIcon
-                    width: 26
-                    height: 26
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    y: 10
+                    objectName: "callIcon"
 
                     Image {
                         anchors.centerIn: parent
@@ -436,6 +621,7 @@ Item {
                 }
 
                 Text {
+                    objectName: "callTabLabel"
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 10
@@ -466,12 +652,9 @@ Item {
                     color: chatTab.active ? "#e7f2f8" : "transparent"
                 }
 
-                Item {
+                NavigationIcon {
                     id: chatIcon
-                    width: 26
-                    height: 26
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    y: 10
+                    objectName: "chatIcon"
 
                     // Speech bubble drawn from primitives, matching the house
                     // style of the search magnifier and presence beads.
@@ -518,6 +701,7 @@ Item {
                 }
 
                 Text {
+                    objectName: "chatTabLabel"
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 10
@@ -548,16 +732,20 @@ Item {
                     color: settingsTab.active ? "#e7f2f8" : "transparent"
                 }
 
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    y: 8
-                    text: "⚙"
-                    color: Theme.iconInk
-                    font.family: Theme.uiFont
-                    font.pixelSize: 24
+                NavigationIcon {
+                    objectName: "settingsIcon"
+
+                    Image {
+                        anchors.centerIn: parent
+                        width: 24
+                        height: 24
+                        source: Qt.resolvedUrl("../../../assets/icons/settings.svg")
+                        sourceSize: Qt.size(width * 2, height * 2)
+                    }
                 }
 
                 Text {
+                    objectName: "settingsTabLabel"
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 10

@@ -59,6 +59,39 @@ Window {
                 width: parent.width
                 height: Theme.conversationHeaderHeight
                 controller: root.chatController
+                visible: root.chatController.hasCurrentContact
+            }
+
+            // Shown instead of the conversation while no chat exists yet (a fresh
+            // profile before its first accepted friend request).
+            Column {
+                objectName: "noConversation"
+                anchors.centerIn: parent
+                width: Math.min(360, parent.width - 48)
+                spacing: 10
+                visible: !root.chatController.hasCurrentContact
+
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "No chats yet"
+                    color: Theme.textPrimary
+                    font.family: Theme.uiFont
+                    font.pixelSize: 16
+                    font.bold: true
+                    renderType: Text.NativeRendering
+                }
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: "Search a username in the sidebar and send a friend request. "
+                          + "Once they accept, your chat opens here."
+                    color: Theme.textSecondary
+                    font.family: Theme.uiFont
+                    font.pixelSize: 14
+                    renderType: Text.NativeRendering
+                }
             }
 
             // Connection/security posture strip. Collapses to zero height and is
@@ -110,6 +143,7 @@ Window {
                 anchors.top: securityBanner.bottom
                 anchors.bottom: messageComposer.top
                 controller: root.chatController
+                visible: root.chatController.hasCurrentContact
             }
 
             Composer {
@@ -119,6 +153,7 @@ Window {
                 anchors.bottom: parent.bottom
                 height: implicitHeight
                 controller: root.chatController
+                visible: root.chatController.hasCurrentContact
                 onMessageSent: history.positionAtEnd()
             }
         }

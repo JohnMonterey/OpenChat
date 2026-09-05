@@ -68,6 +68,10 @@ public:
   storeAccountId(const ProfileId &profileId, const AccountId &accountId);
   [[nodiscard]] Result<AccountId, StorageError>
   loadAccountId(const ProfileId &profileId);
+  [[nodiscard]] Result<void, StorageError>
+  storeProfileDisplayName(const ProfileId &profileId, const QString &displayName);
+  [[nodiscard]] Result<QString, StorageError>
+  loadProfileDisplayName(const ProfileId &profileId);
   void close() noexcept;
 
 private:

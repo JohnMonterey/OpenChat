@@ -41,6 +41,7 @@ struct RelayEndpoints final {
     QUrl keyPackages;   // POST { key_package } -> 200 (authenticated bearer token)
     QUrl keyPackagesClaim; // POST { target_device_id } -> CBOR { key_package } (authenticated)
     QUrl directory;     // GET ?handle=<h> -> CBOR { account_id, devices } (authenticated)
+    QUrl directoryAccount; // GET ?account_id=<hex> -> CBOR { handle } (authenticated)
     QUrl invites;       // POST { ttl_ms? } -> CBOR { token, expires_at_ms } (authenticated)
     QUrl invitesRedeem; // POST { token } -> CBOR { account_id, devices } (authenticated)
     QUrl live;          // wss:// live envelope stream
@@ -257,6 +258,14 @@ public:
     // failure emits Transport.
     void resolveHandle(const QString &handle);
 
+    // Resolves an account id back to its handle over the authenticated HTTPS
+    // reverse-directory endpoint, so an inbound request can be shown by name.
+    // Emits accountResolved(account, handle) on a 2xx with a well-formed body; a
+    // rejected token drives the single refresh-and-retry then authExpired(); an
+    // unknown account (relay 404) emits accountResolutionFailed(account,
+    // NotFound); a malformed body Malformed; any other failure Transport.
+    void resolveAccount(const AccountId &account);
+
     // Mints a one-time invite over the authenticated HTTPS endpoint. When
     // ttlMs > 0 it is sent as ttl_ms; otherwise the body is empty and the relay
     // applies its default TTL. Emits inviteCreated(token, expiresAtMs) on a 2xx;
@@ -310,6 +319,9 @@ signals:
     // Directory lookup: a defensively validated entry, or a typed failure.
     void handleResolved(const RelayDirectoryEntry &entry);
     void handleResolutionFailed(RelayDirectoryError error);
+    // Reverse directory lookup: the account's handle, or a typed failure.
+    void accountResolved(const OpenChat::AccountId &account, const QString &handle);
+    void accountResolutionFailed(const OpenChat::AccountId &account, RelayDirectoryError error);
     // One-time invite creation: the plaintext token plus advisory expiry, or a
     // non-auth failure (a rejected token surfaces through authExpired()).
     void inviteCreated(const QByteArray &token, qint64 expiresAtMs);

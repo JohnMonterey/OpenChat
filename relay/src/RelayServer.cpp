@@ -351,6 +351,25 @@ void RelayServer::registerRoutes()
         });
 
     m_http.route(
+        QStringLiteral("/v1/directory/account"), QHttpServerRequest::Method::Get,
+        [this](const QHttpServerRequest &request) -> QHttpServerResponse {
+            const auto identity = m_auth.authenticate(bearerToken(request));
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const QString hex =
+                QUrlQuery(request.query()).queryItemValue(QStringLiteral("account_id"));
+            const auto account = AccountId::fromBytes(QByteArray::fromHex(hex.toLatin1()));
+            if (hex.size() != AccountId::byteCount * 2 || !account)
+                return QHttpServerResponse(StatusCode::BadRequest);
+            const auto resolved = m_directory.resolveAccount(*account);
+            if (!resolved.hasValue())
+                return errorResponse(resolved.error());
+            QCborMap response;
+            response.insert(QLatin1StringView("handle"), resolved.value());
+            return cbor(response.toCborValue());
+        });
+
+    m_http.route(
         QStringLiteral("/v1/invites"), QHttpServerRequest::Method::Post,
         [this](const QHttpServerRequest &request) -> QHttpServerResponse {
             const auto identity = m_auth.authenticate(bearerToken(request));

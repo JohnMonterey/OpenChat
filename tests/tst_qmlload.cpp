@@ -39,6 +39,7 @@ private slots:
     void requiredStructure()
     {
         OpenChat::ChatController controller;
+        controller.setLocalUserName(QStringLiteral("Ada Lovelace"));
         QQmlApplicationEngine engine;
         engine.setInitialProperties(
             {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
@@ -59,6 +60,10 @@ private slots:
         QVERIFY(root->findChild<QObject *>(QStringLiteral("favoritesCategory")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("contactsCategory")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("contactSearch")));
+        QObject *localUserName =
+            root->findChild<QObject *>(QStringLiteral("localUserName"));
+        QVERIFY(localUserName);
+        QCOMPARE(localUserName->property("text").toString(), QStringLiteral("Ada Lovelace"));
 
         window->setHeight(560);
         QCoreApplication::processEvents();
@@ -106,6 +111,49 @@ private slots:
             root->findChild<QObject *>(QStringLiteral("messageList"));
         QVERIFY(messageList);
         QTRY_VERIFY(messageList->property("atYEnd").toBool());
+    }
+
+    void bottomNavigationIconsStayAboveLabels()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+
+        for (const QSize size : {QSize(720, 560), QSize(920, 680), QSize(1440, 900)}) {
+            window->resize(size);
+            QCoreApplication::processEvents();
+            QRectF referenceIcon;
+            qreal referenceLabelY = 0;
+            qreal referenceTabHeight = 0;
+            for (const QString &name : {QStringLiteral("call"), QStringLiteral("chat"),
+                                        QStringLiteral("settings")}) {
+                auto *icon = window->findChild<QQuickItem *>(name + QStringLiteral("Icon"));
+                auto *label = window->findChild<QQuickItem *>(name + QStringLiteral("TabLabel"));
+                auto *tab = window->findChild<QQuickItem *>(name + QStringLiteral("Tab"));
+                QVERIFY(icon);
+                QVERIFY(label);
+                QVERIFY(tab);
+                QVERIFY(icon->height() > 0);
+                QVERIFY2(icon->y() + icon->height() < label->y(),
+                         qPrintable(name + QStringLiteral(" icon overlaps its label")));
+                const QRectF iconRect(icon->x(), icon->y(), icon->width(), icon->height());
+                if (name == QStringLiteral("call")) {
+                    referenceIcon = iconRect;
+                    referenceLabelY = label->y();
+                    referenceTabHeight = tab->height();
+                } else {
+                    QCOMPARE(iconRect, referenceIcon);
+                    QCOMPARE(label->y(), referenceLabelY);
+                    QCOMPARE(tab->height(), referenceTabHeight);
+                }
+            }
+        }
     }
 
     void bottomNavigationSwitchesMainPane()
@@ -593,22 +641,21 @@ private slots:
         QCOMPARE(engine.rootObjects().size(), 1);
         QObject *root = engine.rootObjects().constFirst();
 
-        // The requests panel supersedes the favorites "Requests" category, and the
-        // add affordance is present.
+        // The friend-requests category supersedes the favorites "Requests"
+        // category while a request is pending, and the add affordance is present.
         QObject *requestsPanel =
             root->findChild<QObject *>(QStringLiteral("requestsPanel"));
         QObject *favoritesCategory =
             root->findChild<QObject *>(QStringLiteral("favoritesCategory"));
         QObject *addContactButton =
             root->findChild<QObject *>(QStringLiteral("addContactButton"));
-        QObject *noRequests = root->findChild<QObject *>(QStringLiteral("noRequests"));
         QVERIFY(requestsPanel);
         QVERIFY(favoritesCategory);
         QVERIFY(addContactButton);
-        QVERIFY(noRequests);
         QVERIFY(requestsPanel->property("visible").toBool());
+        QTRY_VERIFY(requestsPanel->property("height").toReal() > 40.0); // header + one row
         QVERIFY(!favoritesCategory->property("visible").toBool());
-        QVERIFY(!noRequests->property("visible").toBool());
+        QVERIFY(addContactButton->property("visible").toBool());
 
         // The seeded request's delegate is keyed by its requestId hex, and each of
         // its accept / decline / block buttons targets that same id.
@@ -653,6 +700,92 @@ private slots:
         QVERIFY(contactController.inviteReady());
         QCOMPARE(myInviteText->property("text").toString(),
                  QStringLiteral("OPENCHAT-INV-TEST-0001"));
+    }
+
+    void friendRequestsCategoryHidesWithoutRequests()
+    {
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        QObject *requestsPanel = root->findChild<QObject *>(QStringLiteral("requestsPanel"));
+        QVERIFY(requestsPanel);
+        QVERIFY(!requestsPanel->property("visible").toBool());
+        QCOMPARE(requestsPanel->property("height").toReal(), 0.0);
+
+        // A request arriving reveals the category; resolving it hides it again.
+        contactController.addMockRequest(QStringLiteral("@dave"), QStringLiteral("wants to chat"));
+        QCoreApplication::processEvents();
+        QVERIFY(requestsPanel->property("visible").toBool());
+        OpenChat::RequestListModel *model = contactController.requests();
+        const QString requestId =
+            model->data(model->index(0), OpenChat::RequestListModel::IdRole).toString();
+        contactController.decline(requestId);
+        QCoreApplication::processEvents();
+        QVERIFY(!requestsPanel->property("visible").toBool());
+    }
+
+    void searchAndFindRowSendsFriendRequest()
+    {
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        contactController.setMockDirectory({QStringLiteral("alice")});
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        QObject *result = root->findChild<QObject *>(QStringLiteral("directoryResult"));
+        QObject *name = root->findChild<QObject *>(QStringLiteral("directoryResultName"));
+        QObject *subtitle =
+            root->findChild<QObject *>(QStringLiteral("directoryResultSubtitle"));
+        QObject *button = root->findChild<QObject *>(QStringLiteral("sendRequestButton"));
+        QVERIFY(result);
+        QVERIFY(name);
+        QVERIFY(subtitle);
+        QVERIFY(button);
+        QVERIFY(!result->property("visible").toBool());
+        QCOMPARE(result->property("height").toReal(), 0.0);
+
+        // Typing a username that exists shows them with the grey add affordance.
+        chatController.setSearchQuery(QStringLiteral("alice"));
+        contactController.lookup(QStringLiteral("alice"));
+        QCoreApplication::processEvents();
+        QVERIFY(result->property("visible").toBool());
+        QCOMPARE(name->property("text").toString(), QStringLiteral("@alice"));
+        QTRY_COMPARE(contactController.lookupState(),
+                     OpenChat::ContactController::LookupState::Found);
+        QCoreApplication::processEvents();
+        QVERIFY(button->property("visible").toBool());
+        QVERIFY(!button->property("sent").toBool());
+        QCOMPARE(subtitle->property("text").toString(), QStringLiteral("Send a friend request"));
+
+        // Clicking it sends the request; the affordance turns into a sent mark.
+        contactController.requestLookup();
+        QCoreApplication::processEvents();
+        QVERIFY(button->property("sent").toBool());
+        QCOMPARE(subtitle->property("text").toString(), QStringLiteral("Request sent"));
+
+        // Clearing the search hides the row again.
+        chatController.setSearchQuery(QString());
+        contactController.lookup(QString());
+        QCoreApplication::processEvents();
+        QVERIFY(!result->property("visible").toBool());
     }
 
     void safetyNumberDialogRendersWithController()

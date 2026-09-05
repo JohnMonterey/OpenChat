@@ -92,8 +92,9 @@ insertContact(sqlite3 *database, const ContactRecord &contact, ContactState stat
 {
     Statement statement(database,
                         "INSERT INTO contacts(account_id, handle, display_name, state, "
-                        "conversation_id, created_at_ms, updated_at_ms, peer_signing_key, verified) "
-                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
+                        "conversation_id, created_at_ms, updated_at_ms, peer_signing_key, verified, "
+                        "peer_device_id) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)");
     if (!statement.isValid() || !statement.bindBlob(1, contact.accountId.bytes())
         || !statement.bindText(2, contact.handle) || !statement.bindText(3, contact.displayName)
         || !statement.bindInt(4, toStateInt(state)))
@@ -104,26 +105,34 @@ insertContact(sqlite3 *database, const ContactRecord &contact, ContactState stat
     const bool boundPeerKey = contact.peerSigningKey
         ? statement.bindBlob(8, *contact.peerSigningKey)
         : statement.bindNull(8);
+    const bool boundPeerDevice = contact.peerDeviceId
+        ? statement.bindBlob(10, contact.peerDeviceId->bytes())
+        : statement.bindNull(10);
     if (!boundConversation || !statement.bindInt64(6, contact.createdAtMs)
         || !statement.bindInt64(7, contact.updatedAtMs) || !boundPeerKey
-        || !statement.bindInt(9, contact.verified ? 1 : 0)
+        || !statement.bindInt(9, contact.verified ? 1 : 0) || !boundPeerDevice
         || sqlite3_step(statement.get()) != SQLITE_DONE)
         return failVoid(internalError(code));
     return okVoid();
 }
 
 // Refreshes the directory metadata and moves an existing row to a new state.
-// created_at_ms and conversation_id are deliberately preserved.
+// created_at_ms and conversation_id are deliberately preserved; the peer device
+// is rebound only when the new record names one (a fresh request always does),
+// so an unrelated metadata refresh never clears a known device.
 Result<void, RepositoryError>
 updateContactState(sqlite3 *database, const ContactRecord &contact, ContactState state,
                    const QString &code)
 {
     Statement statement(database,
                         "UPDATE contacts SET handle=?2, display_name=?3, state=?4, "
-                        "updated_at_ms=?5 WHERE account_id=?1");
+                        "updated_at_ms=?5, peer_device_id=COALESCE(?6, peer_device_id) "
+                        "WHERE account_id=?1");
     if (!statement.isValid() || !statement.bindBlob(1, contact.accountId.bytes())
         || !statement.bindText(2, contact.handle) || !statement.bindText(3, contact.displayName)
         || !statement.bindInt(4, toStateInt(state)) || !statement.bindInt64(5, contact.updatedAtMs)
+        || !(contact.peerDeviceId ? statement.bindBlob(6, contact.peerDeviceId->bytes())
+                                  : statement.bindNull(6))
         || sqlite3_step(statement.get()) != SQLITE_DONE)
         return failVoid(internalError(code));
     return okVoid();
@@ -159,10 +168,18 @@ Result<ContactRecord, RepositoryError> decodeContact(sqlite3_stmt *statement)
         peerSigningKey = std::move(key);
     }
     const bool verified = sqlite3_column_int(statement, 8) != 0;
+    std::optional<DeviceId> peerDeviceId;
+    if (sqlite3_column_type(statement, 9) != SQLITE_NULL) {
+        const auto device = DeviceId::fromBytes(RepositorySql::blob(statement, 9));
+        if (!device)
+            return Ret::failure(RepositorySql::error(RepositoryErrorCode::IntegrityFailure,
+                                                     QStringLiteral("contact.decode.peerdevice")));
+        peerDeviceId = *device;
+    }
     return Ret::success(ContactRecord{*accountId, handle, displayName, *state, conversationId,
                                       sqlite3_column_int64(statement, 5),
                                       sqlite3_column_int64(statement, 6), std::move(peerSigningKey),
-                                      verified});
+                                      verified, peerDeviceId});
 }
 
 } // namespace
@@ -178,7 +195,8 @@ Result<QVector<ContactRecord>, RepositoryError> SqlCipherContactRepository::cont
         using Ret = Result<QVector<ContactRecord>, RepositoryError>;
         Statement statement(database,
                             "SELECT account_id, handle, display_name, state, conversation_id, "
-                            "created_at_ms, updated_at_ms, peer_signing_key, verified FROM contacts "
+                            "created_at_ms, updated_at_ms, peer_signing_key, verified, "
+                            "peer_device_id FROM contacts "
                             "ORDER BY created_at_ms ASC, account_id ASC");
         if (!statement.isValid())
             return Ret::failure(internalError(QStringLiteral("contact.list.prepare")));
@@ -203,7 +221,8 @@ SqlCipherContactRepository::find(const AccountId &accountId)
         using Ret = Result<std::optional<ContactRecord>, RepositoryError>;
         Statement statement(database,
                             "SELECT account_id, handle, display_name, state, conversation_id, "
-                            "created_at_ms, updated_at_ms, peer_signing_key, verified FROM contacts "
+                            "created_at_ms, updated_at_ms, peer_signing_key, verified, "
+                            "peer_device_id FROM contacts "
                             "WHERE account_id=?1");
         if (!statement.isValid() || !statement.bindBlob(1, accountId.bytes()))
             return Ret::failure(internalError(QStringLiteral("contact.find.prepare")));
@@ -385,6 +404,38 @@ SqlCipherContactRepository::setPeerSigningKey(const AccountId &accountId, QByteA
         if (!statement.isValid() || !statement.bindBlob(1, accountId.bytes())
             || !statement.bindBlob(2, key32) || sqlite3_step(statement.get()) != SQLITE_DONE)
             return failVoid(internalError(QStringLiteral("contact.peerkey.update")));
+        return okVoid();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherContactRepository::setPeerDeviceId(const AccountId &accountId, const DeviceId &deviceId)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database,
+                            "UPDATE contacts SET peer_device_id=?2 WHERE account_id=?1");
+        if (!statement.isValid() || !statement.bindBlob(1, accountId.bytes())
+            || !statement.bindBlob(2, deviceId.bytes())
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return failVoid(internalError(QStringLiteral("contact.peerdevice.update")));
+        if (sqlite3_changes(database) == 0)
+            return failVoid(RepositorySql::error(RepositoryErrorCode::NotFound,
+                                                 QStringLiteral("contact.peerdevice.missing")));
+        return okVoid();
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherContactRepository::setHandle(const AccountId &accountId, const QString &handle)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database, "UPDATE contacts SET handle=?2 WHERE account_id=?1");
+        if (!statement.isValid() || !statement.bindBlob(1, accountId.bytes())
+            || !statement.bindText(2, handle) || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return failVoid(internalError(QStringLiteral("contact.handle.update")));
+        if (sqlite3_changes(database) == 0)
+            return failVoid(RepositorySql::error(RepositoryErrorCode::NotFound,
+                                                 QStringLiteral("contact.handle.missing")));
         return okVoid();
     });
 }

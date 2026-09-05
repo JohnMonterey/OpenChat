@@ -108,6 +108,34 @@ bool RequestListModel::removeByAccount(const AccountId &account)
     return false;
 }
 
+bool RequestListModel::updateHandle(const AccountId &account, const QString &handle)
+{
+    bool updated = false;
+    for (int row = 0; row < m_requests.size(); ++row) {
+        RequestEntry &entry = m_requests[row];
+        if (entry.account != account)
+            continue;
+        entry.handle = handle;
+        entry.displayName = displayNameForHandle(handle);
+        entry.subtitle = subtitleForHandle(handle, account);
+        emit dataChanged(index(row), index(row), {NameRole, SubtitleRole, HandleRole});
+        updated = true;
+    }
+    return updated;
+}
+
+QString RequestListModel::displayNameForHandle(const QString &handle)
+{
+    return handle.isEmpty() ? QStringLiteral("New contact request")
+                            : QStringLiteral("@") + handle;
+}
+
+QString RequestListModel::subtitleForHandle(const QString &handle, const AccountId &account)
+{
+    return handle.isEmpty() ? QStringLiteral("ID ") + account.toHex().left(10)
+                            : QStringLiteral("wants to chat with you");
+}
+
 std::optional<RequestListModel::RequestEntry>
 RequestListModel::byConversationHex(const QString &hex) const
 {

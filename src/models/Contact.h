@@ -16,6 +16,9 @@ struct Contact {
     Presence presence = Presence::Offline;
     bool favorite = false;
     QString avatarKey;
+    // Optional row subtitle. When empty the presence text is shown; a live
+    // contact shows its directory handle here because no presence exists yet.
+    QString statusText;
 };
 
 inline QString presenceText(Presence presence)

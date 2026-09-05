@@ -36,6 +36,12 @@ struct ContactRecord final {
     qint64 updatedAtMs = 0;
     std::optional<QByteArray> peerSigningKey{};  // peer's 32-byte Ed25519 identity key, when known
     bool verified = false;                        // local user assertion after comparing the safety number
+    // The peer device the 2-party MLS group was formed with: the device whose
+    // KeyPackage we claimed (sender side) or the device that shipped the Welcome
+    // (receiver side). It is the recipient of every envelope in the
+    // conversation; NULL for rows that predate migration 011 or were blocked
+    // before any exchange.
+    std::optional<DeviceId> peerDeviceId{};
 };
 
 } // namespace OpenChat

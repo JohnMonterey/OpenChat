@@ -198,6 +198,13 @@ public:
     void sendCallSignal(const ConversationId &conversation, const DeviceId &recipientDevice,
                         const QByteArray &payload);
 
+    // Sends the local user's self-published profile (presence, status line,
+    // picture) as an MLS application message on the durable path, so a change
+    // made while a contact is offline still reaches them. `payload` is an
+    // encoded ProfileUpdateMessage. Carries no visible message row.
+    void sendProfileUpdate(const ConversationId &conversation, const DeviceId &recipientDevice,
+                           const QByteArray &payload);
+
     // Sends one sealed media frame on the unreliable datagram path. `payload` is
     // already encrypted under the call's media key, so this deliberately skips
     // the group ratchet: 50 frames a second through MLS would mean 50 durable
@@ -234,6 +241,11 @@ signals:
     // to authenticate and open.
     void callMediaReceived(const OpenChat::ConversationId &conversation,
                            const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
+    // A ProfileUpdate control message was decrypted, authenticated against the
+    // MLS sender credential, and durably consumed. `payload` is the encoded
+    // ProfileUpdateMessage plaintext.
+    void profileUpdateReceived(const OpenChat::ConversationId &conversation,
+                               const OpenChat::DeviceId &senderDevice, const QByteArray &payload);
     void failedClosed();
     // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
     void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,

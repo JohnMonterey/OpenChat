@@ -430,6 +430,7 @@ private slots:
     void sendEmitsQueuedRowBeforeRelayAcceptance();
     void contactAcceptIsControlSentAndSurfacedOnReceive();
     void callSignalIsControlSentAndSurfacedOnReceive();
+    void profileUpdateIsControlSentAndSurfacedOnReceive();
     void callMediaBypassesTheStoreAndTheRatchet();
     void inboundDatagramsAreSurfacedWithoutTouchingTheStore();
 
@@ -1189,6 +1190,69 @@ void SyncEngineTest::callSignalIsControlSentAndSurfacedOnReceive()
     // A redelivery is acked but surfaced only once, so a retried offer does not
     // ring twice.
     engine.handleEnvelope(inbound, 33);
+    QVERIFY(receivedPayload.isEmpty());
+    QCOMPARE(transport.acks.size(), 2);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::profileUpdateIsControlSentAndSurfacedOnReceive()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QByteArray receivedPayload;
+    std::optional<DeviceId> receivedFrom;
+    int visibleMessages = 0;
+    connect(&engine, &SyncEngine::profileUpdateReceived, &engine,
+            [&](const ConversationId &, const DeviceId &sender, const QByteArray &payload) {
+                receivedFrom = sender;
+                receivedPayload = payload;
+            });
+    connect(&engine, &SyncEngine::messageReceived, &engine,
+            [&](const MessageRecord &) { ++visibleMessages; });
+    engine.start();
+
+    // A profile update travels the DURABLE path: encrypted under the group
+    // ratchet and queued in the outbox, so a change made while the contact is
+    // away still reaches them. It never becomes a visible message row.
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    engine.sendProfileUpdate(conversation, peer, QByteArray("PROFILE"));
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.messages.size(), 0);
+    QCOMPARE(store.outboxes.size(), 1);
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(transport.datagrams.size(), 0);
+    QCOMPARE(transport.sent.first().messageKind, EnvelopeMessageKind::ProfileUpdate);
+    QCOMPARE(transport.sent.first().recipientDeviceId.bytes(), peer.bytes());
+    QCOMPARE(transport.sent.first().ciphertext, QByteArray("ENC:PROFILE"));
+
+    // Receiving one is a control receive: acked, replay-guarded, and surfaced
+    // as plaintext for the roster rather than as conversation.
+    CiphertextEnvelopeV1 inbound =
+        incomingEnvelope(conversation, mls.senderDevice, QByteArray("ENC:THEIRS"));
+    inbound.messageKind = EnvelopeMessageKind::ProfileUpdate;
+    engine.handleEnvelope(inbound, 41);
+    QCOMPARE(receivedPayload, QByteArray("THEIRS"));
+    QCOMPARE(receivedFrom->bytes(), mls.senderDevice.bytes());
+    QCOMPARE(visibleMessages, 0);
+    QCOMPARE(store.received.size(), 0);
+    QCOMPARE(transport.acks.size(), 1);
+
+    // One whose MLS credential names a different device is a relay trying to
+    // put words (or a picture) in someone else's mouth; dropped unsurfaced.
+    CiphertextEnvelopeV1 forged =
+        incomingEnvelope(conversation, DeviceId::generate(), QByteArray("ENC:FORGED"));
+    forged.messageKind = EnvelopeMessageKind::ProfileUpdate;
+    receivedPayload.clear();
+    engine.handleEnvelope(forged, 42);
+    QVERIFY(receivedPayload.isEmpty());
+    QCOMPARE(transport.acks.size(), 1);
+
+    // A redelivery is acked but surfaced only once.
+    engine.handleEnvelope(inbound, 43);
     QVERIFY(receivedPayload.isEmpty());
     QCOMPARE(transport.acks.size(), 2);
     QVERIFY(!engine.isFailedClosed());

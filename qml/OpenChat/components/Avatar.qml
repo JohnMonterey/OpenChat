@@ -5,7 +5,7 @@ Item {
     id: avatar
     property string avatarKey: "neutral"
     property real cornerRadius: 5
-    readonly property bool knownArtwork: avatarKey === "landscape" || avatarKey === "beach" || avatarKey === "mono" || avatarKey === "sarah" || avatarKey === "jessica" || avatarKey === "alex" || avatarKey === "michael" || avatarKey === "ryan" || avatarKey === "userpfp_none"
+    readonly property bool knownArtwork: avatarKey === "landscape" || avatarKey === "beach" || avatarKey === "mono" || avatarKey === "sarah" || avatarKey === "jessica" || avatarKey === "alex" || avatarKey === "michael" || avatarKey === "ryan" || avatarKey === "userpfp_none" || avatarKey.startsWith("blob:")
     readonly property bool usesRoundedArtworkMask: true
 
     implicitWidth: 44

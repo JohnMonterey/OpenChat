@@ -1,5 +1,7 @@
 #include "render/AvatarArtwork.h"
 
+#include "render/AvatarStore.h"
+
 #include <QLinearGradient>
 #include <QImage>
 #include <QPainter>
@@ -48,7 +50,7 @@ QRectF centeredCrop(const QSize &imageSize, const QSizeF &targetSize)
 QRectF photoSourceRect(const QString &avatarKey, const QSize &imageSize,
                        const QSizeF &targetSize)
 {
-    if (avatarKey == QStringLiteral("userpfp_none"))
+    if (avatarKey == QStringLiteral("userpfp_none") || AvatarStore::isBlobKey(avatarKey))
         return centeredCrop(imageSize, targetSize);
 
     const qreal side = std::min(imageSize.width(), imageSize.height()) * 0.62;
@@ -107,8 +109,12 @@ void AvatarArtwork::paint(QPainter *painter)
     painter->setClipPath(makeClipPath(rect, m_cornerRadius), Qt::IntersectClip);
 
     QImage photo;
+    // A received or chosen picture lives in the store under a content key; the
+    // bundled artwork is a resource. Either way the photo is drawn the same.
+    if (const auto stored = AvatarStore::instance().image(m_avatarKey))
+        photo = *stored;
     const QString resourcePath = photoResourcePath(m_avatarKey);
-    if (!resourcePath.isEmpty())
+    if (photo.isNull() && !resourcePath.isEmpty())
         photo.load(resourcePath);
     if (!photo.isNull()) {
         painter->setRenderHint(QPainter::SmoothPixmapTransform, true);

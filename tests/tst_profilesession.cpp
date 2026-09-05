@@ -1,6 +1,7 @@
 #include "app/ProfileSession.h"
 #include "crypto/MlsClient.h"
 #include "domain/ChatTypes.h"
+#include "domain/ProfileUpdate.h"
 #include "network/SyncEngine.h"
 #include "protocol/CiphertextEnvelope.h"
 #include "security/KeyVault.h"
@@ -135,6 +136,7 @@ private slots:
   void recoveryCodeIsRevealedAndConsumedOnce();
   void createPersistsAStableAccountId();
   void profileDisplayNameSurvivesUnlock();
+  void publishedProfileSurvivesUnlock();
   void persistMlsStateMakesKeyPackageMaterialDurable();
   void offlineDurableSendSurvivesRestart();
 };
@@ -204,6 +206,54 @@ void ProfileSessionTest::profileDisplayNameSurvivesUnlock() {
   auto reopened = ProfileSession::unlock(profileId, vault, paths);
   QVERIFY(reopened.hasValue());
   QCOMPARE(reopened.value()->displayName(), QStringLiteral("Ada Lovelace"));
+}
+
+void ProfileSessionTest::publishedProfileSurvivesUnlock() {
+  QTemporaryDir directory;
+  SessionVault vault;
+  const auto profileId = ProfileId::generate();
+  const auto paths = ProfilePaths::forProfile(directory.path(), profileId);
+  const QByteArray picture = QByteArray("\xFF\xD8\xFF\xE0", 4) + QByteArray(200, 'p');
+
+  auto created = ProfileSession::create(profileId, vault, paths);
+  QVERIFY(created.hasValue());
+  ProfileSession &session = *created.value();
+  // A fresh profile publishes nothing: Available, no status, no picture.
+  QCOMPARE(session.presence(), 0);
+  QVERIFY(session.statusText().isEmpty());
+  QVERIFY(session.avatarJpeg().isEmpty());
+
+  QVERIFY(session.setPresence(3).hasValue());
+  QVERIFY(!session.setPresence(4).hasValue());
+  QVERIFY(!session.setPresence(-1).hasValue());
+  QCOMPARE(session.presence(), 3);
+  QVERIFY(session.setStatusText(QStringLiteral("  Back at 3  ")).hasValue());
+  QCOMPARE(session.statusText(), QStringLiteral("Back at 3"));
+  QVERIFY(session.setStatusText(QString(200, QLatin1Char('x'))).hasValue());
+  QCOMPARE(session.statusText().size(), maxStatusTextLength);
+  QVERIFY(session.setStatusText(QStringLiteral("Back at 3")).hasValue());
+  QVERIFY(session.setAvatarJpeg(picture).hasValue());
+  QVERIFY(!session.setAvatarJpeg(QByteArray(maxAvatarJpegBytes + 1, 'j')).hasValue());
+  QCOMPARE(session.avatarJpeg(), picture);
+  session.lock();
+  // Locked: nothing is readable or writable.
+  QCOMPARE(session.presence(), 0);
+  QVERIFY(session.avatarJpeg().isEmpty());
+  QVERIFY(!session.setPresence(1).hasValue());
+
+  auto reopened = ProfileSession::unlock(profileId, vault, paths);
+  QVERIFY(reopened.hasValue());
+  QCOMPARE(reopened.value()->presence(), 3);
+  QCOMPARE(reopened.value()->statusText(), QStringLiteral("Back at 3"));
+  QCOMPARE(reopened.value()->avatarJpeg(), picture);
+
+  // Clearing the picture persists too.
+  QVERIFY(reopened.value()->setAvatarJpeg(QByteArray()).hasValue());
+  reopened.value()->lock();
+  auto again = ProfileSession::unlock(profileId, vault, paths);
+  QVERIFY(again.hasValue());
+  QVERIFY(again.value()->avatarJpeg().isEmpty());
+  QCOMPARE(again.value()->statusText(), QStringLiteral("Back at 3"));
 }
 
 void ProfileSessionTest::failedBootstrapRollsBackBothVaultEntries() {

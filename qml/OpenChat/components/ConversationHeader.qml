@@ -43,8 +43,7 @@ Item {
         x: 110
         y: 63
         beadSize: 11
-        presence: header.controller.currentStatusText === "Available" ? 0
-                : header.controller.currentStatusText === "Away" ? 1 : 2
+        presence: header.controller.currentPresence
     }
 
     Text {

@@ -55,3 +55,6 @@ variables before starting a Windows process.
   the scripts export it so the cross `CC` CMake passes is not used for them.
 - Wine strips `QT_*` from the environment, so `QT_QPA_PLATFORM` and
   `QT_QUICK_BACKEND` have no effect under Wine; use `-platform`.
+- The Windows SDK links `shlwapi` in by itself, mingw-w64 does not, so the
+  toast code needs it spelled out: `propvarutil.h`'s inline
+  `InitPropVariantFromString` calls `SHStrDupW`, which lives there.

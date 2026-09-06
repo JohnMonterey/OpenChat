@@ -7,11 +7,17 @@
 namespace OpenChat {
 
 SpeechLevelMeter::SpeechLevelMeter(Config config)
-    : m_config(config)
 {
-    m_config.threshold = std::clamp(m_config.threshold, 0.0, 1.0);
-    m_config.release = std::clamp(m_config.release, 0.0, 0.999);
-    m_config.hangoverFrames = std::max(0, m_config.hangoverFrames);
+    setConfig(config);
+}
+
+void SpeechLevelMeter::setConfig(Config config)
+{
+    config.threshold = std::clamp(config.threshold, 0.0, 1.0);
+    config.release = std::clamp(config.release, 0.0, 0.999);
+    config.hangoverFrames = std::max(0, config.hangoverFrames);
+    m_config = config;
+    m_hangover = std::min(m_hangover, m_config.hangoverFrames);
 }
 
 void SpeechLevelMeter::apply(double rms)

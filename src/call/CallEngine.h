@@ -9,6 +9,7 @@
 #include "call/CallTransport.h"
 #include "call/CallTypes.h"
 #include "domain/Identifiers.h"
+#include "media/MicrophoneProcessor.h"
 
 #include <QObject>
 #include <QString>
@@ -95,6 +96,9 @@ public:
         // device ids); without it group calls are refused and ordinary calls
         // are unaffected.
         std::optional<DeviceId> localDevice;
+        // Gain and noise gate applied to every captured frame before it is
+        // encoded for anyone. Changeable mid-call with setMicrophone().
+        MicrophoneProcessor::Config microphone;
     };
 
     // A peer, as a call needs to address it: the shared conversation, the device
@@ -177,6 +181,16 @@ public:
     void hangUp();
 
     void setMuted(bool muted);
+    // Replaces the gain and gate settings; applies from the next captured
+    // frame, in or out of a call.
+    void setMicrophone(const MicrophoneProcessor::Config &config);
+    [[nodiscard]] const MicrophoneProcessor::Config &microphone() const noexcept
+    {
+        return m_microphone.config();
+    }
+    // Whether the gate is currently letting the microphone through. True
+    // outside a call and whenever the gate is off.
+    [[nodiscard]] bool isMicrophoneGateOpen() const noexcept { return m_microphone.isGateOpen(); }
     void sendVideoFrame(const QImage &image);
 
     // --- Screen sharing ----------------------------------------------------
@@ -373,6 +387,9 @@ private:
 
     std::unique_ptr<CallSession> m_session;
     std::unique_ptr<AudioCaptureSource> m_capture;
+    // Gain and gate, applied on the owning thread in onCapturedFrame() before
+    // the frame reaches any session — one gate for the whole mesh.
+    MicrophoneProcessor m_microphone;
     std::unique_ptr<AudioPlaybackSink> m_playback;
     CallSoundBoard m_sounds;
 

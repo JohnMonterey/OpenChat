@@ -225,9 +225,10 @@ Window {
         }
 
         // Settings detail pane: the title and element rows of the category
-        // selected in the sidebar. The element rows are visual stubs — a label
-        // and a muted disclosure chevron — until the individual controls are
-        // wired to real preferences.
+        // selected in the sidebar. Most element rows are still visual stubs —
+        // a label and a muted disclosure chevron — until their controls are
+        // wired to real preferences; Appearance → Theme and Audio & Video →
+        // Microphone are live.
         Item {
             id: settingsView
             objectName: "settingsView"
@@ -275,11 +276,21 @@ Window {
                     color: Theme.rule
                 }
 
-                Column {
+                // Scrolls, because a category with a real panel in it (Audio &
+                // Video) is taller than the minimum window.
+                Flickable {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: settingsTitleRule.bottom
                     anchors.topMargin: 6
+                    anchors.bottom: parent.bottom
+                    contentHeight: settingsRows.height
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+
+                Column {
+                    id: settingsRows
+                    width: parent.width
 
                     Repeater {
                         model: root.chatController.currentSettingsElements
@@ -290,10 +301,26 @@ Window {
                             readonly property bool themeSetting:
                                 root.chatController.currentSettingsCategoryName === "Appearance"
                                 && elementLabel === "Theme"
+                            readonly property bool microphoneSetting:
+                                root.chatController.currentSettingsCategoryName === "Audio & Video"
+                                && elementLabel === "Microphone"
                             width: parent.width
-                            height: themeSetting ? 70 : 48
+                            height: microphoneSetting ? microphonePanel.height
+                                                      : (themeSetting ? 70 : 48)
+
+                            // Built only on its own row: the panel is the one
+                            // settings control with a device behind it.
+                            Loader {
+                                id: microphonePanel
+                                active: settingsElementRow.microphoneSetting
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: item ? item.implicitHeight : 0
+                                sourceComponent: MicrophoneSettingsPanel {}
+                            }
 
                             Text {
+                                visible: !settingsElementRow.microphoneSetting
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.verticalCenterOffset: settingsElementRow.themeSetting ? -10 : 0
@@ -328,6 +355,7 @@ Window {
 
                             Item {
                                 visible: !settingsElementRow.themeSetting
+                                         && !settingsElementRow.microphoneSetting
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 14
@@ -353,6 +381,7 @@ Window {
                             }
                         }
                     }
+                }
                 }
             }
         }

@@ -513,6 +513,80 @@ private slots:
         QVERIFY(!m_bob.engine->isLocalSpeaking());
     }
 
+    void theGateKeepsTheRoomOutOfTheCallUntilItIsTurnedOff()
+    {
+        CallEngine::Config config;
+        config.preferredCodec = AudioCodecKind::Pcm;
+        connectEndpoints(config);
+        m_alice.engine->setSoundsEnabled(false);
+        m_bob.engine->setSoundsEnabled(false);
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+
+        // The room Alice sits in: a faint but real hiss. Without a gate this
+        // is what Bob hears, continuously, for as long as the call lasts.
+        const AudioFrame room =
+            AudioConvert::toFrames(OpenChat::AudioTest::tone(20, 120.0, 0.005)).first();
+        const AudioFrame voice =
+            AudioConvert::toFrames(OpenChat::AudioTest::tone(20, 440.0, 0.5)).first();
+        QVERIFY(room != silentAudioFrame());
+
+        constexpr int roomFrames = 30;
+        constexpr int voiceFrames = 20;
+        QList<AudioFrame> spoken;
+        for (int i = 0; i < roomFrames; ++i)
+            spoken.append(room);
+        for (int i = 0; i < voiceFrames; ++i)
+            spoken.append(voice);
+        for (int i = 0; i < roomFrames; ++i)
+            spoken.append(room);
+
+        QList<AudioFrame> heard;
+        for (int i = 0; i < spoken.size(); ++i) {
+            // Halfway through the second stretch of room noise Alice turns the
+            // gate off in settings, mid-call.
+            if (i == roomFrames + voiceFrames + roomFrames / 2) {
+                MicrophoneProcessor::Config microphone = m_alice.engine->microphone();
+                microphone.gateEnabled = false;
+                m_alice.engine->setMicrophone(microphone);
+            }
+            m_alice.speak(spoken.at(i));
+            m_bob.speak(silentAudioFrame());
+            heard.append(m_bob.listen());
+            (void)m_alice.listen();
+        }
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+
+        // Bob hears Alice three slots late (the jitter cushion, as in
+        // audioCrossesTheEngineIntact); line the two up.
+        constexpr int leadIn = 3;
+        const QList<AudioFrame> received = heard.mid(leadIn);
+        QVERIFY(received.size() >= spoken.size() - leadIn);
+
+        // The room never arrives: the gate turns it into real silence. The
+        // very first frame closes the gate with a fade and is the only one
+        // that is not silence outright.
+        for (int i = 1; i < roomFrames; ++i)
+            QCOMPARE(received.at(i), silentAudioFrame());
+        QVERIFY(received.at(0) != room);
+        // The voice arrives unchanged, from its first frame.
+        for (int i = roomFrames; i < roomFrames + voiceFrames; ++i)
+            QCOMPARE(received.at(i), voice);
+        // After the voice the gate holds open through its hangover, then
+        // closes; and once the gate is turned off the room comes through as
+        // captured, which is the continuous behaviour the setting restores.
+        const int hold = m_alice.engine->microphone().gateHoldFrames;
+        for (int i = roomFrames + voiceFrames; i < roomFrames + voiceFrames + hold - 1; ++i)
+            QCOMPARE(received.at(i), room);
+        const int gateOff = roomFrames + voiceFrames + roomFrames / 2;
+        for (int i = roomFrames + voiceFrames + hold + 1; i < gateOff; ++i)
+            QCOMPARE(received.at(i), silentAudioFrame());
+        for (int i = gateOff; i < spoken.size() - leadIn; ++i)
+            QCOMPARE(received.at(i), room);
+        QVERIFY(!m_alice.engine->microphone().gateEnabled);
+        QVERIFY(m_alice.engine->isMicrophoneGateOpen());
+    }
+
     void decliningEndsBothSidesWithTheSameReason()
     {
         connectEndpoints();

@@ -39,6 +39,12 @@ public:
     }
     explicit SpeechLevelMeter(Config config);
 
+    // Swaps the thresholds without disturbing the level or the hangover, so a
+    // setting changed mid-call takes effect on the next frame with no glitch in
+    // whatever is being drawn from it.
+    void setConfig(Config config);
+    [[nodiscard]] const Config &config() const noexcept { return m_config; }
+
     // Feeds one frame. A frame of the wrong length is treated as silence rather
     // than rejected, so a concealment or starvation gap decays the level the same
     // way real quiet does.

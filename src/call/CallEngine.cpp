@@ -88,6 +88,7 @@ CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFacto
     , m_config(config)
     , m_transport(transport)
     , m_audioIo(std::move(audioIo))
+    , m_microphone(config.microphone)
 {
     if (!isAudioCodecAvailable(m_config.preferredCodec))
         m_config.preferredCodec = AudioCodecKind::Pcm;
@@ -385,6 +386,11 @@ void CallEngine::hangUp()
     if (!callOccupiesDevice(m_state))
         return;
     endCall(CallEndReason::LocalHangup, /*notifyPeer=*/true);
+}
+
+void CallEngine::setMicrophone(const MicrophoneProcessor::Config &config)
+{
+    m_microphone.setConfig(config);
 }
 
 void CallEngine::setMuted(bool muted)
@@ -1025,6 +1031,9 @@ bool CallEngine::startCapture()
     m_capture = m_audioIo.makeCapture();
     if (!m_capture)
         return false;
+    // A fresh device means a fresh gate: nothing from the last call's tail
+    // should decide whether this call's first words get through.
+    m_microphone.reset();
     m_capture->onFrame = [this](const AudioFrame &frame) { onCapturedFrame(frame); };
     if (!m_capture->start()) {
         m_capture->onFrame = nullptr;
@@ -1187,10 +1196,13 @@ void CallEngine::stopMedia()
     closePlayback();
 }
 
-void CallEngine::onCapturedFrame(const AudioFrame &frame)
+void CallEngine::onCapturedFrame(const AudioFrame &captured)
 {
     if (m_state != CallState::Connecting && m_state != CallState::Active)
         return;
+    // Gain and gate once, here, so every session below encodes the same
+    // frame and a closed gate sends real silence to the whole mesh.
+    const AudioFrame frame = m_microphone.process(captured);
     if (m_group) {
         // The same frame, sealed separately for each member: every pair has its
         // own key, and nobody's audio is ever forwarded by a third device.

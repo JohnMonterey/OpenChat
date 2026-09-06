@@ -2,10 +2,12 @@
 
 #include "call/AudioIo.h"
 
+#include <QAudioDevice>
 #include <QAudioFormat>
 #include <QIODevice>
 #include <QObject>
 
+#include <functional>
 #include <memory>
 
 QT_BEGIN_NAMESPACE
@@ -36,6 +38,15 @@ inline constexpr int playbackBytesPerFrame = CallAudioFormat::samplesPerFrame
 // microphone" is reported up front rather than as a call that fails to connect.
 [[nodiscard]] bool hasUsableCallAudioDevices();
 
+// Which microphone to open. Consulted each time capture starts, never cached,
+// so a device chosen in settings applies to the next call without a restart.
+// An empty result means "whatever the system default is right now".
+using AudioInputChooser = std::function<QAudioDevice()>;
+
+// The device to capture from: the chooser's pick if it names a device that is
+// still present, otherwise the system default.
+[[nodiscard]] QAudioDevice resolveAudioInput(const AudioInputChooser &chooser);
+
 // Microphone capture through QAudioSource in pull mode: Qt writes into the
 // QIODevice below, which slices the stream into exact 20 ms frames. Slicing here
 // rather than trusting the device's buffer size is what keeps the sequence
@@ -45,15 +56,20 @@ class QtAudioCaptureSource final : public QObject, public AudioCaptureSource
     Q_OBJECT
 
 public:
-    explicit QtAudioCaptureSource(QObject *parent = nullptr);
+    explicit QtAudioCaptureSource(AudioInputChooser chooser = {}, QObject *parent = nullptr);
     ~QtAudioCaptureSource() override;
 
     [[nodiscard]] bool start() override;
     void stop() override;
 
+    // The device the running capture was opened on; null when stopped.
+    [[nodiscard]] QAudioDevice device() const { return m_device; }
+
 private:
     class FrameSlicer;
 
+    AudioInputChooser m_chooser;
+    QAudioDevice m_device;
     std::unique_ptr<QAudioSource> m_source;
     std::unique_ptr<FrameSlicer> m_slicer;
 };
@@ -81,7 +97,7 @@ private:
 };
 
 // The factory the app installs on the call engine: real devices, opened lazily
-// when a call actually starts.
-[[nodiscard]] CallAudioIoFactory makeQtCallAudioIoFactory();
+// when a call actually starts. The chooser, if given, picks the microphone.
+[[nodiscard]] CallAudioIoFactory makeQtCallAudioIoFactory(AudioInputChooser inputChooser = {});
 
 } // namespace OpenChat

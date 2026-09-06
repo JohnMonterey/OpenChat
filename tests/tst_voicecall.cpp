@@ -10,6 +10,7 @@
 #include "media/AudioCodec.h"
 #include "media/AudioConvert.h"
 #include "media/JitterBuffer.h"
+#include "media/MicrophoneProcessor.h"
 #include "media/PcmAudioCodec.h"
 #include "media/SpeechLevelMeter.h"
 #include "media/ToneSynth.h"
@@ -1890,6 +1891,127 @@ private slots:
             meter.updateSilent();
         QVERIFY(!meter.isSpeaking());
         QVERIFY(meter.level() < 0.02);
+    }
+
+    // -------------------------------------------------- microphone gate
+
+    void theGateHoldsBackTheRoomAndPassesTheVoice()
+    {
+        MicrophoneProcessor mic;
+        // Room tone: a steady hiss well below the threshold, but not silence —
+        // this is what an ungated call sends for its entire duration.
+        const AudioFrame room = AudioConvert::toFrames(tone(20, 120.0, 0.005)).first();
+        QVERIFY(room != silentAudioFrame());
+        QVERIFY(AudioConvert::frameRms(room) < mic.config().gateThreshold);
+
+        // A fresh gate is open; the first quiet frame closes it, and from then
+        // on the room goes out as true silence.
+        (void)mic.process(room);
+        QVERIFY(!mic.isGateOpen());
+        for (int i = 0; i < 50; ++i)
+            QCOMPARE(mic.process(room), silentAudioFrame());
+
+        // Speech opens the gate on the very frame it arrives, bit for bit.
+        const QList<AudioFrame> speech = AudioConvert::toFrames(tone(60, 300.0, 0.35));
+        for (const AudioFrame &frame : speech) {
+            QCOMPARE(mic.process(frame), frame);
+            QVERIFY(mic.isGateOpen());
+        }
+
+        // The hold: quiet frames inside a sentence keep passing (unchanged,
+        // room and all) for the hangover, so a pause between words is not
+        // chopped out.
+        const int hold = mic.config().gateHoldFrames;
+        for (int i = 0; i < hold - 1; ++i) {
+            QCOMPARE(mic.process(room), room);
+            QVERIFY(mic.isGateOpen());
+        }
+
+        // The closing frame is faded, not cut: it starts as the room did and
+        // ends at nothing.
+        const AudioFrame closing = mic.process(room);
+        QVERIFY(!mic.isGateOpen());
+        QVERIFY(closing != room);
+        QVERIFY(closing != silentAudioFrame());
+        const QVector<qint16> closingSamples = AudioConvert::samplesOf(closing);
+        const QVector<qint16> roomSamples = AudioConvert::samplesOf(room);
+        QCOMPARE(closingSamples.first(), roomSamples.first());
+        QVERIFY(std::abs(closingSamples.last()) <= 1);
+        QVERIFY(AudioConvert::frameRms(closing) < AudioConvert::frameRms(room));
+
+        // And then silence again.
+        QCOMPARE(mic.process(room), silentAudioFrame());
+    }
+
+    void theGateCanBeTurnedOffAndTunedMidStream()
+    {
+        MicrophoneProcessor mic;
+        const AudioFrame room = AudioConvert::toFrames(tone(20, 120.0, 0.005)).first();
+        for (int i = 0; i < 5; ++i)
+            (void)mic.process(room);
+        QCOMPARE(mic.process(room), silentAudioFrame());
+
+        // Off: everything goes through, immediately, and the gate reads open.
+        MicrophoneProcessor::Config config = mic.config();
+        config.gateEnabled = false;
+        mic.setConfig(config);
+        QVERIFY(mic.isGateOpen());
+        QCOMPARE(mic.process(room), room);
+
+        // Back on with a threshold below the room's level: the room now counts
+        // as sound and passes. Above it: the room is held back again.
+        config.gateEnabled = true;
+        config.gateThreshold = AudioConvert::frameRms(room) / 2;
+        mic.setConfig(config);
+        QCOMPARE(mic.process(room), room);
+        QVERIFY(mic.isGateOpen());
+        config.gateThreshold = AudioConvert::frameRms(room) * 2;
+        mic.setConfig(config);
+        for (int i = 0; i < config.gateHoldFrames + 1; ++i)
+            (void)mic.process(room);
+        QCOMPARE(mic.process(room), silentAudioFrame());
+        QVERIFY(!mic.isGateOpen());
+
+        // The level the meter reports is the level after gain, which is what
+        // the far end would hear and what the settings bar should show.
+        config.gateEnabled = false;
+        config.gain = 2.0;
+        mic.setConfig(config);
+        const AudioFrame loud = AudioConvert::toFrames(tone(20, 300.0, 0.2)).first();
+        const AudioFrame doubled = mic.process(loud);
+        QVERIFY(qAbs(AudioConvert::frameRms(doubled) - 2 * AudioConvert::frameRms(loud)) < 0.001);
+        QVERIFY(qAbs(mic.level() - AudioConvert::frameRms(doubled)) < 0.001);
+    }
+
+    void gainScalesAndClipsAndUnityIsBitExact()
+    {
+        const AudioFrame frame = AudioConvert::toFrames(tone(20, 300.0, 0.4)).first();
+        MicrophoneProcessor::Config config;
+        config.gateEnabled = false;
+
+        // Unity must not touch the bytes: a call with default settings sends
+        // exactly what the microphone captured.
+        config.gain = 1.0;
+        QCOMPARE(MicrophoneProcessor(config).process(frame), frame);
+
+        // Half gain halves every sample.
+        config.gain = 0.5;
+        const QVector<qint16> in = AudioConvert::samplesOf(frame);
+        const QVector<qint16> half =
+            AudioConvert::samplesOf(MicrophoneProcessor(config).process(frame));
+        QCOMPARE(half.size(), in.size());
+        for (qsizetype i = 0; i < in.size(); ++i)
+            QVERIFY(std::abs(half.at(i) - std::lround(in.at(i) * 0.5)) <= 1);
+
+        // Too much gain clips at full scale rather than wrapping around.
+        config.gain = 4.0;
+        const QVector<qint16> clipped =
+            AudioConvert::samplesOf(MicrophoneProcessor(config).process(frame));
+        QCOMPARE(*std::max_element(clipped.cbegin(), clipped.cend()), qint16(32767));
+        QCOMPARE(*std::min_element(clipped.cbegin(), clipped.cend()), qint16(-32768));
+        // Zero gain is a mute.
+        config.gain = 0.0;
+        QCOMPARE(MicrophoneProcessor(config).process(frame), silentAudioFrame());
     }
 
     void bothEndsSeeWhoIsTalking()

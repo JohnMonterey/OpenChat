@@ -120,8 +120,21 @@ private:
     QByteArray m_pending;
 };
 
-QtAudioCaptureSource::QtAudioCaptureSource(QObject *parent)
+QAudioDevice resolveAudioInput(const AudioInputChooser &chooser)
+{
+    if (chooser) {
+        const QAudioDevice chosen = chooser();
+        // A device that was unplugged since it was chosen is skipped rather
+        // than failing the call: the default is the next best thing.
+        if (!chosen.isNull() && QMediaDevices::audioInputs().contains(chosen))
+            return chosen;
+    }
+    return QMediaDevices::defaultAudioInput();
+}
+
+QtAudioCaptureSource::QtAudioCaptureSource(AudioInputChooser chooser, QObject *parent)
     : QObject(parent)
+    , m_chooser(std::move(chooser))
 {
 }
 
@@ -132,7 +145,7 @@ QtAudioCaptureSource::~QtAudioCaptureSource()
 
 bool QtAudioCaptureSource::start()
 {
-    const QAudioDevice device = QMediaDevices::defaultAudioInput();
+    const QAudioDevice device = resolveAudioInput(m_chooser);
     if (device.isNull())
         return false;
     const auto format = captureFormat(device);
@@ -143,7 +156,10 @@ bool QtAudioCaptureSource::start()
     if (!m_slicer->open(QIODevice::WriteOnly))
         return false;
     m_source->start(m_slicer.get());
-    return m_source->error() == QAudio::NoError;
+    if (m_source->error() != QAudio::NoError)
+        return false;
+    m_device = device;
+    return true;
 }
 
 void QtAudioCaptureSource::stop()
@@ -156,6 +172,7 @@ void QtAudioCaptureSource::stop()
         m_slicer->close();
         m_slicer.reset();
     }
+    m_device = QAudioDevice();
 }
 
 // Supplies the sink with audio on demand, one frame at a time, padding whatever
@@ -268,10 +285,12 @@ void QtAudioPlaybackSink::stop()
     }
 }
 
-CallAudioIoFactory makeQtCallAudioIoFactory()
+CallAudioIoFactory makeQtCallAudioIoFactory(AudioInputChooser inputChooser)
 {
     CallAudioIoFactory factory;
-    factory.makeCapture = [] { return std::make_unique<QtAudioCaptureSource>(); };
+    factory.makeCapture = [inputChooser] {
+        return std::make_unique<QtAudioCaptureSource>(inputChooser);
+    };
     factory.makePlayback = [] { return std::make_unique<QtAudioPlaybackSink>(); };
     return factory;
 }

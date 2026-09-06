@@ -22,6 +22,7 @@
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include "app/MicrophoneSettings.h"
 #include <QQmlExpression>
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
@@ -301,6 +302,108 @@ private slots:
         QVERIFY(chatTab->property("active").toBool());
         QVERIFY(chatContactArea->property("visible").toBool());
         QVERIFY(!sidebarCallList->property("visible").toBool());
+    }
+
+    void theMicrophonePanelDrivesAndRemembersTheSettings()
+    {
+        OpenChat::ChatController chats;
+        chats.setLocalUserName(QStringLiteral("Developer"));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        chats.setCurrentSettingsCategory(4); // Audio & Video
+        OpenChat::ContactController contacts;
+        contacts.enableForPreview();
+        OpenChat::CallController calls;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("contactController"), QVariant::fromValue(&contacts)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *settings = engine.singletonInstance<OpenChat::MicrophoneSettings *>(
+            "OpenChat.Native", "MicrophoneSettings");
+        QVERIFY(settings);
+        // The defaults a fresh install runs with: follow the system device,
+        // unity gain, and the gate on at its stock threshold.
+        QVERIFY(settings->inputDeviceId().isEmpty());
+        QCOMPARE(settings->gain(), 1.0);
+        QVERIFY(settings->noiseGateEnabled());
+        QVERIFY(settings->processing().gateEnabled);
+        QVERIFY(qAbs(settings->processing().gateThreshold - 0.02) < 0.001);
+
+        // The panel replaces the Microphone stub row, and only that row.
+        auto *panel = findVisualItem(window->contentItem(), QStringLiteral("microphoneSettingsPanel"));
+        QVERIFY(panel && panel->isVisible());
+        auto *systemDefault = findVisualItem(window->contentItem(), QStringLiteral("microphoneDevice_0"));
+        QVERIFY(systemDefault && systemDefault->isVisible());
+        QVERIFY(systemDefault->property("selected").toBool());
+
+        // The gate switch writes the setting, persists it, and hides the
+        // threshold slider that no longer means anything.
+        auto *gateSwitch = findVisualItem(window->contentItem(), QStringLiteral("noiseGateSwitch"));
+        auto *threshold = findVisualItem(window->contentItem(), QStringLiteral("noiseGateThresholdSlider"));
+        QVERIFY(gateSwitch && gateSwitch->isVisible());
+        QVERIFY(threshold && threshold->isVisible());
+        QSignalSpy processing(settings, &OpenChat::MicrophoneSettings::processingChanged);
+        const QPoint switchCentre = gateSwitch->mapToScene(
+            QPointF(gateSwitch->width() / 2, gateSwitch->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, switchCentre);
+        QTRY_VERIFY(!settings->noiseGateEnabled());
+        QCOMPARE(processing.count(), 1);
+        QVERIFY(!settings->processing().gateEnabled);
+        QCOMPARE(QSettings().value(QStringLiteral("Audio/noiseGate")).toBool(), false);
+        QTRY_VERIFY(!threshold->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, switchCentre);
+        QTRY_VERIFY(settings->noiseGateEnabled());
+        QTRY_VERIFY(threshold->isVisible());
+
+        // The volume slider: its right end is 200%, its middle unity, and the
+        // label follows.
+        auto *gainSlider = findVisualItem(window->contentItem(), QStringLiteral("microphoneGainSlider"));
+        auto *gainLabel = findVisualItem(window->contentItem(), QStringLiteral("microphoneGainLabel"));
+        QVERIFY(gainSlider && gainSlider->isVisible() && gainLabel);
+        QCOMPARE(gainLabel->property("text").toString(), QStringLiteral("100%"));
+        const QPoint rightEnd = gainSlider->mapToScene(
+            QPointF(gainSlider->width() - 1, gainSlider->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, rightEnd);
+        QTRY_COMPARE(settings->gain(), 2.0);
+        QCOMPARE(gainLabel->property("text").toString(), QStringLiteral("200%"));
+        QCOMPARE(settings->processing().gain, 2.0);
+        QCOMPARE(QSettings().value(QStringLiteral("Audio/inputGain")).toDouble(), 2.0);
+
+        // The threshold slider works in decibels across the documented range.
+        // Its row was just re-shown; let the column lay out before aiming.
+        QTest::qWait(50);
+        const QPoint thresholdLeft = threshold->mapToScene(
+            QPointF(1, threshold->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, thresholdLeft);
+        QTRY_COMPARE(settings->noiseGateThresholdDb(), settings->minThresholdDb());
+        QVERIFY(settings->processing().gateThreshold < 0.002);
+
+        // A second engine, as the next window would use, sees what was saved.
+        settings->setGain(0.5);
+        {
+            QQmlEngine nextEngine;
+            nextEngine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            QQmlComponent component(&nextEngine);
+            component.setData("import QtQuick; import OpenChat.Native; "
+                              "QtObject { property real gain: MicrophoneSettings.gain; "
+                              "property bool gate: MicrophoneSettings.noiseGateEnabled; "
+                              "property real db: MicrophoneSettings.noiseGateThresholdDb }",
+                              QUrl());
+            std::unique_ptr<QObject> restored(component.create());
+            QVERIFY2(restored, qPrintable(component.errorString()));
+            QCOMPARE(restored->property("gain").toDouble(), 0.5);
+            QVERIFY(restored->property("gate").toBool());
+            QCOMPARE(restored->property("db").toDouble(), settings->minThresholdDb());
+        }
+        settings->resetToDefaults();
+        QCOMPARE(settings->gain(), 1.0);
+        QVERIFY(qAbs(settings->processing().gateThreshold - 0.02) < 0.001);
     }
 
     void darkModeSwitchUpdatesTheAppAndRemembersTheChoice()
@@ -1890,6 +1993,9 @@ int main(int argc, char **argv)
     qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
         "OpenChat.Native", 1, 0, "AppearanceSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
+    qmlRegisterSingletonType<OpenChat::MicrophoneSettings>(
+        "OpenChat.Native", 1, 0, "MicrophoneSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MicrophoneSettings; });
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");

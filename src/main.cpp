@@ -43,6 +43,7 @@
 #include "network/SyncEngine.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include "app/MicrophoneSettings.h"
 #include "call/ScreenCanvas.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
@@ -59,6 +60,18 @@ void registerQmlTypes()
     qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
         "OpenChat.Native", 1, 0, "AppearanceSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
+    // The microphone settings are shared with the call engine, so the QML side
+    // is handed the process instance when main() has made one; the engine
+    // never owns it. Only a bare QML load (the tests) gets its own.
+    qmlRegisterSingletonType<OpenChat::MicrophoneSettings>(
+        "OpenChat.Native", 1, 0, "MicrophoneSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * {
+            if (auto *shared = OpenChat::MicrophoneSettings::instance()) {
+                QQmlEngine::setObjectOwnership(shared, QQmlEngine::CppOwnership);
+                return shared;
+            }
+            return new OpenChat::MicrophoneSettings;
+        });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
@@ -424,8 +437,18 @@ private:
             // A group call keys each pair's media from both device ids.
             if (const auto credential = m_session->publicCredential(); credential.hasValue())
                 callConfig.localDevice = credential.value().deviceId;
+            // The microphone the user picked, with their gain and gate; the
+            // engine follows the settings for as long as both exist.
+            callConfig.microphone = m_microphoneSettings->processing();
             m_callEngine = std::make_unique<OpenChat::CallEngine>(
-                callConfig, *m_callTransport, OpenChat::makeQtCallAudioIoFactory());
+                callConfig, *m_callTransport,
+                OpenChat::makeQtCallAudioIoFactory(
+                    [this] { return m_microphoneSettings->selectedInputDevice(); }));
+            QObject::connect(m_microphoneSettings.get(),
+                             &OpenChat::MicrophoneSettings::processingChanged,
+                             m_callEngine.get(), [this] {
+                                 m_callEngine->setMicrophone(m_microphoneSettings->processing());
+                             });
         } else {
             qWarning().noquote() << QStringLiteral(
                 "OpenChat: no usable audio input/output was found; voice calls are "
@@ -603,6 +626,11 @@ private:
     // Keeps the relay session authenticated for the life of the profile session.
     // Declared after the relay it borrows (destroyed before it).
     std::unique_ptr<OpenChat::DeviceLink> m_deviceLink;
+    // The microphone as configured in settings. Declared ahead of the call
+    // engine: the engine's device chooser reads it when a call starts, so it
+    // must outlive any engine.
+    std::unique_ptr<OpenChat::MicrophoneSettings> m_microphoneSettings =
+        std::make_unique<OpenChat::MicrophoneSettings>();
     // The voice-call stack. Declared after the engine/relay they borrow, so both
     // are torn down while the SyncEngine and RelayClient are still alive; the
     // engine is destroyed before the transport it holds a reference to.

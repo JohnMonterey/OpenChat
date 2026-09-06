@@ -46,6 +46,7 @@ qt_add_executable(OpenChat
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
+    src/app/MicrophoneSettings.cpp
 )
 
 if(APPLE)
@@ -74,6 +75,8 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/AeroTextField.qml
         qml/OpenChat/components/AeroButton.qml
         qml/OpenChat/components/AeroSwitch.qml
+        qml/OpenChat/components/AeroSlider.qml
+        qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
@@ -303,6 +306,7 @@ add_library(openchat_media STATIC
     src/media/OpusAudioCodec.cpp
     src/media/JitterBuffer.cpp
     src/media/SpeechLevelMeter.cpp
+    src/media/MicrophoneProcessor.cpp
 )
 target_include_directories(openchat_media PUBLIC src)
 target_link_libraries(openchat_media
@@ -813,6 +817,7 @@ add_executable(tst_qmlload
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
+    src/app/MicrophoneSettings.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE

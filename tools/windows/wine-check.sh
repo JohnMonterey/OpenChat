@@ -9,7 +9,11 @@
 #
 # Writes wine-check.log (the full loader trace) and capture.png in the dist
 # directory. Set WINEPREFIX to reuse a prefix; the default is a throwaway one
-# beside the dist directory so the user's own prefix is never touched.
+# under the user's cache directory, keyed by the dist path, so the user's own
+# prefix is never touched. It deliberately does NOT live beside the dist directory: a Wine
+# prefix contains dosdevices/z: -> /, and CMake runs qmlimportscanner with
+# -rootPath set to the source tree, so a prefix anywhere inside that tree sends
+# the scanner walking the whole filesystem and configure never finishes.
 #
 # By default the real Windows platform plugin (qwindows) is used, which needs a
 # display: that is the path a Windows user actually runs. OPENCHAT_WINE_HEADLESS=1
@@ -20,7 +24,15 @@ set -e
 dist="${1:-build-win/dist}"
 shift || true
 dist="$(cd "$dist" && pwd)"
-export WINEPREFIX="${WINEPREFIX:-$dist.wineprefix}"
+if [ -z "${WINEPREFIX:-}" ]; then
+    # Under the user's cache, not TMPDIR: Wine refuses to build a prefix in a
+    # directory it does not own, and a shared /tmp often is not. Keyed by the
+    # dist path so different packages keep separate prefixes.
+    _wine_key=$(printf '%s' "$dist" | cksum | cut -d' ' -f1)
+    WINEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/openchat-wine/$_wine_key"
+    mkdir -p "$(dirname "$WINEPREFIX")"
+fi
+export WINEPREFIX
 # No Mono or Gecko install prompts: they would block an unattended run.
 export WINEDLLOVERRIDES="mscoree,mshtml="
 export WINEDEBUG="${WINEDEBUG:-+loaddll}"

@@ -246,8 +246,11 @@ if(APPLE)
     )
 elseif(WIN32)
     # shell32/ole32/propsys register the Start Menu shortcut that gives an
-    # unpackaged application the identity Windows attributes its toasts to.
-    target_link_libraries(openchat_notify PRIVATE shell32 ole32 oleaut32 propsys uuid)
+    # unpackaged application the identity Windows attributes its toasts to;
+    # shlwapi carries the SHStrDupW that propvarutil.h's inline string helpers
+    # call, which the Windows SDK links in implicitly and mingw-w64 does not.
+    target_link_libraries(openchat_notify PRIVATE
+        shell32 ole32 oleaut32 propsys uuid shlwapi)
     # C++/WinRT is what draws the sender's picture on a real toast. It ships
     # with the Windows SDK and with recent mingw-w64, but not with every
     # toolchain, so it is detected rather than assumed: the source picks the

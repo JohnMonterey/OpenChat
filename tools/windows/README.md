@@ -58,3 +58,6 @@ variables before starting a Windows process.
 - The Windows SDK links `shlwapi` in by itself, mingw-w64 does not, so the
   toast code needs it spelled out: `propvarutil.h`'s inline
   `InitPropVariantFromString` calls `SHStrDupW`, which lives there.
+- `qopensslbackend.dll` reaches OpenSSL through `LoadLibrary`, not an import
+  table, so closing the import graph never finds `libssl-3-x64.dll`. `deploy.sh`
+  copies it by name; without it Qt quietly falls back to the Schannel backend.

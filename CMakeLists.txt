@@ -58,6 +58,13 @@ if(APPLE)
         "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist")
     set_property(TARGET OpenChat APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist)
+elseif(WIN32)
+    # Build against the GUI subsystem so Windows does not open a console window
+    # behind the app. Qt6::EntryPoint, which qt_add_executable already links,
+    # supplies the WinMain that then calls main(). Output redirected on the
+    # command line still arrives, so --capture and the other CLI surfaces are
+    # unaffected; only an inherited console is gone.
+    set_target_properties(OpenChat PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
 qt_add_qml_module(OpenChat

@@ -778,7 +778,7 @@ public:
     // Multi-recipient messages still waiting on some envelope, keyed by message
     // id: how many envelopes are unresolved and whether any was accepted.
     struct FanOutProgress final {
-        int pending = 0;
+        qsizetype pending = 0;
         bool accepted = false;
     };
     QHash<QByteArray, FanOutProgress> fanOut;

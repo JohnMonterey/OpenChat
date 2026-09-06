@@ -93,9 +93,14 @@ MacNotifier::MacNotifier(NotificationAppInfo appInfo, QObject *parent)
 {
     d->appInfo = std::move(appInfo);
 
-    // A process with no bundle identity cannot use the notification centre, and
-    // asking anyway raises rather than returning nil.
-    if ([[NSBundle mainBundle] bundleIdentifier] == nil)
+    // UserNotifications requires a LaunchServices-backed application bundle.
+    // The standalone development executable has an embedded Info.plist, so it
+    // reports a bundle identifier even though its main bundle is the build
+    // directory. Asking for the notification centre in that state raises an
+    // NSInternalInconsistencyException instead of returning nil.
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    if (mainBundle.bundleIdentifier == nil
+        || ![mainBundle.bundleURL.pathExtension.lowercaseString isEqualToString:@"app"])
         return;
 
     @try {

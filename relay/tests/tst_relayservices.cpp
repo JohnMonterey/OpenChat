@@ -2,6 +2,9 @@
 #include <QWebSocket>
 #include <QCborArray>
 #include <QNetworkRequest>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QCborMap>
 #include <QSignalSpy>
 #include "AuthService.h"
 #include "DirectoryService.h"
@@ -133,6 +136,8 @@ private slots:
     void offlineRejectionAndLostAcceptanceAreUnambiguous();
     void datagramValidationIsFullButStoresNothing();
     void keyPackageClaimIsOneTime();
+    void eightPackagePoolExhaustion();
+    void keyPackageSupplyReportsCountsAndExpiry();
     void concurrentKeyPackageClaimHasOneWinner();
     void concurrentClaimWithTwoPackagesGivesDistinct();
     void sameIdempotencyKeyDifferentSendersBothDelivered();
@@ -546,6 +551,90 @@ void RelayServicesTest::keyPackageClaimIsOneTime()
     const auto again = packages.claim(owner.device, claimer.device);
     QVERIFY(!again.hasValue());
     QCOMPARE(again.error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::eightPackagePoolExhaustion()
+{
+    const auto owner = registerDevice(QStringLiteral("pool-owner"));
+    const auto claimer = registerDevice(QStringLiteral("pool-claimer"));
+    KeyPackageService packages(*m_store);
+    for (int i = 0; i < 8; ++i)
+        QVERIFY(packages.publish(owner.account, owner.device,
+                                QByteArray("package-") + QByteArray::number(i)).hasValue());
+    for (int i = 0; i < 8; ++i) {
+        QVERIFY(packages.claim(owner.device, claimer.device).hasValue());
+        QCOMPARE(packages.availableCount(owner.device), 7 - i);
+    }
+    const auto ninth = packages.claim(owner.device, claimer.device);
+    QVERIFY(!ninth.hasValue());
+    QCOMPARE(ninth.error(), RelayError::NotFound);
+    QCOMPARE(packages.availableCount(owner.device), 0);
+}
+
+void RelayServicesTest::keyPackageSupplyReportsCountsAndExpiry()
+{
+    const auto owner = registerDevice(QStringLiteral("supply-owner"));
+    const auto claimer = registerDevice(QStringLiteral("supply-claimer"));
+    AuthService auth(*m_store);
+    EnvelopeService envelopes(*m_store);
+    KeyPackageService::Policy policy;
+    policy.ttlMs = 10;
+    KeyPackageService packages(*m_store, policy);
+    DirectoryService directory(*m_store);
+    RelayServer server(*m_store, auth, envelopes, packages, directory);
+    const auto port = server.start(QHostAddress::LocalHost, 0);
+    QVERIFY(port);
+    const auto request = [port](const QString &path, const QByteArray &token) {
+        QNetworkRequest req(QUrl(QStringLiteral("http://127.0.0.1:%1/v1/").arg(port) + path));
+        req.setRawHeader("Authorization", "Bearer " + token);
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/cbor");
+        return req;
+    };
+    QNetworkAccessManager network;
+    auto *empty = network.get(request(QStringLiteral("key-packages"), owner.tokens.accessToken));
+    QTRY_VERIFY(empty->isFinished());
+    QCOMPARE(empty->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(), 200);
+    QCOMPARE(QCborValue::fromCbor(empty->readAll()).toMap()
+        .value(QLatin1StringView("availableKeyPackages")).toInteger(-1), 0);
+    empty->deleteLater();
+    auto *unauth = network.get(request(QStringLiteral("key-packages"), "invalid"));
+    QTRY_VERIFY(unauth->isFinished());
+    QCOMPARE(unauth->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(), 401);
+    unauth->deleteLater();
+
+    QWebSocket socket;
+    QSignalSpy frames(&socket, &QWebSocket::binaryMessageReceived);
+    QNetworkRequest live(QUrl(QStringLiteral("ws://127.0.0.1:%1/v1/live?keyPackageSupply=1").arg(port)));
+    live.setRawHeader("Authorization", "Bearer " + owner.tokens.accessToken);
+    socket.open(live);
+    QTRY_COMPARE(frames.size(), 1);
+    QCOMPARE(QCborValue::fromCbor(frames.takeFirst().at(0).toByteArray()).toArray(), QCborArray({10, 0}));
+    QCborMap upload;
+    upload.insert(QLatin1StringView("key_package"), QByteArray("fresh-package"));
+    auto *published = network.post(request(QStringLiteral("key-packages"), owner.tokens.accessToken),
+                                    upload.toCborValue().toCbor());
+    QTRY_VERIFY(published->isFinished());
+    QCOMPARE(QCborValue::fromCbor(published->readAll()).toMap()
+        .value(QLatin1StringView("availableKeyPackages")).toInteger(-1), 1);
+    published->deleteLater();
+    QCborMap claim;
+    claim.insert(QLatin1StringView("target_device_id"), owner.device.bytes());
+    auto *claimed = network.post(request(QStringLiteral("key-packages/claim"), claimer.tokens.accessToken),
+                                 claim.toCborValue().toCbor());
+    QTRY_VERIFY(claimed->isFinished());
+    QCOMPARE(claimed->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(), 200);
+    claimed->deleteLater();
+    QTRY_COMPARE(frames.size(), 1);
+    QCOMPARE(QCborValue::fromCbor(frames.takeFirst().at(0).toByteArray()).toArray(), QCborArray({10, 0}));
+    QVERIFY(packages.publish(owner.account, owner.device, QByteArray("expires-soon")).hasValue());
+    QCOMPARE(packages.availableCount(owner.device), 1);
+    m_now += 10;
+    auto *expired = network.get(request(QStringLiteral("key-packages"), owner.tokens.accessToken));
+    QTRY_VERIFY(expired->isFinished());
+    QCOMPARE(QCborValue::fromCbor(expired->readAll()).toMap()
+        .value(QLatin1StringView("availableKeyPackages")).toInteger(-1), 0);
+    expired->deleteLater();
+    socket.close();
 }
 
 void RelayServicesTest::concurrentKeyPackageClaimHasOneWinner()

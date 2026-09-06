@@ -790,6 +790,36 @@ private slots:
         QCOMPARE(other.messages()->rowCount(), 1);
     }
 
+    void groupStopsClaimingWhenContactBlockedDuringInvite()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ExtraPeer carol;
+        QVERIFY(carol.setUp(live, QStringLiteral("carol")));
+        int claims = 0;
+        std::function<void(const QByteArray &)> pending;
+        GroupService groups(*live.session, *live.session->syncEngine(),
+            [&](const DeviceId &, std::function<void(const QByteArray &)> done) {
+                ++claims;
+                pending = std::move(done);
+            });
+        QSignalSpy failures(&groups, &GroupService::groupActionFailed);
+        QSignalSpy created(&groups, &GroupService::groupCreated);
+        groups.createGroup({live.peerAccount, carol.account}, QStringLiteral("test"));
+        QCOMPARE(claims, 1);
+        QVERIFY(pending);
+        QVERIFY(live.session->contacts()->block(carol.account, QDateTime::currentMSecsSinceEpoch()).hasValue());
+        pending(live.peer->generateKeyPackage().value());
+        QCOMPARE(failures.count(), 1);
+        QCOMPARE(created.count(), 0);
+        QCOMPARE(claims, 1); // Carol's package was never consumed.
+        groups.createGroup({carol.account}, QStringLiteral("blocked"));
+        QCOMPARE(failures.count(), 2);
+        QCOMPARE(claims, 1);
+    }
+
     void groupIsCreatedFromContactsMessagedRenamedAndLeft()
     {
         using namespace OpenChat;

@@ -168,6 +168,7 @@ struct RelaySession final {
     QByteArray accessToken;
     QByteArray refreshToken;
     qint64 accessExpiresAtMs = 0;
+    int availableKeyPackages = -1; // absent on older relays
 };
 
 // Authenticated HTTPS/WSS relay transport.
@@ -266,6 +267,7 @@ public:
     // 2xx; a rejected token drives a single serialized refresh-and-retry and then
     // authExpired(); any other failure emits keyPackagePublishFailed().
     void publishKeyPackage(const QByteArray &keyPackage);
+    void fetchKeyPackageCount();
 
     // Resolves a handle to an account and its active devices over the
     // authenticated HTTPS directory endpoint (bearer access token attached). The
@@ -341,6 +343,8 @@ signals:
     // KeyPackage publish succeeded / failed (non-auth failure; a rejected token
     // surfaces through authExpired() after the single refresh-and-retry).
     void keyPackagePublished();
+    void keyPackageCountReceived(int available);
+    void keyPackageCountFailed();
     void keyPackagePublishFailed();
     // Directory lookup: a defensively validated entry, or a typed failure.
     void handleResolved(const RelayDirectoryEntry &entry);

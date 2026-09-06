@@ -18,7 +18,7 @@ constexpr char deviceBindContext[] = "account-device-bind";
 } // namespace
 
 DeviceLink::DeviceLink(ProfileSession &session, RelayClient &relay, QObject *parent)
-    : QObject(parent), m_session(session), m_relay(relay)
+    : QObject(parent), m_session(session), m_relay(relay), m_supply(session, relay)
 {
     m_connections << connect(&m_relay, &RelayClient::authenticated, this,
                              &DeviceLink::onAuthenticated);
@@ -41,6 +41,7 @@ void DeviceLink::start(Start mode)
         // Bootstrap already authenticated and opened the stream; only a later
         // authExpired brings this object into play.
         m_authenticated = true;
+        m_supply.start();
         return;
     }
     authenticate();
@@ -87,6 +88,7 @@ void DeviceLink::onAuthenticated(const RelaySession &session)
     m_authenticated = true;
     m_retryDelayMs = initialRetryMs;
     m_relay.setTokens(session.accessToken, session.refreshToken);
+    m_supply.start(session.availableKeyPackages);
     // Resume from zero: the relay only redelivers unacknowledged envelopes and
     // the durable store's replay guard drops anything already applied.
     m_relay.connectLive(0);
@@ -95,6 +97,7 @@ void DeviceLink::onAuthenticated(const RelaySession &session)
 
 void DeviceLink::onAuthExpired()
 {
+    m_supply.pause();
     // Either the challenge/response itself was refused, or a later refresh was
     // exhausted. Both mean the device must run the full authentication again.
     m_authenticating = false;

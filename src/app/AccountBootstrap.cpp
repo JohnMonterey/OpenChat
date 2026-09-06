@@ -124,6 +124,10 @@ void AccountBootstrap::publishNextKeyPackage()
         fail(Error::Publish);
         return;
     }
+    if (!m_session.persistMlsState().hasValue()) {
+        fail(Error::Storage);
+        return;
+    }
     m_relay.publishKeyPackage(keyPackage.value());
 }
 
@@ -157,10 +161,9 @@ void AccountBootstrap::onTransportError(RelayTransportError error)
 
 void AccountBootstrap::goLiveAndSucceed()
 {
-    // CRITICAL ordering: persist the KeyPackages' private material BEFORE going
-    // live and reporting success. Each generateKeyPackage() above only captured
-    // the advanced MLS state in memory; without this durable commit a KeyPackage
-    // another device later claims could not be answered after a restart.
+    // Final flush before going live. Each KeyPackage's private material was
+    // already committed before its upload, so even a claim during bootstrap
+    // can be answered after a restart.
     auto persisted = m_session.persistMlsState();
     if (!persisted.hasValue()) {
         fail(Error::Storage);

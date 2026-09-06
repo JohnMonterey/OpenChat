@@ -89,6 +89,7 @@ private:
     QString m_handle; // empty for the invite path
     std::optional<RelayDirectoryEntry> m_entry;
     int m_deviceIndex = 0;
+    std::optional<ConversationId> m_conversation;
 
     State m_state = State::Idle;
     QList<QMetaObject::Connection> m_connections;

@@ -49,7 +49,7 @@ public:
     Q_ENUM(Error)
 
     // A sensible default one-time KeyPackage pool size for a new device.
-    static constexpr int defaultKeyPackageCount = 8;
+    static constexpr int defaultKeyPackageCount = 16;
 
     AccountBootstrap(ProfileSession &session, RelayClient &relay, SyncTransport &transport,
                      QObject *parent = nullptr);

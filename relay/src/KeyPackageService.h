@@ -33,7 +33,7 @@ public:
     [[nodiscard]] Result<QByteArray, RelayError>
     claim(const DeviceId &targetDeviceId, const DeviceId &claimingDeviceId);
 
-    // Count of unclaimed, unexpired packages (for tests/metrics).
+    // Count of unclaimed, unexpired packages (for supply checks and metrics).
     [[nodiscard]] int availableCount(const DeviceId &targetDeviceId);
 
 private:

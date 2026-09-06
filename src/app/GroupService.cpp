@@ -1,4 +1,5 @@
 #include "app/GroupService.h"
+#include "diagnostics/Logging.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -227,6 +228,7 @@ GroupUpdateMessage GroupService::infoFor(const ConversationId &conversation,
 
 void GroupService::fail(const QString &message)
 {
+    qCWarning(contactsLog) << "Group change failed before completion";
     m_pending.reset();
     emit groupActionFailed(message);
 }
@@ -300,6 +302,24 @@ void GroupService::claimNext()
 {
     if (!m_pending)
         return;
+    // Validate local state before each claim, including changes while an earlier
+    // member's request was in flight. Never consume another package after lock,
+    // block, contact removal, or leaving/deleting the destination group.
+    if (!m_session.isUnlocked() || !m_session.mls() || !m_session.chats()) {
+        fail(QStringLiteral("The group could not be saved."));
+        return;
+    }
+    if (m_pending->conversation && !group(*m_pending->conversation)) {
+        fail(QStringLiteral("That group no longer exists."));
+        return;
+    }
+    for (const Invitee &invitee : m_pending->invitees) {
+        const auto current = inviteeFor(invitee.account);
+        if (!current || current->device != invitee.device) {
+            fail(QStringLiteral("Only contacts who accepted you can be added to a group."));
+            return;
+        }
+    }
     if (m_pending->next >= m_pending->invitees.size()) {
         // Every KeyPackage is in hand. The pending change is moved out first so
         // a re-entrant create/add from a signal handler starts clean.

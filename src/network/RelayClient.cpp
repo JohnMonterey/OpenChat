@@ -1,3 +1,4 @@
+#include "diagnostics/Logging.h"
 #include "network/RelayClient.h"
 
 #include <QAbstractSocket>
@@ -18,6 +19,7 @@
 #include <QWebSocketProtocol>
 
 #include <algorithm>
+#include <climits>
 #include <optional>
 #include <utility>
 
@@ -25,10 +27,25 @@ namespace OpenChat {
 
 namespace {
 
+// Counts are optional for compatibility, but a malformed response must never
+// become an empty pool and trigger uploads.
+std::optional<int> packageCount(const QByteArray &body)
+{
+    QCborParserError error{};
+    const auto value = QCborValue::fromCbor(body, &error);
+    if (error.error != QCborError::NoError || error.offset != body.size() || !value.isMap())
+        return std::nullopt;
+    const auto count = value.toMap().value(QLatin1StringView("availableKeyPackages"));
+    if (!count.isInteger() || count.toInteger() < 0 || count.toInteger() > INT_MAX)
+        return std::nullopt;
+    return static_cast<int>(count.toInteger());
+}
+
 // Control-frame discriminators carried as the first element of a top-level CBOR
 // array. Delivery frames are top-level CBOR maps (canonical envelopes) and are
 // never handled here, so the two categories can never be confused.
 enum class ControlType : int {
+    KeyPackageSupply = 10, // server -> client: [10, available]
     PresenceQuery = 7, // client -> server: [7, [deviceId, ...]]
     PresenceResult = 8, // server -> client: [8, [[deviceId, online], ...]]
     RecipientUnavailable = 9, // server -> client: [9, envelopeId]; never stored
@@ -300,6 +317,8 @@ public:
         QUrlQuery query(url);
         query.removeQueryItem(QStringLiteral("since"));
         query.addQueryItem(QStringLiteral("since"), QString::number(resumeWatermark));
+        query.removeQueryItem(QStringLiteral("keyPackageSupply"));
+        query.addQueryItem(QStringLiteral("keyPackageSupply"), QStringLiteral("1"));
         url.setQuery(query);
 
         QNetworkRequest request(url);
@@ -341,6 +360,7 @@ public:
         heartbeat->start(10'000);
         reconnectAttempt = 0;
         refreshAttemptedThisCycle = false;
+        qCDebug(relayLog) << "Relay live connection established";
         emit q->connected();
     }
 
@@ -478,6 +498,15 @@ public:
         }
 
         switch (static_cast<ControlType>(array->at(0).toInteger())) {
+        case ControlType::KeyPackageSupply: {
+            if (array->size() != 2 || !array->at(1).isInteger()
+                || array->at(1).toInteger() < 0 || array->at(1).toInteger() > INT_MAX) {
+                emit q->transportError(RelayTransportError::InvalidControlFrame);
+                return;
+            }
+            emit q->keyPackageCountReceived(static_cast<int>(array->at(1).toInteger()));
+            return;
+        }
         case ControlType::PresenceResult: {
             if (array->size() != 2 || !array->at(1).isArray()) {
                 emit q->transportError(RelayTransportError::InvalidControlFrame);
@@ -639,6 +668,9 @@ public:
         session.accessToken = access.toByteArray();
         session.refreshToken = refresh.toByteArray();
         session.accessExpiresAtMs = expires.toInteger();
+        const auto count = map.value(QLatin1StringView("availableKeyPackages"));
+        if (count.isInteger() && count.toInteger() >= 0 && count.toInteger() <= INT_MAX)
+            session.availableKeyPackages = static_cast<int>(count.toInteger());
         if (session.accessToken.isEmpty() || session.refreshToken.isEmpty())
             return std::nullopt;
         return session;
@@ -1013,8 +1045,10 @@ void RelayClient::registerAccount(const AccountId &account, const DeviceId &devi
 
 void RelayClient::publishKeyPackage(const QByteArray &keyPackage)
 {
+    qCDebug(relayLog) << "Publishing key package";
     if (!isHttps(d->endpoints.keyPackages)) {
         emit transportError(RelayTransportError::InsecureEndpoint);
+        emit keyPackagePublishFailed();
         return;
     }
 
@@ -1046,7 +1080,43 @@ void RelayClient::publishKeyPackage(const QByteArray &keyPackage)
             return;
         }
         d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
+        if (const auto count = packageCount(reply->readAll()))
+            emit keyPackageCountReceived(*count);
         emit keyPackagePublished();
+    });
+}
+
+void RelayClient::fetchKeyPackageCount()
+{
+    if (!isHttps(d->endpoints.keyPackages)) {
+        emit keyPackageCountFailed();
+        return;
+    }
+    auto *reply = d->network->get(d->authorizedRequest(d->endpoints.keyPackages));
+    d->guardReply(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        reply->deleteLater();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status == 401) {
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight)
+                refreshThenRetry([this] { fetchKeyPackageCount(); });
+            else
+                emit authExpired();
+            emit keyPackageCountFailed();
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status != 200
+            || !d->bodyWithinBounds(reply)) {
+            emit keyPackageCountFailed();
+            return;
+        }
+        const auto count = packageCount(reply->readAll());
+        if (!count) {
+            emit keyPackageCountFailed();
+            return;
+        }
+        d->refreshAttemptedThisCycle = false;
+        emit keyPackageCountReceived(*count);
     });
 }
 
@@ -1309,6 +1379,7 @@ void RelayClient::redeemInvite(const QByteArray &token)
 
 void RelayClient::claimKeyPackage(const DeviceId &targetDevice)
 {
+    qCDebug(relayLog) << "Claiming contact key package";
     if (!isHttps(d->endpoints.keyPackagesClaim)) {
         emit transportError(RelayTransportError::InsecureEndpoint);
         return;
@@ -1326,6 +1397,7 @@ void RelayClient::claimKeyPackage(const DeviceId &targetDevice)
         const bool oversized = reply->property("oc_oversized").toBool();
         reply->deleteLater();
         if (oversized) {
+            qCWarning(relayLog) << "Key package claim response exceeded size limit";
             emit keyPackageClaimFailed(RelayClaimError::Transport);
             return;
         }
@@ -1342,17 +1414,20 @@ void RelayClient::claimKeyPackage(const DeviceId &targetDevice)
         // The relay's KeyPackageService::claim maps a target device with no
         // unclaimed KeyPackage to RelayError::NotFound, i.e. 404 Not Found.
         if (status == 404) {
+            qCWarning(relayLog) << "Key package claim returned 404: target has no available package";
             emit keyPackageClaimFailed(RelayClaimError::Unavailable);
             return;
         }
         if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
             || !d->bodyWithinBounds(reply)) {
+            qCWarning(relayLog) << "Key package claim transport failure; HTTP status" << status;
             emit keyPackageClaimFailed(RelayClaimError::Transport);
             return;
         }
 
         const QByteArray rawBody = reply->readAll();
         if (rawBody.size() > d->limits.maxHttpBodyBytes) {
+            qCWarning(relayLog) << "Key package claim transport failure; HTTP status" << status;
             emit keyPackageClaimFailed(RelayClaimError::Transport);
             return;
         }

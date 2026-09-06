@@ -457,9 +457,11 @@ Result<void, ProfileSessionError> ProfileSession::persistMlsState() {
   if (pending.isEmpty())
     return Result<void, ProfileSessionError>::success();
   auto committed = m_syncStore->commitMlsState(pending);
-  if (!committed.hasValue())
+  if (!committed.hasValue()) {
+    (void)m_mlsStateStore->store(pending);
     return Result<void, ProfileSessionError>::failure(
         ProfileSessionError::DatabaseFailure);
+  }
   return Result<void, ProfileSessionError>::success();
 }
 

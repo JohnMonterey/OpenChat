@@ -1,5 +1,7 @@
 #pragma once
 
+#include "app/KeyPackageSupply.h"
+
 #include <QByteArray>
 #include <QList>
 #include <QObject>
@@ -15,10 +17,11 @@ enum class RelayTransportError;
 // relay for the life of the session. AccountBootstrap performs the first-run
 // registration and initial authentication; every LATER launch unlocks an
 // existing profile with no relay tokens at all, and long-running sessions
-// eventually exhaust their refresh token. This object owns both cases:
+// eventually exhaust their refresh token. This object also owns background key
+// package replenishment for both newly registered and existing profiles:
 //
 //   start(NeedsAuthentication)  -> challenge/response -> tokens -> connectLive
-//   start(AlreadyLive)          -> nothing until the relay reports authExpired
+//   start(AlreadyLive)          -> maintain key package supply until authExpired
 //   authExpired (any time)      -> re-authenticate with backoff, reconnect live
 //   transportError while authenticating -> retry with backoff
 //
@@ -60,6 +63,7 @@ private:
 
     ProfileSession &m_session;
     RelayClient &m_relay;
+    KeyPackageSupply m_supply;
     QByteArray m_deviceCredential;
     bool m_authenticating = false;
     bool m_authenticated = false;

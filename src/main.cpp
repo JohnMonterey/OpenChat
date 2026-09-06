@@ -24,6 +24,7 @@
 #include <optional>
 
 #include "app/AccountBootstrap.h"
+#include "diagnostics/Logging.h"
 #include "app/AppMetadata.h"
 #include "app/ContactRequestService.h"
 #include "app/DeviceLink.h"
@@ -923,6 +924,7 @@ int main(int argc, char *argv[])
     QGuiApplication application(argc, argv);
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
+    OpenChat::installFileLogging();
     // How the freedesktop desktops attribute this process: the basename of the
     // installed .desktop file. Wayland compositors use it as the app id, and
     // the notification daemons use it to find the application's name and icon

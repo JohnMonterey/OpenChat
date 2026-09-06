@@ -1,4 +1,8 @@
 #include "app/AddContactService.h"
+#include "app/KeyPackageSupply.h"
+#include "relay/RelayTestSupport.h"
+#include <QCborMap>
+#include <QSignalSpy>
 
 #include "app/ProfileSession.h"
 #include "crypto/MlsClient.h"
@@ -118,6 +122,9 @@ private slots:
     void emptyDeviceListFailsNoDevice();
     void keyPackageUnavailableFallsThroughToNextDevice();
     void keyPackageExhaustedFailsNoKeyPackage();
+    void eightPackagePoolExhaustion();
+    void emptyPoolRecoversAndPrivateKeysSurviveRestart();
+    void supplyStopsAtThresholdAndRecoversAfterFailure();
     void blockedPeerFailsBlockedAndSendsNothing();
     void handleNotFoundFails();
 
@@ -132,6 +139,7 @@ private:
     std::unique_ptr<CapturingMlsStateStore> m_peerCapture;
     std::unique_ptr<MlsClient> m_peer;
     QByteArray m_keyPackage;
+    ProfileId m_profileId = ProfileId::generate();
 };
 
 void AddContactServiceTest::init()
@@ -140,7 +148,7 @@ void AddContactServiceTest::init()
     QVERIFY(m_dir->isValid());
     m_vault = std::make_unique<InMemoryVault>();
 
-    const auto profileId = ProfileId::generate();
+    const auto profileId = m_profileId;
     const auto paths = ProfilePaths::forProfile(m_dir->path(), profileId);
     auto created = ProfileSession::create(profileId, *m_vault, paths);
     QVERIFY(created.hasValue());
@@ -376,6 +384,130 @@ void AddContactServiceTest::keyPackageExhaustedFailsNoKeyPackage()
     QCOMPARE(m_transport->sent.size(), qsizetype(0));
 }
 
+void AddContactServiceTest::eightPackagePoolExhaustion()
+{
+    const RelayDirectoryEntry entry{AccountId::generate(), {device(DeviceId::generate())}};
+    QList<QByteArray> pool;
+    for (int i = 0; i < 8; ++i) {
+        auto package = m_peer->generateKeyPackage();
+        QVERIFY(package.hasValue());
+        pool.append(package.value());
+    }
+    for (int i = 0; i < 9; ++i) {
+        AddContactService service(*m_session, *m_relay, *m_session->syncEngine());
+        bool succeeded = false;
+        std::optional<AddContactService::Error> failure;
+        connect(&service, &AddContactService::succeeded, &service,
+                [&](const ConversationId &, const AccountId &) { succeeded = true; });
+        connect(&service, &AddContactService::failed, &service,
+                [&](AddContactService::Error error) { failure = error; });
+        service.startByHandle(QStringLiteral("finite-pool"));
+        emit m_relay->handleResolved(entry);
+        if (!pool.isEmpty())
+            emit m_relay->keyPackageClaimed(pool.takeFirst());
+        else
+            emit m_relay->keyPackageClaimFailed(RelayClaimError::Unavailable);
+        if (i < 8) {
+            QVERIFY(succeeded);
+            QVERIFY(!failure);
+        } else {
+            QVERIFY(failure);
+            QCOMPARE(*failure, AddContactService::Error::NoKeyPackage);
+            QVERIFY(!succeeded);
+        }
+    }
+}
+
+void AddContactServiceTest::emptyPoolRecoversAndPrivateKeysSurviveRestart()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+    const QString path = QStringLiteral("/v1/key-packages");
+    auto countBody = [](int count) {
+        QCborMap map;
+        map.insert(QLatin1StringView("availableKeyPackages"), count);
+        return map.toCborValue().toCbor();
+    };
+    server.enqueue(path, {200, countBody(0)});
+    for (int count = 1; count <= KeyPackageSupply::targetAvailable; ++count)
+        server.enqueue(path, {200, countBody(count)});
+    RelayEndpoints endpoints;
+    endpoints.keyPackages = server.url(path);
+    RelayClient relay(DeviceId::generate(), AccountId::generate(), endpoints, {});
+    relay.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    relay.setTokens("access", "refresh");
+    QSignalSpy published(&relay, &RelayClient::keyPackagePublished);
+    {
+        KeyPackageSupply supply(*m_session, relay);
+        supply.start();
+        QTRY_COMPARE(published.count(), KeyPackageSupply::targetAvailable);
+        QCOMPARE(server.requestCount(path), 1 + KeyPackageSupply::targetAvailable);
+        // Claim notification: refill from seven, one package at a time.
+        for (int count = 8; count <= KeyPackageSupply::targetAvailable; ++count)
+            server.enqueue(path, {200, countBody(count)});
+        emit relay.keyPackageCountReceived(7);
+        QTRY_COMPARE(published.count(), KeyPackageSupply::targetAvailable + 9);
+    }
+    const auto package = QCborValue::fromCbor(server.lastBody(path)).toMap()
+        .value(QLatin1StringView("key_package")).toByteArray();
+    QVERIFY(!package.isEmpty());
+    m_session->lock();
+    m_session.reset();
+    auto reopened = ProfileSession::unlock(m_profileId, *m_vault,
+        ProfilePaths::forProfile(m_dir->path(), m_profileId));
+    QVERIFY(reopened.hasValue());
+    m_session = std::move(reopened).value();
+    // This Welcome uses the final published package. Joining after restart proves
+    // that generation committed the corresponding private material to SQLCipher.
+    const auto conversation = ConversationId::generate();
+    QVERIFY(m_peer->createGroup(conversation).hasValue());
+    const auto added = m_peer->addMembers(conversation, {package});
+    QVERIFY(added.hasValue());
+    QVERIFY(m_session->mls()->joinGroup(conversation, added.value().welcome).hasValue());
+}
+
+void AddContactServiceTest::supplyStopsAtThresholdAndRecoversAfterFailure()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+    const QString path = QStringLiteral("/v1/key-packages");
+    const auto body = [](int count) {
+        QCborMap map;
+        map.insert(QLatin1StringView("availableKeyPackages"), count);
+        return map.toCborValue().toCbor();
+    };
+    server.enqueue(path, {200, body(8)});
+    RelayEndpoints endpoints;
+    endpoints.keyPackages = server.url(path);
+    RelayClient relay(DeviceId::generate(), AccountId::generate(), endpoints, {});
+    relay.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    relay.setTokens("access", "refresh");
+    QSignalSpy counts(&relay, &RelayClient::keyPackageCountReceived);
+    QSignalSpy published(&relay, &RelayClient::keyPackagePublished);
+    QSignalSpy failed(&relay, &RelayClient::keyPackagePublishFailed);
+    KeyPackageSupply supply(*m_session, relay);
+    supply.start();
+    QTRY_COMPARE(counts.count(), 1);
+    QCOMPARE(published.count(), 0);
+    QCOMPARE(server.requestCount(path), 1);
+    server.enqueue(path, {500, {}});
+    emit relay.keyPackageCountReceived(0);
+    QTRY_COMPARE(failed.count(), 1);
+    QCOMPARE(published.count(), 0);
+    // Reconnect rechecks uncertain outcomes before generating more packages.
+    server.enqueue(path, {200, body(0)});
+    for (int count = 1; count <= KeyPackageSupply::targetAvailable; ++count)
+        server.enqueue(path, {200, body(count)});
+    emit relay.connected();
+    QTRY_COMPARE(published.count(), KeyPackageSupply::targetAvailable);
+    supply.pause();
+    emit relay.keyPackageCountReceived(0);
+    QCoreApplication::processEvents();
+    QCOMPARE(published.count(), KeyPackageSupply::targetAvailable);
+}
+
 void AddContactServiceTest::blockedPeerFailsBlockedAndSendsNothing()
 {
     const AccountId peerAccount = AccountId::generate();
@@ -394,6 +526,8 @@ void AddContactServiceTest::blockedPeerFailsBlockedAndSendsNothing()
 
     service.startByHandle(QStringLiteral("blocked"));
     emit m_relay->handleResolved(entry);
+    // Must fail BEFORE any package is returned; blocking cannot consume one.
+    QVERIFY(failure.has_value());
     emit m_relay->keyPackageClaimed(m_keyPackage);
 
     QVERIFY(!succeeded);

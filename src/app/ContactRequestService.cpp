@@ -1,4 +1,5 @@
 #include "app/ContactRequestService.h"
+#include "diagnostics/Logging.h"
 
 #include "app/ProfileSession.h"
 #include "domain/ChatTypes.h"
@@ -69,8 +70,11 @@ void ContactRequestService::onHandshakeReceived(const AccountId &sender,
                          receivedAtMs,
                          receivedAtMs};
     record.peerDeviceId = senderDevice;
-    if (!contacts->recordIncomingRequest(record).hasValue())
+    if (!contacts->recordIncomingRequest(record).hasValue()) {
+        qCWarning(contactsLog) << "Could not store incoming contact request";
         return;
+    }
+    qCDebug(contactsLog) << "Incoming contact request stored";
     emit incomingRequest(sender, conversation);
 }
 
@@ -218,6 +222,7 @@ bool ContactRequestService::ensureConversationRow(const ConversationId &conversa
 void ContactRequestService::onHandshakeAuthFailed(const ConversationId &conversation,
                                                   const AccountId &sender)
 {
+    qCWarning(contactsLog) << "Incoming Welcome failed authentication";
     // Authentication failed and NO MLS state was mutated (inspectWelcome is
     // side-effect-free and any join ran only after auth passed). Treat it exactly
     // like a decline -- drop the stash and forget the peer, never mark Accepted --

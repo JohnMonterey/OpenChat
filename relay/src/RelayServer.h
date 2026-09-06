@@ -48,6 +48,7 @@ public:
 
 private:
     void registerRoutes();
+    void sendKeyPackageSupply(const DeviceId &device);
     void onWebSocketConnection();
     void handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice &device,
                           const QByteArray &message);

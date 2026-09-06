@@ -1,4 +1,5 @@
 #include "app/AddContactService.h"
+#include "diagnostics/Logging.h"
 
 #include "app/ProfileSession.h"
 #include "crypto/MlsClient.h"
@@ -100,88 +101,90 @@ void AddContactService::onResolutionFailed(RelayDirectoryError error)
 
 void AddContactService::claimCurrentDevice()
 {
-    m_relay.claimKeyPackage(m_entry->devices[m_deviceIndex].deviceId);
+    // Complete package-independent validation/storage before consuming a one-time
+    // package. Failed attempts may leave a retryable PendingOutgoing row.
+    auto *mls = m_session.mls();
+    auto *contacts = m_session.contacts();
+    auto *chats = m_session.chats();
+    if (!mls || !contacts || !chats) {
+        fail(Error::Storage);
+        return;
+    }
+    const auto existing = contacts->find(m_entry->accountId);
+    if (!existing.hasValue()) {
+        fail(Error::Storage);
+        return;
+    }
+    if (existing.value() && existing.value()->state == ContactState::Blocked) {
+        fail(Error::Blocked);
+        return;
+    }
+    const ConversationId conversation = ConversationId::generate();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    ContactRecord record{m_entry->accountId, m_handle, QString(),
+                         ContactState::PendingOutgoing, conversation, now, now};
+    record.peerDeviceId = m_entry->devices[m_deviceIndex].deviceId;
+    const auto recorded = contacts->recordOutgoingRequest(record);
+    if (!recorded.hasValue()) {
+        fail(recorded.error().code == RepositoryErrorCode::Conflict ? Error::Blocked : Error::Storage);
+        return;
+    }
+    if (!chats->upsertConversation(ConversationRecord{conversation, conversation.bytes(),
+            QString(), ConversationKind::Direct, now}).hasValue()) {
+        fail(Error::Storage);
+        return;
+    }
+    if (!mls->createGroup(conversation).hasValue()) {
+        fail(Error::Mls);
+        return;
+    }
+    // Do not leave captured MLS state pending across the asynchronous claim.
+    if (!m_session.persistMlsState().hasValue()) {
+        fail(Error::Storage);
+        return;
+    }
+    m_conversation = conversation;
+    qCDebug(contactsLog) << "Local contact preparation complete; claiming key package";
+    m_relay.claimKeyPackage(*record.peerDeviceId);
 }
 
 void AddContactService::onKeyPackageClaimed(const QByteArray &keyPackage)
 {
     if (m_state != State::Claiming)
         return;
-
-    // This handler MUST run to completion synchronously: there is no event-loop
-    // spin between addMembers() and sendHandshake(), so the pending MLS state the
-    // engine surrenders is exactly this group's createGroup + addMembers snapshot
-    // and cannot be raced by another mutation of the shared MlsClient.
-    MlsClient *mls = m_session.mls();
-    SqlCipherContactRepository *contacts = m_session.contacts();
-    if (mls == nullptr || contacts == nullptr) {
+    auto *mls = m_session.mls();
+    auto *contacts = m_session.contacts();
+    if (!mls || !contacts || !m_conversation) {
         fail(Error::Storage);
         return;
     }
-
-    const ConversationId conversation = ConversationId::generate();
-    if (!mls->createGroup(conversation).hasValue()) {
-        fail(Error::Mls);
+    // The user may have blocked the peer while the claim was in flight.
+    const auto current = contacts->find(m_entry->accountId);
+    if (!current.hasValue()) {
+        fail(Error::Storage);
         return;
     }
+    if (current.value() && current.value()->state == ContactState::Blocked) {
+        fail(Error::Blocked);
+        return;
+    }
+    const ConversationId conversation = *m_conversation;
+    // No event-loop spin between addMembers and sendHandshake: the MLS state
+    // and Welcome are committed together by SyncEngine.
     auto added = mls->addMembers(conversation, {keyPackage});
     if (!added.hasValue()) {
         fail(Error::Mls);
         return;
     }
-    // Discard .commit: addMembers already merged the pending commit locally, and a
-    // brand-new 2-party group has no other member to receive it. Only the Welcome
-    // ships.
-    const QByteArray welcome = added.value().welcome;
-
-    // Record the outgoing request BEFORE sending the Welcome. recordOutgoingRequest
-    // is the authoritative Blocked gate (a Conflict result means the peer is locally
-    // blocked), and ordering it ahead of the send keeps crash-safety
-    // one-directional: commitControlSend atomically commits the group's MLS state
-    // with the Welcome outbox, so "durable group <=> durable Welcome" always holds.
-    // The only crash window (after this record, before/around the send) leaves a
-    // benign PendingOutgoing row with no durable group, which is retryable and
-    // strictly better than a durable group/Welcome with no roster row.
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const DeviceId peerDevice = m_entry->devices[m_deviceIndex].deviceId;
-    ContactRecord record{m_entry->accountId,
-                         m_handle,
-                         QString(),
-                         ContactState::PendingOutgoing,
-                         conversation,
-                         now,
-                         now};
-    // The device whose KeyPackage sealed this group is the recipient of every
-    // envelope in the conversation (the accept, then the messages).
-    record.peerDeviceId = peerDevice;
-    // Capture the peer's MLS-authenticated Ed25519 identity key from the claimed
-    // KeyPackage credential (version(1) || deviceId(16) || signingKey(32)), so a
-    // later checkpoint can compute the safety number. A failed or short inspect
-    // simply leaves the key null (backfilled later) and never fails the add.
-    auto credential = mls->inspectKeyPackage(keyPackage);
+    const auto credential = mls->inspectKeyPackage(keyPackage);
     if (credential.hasValue() && credential.value().size() >= 49
         && static_cast<unsigned char>(credential.value().at(0)) == 1) {
-        record.peerSigningKey = credential.value().sliced(17, 32);
+        // Optional pin backfill: a failed write does not abandon the Welcome.
+        if (!contacts->setPeerSigningKey(m_entry->accountId, credential.value().sliced(17, 32)).hasValue())
+            qCWarning(contactsLog) << "Could not save peer signing key";
     }
-    auto recorded = contacts->recordOutgoingRequest(record);
-    if (!recorded.hasValue()) {
-        fail(recorded.error().code == RepositoryErrorCode::Conflict ? Error::Blocked
-                                                                    : Error::Storage);
-        return;
-    }
-    // Materialise the durable conversation row now: the peer's acceptance and
-    // their first message land in this group, and the message store's foreign
-    // key requires the row before either can be committed.
-    SqlCipherChatRepository *chats = m_session.chats();
-    if (chats == nullptr
-        || !chats->upsertConversation(ConversationRecord{conversation, conversation.bytes(),
-                                                         QString(), ConversationKind::Direct, now})
-                .hasValue()) {
-        fail(Error::Storage);
-        return;
-    }
-
-    m_engine.sendHandshake(conversation, peerDevice, welcome);
+    m_engine.sendHandshake(conversation, m_entry->devices[m_deviceIndex].deviceId,
+                           added.value().welcome);
     succeed(conversation, m_entry->accountId);
 }
 
@@ -229,6 +232,8 @@ void AddContactService::succeed(const ConversationId &conversation, const Accoun
 
 void AddContactService::fail(Error error)
 {
+    qCWarning(contactsLog) << "Add contact failed; stage" << static_cast<int>(m_state)
+                           << "error" << static_cast<int>(error);
     if (m_state == State::Terminated)
         return;
     m_state = State::Terminated;

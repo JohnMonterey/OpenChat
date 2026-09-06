@@ -1,4 +1,5 @@
 #include "crypto/MlsClient.h"
+#include "diagnostics/Logging.h"
 
 #include <openchat_mls.h>
 
@@ -13,6 +14,7 @@ namespace {
 
 MlsError errorFromCode(int code)
 {
+    qCWarning(mlsLog) << "MLS operation failed; bridge status" << code;
     switch (code) {
     case OC_MLS_INVALID_INPUT:
         return MlsError::InvalidInput;
@@ -187,6 +189,7 @@ MlsClient::~MlsClient()
 
 Result<QByteArray, MlsError> MlsClient::generateKeyPackage()
 {
+    qCDebug(mlsLog) << "Generating key package";
     QMutexLocker locker(&m_mutex);
     oc_mls_buffer output{};
     const int status = oc_mls_generate_key_package(m_handle, &output);

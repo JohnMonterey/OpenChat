@@ -249,6 +249,7 @@ void RelayServer::registerRoutes()
             response.insert(QLatin1StringView("refresh"), tokens.value().refreshToken);
             response.insert(QLatin1StringView("expiresAtMs"), tokens.value().accessExpiresAtMs);
             response.insert(QLatin1StringView("refreshExpiresAtMs"), tokens.value().refreshExpiresAtMs);
+            response.insert(QLatin1StringView("availableKeyPackages"), m_keyPackages.availableCount(*device));
             return cbor(response.toCborValue());
         });
 
@@ -295,6 +296,20 @@ void RelayServer::registerRoutes()
         });
 
     m_http.route(
+        QStringLiteral("/v1/key-packages"), QHttpServerRequest::Method::Get,
+        [this](const QHttpServerRequest &request) -> QHttpServerResponse {
+            const auto identity = m_auth.authenticate(bearerToken(request));
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const int count = m_keyPackages.availableCount(identity->deviceId);
+            if (count < 0)
+                return QHttpServerResponse(StatusCode::InternalServerError);
+            QCborMap response;
+            response.insert(QLatin1StringView("availableKeyPackages"), count);
+            return cbor(response.toCborValue());
+        });
+
+    m_http.route(
         QStringLiteral("/v1/key-packages"), QHttpServerRequest::Method::Post,
         [this](const QHttpServerRequest &request) -> QHttpServerResponse {
             const auto identity = m_auth.authenticate(bearerToken(request));
@@ -309,7 +324,10 @@ void RelayServer::registerRoutes()
                 m_keyPackages.publish(identity->accountId, identity->deviceId, keyPackage);
             if (!result.hasValue())
                 return errorResponse(result.error());
-            return QHttpServerResponse(StatusCode::Ok);
+            QCborMap response;
+            response.insert(QLatin1StringView("availableKeyPackages"),
+                            m_keyPackages.availableCount(identity->deviceId));
+            return cbor(response.toCborValue());
         });
 
     m_http.route(
@@ -325,6 +343,9 @@ void RelayServer::registerRoutes()
             if (!target)
                 return QHttpServerResponse(StatusCode::BadRequest);
             const auto claimed = m_keyPackages.claim(*target, identity->deviceId);
+            // Even an empty-pool claim wakes an online owner so existing
+            // exhausted accounts can recover. Old clients never get new frames.
+            sendKeyPackageSupply(*target);
             if (!claimed.hasValue())
                 return errorResponse(claimed.error());
             QCborMap response;
@@ -440,6 +461,9 @@ void RelayServer::onWebSocketConnection()
         if (auto *previous = m_liveByDevice.value(key))
             previous->abort();
         m_liveByDevice.insert(key, raw);
+        raw->setProperty("keyPackageSupply", QUrlQuery(raw->requestUrl())
+            .queryItemValue(QStringLiteral("keyPackageSupply")) == QStringLiteral("1"));
+        sendKeyPackageSupply(identity->deviceId);
         // Detect vanished clients even when TCP has not reported a disconnect.
         auto *heartbeat = new QTimer(raw);
         raw->setProperty("awaitingPong", false);
@@ -487,6 +511,16 @@ void RelayServer::onWebSocketConnection()
             raw->deleteLater();
         });
     }
+}
+
+void RelayServer::sendKeyPackageSupply(const DeviceId &device)
+{
+    auto *socket = m_liveByDevice.value(device.bytes().toHex());
+    if (!socket || !socket->property("keyPackageSupply").toBool())
+        return;
+    const int count = m_keyPackages.availableCount(device);
+    if (count >= 0)
+        socket->sendBinaryMessage(QCborArray{10, count}.toCborValue().toCbor());
 }
 
 void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice &device,

@@ -220,6 +220,8 @@ private slots:
     void registerAccountSucceeds();
     void registerAccountHandleTakenFails();
     void publishKeyPackageSucceeds();
+    void keyPackageSupplyHintIsValidated();
+    void keyPackageCountRejectsMalformedResponses();
     void publishKeyPackageUnauthorizedRefreshExhaustionExpires();
 
     void resolveHandleSucceeds();
@@ -939,6 +941,61 @@ void RelayClientTest::registerAccountHandleTakenFails()
     QCOMPARE(failed.first().at(0).value<RelayRegistrationError>(),
              RelayRegistrationError::HandleUnavailable);
     QCOMPARE(registered.count(), 0);
+}
+
+void RelayClientTest::keyPackageSupplyHintIsValidated()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                    {QString::fromLatin1(relaySubprotocol)});
+    QVERIFY(server.isListening());
+    server.onConnected = [](QWebSocket *socket) {
+        socket->sendBinaryMessage(QCborArray{10, 0}.toCborValue().toCbor());
+        socket->sendBinaryMessage(QCborArray{10, -1}.toCborValue().toCbor());
+    };
+    RelayEndpoints endpoints;
+    endpoints.live = server.liveUrl();
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, {});
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    QSignalSpy counts(&client, &RelayClient::keyPackageCountReceived);
+    QSignalSpy errors(&client, &RelayClient::transportError);
+    client.connectLive(0);
+    QTRY_COMPARE(counts.count(), 1);
+    QCOMPARE(counts.first().at(0).toInt(), 0);
+    QTRY_COMPARE(errors.count(), 1);
+    QCOMPARE(QUrlQuery(server.observedResumeUrl()).queryItemValue(QStringLiteral("keyPackageSupply")),
+             QStringLiteral("1"));
+    client.disconnect();
+}
+
+void RelayClientTest::keyPackageCountRejectsMalformedResponses()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+    const QString path = QStringLiteral("/v1/key-packages");
+    QCborMap map;
+    map.insert(QLatin1StringView("availableKeyPackages"), 0);
+    server.enqueue(path, {200, map.toCborValue().toCbor() + QByteArray("trailing")});
+    server.enqueue(path, {200, QCborMap().toCborValue().toCbor()});
+    map.insert(QLatin1StringView("availableKeyPackages"), -1);
+    server.enqueue(path, {200, map.toCborValue().toCbor()});
+    map.insert(QLatin1StringView("availableKeyPackages"), 0);
+    server.enqueue(path, {200, map.toCborValue().toCbor()});
+    RelayEndpoints endpoints;
+    endpoints.keyPackages = server.url(path);
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, {});
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    QSignalSpy counts(&client, &RelayClient::keyPackageCountReceived);
+    QSignalSpy failed(&client, &RelayClient::keyPackageCountFailed);
+    for (int i = 1; i <= 3; ++i) {
+        client.fetchKeyPackageCount();
+        QTRY_COMPARE(failed.count(), i);
+        QCOMPARE(counts.count(), 0);
+    }
+    client.fetchKeyPackageCount();
+    QTRY_COMPARE(counts.count(), 1);
+    QCOMPARE(counts.first().at(0).toInt(), 0);
 }
 
 void RelayClientTest::publishKeyPackageSucceeds()

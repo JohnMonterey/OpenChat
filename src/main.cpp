@@ -782,7 +782,7 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
                   const QCommandLineOption &captureOption,
                   const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
                   const QCommandLineOption &heightOption, bool incoming, bool video, bool group,
-                  bool screenShare)
+                  bool screenShare, bool sourcePicker)
 {
     OpenChat::ChatController chatController;
     chatController.setLocalUserName(QStringLiteral("Developer"));
@@ -859,6 +859,12 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         return EXIT_FAILURE;
 
     applyWindowSizing(parser, window, widthOption, heightOption);
+    if (sourcePicker) {
+        // Opened once the window exists, so the list is built against a real
+        // screen. The sources are this machine's own; nothing is captured.
+        if (auto *picker = window->findChild<QObject *>(QStringLiteral("screenSharePicker")))
+            QMetaObject::invokeMethod(picker, "show", Qt::QueuedConnection);
+    }
     scheduleCaptureIfRequested(parser, window, captureOption, delayOption);
     return application.exec();
 }
@@ -917,9 +923,13 @@ int main(int argc, char *argv[])
     const QCommandLineOption callScreenOption(
         QStringLiteral("call-screen"),
         QStringLiteral("Preview a received screen share alongside the camera."));
+    const QCommandLineOption callPickerOption(
+        QStringLiteral("call-picker"),
+        QStringLiteral("Preview the screen-source picker, listing this machine's real sources."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, addContactOption, verifyOption, callOption,
-                       callIncomingOption, callVideoOption, callGroupOption, callScreenOption});
+                       callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
+                       callPickerOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -946,10 +956,12 @@ int main(int argc, char *argv[])
     // before the plain capture path so --call --capture routes here.
     const bool previewIncomingCall = parser.isSet(callIncomingOption);
     if (parser.isSet(callOption) || previewIncomingCall || parser.isSet(callVideoOption)
-        || parser.isSet(callGroupOption) || parser.isSet(callScreenOption))
+        || parser.isSet(callGroupOption) || parser.isSet(callScreenOption)
+        || parser.isSet(callPickerOption))
         return runCallWindow(application, parser, captureOption, delayOption, widthOption,
                              heightOption, previewIncomingCall, parser.isSet(callVideoOption),
-                             parser.isSet(callGroupOption), parser.isSet(callScreenOption));
+                             parser.isSet(callGroupOption), parser.isSet(callScreenOption),
+                             parser.isSet(callPickerOption));
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

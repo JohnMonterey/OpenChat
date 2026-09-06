@@ -861,6 +861,7 @@ add_openchat_capture_test(capture_video 900 680 --call-video)
 add_openchat_capture_test(capture_video_minimum 720 560 --call-video)
 add_openchat_capture_test(capture_screen 1100 780 --call-screen)
 add_openchat_capture_test(capture_screen_minimum 720 560 --call-screen)
+add_openchat_capture_test(capture_screen_picker 900 700 --call-picker)
 
 # The add-contact preview sub-mode: renders the dialog over a populated mock
 # Requests list. Uses the same verify runner with the extra --add-contact argument.

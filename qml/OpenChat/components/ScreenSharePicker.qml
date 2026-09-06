@@ -9,25 +9,25 @@ import OpenChat
 // leaving a capture half-started. Dismissing the dialog starts nothing, which
 // is the whole of "the user cancelled the picker".
 Item {
-    id: root
+    id: picker
     objectName: "screenSharePicker"
 
     required property var controller
     property bool open: false
     anchors.fill: parent
-    visible: root.open
+    visible: picker.open
 
     // Rebuilt on every open, deliberately.
     property var sources: []
 
     function show() {
-        root.sources = root.controller ? root.controller.screenShareSources() : [];
-        root.open = true;
+        picker.sources = picker.controller ? picker.controller.screenShareSources() : [];
+        picker.open = true;
     }
 
     function dismiss() {
-        root.open = false;
-        root.sources = [];
+        picker.open = false;
+        picker.sources = [];
     }
 
     Rectangle {
@@ -36,7 +36,7 @@ Item {
 
         MouseArea {
             anchors.fill: parent
-            onClicked: root.dismiss()
+            onClicked: picker.dismiss()
         }
     }
 
@@ -75,7 +75,7 @@ Item {
             Text {
                 width: parent.width
                 wrapMode: Text.WordWrap
-                visible: root.sources.length === 0
+                visible: picker.sources.length === 0
                 text: "Nothing here can be captured. On some desktops screen sharing has to "
                       + "be allowed in system settings first."
                 color: Theme.textSecondary
@@ -88,20 +88,39 @@ Item {
                 id: sourceList
                 objectName: "screenSourceList"
                 width: parent.width
-                height: Math.min(260, contentHeight)
-                visible: root.sources.length > 0
+                // Sized from the model, not from contentHeight: a view whose
+                // height depends on its own content starts at zero, builds no
+                // rows, and so stays at zero.
+                height: Math.min(260, picker.sources.length * (rowHeight + spacing))
+                readonly property int rowHeight: 34
+                visible: picker.sources.length > 0
                 clip: true
-                model: root.sources
+                model: picker.sources
                 boundsBehavior: Flickable.StopAtBounds
                 spacing: 2
+
+                // Choosing lives here, on the list, and not in the delegate.
+                // A delegate is its own scope and could not reliably see the
+                // picker's id from inside a handler — which is exactly how a
+                // click came to do nothing at all. Rows reach this through
+                // ListView.view, an attached property that needs no lookup.
+                function choose(index) {
+                    picker.dismiss();
+                    if (picker.controller)
+                        picker.controller.startScreenShare(index);
+                }
 
                 delegate: Rectangle {
                     id: sourceRow
                     required property int index
                     required property var modelData
                     objectName: "screenSource_" + index
+                    // One way in, whether from the mouse or from a test.
+                    function activate() {
+                        sourceRow.ListView.view.choose(sourceRow.index);
+                    }
                     width: sourceList.width
-                    height: 34
+                    height: sourceList.rowHeight
                     radius: 4
                     color: rowMouse.containsMouse ? Theme.buttonMid : "transparent"
                     border.width: rowMouse.containsMouse ? 1 : 0
@@ -163,12 +182,7 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            const chosen = sourceRow.index;
-                            root.dismiss();
-                            if (root.controller)
-                                root.controller.startScreenShare(chosen);
-                        }
+                        onClicked: sourceRow.activate()
                     }
                 }
             }
@@ -181,7 +195,7 @@ Item {
                     objectName: "screenSharePickerCancel"
                     label: "Cancel"
                     accent: "neutral"
-                    onClicked: root.dismiss()
+                    onClicked: picker.dismiss()
                 }
             }
         }

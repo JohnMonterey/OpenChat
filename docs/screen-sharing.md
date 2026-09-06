@@ -176,7 +176,8 @@ nothing about a running share.
   the relay storing none of it. Requires the PostgreSQL test service.
 - `OpenChat --call-screen --capture <path.png>`: the surface with a received
   share, rendered without opening a display, at 1100x780 and at the minimum
-  720x560.
+  720x560. `--call-picker` renders the source picker over it, listing this
+  machine's real displays and windows without capturing any of them.
 - `openchat-call-check --screen`: one side of a real call against a real relay,
   so two machines can verify a share over an actual network path. The answering
   side reports whether the lossless regions arrived byte for byte.

@@ -277,23 +277,46 @@ Item {
         }
     }
 
-    Text {
+    // A camera failure and a screen failure are different facts, and either can
+    // be true while the other is not — a machine with no webcam can share its
+    // screen perfectly well. They get a line each, so a camera error left over
+    // from earlier in the call cannot hide what just happened to a share.
+    Column {
         id: mediaError
-        objectName: "cameraErrorText"
+        objectName: "callMediaErrors"
         anchors.top: actions.bottom
         anchors.topMargin: 8
         anchors.horizontalCenter: parent.horizontalCenter
         width: parent.width - 40
-        visible: text.length > 0
-        text: callHeader.controller.cameraError.length > 0
-              ? callHeader.controller.cameraError
-              : (callHeader.controller.screenShareError !== undefined
-                 ? callHeader.controller.screenShareError : "")
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.WordWrap
-        color: Theme.declineBottom
-        font.family: Theme.uiFont
-        font.pixelSize: 12
+        spacing: 3
+        visible: cameraErrorText.visible || screenShareErrorText.visible
+
+        Text {
+            id: cameraErrorText
+            objectName: "cameraErrorText"
+            width: parent.width
+            visible: text.length > 0
+            text: callHeader.controller.cameraError
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            color: Theme.declineBottom
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+        }
+
+        Text {
+            id: screenShareErrorText
+            objectName: "screenShareErrorText"
+            width: parent.width
+            visible: text.length > 0
+            text: callHeader.controller.screenShareError !== undefined
+                  ? callHeader.controller.screenShareError : ""
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            color: Theme.declineBottom
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+        }
     }
 
     Rectangle {

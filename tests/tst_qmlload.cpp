@@ -22,6 +22,8 @@
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include <QQmlExpression>
+#include <QQmlContext>
 #include "call/ScreenCanvas.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
@@ -1666,6 +1668,79 @@ private slots:
         QVERIFY(!video->property("canvas").value<OpenChat::ScreenCanvasPtr>());
         canvas.reset();
         QVERIFY2(observer.expired(), "the view kept the share's pixels alive after it ended");
+    }
+
+    void thePickerCanActOnTheRowThatWasClicked()
+    {
+        // The picker is instantiated from Main.qml, whose own root carries the
+        // same id. Every row's click handler has to reach the PICKER's root to
+        // start a share, and this is where that resolution is checked — a bare
+        // load never builds a row, so nothing else here would catch it.
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        // A ListView builds no rows until something lays it out, and nothing
+        // lays out a window that was never shown. This is the one test here
+        // that needs real delegates, so it shows the window and waits for it.
+        auto *window = qobject_cast<QQuickWindow *>(root);
+        QVERIFY(window);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *picker = root->findChild<QQuickItem *>(QStringLiteral("screenSharePicker"));
+        QVERIFY2(picker, "the screen-source picker was never loaded");
+        QVERIFY(!picker->isVisible());
+
+        QVERIFY(QMetaObject::invokeMethod(picker, "show"));
+        QCoreApplication::processEvents();
+        QVERIFY2(picker->isVisible(), "the picker did not open");
+
+        auto *list = root->findChild<QQuickItem *>(QStringLiteral("screenSourceList"));
+        QVERIFY(list);
+        // Offscreen still reports a screen, so there is always at least one row.
+        QVERIFY2(picker->property("sources").toList().size() > 0,
+                 "no capturable source was enumerated");
+        // Nothing renders in a headless load, so the view is asked to lay out
+        // rather than waiting for a frame that never comes.
+        QVERIFY(QMetaObject::invokeMethod(list, "forceLayout"));
+        QQuickItem *row = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT(
+            QMetaObject::invokeMethod(list, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row),
+                                      Q_ARG(int, 0))
+                && row != nullptr,
+            5000);
+
+        // The row's own handler runs in the delegate's scope. Evaluating the
+        // names it uses there is exactly what a click does.
+        // The id this resolves to is the PICKER'''s, not the Main.qml root that
+        // shares the name — an ambiguity that left every row's click handler
+        // unable to see either of them.
+        QQmlExpression reachesPicker(qmlContext(row), row,
+                                     QStringLiteral("picker.objectName"));
+        bool failed = false;
+        const QVariant reached = reachesPicker.evaluate(&failed);
+        QVERIFY2(!failed && !reachesPicker.hasError(),
+                 qPrintable(reachesPicker.error().toString()));
+        QCOMPARE(reached.toString(), QStringLiteral("screenSharePicker"));
+
+        // And choosing a row closes the picker and asks the controller to start.
+        QVERIFY(QMetaObject::invokeMethod(row, "activate"));
+        QCoreApplication::processEvents();
+        QVERIFY2(!picker->isVisible(), "choosing a source left the picker open");
+        // No live engine in a preview, so nothing starts — but the attempt is
+        // what had to reach the controller, and it did so without throwing.
+        QVERIFY(!callController.screenShareEnabled());
     }
 
     void theCallScreenOffersTheRightActionForEachStage()

@@ -209,6 +209,17 @@ Result<void, MlsError> MlsClient::createGroup(const ConversationId &conversation
     return Result<void, MlsError>::success();
 }
 
+Result<void, MlsError> MlsClient::deleteGroup(const ConversationId &conversation)
+{
+    QMutexLocker locker(&m_mutex);
+    const QByteArray bytes = conversation.bytes();
+    const int status = oc_mls_delete_group(
+        m_handle, reinterpret_cast<const uint8_t *>(bytes.constData()));
+    if (status != OC_MLS_OK)
+        return Result<void, MlsError>::failure(errorFromCode(status));
+    return Result<void, MlsError>::success();
+}
+
 Result<void, MlsError> MlsClient::joinGroup(const ConversationId &conversation,
                                             QByteArrayView welcome)
 {

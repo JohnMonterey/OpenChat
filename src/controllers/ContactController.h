@@ -52,6 +52,9 @@ class ContactController final : public QObject
     Q_PROPERTY(QString lookupSubtitle READ lookupSubtitle NOTIFY lookupChanged)
     Q_PROPERTY(bool lookupVisible READ lookupVisible NOTIFY lookupChanged)
     Q_PROPERTY(bool lookupCanRequest READ lookupCanRequest NOTIFY lookupChanged)
+    // True while the row shows a request of ours that is still waiting: the
+    // same button that sent it withdraws it.
+    Q_PROPERTY(bool lookupCanCancel READ lookupCanCancel NOTIFY lookupChanged)
 
 public:
     enum class Status { Idle, Working, Success, Error };
@@ -98,6 +101,7 @@ public:
     [[nodiscard]] QString lookupSubtitle() const;
     [[nodiscard]] bool lookupVisible() const;
     [[nodiscard]] bool lookupCanRequest() const;
+    [[nodiscard]] bool lookupCanCancel() const;
 
     // Search & Find. lookup(text) normalises the search text (trims, drops a
     // leading '@') and, after a short debounce, resolves it as an exact handle
@@ -105,6 +109,12 @@ public:
     // requestLookup() sends a contact request to the Found peer.
     Q_INVOKABLE void lookup(const QString &query);
     Q_INVOKABLE void requestLookup();
+    // Withdraws the outgoing request shown in the lookup row, so the handle can
+    // be asked again. Ignored unless the row shows one of ours still waiting.
+    Q_INVOKABLE void cancelLookupRequest();
+    // Withdraws the outgoing request to `peer`: removes the roster row, its
+    // conversation and its MLS group. False when there was no such request.
+    bool cancelOutgoingRequest(const AccountId &peer);
 
     Q_INVOKABLE void openDialog();
     Q_INVOKABLE void closeDialog();

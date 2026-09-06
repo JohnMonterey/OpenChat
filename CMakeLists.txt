@@ -393,6 +393,7 @@ add_library(openchat_app STATIC
     src/app/ProfileSession.cpp
     src/app/AccountBootstrap.cpp
     src/app/AddContactService.cpp
+    src/app/OutgoingRequestCleanup.cpp
     src/app/ContactRequestService.cpp
     src/app/GroupService.cpp
     src/app/DeviceLink.cpp

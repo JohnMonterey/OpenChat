@@ -31,7 +31,17 @@ Deployment requires separate approval and is not part of this change.
 
 AddContactService now performs contact lookup, the blocked gate, outgoing-contact
 and conversation storage, empty-group creation, and MLS persistence before claiming.
-A failed attempt can leave a retryable PendingOutgoing row. GroupService already
+That preparation runs once per add; trying a peer's next device only re-points the
+row. A claim that then fails rolls the preparation back — the row, the conversation
+and the MLS group (`MlsClient::deleteGroup`) all go, a row that existed before the
+attempt is put back as it was, and a peer blocked mid-flight keeps the row that says
+so — so a failed add never leaves "request sent" behind for a request that never
+left, and the handle can be asked again at once. The same cleanup
+(`discardOutgoingRequest`) backs **withdrawing** a request: the sent mark on a
+Search & Find row is a button, and clicking it removes the pending request so it
+can be sent again. A Welcome that did reach the peer cannot be recalled; an
+acceptance arriving after a withdrawal names a conversation this side no longer
+knows and is ignored. GroupService already
 checks accepted contacts and membership before claiming and now rechecks eligibility
 and session state between asynchronous claims. Package-dependent MLS work and the
 atomic Welcome/outbox commit must still follow the claim; a failure there, a block

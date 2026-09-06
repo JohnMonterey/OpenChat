@@ -169,6 +169,20 @@ pub unsafe extern "C" fn oc_mls_create_group(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn oc_mls_delete_group(
+    client: *mut OcMlsClient,
+    conversation_id: *const u8,
+) -> i32 {
+    ffi_guard(|| {
+        // SAFETY: validated by helper functions.
+        let handle = unsafe { handle(client)? };
+        // SAFETY: conversation IDs always contain exactly 16 bytes by ABI contract.
+        let conversation = unsafe { conversation_id_from_ptr(conversation_id)? };
+        mutate(handle, |client| client.delete_group(conversation))
+    })
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn oc_mls_join_group(
     client: *mut OcMlsClient,
     conversation_id: *const u8,

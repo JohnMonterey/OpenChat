@@ -488,8 +488,10 @@ Item {
                         x: 70
                         y: directoryRow.compact ? 26 : 34
                         width: sendRequestButton.x - x - 8
-                        text: sidebar.contactController
-                              ? sidebar.contactController.lookupSubtitle : ""
+                        // Hovering the sent mark says what a click there does.
+                        text: !sidebar.contactController ? ""
+                              : sendRequestButton.cancelHover ? "Withdraw the request"
+                              : sidebar.contactController.lookupSubtitle
                         color: Theme.textSecondary
                         font.family: Theme.uiFont
                         font.pixelSize: 14
@@ -498,8 +500,10 @@ Item {
                     }
 
                     // Grey "add person" icon: a head, shoulders and a small plus,
-                    // drawn from primitives. Enabled only while a request can be
-                    // sent; afterwards it dims to show the request went out.
+                    // drawn from primitives. Sends the request while one can be
+                    // sent; once it has gone out the plus becomes a check, and
+                    // the same button withdraws the request — the check turns
+                    // into a cross under the pointer to say so.
                     Item {
                         id: sendRequestButton
                         objectName: "sendRequestButton"
@@ -514,7 +518,12 @@ Item {
                                     === ContactController.LookupState.RequestSent
                                 || sidebar.contactController.lookupState
                                     === ContactController.LookupState.RequestPending)
-                        readonly property color ink: directoryResult.canRequest
+                        readonly property bool canCancel:
+                            sent && sidebar.contactController.lookupCanCancel
+                        readonly property bool cancelHover:
+                            canCancel && sendRequestMouse.containsMouse
+                        readonly property bool clickable: directoryResult.canRequest || canCancel
+                        readonly property color ink: clickable
                             ? (sendRequestMouse.containsMouse ? Theme.iconHover : Theme.searchIcon)
                             : Theme.iconDisabled
                         visible: directoryResult.canRequest || sent
@@ -522,7 +531,7 @@ Item {
                         Rectangle {
                             anchors.fill: parent
                             radius: 15
-                            color: directoryResult.canRequest
+                            color: sendRequestButton.clickable
                                    ? (sendRequestMouse.containsMouse ? Theme.navSelected : Theme.requestButton)
                                    : "transparent"
                             border.width: 1
@@ -554,24 +563,40 @@ Item {
                             color: sendRequestButton.ink
                         }
                         Rectangle {
-                            visible: sendRequestButton.sent
+                            visible: sendRequestButton.sent && !sendRequestButton.cancelHover
                             x: 18; y: 12; width: 4; height: 2; radius: 1; rotation: 45
                             color: Theme.requestSuccess
                         }
                         Rectangle {
-                            visible: sendRequestButton.sent
+                            visible: sendRequestButton.sent && !sendRequestButton.cancelHover
                             x: 20; y: 10; width: 7; height: 2; radius: 1; rotation: -50
                             color: Theme.requestSuccess
+                        }
+                        // The cross that replaces the check under the pointer.
+                        Rectangle {
+                            objectName: "withdrawRequestMark"
+                            visible: sendRequestButton.cancelHover
+                            x: 18; y: 9; width: 8; height: 2; radius: 1; rotation: 45
+                            color: Theme.declineBottom
+                        }
+                        Rectangle {
+                            visible: sendRequestButton.cancelHover
+                            x: 18; y: 9; width: 8; height: 2; radius: 1; rotation: -45
+                            color: Theme.declineBottom
                         }
 
                         MouseArea {
                             id: sendRequestMouse
                             anchors.fill: parent
                             hoverEnabled: true
-                            enabled: directoryResult.canRequest
+                            enabled: sendRequestButton.clickable
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                if (sidebar.contactController)
+                                if (!sidebar.contactController)
+                                    return;
+                                if (sendRequestButton.canCancel)
+                                    sidebar.contactController.cancelLookupRequest();
+                                else
                                     sidebar.contactController.requestLookup();
                             }
                         }

@@ -11,6 +11,7 @@
 #include "security/SafetyNumber.h"
 #include "security/SecureBuffer.h"
 #include "storage/CapturingMlsStateStore.h"
+#include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherDatabase.h"
 #include "storage/SqlCipherSyncStore.h"
@@ -152,6 +153,8 @@ private slots:
     void liveOpenSafetyNumberComputesAndVerifies();
     void liveOpenSafetyNumberUnavailableWithoutPeerKey();
     void liveAcceptOpensSafetyNumber();
+    void liveCancelOutgoingRequestRemovesEveryTrace();
+    void mockCancelReopensTheLookupRow();
 
 private:
     // A genuine inbound handshake (see tst_contactrequestservice): our KeyPackage is
@@ -646,6 +649,76 @@ void ContactControllerTest::liveAcceptOpensSafetyNumber()
     QVERIFY(expected.hasValue());
     QVERIFY(!controller.safetyNumber().isEmpty());
     QCOMPARE(controller.safetyNumber(), groupedSafetyNumber(expected.value()));
+}
+
+void ContactControllerTest::liveCancelOutgoingRequestRemovesEveryTrace()
+{
+    // A request of ours that is still waiting — whether it went out or a failed
+    // claim left it behind — can be withdrawn: the roster row, its conversation
+    // and its MLS group all go, so the handle can be asked again.
+    ContactRequestService requestsSvc(*m_session, *m_session->syncEngine());
+    ContactController controller;
+    controller.setLiveServices(&requestsSvc, nullptr, m_session.get(), m_session->syncEngine());
+
+    const AccountId peer = AccountId::generate();
+    const ConversationId conversation = ConversationId::generate();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    ContactRecord outgoing{peer, QStringLiteral("waiting"), QString(),
+                           ContactState::PendingOutgoing, conversation, now, now};
+    QVERIFY(m_session->contacts()->recordOutgoingRequest(outgoing).hasValue());
+    QVERIFY(m_session->chats()
+                ->upsertConversation(ConversationRecord{conversation, conversation.bytes(),
+                                                        QString(), ConversationKind::Direct, now})
+                .hasValue());
+    QVERIFY(m_session->mls()->createGroup(conversation).hasValue());
+    QVERIFY(m_session->persistMlsState().hasValue());
+    const auto before = m_session->chats()->conversations();
+    QVERIFY(before.hasValue());
+
+    QVERIFY(controller.cancelOutgoingRequest(peer));
+    auto row = m_session->contacts()->find(peer);
+    QVERIFY(row.hasValue());
+    QVERIFY2(!row.value().has_value(), "withdrawing left the roster row");
+    auto after = m_session->chats()->conversations();
+    QVERIFY(after.hasValue());
+    QCOMPARE(after.value().size(), before.value().size() - 1);
+    QVERIFY2(!m_session->mls()->groupMembers(conversation).hasValue(),
+             "withdrawing left the MLS group");
+
+    // Nothing to withdraw: an unknown peer, or a request that is THEIRS.
+    QVERIFY(!controller.cancelOutgoingRequest(peer));
+    const ConversationId incoming = feedInboundHandshake();
+    QVERIFY(!controller.cancelOutgoingRequest(m_senderAccount));
+    auto theirs = m_session->contacts()->find(m_senderAccount);
+    QVERIFY(theirs.hasValue() && theirs.value().has_value());
+    QCOMPARE(theirs.value()->state, ContactState::PendingIncoming);
+    QCOMPARE(theirs.value()->conversationId->bytes(), incoming.bytes());
+}
+
+void ContactControllerTest::mockCancelReopensTheLookupRow()
+{
+    ContactController controller;
+    controller.enableForPreview();
+    controller.setMockDirectory({QStringLiteral("alice")});
+
+    // Nothing to cancel while the row merely offers a request.
+    controller.lookup(QStringLiteral("alice"));
+    QTRY_COMPARE(controller.lookupState(), ContactController::LookupState::Found);
+    QVERIFY(!controller.lookupCanCancel());
+    controller.cancelLookupRequest();
+    QCOMPARE(controller.lookupState(), ContactController::LookupState::Found);
+
+    // Once sent, the same row can withdraw it and offers the request again.
+    controller.requestLookup();
+    QCOMPARE(controller.lookupState(), ContactController::LookupState::RequestSent);
+    QVERIFY(controller.lookupCanCancel());
+    QVERIFY(!controller.lookupCanRequest());
+    controller.cancelLookupRequest();
+    QCOMPARE(controller.lookupState(), ContactController::LookupState::Found);
+    QVERIFY(controller.lookupCanRequest());
+    QVERIFY(!controller.lookupCanCancel());
+    QCOMPARE(controller.status(), ContactController::Status::Success);
+    QCOMPARE(controller.statusMessage(), QStringLiteral("Request withdrawn."));
 }
 
 QTEST_GUILESS_MAIN(ContactControllerTest)

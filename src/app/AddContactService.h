@@ -1,5 +1,6 @@
 #pragma once
 
+#include "domain/Contact.h"
 #include "domain/Identifiers.h"
 #include "network/RelayClient.h"
 
@@ -16,10 +17,16 @@ class ProfileSession;
 class SyncEngine;
 
 // Drives the SEND side of the content-blind MLS add-contact handshake: resolve a
-// peer (by handle or by redeeming a one-time invite), claim one of their device
-// KeyPackages, create a fresh MLS group, add the peer (producing a Welcome),
-// record a PendingOutgoing roster entry, and ship the Welcome to that device as a
-// MlsHandshake envelope through the SyncEngine.
+// peer (by handle or by redeeming a one-time invite), record a PendingOutgoing
+// roster entry with a fresh conversation and MLS group, claim one of their device
+// KeyPackages, add the peer (producing a Welcome), and ship the Welcome to that
+// device as a MlsHandshake envelope through the SyncEngine.
+//
+// The local rows are written BEFORE the claim, so a peer whose one-time
+// KeyPackage would be wasted by a local failure is never asked for one. That
+// makes the claim the last thing that can fail, and when it does the rows are
+// rolled back: a failed add leaves no "request sent" behind for a request that
+// never left, and the handle can be asked again at once.
 //
 // A single-shot QObject state machine modelled on AccountBootstrap. Every relay
 // outcome is wired before the first call; each handler is guarded by the current
@@ -77,7 +84,12 @@ private:
     void onAuthExpired();
     void onTransportError(RelayTransportError error);
 
+    // Writes the roster row, conversation and MLS group, once per add.
+    bool prepareLocal();
+    // Points the roster row at the current device and asks for its KeyPackage.
     void claimCurrentDevice();
+    // Undoes prepareLocal() after a failure, restoring any row it replaced.
+    void rollbackLocal(Error error);
     void succeed(const ConversationId &conversation, const AccountId &peer);
     void fail(Error error);
     void teardown();
@@ -90,6 +102,10 @@ private:
     std::optional<RelayDirectoryEntry> m_entry;
     int m_deviceIndex = 0;
     std::optional<ConversationId> m_conversation;
+    // The roster row as it stood before this add replaced it (an earlier
+    // outgoing request, say), so a rollback can put it back rather than delete.
+    std::optional<ContactRecord> m_priorContact;
+    bool m_prepared = false;
 
     State m_state = State::Idle;
     QList<QMetaObject::Connection> m_connections;

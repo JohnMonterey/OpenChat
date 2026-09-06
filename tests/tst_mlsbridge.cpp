@@ -48,7 +48,31 @@ private slots:
     void rejectsInvalidInputsWithoutCrossingTheAbi();
     void threePartyGroupListsMembersAndRemovesOne();
     void messagesFromARecentPastEpochStillDecrypt();
+    void deletingAGroupForgetsItAndFreesItsId();
 };
+
+void MlsBridgeTest::deletingAGroupForgetsItAndFreesItsId()
+{
+    auto client = std::move(MlsClient::create("device")).value();
+    // Nothing to delete yet: reported, not swallowed.
+    auto missing = client->deleteGroup(conversationId());
+    QVERIFY(!missing.hasValue());
+    QCOMPARE(missing.error(), MlsError::MissingGroup);
+
+    QVERIFY(client->createGroup(conversationId()));
+    QVERIFY(client->groupMembers(conversationId()));
+    // A second group under the same id is refused while the first exists...
+    QVERIFY(!client->createGroup(conversationId()));
+
+    QVERIFY(client->deleteGroup(conversationId()));
+    // ...and after deletion there is no group to list, encrypt in, or delete.
+    QVERIFY(!client->groupMembers(conversationId()));
+    QVERIFY(!client->encrypt(conversationId(), "hello"));
+    QVERIFY(!client->deleteGroup(conversationId()));
+    // The id is free for a fresh group.
+    QVERIFY(client->createGroup(conversationId()));
+    QVERIFY(client->groupMembers(conversationId()));
+}
 
 void MlsBridgeTest::threePartyGroupListsMembersAndRemovesOne()
 {

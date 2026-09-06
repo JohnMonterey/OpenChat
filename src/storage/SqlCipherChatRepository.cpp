@@ -229,6 +229,23 @@ SqlCipherChatRepository::upsertConversation(const ConversationRecord &conversati
     });
 }
 
+Result<void, RepositoryError>
+SqlCipherChatRepository::removeConversation(const ConversationId &conversationId)
+{
+    // Messages, outbox rows, sync cursors and group members hang off the
+    // conversation with ON DELETE CASCADE, and the database opens with foreign
+    // keys enforced, so one delete takes the lot. Removing a conversation that
+    // is already gone is not an error: the caller wanted it gone, and it is.
+    return m_database.withConnection([&conversationId](sqlite3 *database) {
+        Statement statement(database, "DELETE FROM conversations WHERE id=?1");
+        if (!statement.isValid() || !statement.bindBlob(1, conversationId.bytes())
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("conversation.remove")));
+        return Result<void, RepositoryError>::success();
+    });
+}
+
 Result<QVector<MessageRecord>, RepositoryError>
 SqlCipherChatRepository::messages(const ConversationId &conversationId, int limit,
                                   const std::optional<MessageId> &before)

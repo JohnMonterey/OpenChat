@@ -14,6 +14,8 @@ public:
     [[nodiscard]] Result<QVector<ConversationRecord>, RepositoryError> conversations() override;
     [[nodiscard]] Result<void, RepositoryError>
     upsertConversation(const ConversationRecord &conversation) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    removeConversation(const ConversationId &conversationId) override;
     [[nodiscard]] Result<QVector<MessageRecord>, RepositoryError>
     messages(const ConversationId &conversationId, int limit,
              const std::optional<MessageId> &before) override;

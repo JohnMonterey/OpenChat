@@ -19,6 +19,10 @@ public:
         conversations() = 0;
     [[nodiscard]] virtual Result<void, RepositoryError>
         upsertConversation(const ConversationRecord &conversation) = 0;
+    // Deletes a conversation and everything hanging off it (messages, outbox,
+    // cursors, members). Succeeds when there was nothing to delete.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+        removeConversation(const ConversationId &conversationId) = 0;
     [[nodiscard]] virtual Result<QVector<MessageRecord>, RepositoryError>
         messages(const ConversationId &conversationId, int limit,
                  const std::optional<MessageId> &before) = 0;

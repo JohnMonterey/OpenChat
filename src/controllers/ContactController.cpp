@@ -2,6 +2,7 @@
 
 #include "app/AddContactService.h"
 #include "app/ContactRequestService.h"
+#include "app/OutgoingRequestCleanup.h"
 #include "app/ProfileSession.h"
 #include "domain/Contact.h"
 #include "network/RelayClient.h"
@@ -221,6 +222,45 @@ bool ContactController::lookupVisible() const
 bool ContactController::lookupCanRequest() const
 {
     return m_lookupState == LookupState::Found;
+}
+
+bool ContactController::lookupCanCancel() const
+{
+    return m_lookupState == LookupState::RequestPending
+        || m_lookupState == LookupState::RequestSent;
+}
+
+void ContactController::cancelLookupRequest()
+{
+    if (!lookupCanCancel())
+        return;
+    if (m_session != nullptr && m_lookupAccount) {
+        if (!cancelOutgoingRequest(*m_lookupAccount)) {
+            setStatus(Status::Error, QStringLiteral("Couldn't withdraw that request."));
+            return;
+        }
+    }
+    // Mock mode has nothing to remove; the row simply offers the request again.
+    setStatus(Status::Success, QStringLiteral("Request withdrawn."));
+    setLookup(LookupState::Found);
+}
+
+bool ContactController::cancelOutgoingRequest(const AccountId &peer)
+{
+    if (m_session == nullptr)
+        return false;
+    SqlCipherContactRepository *contacts = m_session->contacts();
+    if (contacts == nullptr)
+        return false;
+    const auto found = contacts->find(peer);
+    if (!found.hasValue() || !found.value().has_value()
+        || found.value()->state != ContactState::PendingOutgoing
+        || !found.value()->conversationId.has_value())
+        return false;
+    // Best effort across the three stores; a partial failure is logged inside,
+    // and what did go is gone, so the request cannot come back half-way.
+    return discardOutgoingRequest(*m_session, peer, *found.value()->conversationId,
+                                  /*removeContactRow=*/true);
 }
 
 void ContactController::setLookup(LookupState state, const QString &message)

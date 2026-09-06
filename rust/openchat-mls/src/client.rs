@@ -132,6 +132,17 @@ impl MlsClient {
         serialize(bundle.key_package())
     }
 
+    /// Forget a group entirely: every secret, leaf and epoch it holds in storage.
+    /// For a group that never reached anyone (an add whose key-package claim
+    /// failed) or one the user withdrew from before a reply, so the identifier
+    /// is free again and no ratchet lingers for a conversation that does not exist.
+    pub fn delete_group(&mut self, conversation: [u8; 16]) -> Result<(), MlsError> {
+        let mut group = self.load_group(conversation)?;
+        group
+            .delete(self.provider.storage())
+            .map_err(|_| MlsError::Storage)
+    }
+
     pub fn create_group(&mut self, conversation: [u8; 16]) -> Result<(), MlsError> {
         let group_id = group_id(conversation);
         if MlsGroup::load(self.provider.storage(), &group_id)

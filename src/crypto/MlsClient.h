@@ -72,6 +72,9 @@ public:
 
     [[nodiscard]] Result<QByteArray, MlsError> generateKeyPackage();
     [[nodiscard]] Result<void, MlsError> createGroup(const ConversationId &conversation);
+    // Forgets a group and everything stored for it, freeing its identifier.
+    // Fails with MissingGroup when there is no such group.
+    [[nodiscard]] Result<void, MlsError> deleteGroup(const ConversationId &conversation);
     [[nodiscard]] Result<void, MlsError> joinGroup(const ConversationId &conversation,
                                                    QByteArrayView welcome);
     // Returns the MLS-authenticated credential identities of the Welcome's other

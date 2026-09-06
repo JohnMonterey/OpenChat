@@ -77,6 +77,10 @@ int32_t oc_mls_generate_key_package(oc_mls_client *client,
                                     oc_mls_buffer *out_key_package);
 int32_t oc_mls_create_group(oc_mls_client *client,
                             const uint8_t conversation_id[16]);
+/* Removes every trace of a group from the client's storage. Fails with
+ * OC_MLS_MISSING_GROUP when the group does not exist. */
+int32_t oc_mls_delete_group(oc_mls_client *client,
+                            const uint8_t conversation_id[16]);
 int32_t oc_mls_join_group(oc_mls_client *client,
                           const uint8_t conversation_id[16],
                           const uint8_t *welcome,

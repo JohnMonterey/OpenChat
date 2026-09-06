@@ -15,6 +15,7 @@
 #include "security/KeyVault.h"
 #include "security/SecureBuffer.h"
 #include "storage/CapturingMlsStateStore.h"
+#include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherDatabase.h"
 
@@ -127,6 +128,9 @@ private slots:
     void supplyStopsAtThresholdAndRecoversAfterFailure();
     void blockedPeerFailsBlockedAndSendsNothing();
     void handleNotFoundFails();
+    void failedClaimLeavesNoTrace();
+    void deviceFallThroughReusesOnePreparation();
+    void failedRetryRestoresTheEarlierRequest();
 
 private:
     // Fresh fixture per test slot (QtTest init()/cleanup()).
@@ -556,6 +560,137 @@ void AddContactServiceTest::handleNotFoundFails()
     QVERIFY(failure.has_value());
     QCOMPARE(failure.value(), AddContactService::Error::NotFound);
     QCOMPARE(m_transport->sent.size(), qsizetype(0));
+}
+
+void AddContactServiceTest::failedClaimLeavesNoTrace()
+{
+    // The rows are written before the claim so a local failure never wastes a
+    // peer's one-time package. The price is that a claim that fails has rows to
+    // undo — and it must undo them, or the roster says "request sent" about a
+    // request that never left, with no way to try again.
+    const AccountId peerAccount = AccountId::generate();
+    const RelayDirectoryEntry entry{peerAccount, {device(DeviceId::generate())}};
+    const auto before = m_session->chats()->conversations();
+    QVERIFY(before.hasValue());
+
+    AddContactService service(*m_session, *m_relay, *m_session->syncEngine());
+    std::optional<AddContactService::Error> failure;
+    connect(&service, &AddContactService::failed, this,
+            [&](AddContactService::Error e) { failure = e; });
+
+    service.startByHandle(QStringLiteral("empty-pool"));
+    emit m_relay->handleResolved(entry);
+    // Preparation ran: the row and its conversation exist while the claim is out.
+    auto pending = m_session->contacts()->find(peerAccount);
+    QVERIFY(pending.hasValue() && pending.value().has_value());
+    QCOMPARE(pending.value()->state, ContactState::PendingOutgoing);
+    const ConversationId conversation = *pending.value()->conversationId;
+    auto during = m_session->chats()->conversations();
+    QVERIFY(during.hasValue());
+    QCOMPARE(during.value().size(), before.value().size() + 1);
+    QVERIFY(m_session->mls()->groupMembers(conversation).hasValue());
+
+    emit m_relay->keyPackageClaimFailed(RelayClaimError::Unavailable);
+    QVERIFY(failure.has_value());
+    QCOMPARE(failure.value(), AddContactService::Error::NoKeyPackage);
+    QCOMPARE(m_transport->sent.size(), qsizetype(0));
+
+    // Nothing is left: no roster row, no conversation, no MLS group.
+    auto after = m_session->contacts()->find(peerAccount);
+    QVERIFY(after.hasValue());
+    QVERIFY2(!after.value().has_value(), "a failed add left a pending-outgoing row behind");
+    auto conversations = m_session->chats()->conversations();
+    QVERIFY(conversations.hasValue());
+    QCOMPARE(conversations.value().size(), before.value().size());
+    QVERIFY2(!m_session->mls()->groupMembers(conversation).hasValue(),
+             "a failed add left its MLS group behind");
+
+    // And the same handle can be asked again straight away.
+    AddContactService retry(*m_session, *m_relay, *m_session->syncEngine());
+    std::optional<ConversationId> sent;
+    connect(&retry, &AddContactService::succeeded, this,
+            [&](const ConversationId &c, const AccountId &) { sent = c; });
+    retry.startByHandle(QStringLiteral("empty-pool"));
+    emit m_relay->handleResolved(entry);
+    emit m_relay->keyPackageClaimed(m_keyPackage);
+    QVERIFY(sent.has_value());
+    QCOMPARE(m_transport->sent.size(), qsizetype(1));
+}
+
+void AddContactServiceTest::deviceFallThroughReusesOnePreparation()
+{
+    // Trying a peer's second device is not a second add: one row, one
+    // conversation and one group serve the whole attempt, re-pointed at the
+    // device that actually handed over a package.
+    const AccountId peerAccount = AccountId::generate();
+    const DeviceId firstDevice = DeviceId::generate();
+    const DeviceId secondDevice = DeviceId::generate();
+    const RelayDirectoryEntry entry{peerAccount, {device(firstDevice), device(secondDevice)}};
+    const auto before = m_session->chats()->conversations();
+    QVERIFY(before.hasValue());
+
+    AddContactService service(*m_session, *m_relay, *m_session->syncEngine());
+    std::optional<ConversationId> conversation;
+    connect(&service, &AddContactService::succeeded, this,
+            [&](const ConversationId &c, const AccountId &) { conversation = c; });
+
+    service.startByHandle(QStringLiteral("multi"));
+    emit m_relay->handleResolved(entry);
+    auto prepared = m_session->contacts()->find(peerAccount);
+    QVERIFY(prepared.hasValue() && prepared.value().has_value());
+    const ConversationId first = *prepared.value()->conversationId;
+    QCOMPARE(prepared.value()->peerDeviceId->bytes(), firstDevice.bytes());
+
+    emit m_relay->keyPackageClaimFailed(RelayClaimError::Unavailable);
+    emit m_relay->keyPackageClaimed(m_keyPackage);
+    QVERIFY(conversation.has_value());
+    QCOMPARE(conversation->bytes(), first.bytes());
+
+    auto row = m_session->contacts()->find(peerAccount);
+    QVERIFY(row.hasValue() && row.value().has_value());
+    QCOMPARE(row.value()->conversationId->bytes(), first.bytes());
+    QCOMPARE(row.value()->peerDeviceId->bytes(), secondDevice.bytes());
+    auto conversations = m_session->chats()->conversations();
+    QVERIFY(conversations.hasValue());
+    QCOMPARE(conversations.value().size(), before.value().size() + 1);
+}
+
+void AddContactServiceTest::failedRetryRestoresTheEarlierRequest()
+{
+    // An invite can re-add a peer who already has an outgoing request waiting.
+    // If that second attempt fails, the first request — which really went out —
+    // must still be on the books, pointing at its own conversation.
+    const AccountId peerAccount = AccountId::generate();
+    const RelayDirectoryEntry entry{peerAccount, {device(DeviceId::generate())}};
+
+    AddContactService first(*m_session, *m_relay, *m_session->syncEngine());
+    std::optional<ConversationId> firstConversation;
+    connect(&first, &AddContactService::succeeded, this,
+            [&](const ConversationId &c, const AccountId &) { firstConversation = c; });
+    first.startByHandle(QStringLiteral("again"));
+    emit m_relay->handleResolved(entry);
+    emit m_relay->keyPackageClaimed(m_keyPackage);
+    QVERIFY(firstConversation.has_value());
+    const auto conversationsAfterFirst = m_session->chats()->conversations();
+    QVERIFY(conversationsAfterFirst.hasValue());
+
+    AddContactService second(*m_session, *m_relay, *m_session->syncEngine());
+    std::optional<AddContactService::Error> failure;
+    connect(&second, &AddContactService::failed, this,
+            [&](AddContactService::Error e) { failure = e; });
+    second.startByInvite(QByteArrayLiteral("token"));
+    emit m_relay->inviteRedeemed(entry);
+    emit m_relay->keyPackageClaimFailed(RelayClaimError::Unavailable);
+    QVERIFY(failure.has_value());
+
+    auto row = m_session->contacts()->find(peerAccount);
+    QVERIFY(row.hasValue() && row.value().has_value());
+    QCOMPARE(row.value()->state, ContactState::PendingOutgoing);
+    QCOMPARE(row.value()->conversationId->bytes(), firstConversation->bytes());
+    QVERIFY(m_session->mls()->groupMembers(*firstConversation).hasValue());
+    auto conversations = m_session->chats()->conversations();
+    QVERIFY(conversations.hasValue());
+    QCOMPARE(conversations.value().size(), conversationsAfterFirst.value().size());
 }
 
 QTEST_GUILESS_MAIN(AddContactServiceTest)

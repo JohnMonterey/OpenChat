@@ -1,4 +1,5 @@
 #include "app/AddContactService.h"
+#include "app/OutgoingRequestCleanup.h"
 #include "diagnostics/Logging.h"
 
 #include "app/ProfileSession.h"
@@ -89,6 +90,8 @@ void AddContactService::onResolved(const RelayDirectoryEntry &entry)
     m_entry = entry;
     m_deviceIndex = 0;
     m_state = State::Claiming;
+    if (!prepareLocal())
+        return;
     claimCurrentDevice();
 }
 
@@ -99,26 +102,27 @@ void AddContactService::onResolutionFailed(RelayDirectoryError error)
     fail(error == RelayDirectoryError::NotFound ? Error::NotFound : Error::Transport);
 }
 
-void AddContactService::claimCurrentDevice()
+bool AddContactService::prepareLocal()
 {
-    // Complete package-independent validation/storage before consuming a one-time
-    // package. Failed attempts may leave a retryable PendingOutgoing row.
+    // Everything that can fail without a KeyPackage happens here, once, before
+    // one is consumed. From this point on a failure rolls all of it back.
     auto *mls = m_session.mls();
     auto *contacts = m_session.contacts();
     auto *chats = m_session.chats();
     if (!mls || !contacts || !chats) {
         fail(Error::Storage);
-        return;
+        return false;
     }
     const auto existing = contacts->find(m_entry->accountId);
     if (!existing.hasValue()) {
         fail(Error::Storage);
-        return;
+        return false;
     }
     if (existing.value() && existing.value()->state == ContactState::Blocked) {
         fail(Error::Blocked);
-        return;
+        return false;
     }
+    m_priorContact = existing.value();
     const ConversationId conversation = ConversationId::generate();
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     ContactRecord record{m_entry->accountId, m_handle, QString(),
@@ -127,25 +131,62 @@ void AddContactService::claimCurrentDevice()
     const auto recorded = contacts->recordOutgoingRequest(record);
     if (!recorded.hasValue()) {
         fail(recorded.error().code == RepositoryErrorCode::Conflict ? Error::Blocked : Error::Storage);
-        return;
+        return false;
     }
+    // The row is written: from here a failure has something to undo.
+    m_conversation = conversation;
+    m_prepared = true;
     if (!chats->upsertConversation(ConversationRecord{conversation, conversation.bytes(),
             QString(), ConversationKind::Direct, now}).hasValue()) {
         fail(Error::Storage);
-        return;
+        return false;
     }
     if (!mls->createGroup(conversation).hasValue()) {
         fail(Error::Mls);
-        return;
+        return false;
     }
     // Do not leave captured MLS state pending across the asynchronous claim.
     if (!m_session.persistMlsState().hasValue()) {
         fail(Error::Storage);
+        return false;
+    }
+    qCDebug(contactsLog) << "Local contact preparation complete";
+    return true;
+}
+
+void AddContactService::claimCurrentDevice()
+{
+    const DeviceId &device = m_entry->devices[m_deviceIndex].deviceId;
+    // Falling through to a later device changes only which device the Welcome
+    // is for; the row, conversation and group prepared above are reused.
+    if (auto *contacts = m_session.contacts();
+        !contacts || !contacts->setPeerDeviceId(m_entry->accountId, device).hasValue()) {
+        fail(Error::Storage);
         return;
     }
-    m_conversation = conversation;
-    qCDebug(contactsLog) << "Local contact preparation complete; claiming key package";
-    m_relay.claimKeyPackage(*record.peerDeviceId);
+    qCDebug(contactsLog) << "Claiming key package for device" << m_deviceIndex + 1 << "of"
+                         << m_entry->devices.size();
+    m_relay.claimKeyPackage(device);
+}
+
+void AddContactService::rollbackLocal(Error error)
+{
+    if (!m_prepared || !m_conversation)
+        return;
+    m_prepared = false;
+    // A peer blocked while the claim was in flight keeps the row that says so;
+    // a row that existed before this add goes back to what it was; a row this
+    // add created goes away. The conversation and group are this add's alone.
+    const bool removeRow = !m_priorContact && error != Error::Blocked;
+    const bool clean = discardOutgoingRequest(m_session, m_entry->accountId, *m_conversation,
+                                              removeRow);
+    if (m_priorContact && error != Error::Blocked
+        && m_priorContact->state == ContactState::PendingOutgoing) {
+        if (!m_session.contacts()
+            || !m_session.contacts()->recordOutgoingRequest(*m_priorContact).hasValue())
+            qCWarning(contactsLog) << "Could not restore the earlier outgoing request";
+    }
+    qCDebug(contactsLog) << "Rolled back a failed add" << (clean ? "cleanly" : "with errors");
 }
 
 void AddContactService::onKeyPackageClaimed(const QByteArray &keyPackage)
@@ -185,6 +226,8 @@ void AddContactService::onKeyPackageClaimed(const QByteArray &keyPackage)
     }
     m_engine.sendHandshake(conversation, m_entry->devices[m_deviceIndex].deviceId,
                            added.value().welcome);
+    // The Welcome is on its way: the rows are the record of a real request now.
+    m_prepared = false;
     succeed(conversation, m_entry->accountId);
 }
 
@@ -237,6 +280,7 @@ void AddContactService::fail(Error error)
     if (m_state == State::Terminated)
         return;
     m_state = State::Terminated;
+    rollbackLocal(error);
     teardown();
     emit failed(error);
 }

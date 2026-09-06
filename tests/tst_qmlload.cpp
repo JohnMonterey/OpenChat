@@ -1301,6 +1301,18 @@ private slots:
         QVERIFY(button->property("sent").toBool());
         QCOMPARE(subtitle->property("text").toString(), QStringLiteral("Request sent"));
 
+        // The sent mark is itself a button: it withdraws the request, and the
+        // row offers to send one again.
+        QVERIFY(button->property("canCancel").toBool());
+        QVERIFY(button->property("clickable").toBool());
+        contactController.cancelLookupRequest();
+        QCoreApplication::processEvents();
+        QVERIFY(!button->property("sent").toBool());
+        QVERIFY(!button->property("canCancel").toBool());
+        QCOMPARE(contactController.lookupState(),
+                 OpenChat::ContactController::LookupState::Found);
+        QCOMPARE(subtitle->property("text").toString(), QStringLiteral("Send a friend request"));
+
         // Clearing the search hides the row again.
         chatController.setSearchQuery(QString());
         contactController.lookup(QString());

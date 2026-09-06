@@ -62,6 +62,17 @@ for unused in \
     rm -rf "$dist/qml/$unused"
 done
 
+# Qt's OpenSSL TLS backend is loaded, not linked: qopensslbackend.dll carries no
+# import entry for libssl/libcrypto and calls LoadLibrary on them by name at
+# runtime. The import-graph closure below therefore cannot reach them, and
+# without libssl Qt silently drops to the Schannel backend. Copy them by name so
+# the backend the app is built against is the one it actually gets. (libcrypto
+# arrives through the import graph anyway, since the app links it directly.)
+for runtime_dll in libssl-3-x64.dll libcrypto-3-x64.dll; do
+    [ -e "$sysroot/bin/$runtime_dll" ] || continue
+    cp "$sysroot/bin/$runtime_dll" "$dist/$runtime_dll"
+done
+
 # Close the DLL import graph. Names in import tables carry arbitrary case, so
 # match case-insensitively against the sysroot's bin directory.
 copy_missing_imports() {

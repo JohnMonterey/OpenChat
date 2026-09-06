@@ -11,7 +11,9 @@ Item {
     required property bool favorite
     required property bool selected
     required property string avatarKey
+    required property int unreadCount
     required property bool isGroup
+    readonly property real badgeSpace: unreadBadge.visible ? unreadBadge.width + 12 : 0
     readonly property bool compact: height < 55
     property bool statusBubbleEnabled: true
     property bool statusBubbleReady: false
@@ -58,7 +60,7 @@ Item {
         id: nameText
         x: row.textLeft
         y: row.compact ? 3 : 11
-        width: Math.min(implicitWidth, row.width - x - presenceBead.width - 8 - 12)
+        width: Math.min(implicitWidth, Math.max(0, row.width - x - presenceBead.width - 8 - 12 - row.badgeSpace))
         elide: Text.ElideRight
         text: row.name
         color: Theme.textPrimary
@@ -81,13 +83,36 @@ Item {
     Text {
         x: row.textLeft
         y: row.compact ? 26 : 34
-        width: row.width - x - 12
+        width: Math.max(0, row.width - x - 12 - row.badgeSpace)
         elide: Text.ElideRight
         text: row.statusText
         color: Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 14
         renderType: Text.NativeRendering
+    }
+
+    Rectangle {
+        id: unreadBadge
+        objectName: "contactUnreadBadge"
+        visible: row.unreadCount > 0
+        anchors.right: parent.right
+        anchors.rightMargin: 12
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.max(22, unreadLabel.implicitWidth + 12)
+        height: 22
+        radius: 11
+        color: Theme.unreadBadge
+        Text {
+            id: unreadLabel
+            objectName: "contactUnreadLabel"
+            anchors.centerIn: parent
+            text: row.unreadCount > 99 ? "99+" : String(row.unreadCount)
+            color: "white"
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+            font.bold: true
+        }
     }
 
     MouseArea {

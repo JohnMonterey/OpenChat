@@ -14,6 +14,8 @@ enum class MessageDirection {
 enum class MessageKind {
     Text,
     Emoji,
+    MembershipEvent,
+    CallEvent,
 };
 
 // Durable delivery lifecycle surfaced to the UI. Mirrors the domain

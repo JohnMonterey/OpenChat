@@ -36,6 +36,8 @@ QVariant ContactListModel::data(const QModelIndex &index, int role) const
         return contact->id == m_selectedId;
     case AvatarKeyRole:
         return contact->avatarKey;
+    case UnreadCountRole:
+        return contact->unreadCount;
     case IsGroupRole:
         return contact->isGroup;
     default:
@@ -54,12 +56,16 @@ QHash<int, QByteArray> ContactListModel::roleNames() const
         {SelectedRole, "selected"},
         {AvatarKeyRole, "avatarKey"},
         {IsGroupRole, "isGroup"},
+        {UnreadCountRole, "unreadCount"},
     };
 }
 
 void ContactListModel::setContacts(QVector<Contact> contacts)
 {
     beginResetModel();
+    std::stable_sort(contacts.begin(), contacts.end(), [](const Contact &a, const Contact &b) {
+        return a.lastMessageAtMs > b.lastMessageAtMs;
+    });
     m_contacts = std::move(contacts);
     m_visibleRows.clear();
     for (int row = 0; row < m_contacts.size(); ++row) {
@@ -72,6 +78,26 @@ void ContactListModel::setContacts(QVector<Contact> contacts)
         m_selectedId.clear();
     endResetModel();
     emit countsChanged();
+}
+
+void ContactListModel::setActivity(const QString &id, qint64 lastMessageAtMs, int unreadCount)
+{
+    for (int i = 0; i < m_contacts.size(); ++i) {
+        auto &contact = m_contacts[i];
+        if (contact.id != id)
+            continue;
+        const bool reorder = contact.lastMessageAtMs != lastMessageAtMs;
+        if (!reorder && contact.unreadCount == unreadCount)
+            return;
+        contact.lastMessageAtMs = lastMessageAtMs;
+        contact.unreadCount = unreadCount;
+        if (reorder) {
+            setContacts(m_contacts);
+        } else if (const int row = m_visibleRows.indexOf(i); row >= 0) {
+            emit dataChanged(index(row), index(row), {UnreadCountRole});
+        }
+        return;
+    }
 }
 
 void ContactListModel::setPresence(const QString &id, Presence presence)
@@ -108,6 +134,14 @@ bool ContactListModel::selectContact(const QString &id)
     if (!m_visibleRows.isEmpty())
         emit dataChanged(index(0), index(m_visibleRows.size() - 1), {SelectedRole});
     return true;
+}
+
+int ContactListModel::totalUnreadCount() const
+{
+    int count = 0;
+    for (const auto &contact : m_contacts)
+        count += contact.unreadCount;
+    return count;
 }
 
 int ContactListModel::favoriteCount() const

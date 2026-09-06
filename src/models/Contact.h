@@ -34,6 +34,8 @@ struct Contact {
     // A group chat rather than a person: no presence bead, a group picture,
     // and the subtitle is the member count rather than a status.
     bool isGroup = false;
+    int unreadCount = 0;
+    qint64 lastMessageAtMs = 0;
 };
 
 inline QString presenceText(Presence presence)

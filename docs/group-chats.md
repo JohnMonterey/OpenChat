@@ -53,6 +53,34 @@ what they are doing (ringing, declined, busy, no answer, left); the talker is
 ringed green. A member who hangs up is dropped from the others' mesh and the
 call carries on; it ends for a device only when nobody else is left.
 
+## Conversation events
+
+Membership changes are saved as system rows in encrypted conversation history.
+They use short centered rules with compact spacing. The actor's name is saved
+with the event so leaving the roster does not erase their name from history.
+Roster refreshes log only newly observed joins and departures.
+
+Call offers produce a green event on the caller's side of the conversation and
+on the incoming side for recipients, for both direct and group calls. The
+conversation and call ID form a stable event ID, so fan-out and repeated offers
+produce one row. Ringing, answers and hangups do not create start events.
+Events are local history derived from authenticated control traffic; they do
+not send extra chat messages, delivery receipts or message notifications.
+
+## Chat order and unread badges
+
+Direct and group chats sort by their latest stored history entry, newest first.
+The current selection and search filter survive reordering. Empty conversations
+follow conversations with history; the existing sidebar sections are retained.
+
+Incoming messages carry a local read flag in migration 014. Chat rows show a red
+count badge (capped visually at `99+`), and the navigation badge totals unread
+messages. Opening a conversation in the active window clears its count; inactive,
+minimized, locked and non-chat views leave it unread. Counts survive restarts.
+Outgoing messages and system events update activity without adding unread messages.
+Existing history is treated as read when upgrading because earlier versions did
+not store enough information to reconstruct its read state.
+
 ## Validation
 
 - `tst_groupupdate`: the control codec.

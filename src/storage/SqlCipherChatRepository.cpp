@@ -46,8 +46,8 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                         "INSERT INTO messages("
                         "id, conversation_id, sender_device_id, content_kind, content, "
                         "client_created_at_ms, server_sequence, delivery_state, flow, body, "
-                        "sent_at_ms, reply_to_id) "
-                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)");
+                        "sent_at_ms, reply_to_id, locally_read) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
     if (!statement.isValid())
         return false;
 
@@ -66,7 +66,9 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                        && statement.bindText(10, message.body)
                        && statement.bindInt64(11, message.sentAtMs)
                        && (message.replyToId ? statement.bindBlob(12, message.replyToId->bytes())
-                                            : statement.bindNull(12));
+                                            : statement.bindNull(12))
+                       && statement.bindInt(13, message.flow == MessageFlow::Incoming
+                           && message.kind != ContentKind::System ? 0 : 1);
     return bound && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
@@ -118,6 +120,57 @@ std::optional<MessageRecord> decodeMessage(sqlite3_stmt *statement)
 SqlCipherChatRepository::SqlCipherChatRepository(SqlCipherDatabase &database)
     : m_database(database)
 {
+}
+
+Result<QVector<SqlCipherChatRepository::Activity>, RepositoryError>
+SqlCipherChatRepository::activity()
+{
+    return m_database.withConnection([](sqlite3 *database) {
+        Statement statement(database,
+            "SELECT conversation_id, MAX(sent_at_ms), SUM(CASE WHEN locally_read = 0 THEN 1 ELSE 0 END) "
+            "FROM messages GROUP BY conversation_id");
+        if (!statement.isValid())
+            return Result<QVector<Activity>, RepositoryError>::failure(internalError(QStringLiteral("activity.prepare")));
+        QVector<Activity> rows;
+        int step;
+        while ((step = sqlite3_step(statement.get())) == SQLITE_ROW) {
+            const auto id = ConversationId::fromBytes(RepositorySql::blob(statement.get(), 0));
+            if (!id)
+                return Result<QVector<Activity>, RepositoryError>::failure(internalError(QStringLiteral("activity.decode")));
+            rows.append({*id, sqlite3_column_int64(statement.get(), 1), sqlite3_column_int(statement.get(), 2)});
+        }
+        if (step != SQLITE_DONE)
+            return Result<QVector<Activity>, RepositoryError>::failure(internalError(QStringLiteral("activity.read")));
+        return Result<QVector<Activity>, RepositoryError>::success(std::move(rows));
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherChatRepository::markConversationRead(const ConversationId &conversation)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database, "UPDATE messages SET locally_read = 1 WHERE conversation_id = ?1 AND locally_read = 0");
+        if (!statement.isValid() || !statement.bindBlob(1, conversation.bytes())
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return Result<void, RepositoryError>::failure(internalError(QStringLiteral("activity.markRead")));
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<bool, RepositoryError> SqlCipherChatRepository::saveEvent(const MessageRecord &message)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement existing(database, "SELECT 1 FROM messages WHERE id = ?1");
+        if (message.kind != ContentKind::System || !existing.isValid()
+            || !existing.bindBlob(1, message.id.bytes()))
+            return Result<bool, RepositoryError>::failure(internalError(QStringLiteral("event.prepare")));
+        const int step = sqlite3_step(existing.get());
+        if (step == SQLITE_ROW)
+            return Result<bool, RepositoryError>::success(false);
+        if (step != SQLITE_DONE || !insertMessage(database, message))
+            return Result<bool, RepositoryError>::failure(internalError(QStringLiteral("event.save")));
+        return Result<bool, RepositoryError>::success(true);
+    });
 }
 
 Result<QVector<ConversationRecord>, RepositoryError> SqlCipherChatRepository::conversations()

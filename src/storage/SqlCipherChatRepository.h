@@ -35,6 +35,18 @@ public:
     [[nodiscard]] Result<void, RepositoryError>
     markConversationLeft(const ConversationId &conversationId, qint64 leftAtMs) override;
 
+    struct Activity {
+        ConversationId conversation;
+        qint64 lastMessageAtMs;
+        int unreadCount;
+    };
+    [[nodiscard]] Result<QVector<Activity>, RepositoryError> activity();
+    [[nodiscard]] Result<void, RepositoryError> markConversationRead(const ConversationId &conversation);
+
+    // Stores a local history event without an outbox or sync cursor mutation.
+    // Returns false for an event already present (e.g. another group-call offer).
+    [[nodiscard]] Result<bool, RepositoryError> saveEvent(const MessageRecord &message);
+
 private:
     SqlCipherDatabase &m_database;
 };

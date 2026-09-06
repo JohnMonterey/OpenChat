@@ -16,7 +16,9 @@ Item {
     // chat, where the bubble alone says.
     required property string senderName
     readonly property bool outgoing: direction === 1
-    readonly property bool showSender: !outgoing && senderName.length > 0
+    readonly property bool eventRow: kind === 2 || kind === 3
+    readonly property bool callEvent: kind === 3
+    readonly property bool showSender: !eventRow && !outgoing && senderName.length > 0
     readonly property real senderHeight: showSender ? 18 : 0
     readonly property real maximumBubbleWidth: Math.min(360, width * 0.68)
     readonly property real directionalLimit: outgoing
@@ -40,7 +42,8 @@ Item {
         : Math.max(54, messageBody.paintedHeight + messageTime.implicitHeight + 21)
     readonly property real dateSectionHeight: showDateDivider ? 64 : 0
 
-    implicitHeight: dateSectionHeight + senderHeight + bubbleHeight + 20 + (retryText.visible ? 20 : 0)
+    implicitHeight: dateSectionHeight + (eventRow ? eventLabel.implicitHeight + 16
+        : senderHeight + bubbleHeight + 20 + (retryText.visible ? 20 : 0))
 
     Text {
         objectName: "messageSender"
@@ -60,7 +63,7 @@ Item {
     Text {
         id: retryText
         objectName: "messageRetry"
-        visible: delegateRoot.outgoing && delegateRoot.deliveryState === 6
+        visible: !delegateRoot.eventRow && delegateRoot.outgoing && delegateRoot.deliveryState === 6
         anchors.right: bubble.right
         anchors.rightMargin: delegateRoot.bubbleTailWidth
         y: bubble.y + bubble.height + 4
@@ -120,8 +123,52 @@ Item {
         }
     }
 
+    Item {
+        id: eventDivider
+        objectName: "conversationEvent"
+        visible: delegateRoot.eventRow
+        width: Math.min(delegateRoot.width - 36,
+                        eventLabel.implicitWidth + (delegateRoot.callEvent ? 48 : 80))
+        height: eventLabel.implicitHeight + 16
+        x: delegateRoot.callEvent
+            ? (delegateRoot.outgoing ? delegateRoot.width - width - 17 : 16)
+            : (delegateRoot.width - width) / 2
+        y: delegateRoot.dateSectionHeight
+
+        Rectangle {
+            width: delegateRoot.callEvent ? 14 : 30
+            height: 1
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            color: delegateRoot.callEvent ? Theme.successText : Theme.dateRule
+        }
+        Text {
+            id: eventLabel
+            objectName: "conversationEventText"
+            anchors.centerIn: parent
+            width: Math.min(implicitWidth, eventDivider.width - (delegateRoot.callEvent ? 48 : 80))
+            text: delegateRoot.body
+            textFormat: Text.PlainText
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            color: delegateRoot.callEvent ? Theme.successText : Theme.textSecondary
+            font.family: Theme.uiFont
+            font.pixelSize: 13
+            font.weight: delegateRoot.callEvent ? Font.DemiBold : Font.Normal
+            renderType: Text.NativeRendering
+        }
+        Rectangle {
+            width: delegateRoot.callEvent ? 14 : 30
+            height: 1
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            color: delegateRoot.callEvent ? Theme.successText : Theme.dateRule
+        }
+    }
+
     BubbleBackground {
         id: bubble
+        visible: !delegateRoot.eventRow
         x: delegateRoot.outgoing ? delegateRoot.width - bubble.width - 17 : 16
         y: delegateRoot.dateSectionHeight + delegateRoot.senderHeight
         width: delegateRoot.bubbleWidth
@@ -137,6 +184,7 @@ Item {
 
     Text {
         id: messageBody
+        visible: !delegateRoot.eventRow
         x: delegateRoot.kind === 1
             ? bubble.x + delegateRoot.contentLeftInset
             : bubble.x + delegateRoot.contentLeftInset
@@ -157,6 +205,7 @@ Item {
 
     Text {
         id: messageTime
+        visible: !delegateRoot.eventRow
         objectName: "messageTimestamp"
         x: delegateRoot.kind === 1
             ? bubble.x + bubble.width - implicitWidth - (delegateRoot.outgoing ? 14 : 13)

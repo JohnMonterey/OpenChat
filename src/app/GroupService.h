@@ -98,6 +98,9 @@ signals:
     void groupActionFailed(const QString &message);
 
 private:
+    void logMembership(const ConversationId &conversation, const DeviceId &device,
+                       const QString &name, bool joined);
+
     struct Invitee final {
         AccountId account;
         DeviceId device;

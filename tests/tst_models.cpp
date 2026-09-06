@@ -26,6 +26,27 @@ class ModelsTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void activitySortPreservesSelectionAndSearch()
+    {
+        ContactListModel model;
+        model.setContacts(seedContacts());
+        QVERIFY(model.selectContact("michael"));
+        model.setActivity("tom", 200, 12);
+        model.setActivity("sarah", 100, 2);
+        QCOMPARE(model.contactAt(0)->id, QString("tom"));
+        QCOMPARE(model.data(model.index(0), ContactListModel::UnreadCountRole).toInt(), 12);
+        QCOMPARE(model.contactAt(1)->id, QString("sarah"));
+        QCOMPARE(model.data(model.index(2), ContactListModel::SelectedRole).toBool(), true);
+        model.setQuery("sar");
+        model.setActivity("tom", 300, 13);
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.contactAt(0)->id, QString("sarah"));
+        model.setQuery("");
+        model.setActivity("michael", 400, 0);
+        QCOMPARE(model.contactAt(0)->id, QString("michael"));
+        QCOMPARE(model.data(model.index(0), ContactListModel::SelectedRole).toBool(), true);
+    }
+
     void contactsExposeApprovedGroups()
     {
         ContactListModel model;

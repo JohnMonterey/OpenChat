@@ -280,6 +280,8 @@ public:
     [[nodiscard]] bool isFailedClosed() const noexcept;
 
 signals:
+    void callSignalSent(const OpenChat::ConversationId &conversation,
+                        const OpenChat::DeviceId &sender, const QByteArray &payload);
     // An outgoing text was durably committed (Queued or Failed) and is the exact row the
     // store holds, so the UI can show it before relay acceptance.
     void messageQueued(const MessageRecord &message);

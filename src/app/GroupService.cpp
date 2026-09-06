@@ -1,5 +1,8 @@
 #include "app/GroupService.h"
 
+#include <QJsonDocument>
+#include <QJsonObject>
+
 #include "app/ProfileSession.h"
 #include "crypto/MlsClient.h"
 #include "domain/Contact.h"
@@ -331,6 +334,22 @@ void GroupService::claimNext()
     });
 }
 
+void GroupService::logMembership(const ConversationId &conversation, const DeviceId &device,
+                                  const QString &name, bool joined)
+{
+    auto *chats = m_session.chats();
+    if (chats == nullptr)
+        return;
+    const QString text = (name.isEmpty() ? QStringLiteral("Someone") : name)
+        + (joined ? QStringLiteral(" Joined the group chat") : QStringLiteral(" Left the group chat"));
+    MessageRecord record{MessageId::generate(), conversation, device, MessageFlow::Incoming,
+        ContentKind::System, QString::fromUtf8(QJsonDocument(QJsonObject{{"event", "membership"},
+        {"text", text}}).toJson(QJsonDocument::Compact)), nowMs(), DeliveryState::Sent, {}, {}};
+    const auto saved = chats->saveEvent(record);
+    if (saved.hasValue() && saved.value())
+        emit m_engine.messageReceived(record);
+}
+
 void GroupService::finishCreate(PendingChange &change)
 {
     // Runs to completion synchronously: the MLS state captured by createGroup +
@@ -377,6 +396,10 @@ void GroupService::finishCreate(PendingChange &change)
     m_engine.sendGroupControl(conversation, devices,
                               encodeGroupUpdate(infoFor(conversation, change.title)));
     emit groupCreated(conversation);
+    if (const auto self = localDevice())
+        logMembership(conversation, *self, localName(), true);
+    for (const Invitee &invitee : change.invitees)
+        logMembership(conversation, invitee.device, invitee.name, true);
 }
 
 void GroupService::finishAdd(PendingChange &change)
@@ -408,6 +431,7 @@ void GroupService::finishAdd(PendingChange &change)
     m_engine.sendGroupControl(conversation, everyone,
                               encodeGroupUpdate(infoFor(conversation, existing->title)));
     emit groupChanged(conversation);
+    logMembership(conversation, invitee.device, invitee.name, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +469,8 @@ bool GroupService::leave(const ConversationId &conversation)
                                   encodeGroupUpdate(GroupUpdateMessage::leave()));
     if (!chats->markConversationLeft(conversation, nowMs()).hasValue())
         return false;
+    if (const auto self = localDevice())
+        logMembership(conversation, *self, localName(), false);
     emit groupLeft(conversation);
     return true;
 }
@@ -467,6 +493,9 @@ void GroupService::onGroupWelcomeReceived(const ConversationId &conversation,
     (void)chats->upsertGroupMember(GroupMemberRecord{conversation, senderAccount, senderDevice,
                                                      contactName(senderAccount), nowMs()});
     emit groupJoined(conversation);
+    if (const auto self = localDevice())
+        logMembership(conversation, *self, localName(), true);
+    logMembership(conversation, senderDevice, contactName(senderAccount), true);
 }
 
 void GroupService::onGroupControlReceived(const ConversationId &conversation,
@@ -513,15 +542,19 @@ void GroupService::applyInfo(const ConversationId &conversation, const GroupUpda
             if (record.deviceId == member.device && !record.displayName.isEmpty()
                 && name.isEmpty())
                 name = record.displayName;
-        (void)chats->upsertGroupMember(
-            GroupMemberRecord{conversation, member.account, member.device, name, now});
+        const bool alreadyMember = std::any_of(existing->members.cbegin(), existing->members.cend(),
+            [&](const GroupMemberRecord &record) { return record.deviceId == member.device; });
+        if (chats->upsertGroupMember(
+            GroupMemberRecord{conversation, member.account, member.device, name, now}).hasValue()
+            && !alreadyMember)
+            logMembership(conversation, member.device, name, true);
     }
     for (const GroupMemberRecord &record : existing->members) {
         const bool named = std::any_of(
             info.members.cbegin(), info.members.cend(),
             [&](const GroupMemberInfo &member) { return member.device == record.deviceId; });
-        if (!named)
-            (void)chats->removeGroupMember(conversation, record.deviceId);
+        if (!named && chats->removeGroupMember(conversation, record.deviceId).hasValue())
+            logMembership(conversation, record.deviceId, record.displayName, false);
     }
     emit groupChanged(conversation);
 }
@@ -531,7 +564,17 @@ void GroupService::applyLeave(const ConversationId &conversation, const DeviceId
     SqlCipherChatRepository *chats = m_session.chats();
     if (chats == nullptr)
         return;
-    (void)chats->removeGroupMember(conversation, leaver);
+    const auto existing = group(conversation);
+    if (!existing)
+        return;
+    const auto member = std::find_if(existing->members.cbegin(), existing->members.cend(),
+        [&](const GroupMemberRecord &record) { return record.deviceId == leaver; });
+    if (member == existing->members.cend())
+        return;
+    if (!chats->removeGroupMember(conversation, leaver).hasValue())
+        return;
+    const QString knownName = contactName(member->accountId);
+    logMembership(conversation, leaver, knownName.isEmpty() ? member->displayName : knownName, false);
     emit groupChanged(conversation);
 
     // Exactly one remaining member re-keys the group without the leaver: the

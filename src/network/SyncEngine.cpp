@@ -264,6 +264,7 @@ public:
             failClosed();
             return;
         }
+        emit q->callSignalSent(conversation, config.localDeviceId, payload);
         drainOutbox();
     }
 

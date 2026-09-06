@@ -84,8 +84,8 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                         "INSERT INTO messages("
                         "id, conversation_id, sender_device_id, content_kind, content, "
                         "client_created_at_ms, server_sequence, delivery_state, flow, body, "
-                        "sent_at_ms, reply_to_id) "
-                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)");
+                        "sent_at_ms, reply_to_id, locally_read) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
     if (!statement.isValid())
         return false;
 
@@ -104,7 +104,9 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                        && statement.bindText(10, message.body)
                        && statement.bindInt64(11, message.sentAtMs)
                        && (message.replyToId ? statement.bindBlob(12, message.replyToId->bytes())
-                                             : statement.bindNull(12));
+                                             : statement.bindNull(12))
+                       && statement.bindInt(13, message.flow == MessageFlow::Incoming
+                           && message.kind != ContentKind::System ? 0 : 1);
     return bound && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 

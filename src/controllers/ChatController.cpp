@@ -4,6 +4,7 @@
 #include "app/ContactRequestService.h"
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
+#include "call/CallSignal.h"
 #include "domain/Contact.h"
 #include "domain/GroupUpdate.h"
 #include "network/SyncEngine.h"
@@ -12,7 +13,10 @@
 #include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #include <algorithm>
 
@@ -26,8 +30,8 @@ QVector<Contact> referenceContacts()
 {
     return {
         {"michael", "Michael", Presence::Available, true, "michael"},
-        {"sarah", "Sarah", Presence::Away, true, "sarah"},
-        {"alex", "Alex", Presence::Available, false, "alex"},
+        {"sarah", "Sarah", Presence::Away, true, "sarah", {}, false, 2},
+        {"alex", "Alex", Presence::Available, false, "alex", {}, false, 1},
         {"jessica", "Jessica", Presence::Available, false, "jessica"},
         {"ryan", "Ryan", Presence::Away, false, "ryan"},
         {"tom", "Tom", Presence::Offline, false, "mono"},
@@ -536,10 +540,51 @@ QString ChatController::securityNoticeText() const
     return {};
 }
 
+void ChatController::setConversationVisible(bool visible)
+{
+    if (m_conversationVisible == visible)
+        return;
+    m_conversationVisible = visible;
+    refreshChatActivity();
+    emit conversationVisibleChanged();
+}
+
+void ChatController::refreshChatActivity(bool markCurrentRead)
+{
+    if (!m_live || !m_session || !m_session->chats())
+        return;
+    auto *repository = m_session->chats();
+    if (markCurrentRead && m_conversationVisible && m_navSection == NavSection::Chat
+        && statePermitsPlaintext(m_sessionState)) {
+        if (const auto chat = m_liveChats.constFind(m_currentContactId); chat != m_liveChats.cend())
+            (void)repository->markConversationRead(chat->conversation);
+        if (const auto group = m_liveGroups.constFind(m_currentContactId); group != m_liveGroups.cend())
+            (void)repository->markConversationRead(group->conversation);
+    }
+    const auto activity = repository->activity();
+    if (!activity.hasValue())
+        return;
+    const int oldUnread = chatUnreadCount();
+    for (const auto &row : activity.value()) {
+        const QString id = contactForConversation(row.conversation);
+        if (id.isEmpty())
+            continue;
+        if (auto chat = m_liveChats.find(id); chat != m_liveChats.end())
+            chat->unread = row.unreadCount;
+        if (auto group = m_liveGroups.find(id); group != m_liveGroups.end())
+            group->unread = row.unreadCount;
+        m_contacts.setActivity(id, row.lastMessageAtMs, row.unreadCount);
+    }
+    if (oldUnread != chatUnreadCount())
+        emit chatUnreadCountChanged();
+}
+
 bool ChatController::selectContact(const QString &id)
 {
-    if (id == m_currentContactId)
+    if (id == m_currentContactId) {
+        refreshChatActivity();
         return true;
+    }
 
     const auto contact = m_contacts.contactById(id);
     if (!contact)
@@ -548,26 +593,23 @@ bool ChatController::selectContact(const QString &id)
     const bool wasSendable = canSend();
     m_currentContactId = id;
     m_contacts.selectContact(id);
+    if (!m_live && contact->unreadCount > 0) {
+        m_contacts.setActivity(id, contact->lastMessageAtMs, 0);
+        emit chatUnreadCountChanged();
+    }
     if (m_live) {
         // History is read on demand: the open conversation is the only one whose
         // plaintext sits in a model. Opening also clears its unread count.
         const auto chat = m_liveChats.find(id);
         if (chat != m_liveChats.end()) {
             m_messagesByContact.insert(id, loadHistory(chat->conversation));
-            if (chat->unread != 0) {
-                chat->unread = 0;
-                emit chatUnreadCountChanged();
-            }
         }
         const auto group = m_liveGroups.find(id);
         if (group != m_liveGroups.end()) {
             m_messagesByContact.insert(id, loadHistory(group->conversation));
-            if (group->unread != 0) {
-                group->unread = 0;
-                emit chatUnreadCountChanged();
-            }
         }
     }
+    refreshChatActivity();
     refreshVisibleMessages();
     emit currentContactChanged();
     emit groupCandidatesChanged();
@@ -715,6 +757,7 @@ bool ChatController::sendMessage()
 
     m_messagesByContact[m_currentContactId].append(
         {MessageDirection::Outgoing, body, sentAt.time(), MessageKind::Text, sentAt.date()});
+    m_contacts.setActivity(m_currentContactId, sentAt.toMSecsSinceEpoch(), 0);
     setComposerText({});
     return true;
 }
@@ -730,6 +773,7 @@ void ChatController::setSessionState(SessionState state)
     m_sessionState = state;
     if (visibilityChanged)
         refreshVisibleMessages();
+    refreshChatActivity();
     emit sessionStateChanged();
     updateCanSend(wasSendable);
 }
@@ -742,7 +786,7 @@ ChatController::NavSection ChatController::navSection() const
 int ChatController::chatUnreadCount() const
 {
     if (!m_live)
-        return 3; // static mock for the reference rendering
+        return m_contacts.totalUnreadCount();
     int total = 0;
     for (const LiveChat &chat : m_liveChats)
         total += chat.unread;
@@ -803,6 +847,7 @@ void ChatController::setNavSection(NavSection section)
         return;
 
     m_navSection = section;
+    refreshChatActivity();
     emit navSectionChanged();
 }
 
@@ -830,6 +875,45 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
     m_contacts.setContacts({});
     m_messages.setMessages({});
 
+    const auto logCall = [this](const ConversationId &conversation, const DeviceId &sender,
+                                const QByteArray &payload, bool outgoing) {
+        const auto signal = decodeCallSignal(payload);
+        if (!signal || signal->type != CallSignalType::Offer || !m_session->chats())
+            return;
+        const QString contactId = contactForConversation(conversation);
+        const auto group = m_liveGroups.constFind(contactId);
+        QString name = outgoing ? m_session->displayName() : QString();
+        if (!outgoing) {
+            if (group != m_liveGroups.cend()) {
+                for (const GroupMember &member : group->members)
+                    if (member.device == sender)
+                        name = memberName(member);
+            } else if (const auto contact = m_contacts.contactById(contactId)) {
+                name = contact->name;
+            }
+        }
+        if (name.isEmpty())
+            name = QStringLiteral("Someone");
+        const QString body = name + (group != m_liveGroups.cend()
+            ? QStringLiteral(" Started a group call") : QStringLiteral(" Started a call"));
+        const QByteArray key = QCryptographicHash::hash(
+            QByteArray("call-start:") + conversation.bytes() + signal->callId.bytes(),
+            QCryptographicHash::Sha256).left(MessageId::byteCount);
+        MessageRecord record{*MessageId::fromBytes(key), conversation, sender,
+            outgoing ? MessageFlow::Outgoing : MessageFlow::Incoming, ContentKind::System,
+            QString::fromUtf8(QJsonDocument(QJsonObject{{"event", "call"}, {"text", body}})
+                                  .toJson(QJsonDocument::Compact)),
+            QDateTime::currentMSecsSinceEpoch(), DeliveryState::Sent, {}, {}};
+        const auto saved = m_session->chats()->saveEvent(record);
+        if (saved.hasValue() && saved.value()) {
+            if (outgoing) onMessageQueued(record);
+            else onMessageReceived(record);
+        }
+    };
+    connect(m_engine, &SyncEngine::callSignalSent, this,
+        [logCall](const ConversationId &c, const DeviceId &d, const QByteArray &p) { logCall(c, d, p, true); });
+    connect(m_engine, &SyncEngine::callSignalReceived, this,
+        [logCall](const ConversationId &c, const DeviceId &d, const QByteArray &p) { logCall(c, d, p, false); });
     connect(m_engine, &SyncEngine::messageQueued, this, &ChatController::onMessageQueued);
     connect(m_engine, &SyncEngine::messageReceived, this, &ChatController::onMessageReceived);
     connect(m_engine, &SyncEngine::messageStateChanged, this,
@@ -962,6 +1046,7 @@ void ChatController::loadRoster()
     m_contacts.setContacts(rows);
     loadGroups(rows, m_contactByConversation);
     m_contacts.setContacts(std::move(rows));
+    refreshChatActivity(false);
 
     const bool wasSendable = canSend();
     if (!m_liveChats.contains(m_currentContactId) && !m_liveGroups.contains(m_currentContactId))
@@ -1177,7 +1262,8 @@ Message ChatController::messageFor(const MessageRecord &record) const
     Message message = toMessage(record);
     // In a group the bubble alone does not say who spoke.
     const auto group = m_liveGroups.constFind(contactForConversation(record.conversationId));
-    if (group != m_liveGroups.cend() && record.flow == MessageFlow::Incoming) {
+    if (group != m_liveGroups.cend() && record.flow == MessageFlow::Incoming
+        && record.kind != ContentKind::System) {
         for (const GroupMember &member : group->members)
             if (member.device == record.senderDeviceId)
                 message.senderName = memberName(member);
@@ -1196,9 +1282,16 @@ Message ChatController::toMessage(const MessageRecord &record)
     message.body = record.body;
     message.timestamp = sentAt.time();
     message.kind = record.kind == ContentKind::Emoji ? MessageKind::Emoji : MessageKind::Text;
+    if (record.kind == ContentKind::System) {
+        const auto event = QJsonDocument::fromJson(record.body.toUtf8()).object();
+        message.kind = event.value("event").toString() == QStringLiteral("call")
+            ? MessageKind::CallEvent : MessageKind::MembershipEvent;
+        message.body = event.value("text").toString(record.body);
+    }
     message.date = sentAt.date();
     message.stableId = record.id.toHex();
-    message.deliveryState = toModelState(record.deliveryState);
+    message.deliveryState = record.kind == ContentKind::System
+        ? MessageDeliveryState::None : toModelState(record.deliveryState);
     message.failureReason = record.deliveryState == DeliveryState::Failed
         ? MessageFailureReason::Network
         : MessageFailureReason::None;
@@ -1219,6 +1312,7 @@ void ChatController::onMessageQueued(const MessageRecord &record)
     m_messagesByContact[contactId].append(messageFor(record));
     if (contactId == m_currentContactId && statePermitsPlaintext(m_sessionState))
         m_messages.appendMessage(messageFor(record));
+    refreshChatActivity();
 }
 
 void ChatController::onMessageReceived(const MessageRecord &record)
@@ -1234,8 +1328,9 @@ void ChatController::onMessageReceived(const MessageRecord &record)
     }
     // Announce it before deciding where it lands: an open conversation still
     // deserves a notification when the window is not the one being looked at,
-    // and that is not something this controller can know.
-    if (const auto chat = m_liveChats.constFind(contactId); chat != m_liveChats.cend()) {
+    // the notification service decides whether to show it.
+    if (const auto chat = m_liveChats.constFind(contactId); chat != m_liveChats.cend()
+        && record.kind != ContentKind::System) {
         const Contact row = contactRowFor(*chat);
         const bool showBody = statePermitsPlaintext(m_sessionState)
             && (record.kind == ContentKind::Text || record.kind == ContentKind::Emoji);
@@ -1247,18 +1342,10 @@ void ChatController::onMessageReceived(const MessageRecord &record)
         m_messagesByContact[contactId].append(messageFor(record));
         if (statePermitsPlaintext(m_sessionState))
             m_messages.appendMessage(messageFor(record));
+        refreshChatActivity();
         return;
     }
-    const auto chat = m_liveChats.find(contactId);
-    if (chat != m_liveChats.end()) {
-        ++chat->unread;
-        emit chatUnreadCountChanged();
-    }
-    const auto group = m_liveGroups.find(contactId);
-    if (group != m_liveGroups.end()) {
-        ++group->unread;
-        emit chatUnreadCountChanged();
-    }
+    refreshChatActivity();
 }
 
 void ChatController::onMessageStateChanged(const MessageId &messageId, DeliveryState state)

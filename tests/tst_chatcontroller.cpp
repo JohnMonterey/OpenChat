@@ -578,6 +578,100 @@ private slots:
         QVERIFY(second.at(2).toString().isEmpty());
     }
 
+    void unreadBadgesPersistAndChatsFollowLatestMessage()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ExtraPeer carol;
+        QVERIFY(carol.setUp(live, QStringLiteral("carol")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setConversationVisible(false);
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QVERIFY(controller.selectContact(carol.account.toHex()));
+        QVERIFY(live.deliverFromPeer(QStringLiteral("one")));
+        QVERIFY(live.deliverFromPeer(QStringLiteral("two")));
+        QCOMPARE(controller.currentContactId(), carol.account.toHex());
+        QCOMPARE(controller.contacts()->contactAt(0)->id, live.peerAccount.toHex());
+        QCOMPARE(controller.contacts()->contactAt(0)->unreadCount, 2);
+        QCOMPARE(controller.chatUnreadCount(), 2);
+        // Reloading the roster preserves both activity and the unread count.
+        controller.refreshContact(live.peerAccount.toHex());
+        QCOMPARE(controller.contacts()->contactAt(0)->unreadCount, 2);
+        ChatController reloaded;
+        reloaded.setConversationVisible(false);
+        reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QCOMPARE(reloaded.contacts()->contactAt(0)->id, live.peerAccount.toHex());
+        QCOMPARE(reloaded.chatUnreadCount(), 2);
+        QVERIFY(reloaded.selectContact(live.peerAccount.toHex()));
+        QCOMPARE(reloaded.chatUnreadCount(), 2); // hidden windows do not read
+        reloaded.setNavSection(ChatController::NavSection::Settings);
+        reloaded.setConversationVisible(true);
+        QCOMPARE(reloaded.chatUnreadCount(), 2);
+        reloaded.setNavSection(ChatController::NavSection::Chat);
+        QCOMPARE(reloaded.chatUnreadCount(), 0);
+        QCOMPARE(reloaded.contacts()->contactAt(0)->unreadCount, 0);
+        reloaded.setSessionState(ChatController::SessionState::Locked);
+        QVERIFY(live.deliverFromPeer(QStringLiteral("while locked")));
+        QCOMPARE(reloaded.chatUnreadCount(), 1);
+        reloaded.setSessionState(ChatController::SessionState::Ready);
+        QCOMPARE(reloaded.chatUnreadCount(), 0);
+        // Sending from the selected chat also updates its position.
+        reloaded.setComposerText(QStringLiteral("reply"));
+        QVERIFY(reloaded.sendMessage());
+        QCOMPARE(reloaded.contacts()->contactAt(0)->id, live.peerAccount.toHex());
+        QCOMPARE(reloaded.contacts()->contactAt(0)->unreadCount, 0);
+    }
+
+    void callEventsAreDirectionalDurableAndDeduplicated()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        const auto route = controller.callRouteFor(controller.currentContactId());
+        QVERIFY(route);
+        const auto offer = encodeCallSignal(CallSignalMessage::offer(
+            CallId::generate(), generateCallSecret(), AudioCodecKind::Pcm));
+        auto *engine = live.session->syncEngine();
+        engine->sendCallSignal(route->conversation, live.peerDevice, offer);
+        engine->sendCallSignal(route->conversation, live.peerDevice, offer);
+        QCOMPARE(controller.messages()->rowCount(), 1);
+        QCOMPARE(controller.messages()->messageAt(0)->kind, MessageKind::CallEvent);
+        QCOMPARE(controller.messages()->messageAt(0)->direction, MessageDirection::Outgoing);
+        QVERIFY(controller.messages()->messageAt(0)->body.endsWith(QStringLiteral(" Started a call")));
+        const auto incoming = encodeCallSignal(CallSignalMessage::offer(
+            CallId::generate(), generateCallSecret(), AudioCodecKind::Pcm));
+        // The peer must consume both outbound signals before encrypting its offer.
+        for (const auto &envelope : sentTo(live, live.peerDevice, EnvelopeMessageKind::CallSignal))
+            QVERIFY(live.peer->process(route->conversation, envelope.ciphertext).hasValue());
+        const auto encrypted = live.peer->encrypt(route->conversation, incoming);
+        QVERIFY(encrypted.hasValue());
+        deliver(live, live.peerAccount, live.peerDevice, route->conversation,
+                EnvelopeMessageKind::CallSignal, encrypted.value().bytes);
+        QCOMPARE(controller.messages()->rowCount(), 2);
+        QCOMPARE(controller.messages()->messageAt(1)->direction, MessageDirection::Incoming);
+        QCOMPARE(controller.messages()->messageAt(1)->body, QStringLiteral("bob Started a call"));
+        // A second envelope with the same call ID still produces only one row.
+        const auto repeated = live.peer->encrypt(route->conversation, incoming);
+        QVERIFY(repeated.hasValue());
+        deliver(live, live.peerAccount, live.peerDevice, route->conversation,
+                EnvelopeMessageKind::CallSignal, repeated.value().bytes);
+        QCOMPARE(controller.messages()->rowCount(), 2);
+        ChatController reloaded;
+        reloaded.setLiveServices(live.session.get(), engine, &requests);
+        QCOMPARE(reloaded.messages()->rowCount(), 2);
+        for (int i = 0; i < 2; ++i) {
+            QCOMPARE(reloaded.messages()->messageAt(i)->kind, MessageKind::CallEvent);
+            QCOMPARE(reloaded.messages()->messageAt(i)->deliveryState, MessageDeliveryState::None);
+        }
+    }
+
     void liveRosterReplacesMockAndRoutesMessagesThroughEngine()
     {
         LiveFixture live;
@@ -790,7 +884,7 @@ private slots:
         controller.setComposerText(QStringLiteral("hi group"));
         QVERIFY(controller.canSend());
         QVERIFY(controller.sendMessage());
-        QCOMPARE(controller.messages()->rowCount(), 1);
+        QCOMPARE(controller.messages()->rowCount(), 4);
         const auto toBob = sentTo(live, live.peerDevice, EnvelopeMessageKind::MlsPrivateMessage);
         const auto toCarol = sentTo(live, carol.device, EnvelopeMessageKind::MlsPrivateMessage);
         QCOMPARE(toBob.size(), 1);
@@ -808,17 +902,22 @@ private slots:
         // A member's message lands in the open group, named after its sender.
         auto fromCarol = carol.mls->encrypt(groupConversation, QByteArray("carol here"));
         QVERIFY(fromCarol.hasValue());
+        controller.setConversationVisible(false);
         deliver(live, carol.account, carol.device, groupConversation,
                 EnvelopeMessageKind::MlsPrivateMessage, fromCarol.value().bytes);
-        QCOMPARE(controller.messages()->rowCount(), 2);
-        const QModelIndex inRow = controller.messages()->index(1);
+        QCOMPARE(controller.contacts()->contactById(groupId)->unreadCount, 1);
+        QCOMPARE(controller.contacts()->contactAt(0)->id, groupId);
+        controller.setConversationVisible(true);
+        QCOMPARE(controller.contacts()->contactById(groupId)->unreadCount, 0);
+        QCOMPARE(controller.messages()->rowCount(), 5);
+        const QModelIndex inRow = controller.messages()->index(4);
         QCOMPARE(controller.messages()->data(inRow, MessageListModel::BodyRole).toString(),
                  QStringLiteral("carol here"));
         QCOMPARE(controller.messages()->data(inRow, MessageListModel::SenderNameRole).toString(),
                  QStringLiteral("carol"));
         // Our own row carries no sender name; a one-to-one message neither.
         QVERIFY(controller.messages()
-                    ->data(controller.messages()->index(0), MessageListModel::SenderNameRole)
+                    ->data(controller.messages()->index(3), MessageListModel::SenderNameRole)
                     .toString()
                     .isEmpty());
 
@@ -838,7 +937,18 @@ private slots:
         reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests, &groups);
         QVERIFY(reloaded.selectContact(groupId));
         QCOMPARE(reloaded.currentGroupTitle(), QStringLiteral("Weekend plans"));
-        QCOMPARE(reloaded.messages()->rowCount(), 2);
+        QCOMPARE(reloaded.messages()->rowCount(), 5);
+
+        // Group call fan-out creates one outgoing history row, regardless of
+        // how many members receive an offer.
+        const auto callOffer = encodeCallSignal(CallSignalMessage::offer(
+            CallId::generate(), generateCallSecret(), AudioCodecKind::Pcm));
+        live.session->syncEngine()->sendCallSignal(groupConversation, live.peerDevice, callOffer);
+        live.session->syncEngine()->sendCallSignal(groupConversation, carol.device, callOffer);
+        QCOMPARE(controller.messages()->rowCount(), 6);
+        QCOMPARE(controller.messages()->messageAt(5)->kind, MessageKind::CallEvent);
+        QCOMPARE(controller.messages()->messageAt(5)->direction, MessageDirection::Outgoing);
+        QVERIFY(controller.messages()->messageAt(5)->body.endsWith(QStringLiteral(" Started a group call")));
 
         // Leaving tells everyone and drops the chat here; the view falls back
         // to a person.
@@ -914,12 +1024,18 @@ private slots:
         // The stranger is not a contact, so cannot be offered by the "+".
         QVERIFY(controller.groupCandidates().isEmpty());
 
+        QCOMPARE(controller.messages()->rowCount(), 3);
+        // Refreshing an unchanged roster must not announce everyone joining again.
+        deliver(live, live.peerAccount, live.peerDevice, group, EnvelopeMessageKind::GroupControl,
+                live.peer->encrypt(group, encodeGroupUpdate(info)).value().bytes);
+        QCOMPARE(controller.messages()->rowCount(), 3);
+
         // A message from the stranger is readable and named.
         deliver(live, strangerAccount, strangerDevice, group, EnvelopeMessageKind::MlsPrivateMessage,
                 strangerClient->encrypt(group, QByteArray("hey")).value().bytes);
-        QCOMPARE(controller.messages()->rowCount(), 1);
+        QCOMPARE(controller.messages()->rowCount(), 4);
         QCOMPARE(controller.messages()
-                     ->data(controller.messages()->index(0), MessageListModel::SenderNameRole)
+                     ->data(controller.messages()->index(3), MessageListModel::SenderNameRole)
                      .toString(),
                  QStringLiteral("dana"));
 
@@ -938,6 +1054,9 @@ private slots:
                     .value()
                     .bytes);
         QCOMPARE(controller.currentGroupMembers(), QStringLiteral("You, bob"));
+        QCOMPARE(controller.messages()->rowCount(), 5);
+        QCOMPARE(controller.messages()->messageAt(4)->body, QStringLiteral("dana Left the group chat"));
+        QCOMPARE(controller.messages()->messageAt(4)->kind, MessageKind::MembershipEvent);
         QCoreApplication::processEvents();
         const bool weCommit = ourDevice.bytes() < live.peerDevice.bytes();
         const auto commits = sentTo(live, live.peerDevice, EnvelopeMessageKind::MlsCommit);
@@ -952,7 +1071,7 @@ private slots:
             QVERIFY(!strangerClient->process(group, afterwards.value().bytes).hasValue());
             deliver(live, live.peerAccount, live.peerDevice, group,
                     EnvelopeMessageKind::MlsPrivateMessage, afterwards.value().bytes);
-            QCOMPARE(controller.messages()->rowCount(), 2);
+            QCOMPARE(controller.messages()->rowCount(), 6);
         }
         QVERIFY(!live.session->syncEngine()->isFailedClosed());
         (void)stranger;

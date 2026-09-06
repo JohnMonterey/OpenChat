@@ -25,6 +25,7 @@ public:
         SelectedRole,
         AvatarKeyRole,
         IsGroupRole,
+        UnreadCountRole,
     };
     Q_ENUM(Role)
 
@@ -35,10 +36,12 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     void setContacts(QVector<Contact> contacts);
+    void setActivity(const QString &id, qint64 lastMessageAtMs, int unreadCount);
     void setQuery(const QString &query);
     bool selectContact(const QString &id);
     void setPresence(const QString &id, Presence presence);
 
+    [[nodiscard]] int totalUnreadCount() const;
     [[nodiscard]] int favoriteCount() const;
     [[nodiscard]] int regularCount() const;
     [[nodiscard]] std::optional<Contact> contactAt(int row) const;

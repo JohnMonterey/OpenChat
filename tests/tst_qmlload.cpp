@@ -491,6 +491,88 @@ private slots:
         QVERIFY(!retry->property("visible").toBool());
     }
 
+    void chatRowsShowUnreadCountBadges()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "ContactRow");
+        QScopedPointer<QObject> row(component.createWithInitialProperties({
+            {"contactId", "bob"}, {"name", "Bob"}, {"statusText", "Offline"},
+            {"presence", 2}, {"favorite", false}, {"selected", false},
+            {"avatarKey", "userpfp_none"}, {"isGroup", false}, {"unreadCount", 12},
+            {"width", 250}, {"height", 60}}));
+        QVERIFY2(row, qPrintable(component.errorString()));
+        auto *badge = row->findChild<QObject *>("contactUnreadBadge");
+        auto *label = row->findChild<QObject *>("contactUnreadLabel");
+        QVERIFY(badge && label);
+        QVERIFY(badge->property("visible").toBool());
+        QCOMPARE(label->property("text").toString(), QString("12"));
+        QCOMPARE(badge->property("color").value<QColor>(), QColor("#cb3843"));
+        row->setProperty("unreadCount", 120);
+        QCOMPARE(label->property("text").toString(), QString("99+"));
+        row->setProperty("isGroup", true);
+        QVERIFY(badge->property("visible").toBool());
+        row->setProperty("unreadCount", 0);
+        QVERIFY(!badge->property("visible").toBool());
+    }
+
+    void conversationEventsAreCompactAndAligned_data()
+    {
+        QTest::addColumn<bool>("dark");
+        QTest::addColumn<int>("kind");
+        QTest::addColumn<int>("direction");
+        QTest::newRow("join-light") << false << 2 << 0;
+        QTest::newRow("join-dark") << true << 2 << 0;
+        QTest::newRow("outgoing-light") << false << 3 << 1;
+        QTest::newRow("outgoing-dark") << true << 3 << 1;
+        QTest::newRow("incoming-light") << false << 3 << 0;
+        QTest::newRow("incoming-dark") << true << 3 << 0;
+    }
+
+    void conversationEventsAreCompactAndAligned()
+    {
+        QFETCH(bool, dark);
+        QFETCH(int, kind);
+        QFETCH(int, direction);
+        QSettings().setValue(QStringLiteral("Appearance/darkMode"), dark);
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QScopedPointer<QObject> item(component.createWithInitialProperties({
+            {"direction", direction}, {"deliveryState", 0},
+            {"body", kind == 2 ? "Ayman Left the group chat" : "JohnM Started a group call"},
+            {"timestamp", "10:15 AM"}, {"kind", kind}, {"dateLabel", "September 6, 2026"},
+            {"showDateDivider", false}, {"senderName", "JohnM"}, {"width", 540}}));
+        QVERIFY2(item, qPrintable(component.errorString()));
+        auto *row = item->findChild<QObject *>("conversationEvent");
+        auto *label = item->findChild<QObject *>("conversationEventText");
+        QVERIFY(row && label);
+        QVERIFY(row->property("visible").toBool());
+        QVERIFY(item->property("implicitHeight").toReal() < 50);
+        QVERIFY(row->property("width").toReal() < 400);
+        QVERIFY(!item->findChild<QObject *>("messageTimestamp")->property("visible").toBool());
+        QVERIFY(!item->findChild<QObject *>("messageSender")->property("visible").toBool());
+        const qreal x = row->property("x").toReal();
+        const qreal width = row->property("width").toReal();
+        if (kind == 2) {
+            QCOMPARE(x, (540 - width) / 2);
+        } else {
+            QCOMPARE(x, direction == 1 ? 540 - width - 17 : 16);
+            QCOMPARE(label->property("color").value<QColor>(),
+                     QColor(dark ? "#95d6ac" : "#2e7d4f"));
+        }
+        const qreal compactHeight = item->property("implicitHeight").toReal();
+        item->setProperty("showDateDivider", true);
+        QCOMPARE(item->property("implicitHeight").toReal(), compactHeight + 64);
+        // Long names wrap and retain their own space even at narrow widths.
+        item->setProperty("width", 220);
+        item->setProperty("body", QString(150, QLatin1Char('W')));
+        QVERIFY(item->property("implicitHeight").toReal() > compactHeight + 64);
+        QVERIFY(row->property("width").toReal() <= 184);
+    }
+
     void messageTimestampFormatting()
     {
         QQmlEngine engine;

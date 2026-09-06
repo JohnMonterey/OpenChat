@@ -91,6 +91,7 @@ QtObject {
     readonly property color sectionHighlight: darkMode ? "#0affffff" : "#27ffffff"
     readonly property color categoryChevron: darkMode ? "#9dbed6" : "#557ca1"
     readonly property color avatarBorder: darkMode ? "#658299" : "#8fa8b8"
+    readonly property color unreadBadge: darkMode ? "#da535b" : "#cb3843"
     readonly property color badgeBackground: darkMode ? "#2b4052" : "#f4f8fb"
     readonly property color errorText: darkMode ? "#ffa99e" : "#c0392b"
     readonly property color retryText: darkMode ? "#ffa99e" : "#c62828"

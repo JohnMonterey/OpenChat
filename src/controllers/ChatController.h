@@ -37,6 +37,7 @@ class RelayClient;
 class ChatController final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(bool conversationVisible READ conversationVisible WRITE setConversationVisible NOTIFY conversationVisibleChanged)
     Q_PROPERTY(ContactListModel *contacts READ contacts CONSTANT)
     Q_PROPERTY(MessageListModel *messages READ messages CONSTANT)
     Q_PROPERTY(bool localOnline READ localOnline NOTIFY localOnlineChanged)
@@ -91,6 +92,8 @@ class ChatController final : public QObject
                    currentSettingsCategoryChanged)
 
 public:
+    bool conversationVisible() const { return m_conversationVisible; }
+    void setConversationVisible(bool visible);
     // Connection/security posture of the conversation surface. Ready is the only
     // state that renders the approved chat interface unchanged; every other
     // state adds an explanatory banner and, where trust is unresolved, withholds
@@ -240,6 +243,7 @@ public:
     [[nodiscard]] ProfileUpdateMessage localProfile() const;
 
 signals:
+    void conversationVisibleChanged();
     void currentContactChanged();
     void localUserNameChanged();
     void localProfileChanged();
@@ -271,6 +275,8 @@ signals:
                                       const QString &body, const QString &avatarKey);
 
 private:
+    bool m_conversationVisible = true;
+    void refreshChatActivity(bool markCurrentRead = true);
     // A live chat's routing: the peer account, the 2-party MLS conversation, and
     // the peer device every envelope is addressed to.
     struct LiveChat final {

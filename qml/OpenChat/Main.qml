@@ -26,6 +26,12 @@ Window {
     title: "OpenChat"
     color: Theme.contentBackground
 
+    Binding {
+        target: root.chatController
+        property: "conversationVisible"
+        value: root.active && root.visible && root.visibility !== Window.Minimized
+    }
+
     Item {
         id: applicationSurface
         anchors.fill: parent

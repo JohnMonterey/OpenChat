@@ -1,8 +1,10 @@
 #include "storage/SqlCipherChatRepository.h"
+#include "storage/RepositorySql.h"
 #include "storage/SqlCipherDatabase.h"
 #include "storage/SqlCipherOutboxRepository.h"
 #include "storage/SqlCipherSyncRepository.h"
 
+#include <memory>
 #include <QTemporaryDir>
 #include <QtTest/QTest>
 
@@ -60,6 +62,8 @@ class RepositoryTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void existingHistoryRemainsReadWhenUpgrading();
+    void readStateSurvivesReopeningAndLateMessagesStayUnread();
     void messageAndOutboxCommitAtomically();
     void failedOutgoingWriteRollsBackBothRows();
     void incomingEnvelopeIsIdempotent();
@@ -72,6 +76,84 @@ private slots:
     void watermarkOnlyMovesForward();
     void groupRosterTitleAndLeaveArePersisted();
 };
+
+void RepositoryTest::existingHistoryRemainsReadWhenUpgrading()
+{
+    QTemporaryDir directory;
+    const auto key = SecureBuffer::fromBytes("0123456789abcdef0123456789abcdef");
+    {
+        auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+        QVERIFY(opened.hasValue());
+        auto database = std::move(opened).value();
+        SqlCipherChatRepository chats(database);
+        const auto id = ConversationId::generate();
+        QVERIFY(chats.upsertConversation(conversation(id)).hasValue());
+        QVERIFY(chats.applyIncoming(incomingMessage(MessageId::generate(), id, DeviceId::generate(), 1),
+                                    EnvelopeId::generate(), 1).hasValue());
+    }
+    // Recreate version 13 through a separate SQLCipher connection: production
+    // repositories intentionally do not expose arbitrary SQL execution.
+    {
+        sqlite3 *handle = nullptr;
+        QCOMPARE(sqlite3_open(directory.filePath("profile.sqlite3").toUtf8().constData(), &handle), SQLITE_OK);
+        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> connection(handle, &sqlite3_close);
+        QVERIFY(RepositorySql::execute(handle, "PRAGMA key = '0123456789abcdef0123456789abcdef';"));
+        QVERIFY(RepositorySql::execute(handle, "DROP INDEX messages_unread;"));
+        QVERIFY(RepositorySql::execute(handle, "ALTER TABLE messages DROP COLUMN locally_read;"));
+        QVERIFY(RepositorySql::execute(handle, "PRAGMA user_version = 13;"));
+    }
+    auto reopened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(reopened.hasValue());
+    auto database = std::move(reopened).value();
+    SqlCipherChatRepository chats(database);
+    QCOMPARE(chats.activity().value().first().unreadCount, 0);
+    QCOMPARE(chats.activity().value().first().lastMessageAtMs, qint64(2'000));
+}
+
+void RepositoryTest::readStateSurvivesReopeningAndLateMessagesStayUnread()
+{
+    QTemporaryDir directory;
+    const auto key = SecureBuffer::random(32);
+    const auto id = ConversationId::generate();
+    const auto sender = DeviceId::generate();
+    const auto envelope = EnvelopeId::generate();
+    const auto message = incomingMessage(MessageId::generate(), id, sender, 1);
+    {
+        auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+        QVERIFY(opened.hasValue());
+        auto database = std::move(opened).value();
+        SqlCipherChatRepository chats(database);
+        QVERIFY(chats.upsertConversation(conversation(id)).hasValue());
+        QVERIFY(chats.applyIncoming(message, envelope, 1).hasValue());
+        QVERIFY(chats.applyIncoming(message, envelope, 1).hasValue());
+        QCOMPARE(chats.activity().value().first().unreadCount, 1);
+    }
+    {
+        auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+        QVERIFY(opened.hasValue());
+        auto database = std::move(opened).value();
+        SqlCipherChatRepository chats(database);
+        QCOMPARE(chats.activity().value().first().unreadCount, 1);
+        QVERIFY(chats.markConversationRead(id).hasValue());
+        auto late = incomingMessage(MessageId::generate(), id, sender, 2);
+        late.sentAtMs = 1'000;
+        QVERIFY(chats.applyIncoming(late, EnvelopeId::generate(), 2).hasValue());
+        QCOMPARE(chats.activity().value().first().unreadCount, 1);
+        QCOMPARE(chats.activity().value().first().lastMessageAtMs, qint64(2'000));
+        auto event = incomingMessage(MessageId::generate(), id, sender, 3);
+        event.kind = ContentKind::System;
+        event.sentAtMs = 3'000;
+        QVERIFY(chats.saveEvent(event).hasValue());
+        QCOMPARE(chats.activity().value().first().unreadCount, 1);
+        QCOMPARE(chats.activity().value().first().lastMessageAtMs, qint64(3'000));
+        QVERIFY(chats.markConversationRead(id).hasValue());
+    }
+    auto reopened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(reopened.hasValue());
+    auto database = std::move(reopened).value();
+    SqlCipherChatRepository chats(database);
+    QCOMPARE(chats.activity().value().first().unreadCount, 0);
+}
 
 void RepositoryTest::groupRosterTitleAndLeaveArePersisted()
 {

@@ -255,6 +255,7 @@ private:
     void loadMainWindow()
     {
         m_chatController = std::make_unique<OpenChat::ChatController>();
+        m_chatController->setConversationVisible(false);
         if (m_session) {
             QString displayName = m_session->displayName();
             // Profiles created before display names were stored have no value to

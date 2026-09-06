@@ -349,6 +349,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/011_contact_device.sql
         src/storage/migrations/012_profiles.sql
         src/storage/migrations/013_group_chats.sql
+        src/storage/migrations/014_chat_read_state.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security

@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QPainter>
 #include <QQmlApplicationEngine>
 #include <QQuickView>
 #include <QQuickWindow>
@@ -42,6 +43,7 @@
 #include "network/SyncEngine.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include "call/ScreenCanvas.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
@@ -779,7 +781,8 @@ int runVerifyWindow(QGuiApplication &application, QCommandLineParser &parser,
 int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
                   const QCommandLineOption &captureOption,
                   const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
-                  const QCommandLineOption &heightOption, bool incoming, bool video, bool group)
+                  const QCommandLineOption &heightOption, bool incoming, bool video, bool group,
+                  bool screenShare)
 {
     OpenChat::ChatController chatController;
     chatController.setLocalUserName(QStringLiteral("Developer"));
@@ -817,6 +820,27 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         local.fill(QColor("#6192ab"));
         remote.fill(QColor("#4f7a69"));
         callController.setPreviewVideo(local, remote);
+    }
+
+    if (screenShare) {
+        // A stand-in desktop rather than a real capture: the preview path never
+        // opens a display, exactly as it never opens a camera.
+        QImage desktop(1600, 900, QImage::Format_RGB32);
+        {
+            QPainter painter(&desktop);
+            painter.fillRect(QRect(0, 0, 1600, 900), QColor("#20262e"));
+            painter.fillRect(QRect(0, 0, 1600, 46), QColor("#39434f"));
+            painter.fillRect(QRect(0, 46, 260, 854), QColor("#2a323c"));
+            for (int line = 0; line < 26; ++line) {
+                painter.fillRect(QRect(300, 80 + line * 30, 120 + (line * 67) % 900, 11),
+                                 line % 3 == 0 ? QColor("#e2e8f0") : QColor("#96c8f0"));
+            }
+            for (int row = 0; row < 8; ++row)
+                painter.fillRect(QRect(30, 70 + row * 34, 200, 12), QColor("#5d6b7a"));
+        }
+        callController.setPreviewScreenShare(
+            std::make_shared<OpenChat::ScreenCanvas>(std::move(desktop)),
+            QStringLiteral("Jessica"));
     }
 
     QQmlApplicationEngine engine;
@@ -890,9 +914,12 @@ int main(int argc, char *argv[])
         QStringLiteral("Preview the in-call surface while a call is ringing."));
     const QCommandLineOption callGroupOption(
         QStringLiteral("call-group"), QStringLiteral("Preview a group call with several members."));
+    const QCommandLineOption callScreenOption(
+        QStringLiteral("call-screen"),
+        QStringLiteral("Preview a received screen share alongside the camera."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, addContactOption, verifyOption, callOption,
-                       callIncomingOption, callVideoOption, callGroupOption});
+                       callIncomingOption, callVideoOption, callGroupOption, callScreenOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -919,10 +946,10 @@ int main(int argc, char *argv[])
     // before the plain capture path so --call --capture routes here.
     const bool previewIncomingCall = parser.isSet(callIncomingOption);
     if (parser.isSet(callOption) || previewIncomingCall || parser.isSet(callVideoOption)
-        || parser.isSet(callGroupOption))
+        || parser.isSet(callGroupOption) || parser.isSet(callScreenOption))
         return runCallWindow(application, parser, captureOption, delayOption, widthOption,
                              heightOption, previewIncomingCall, parser.isSet(callVideoOption),
-                             parser.isSet(callGroupOption));
+                             parser.isSet(callGroupOption), parser.isSet(callScreenOption));
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

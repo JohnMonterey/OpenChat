@@ -15,6 +15,10 @@ Item {
     objectName: "callHeader"
     required property var controller
     property real maxVideoHeight: 210
+    // The share stage gets its own cap rather than a multiple of the camera's:
+    // a desktop wants more height than a face, but not so much that the
+    // conversation underneath disappears at the minimum window size.
+    property real maxShareHeight: 300
     readonly property bool isGroupCall: controller.isGroupCall === true
     readonly property bool hasVideo: controller.cameraEnabled || controller.remoteCameraEnabled
     readonly property real videoWidth: Math.max(100,
@@ -27,7 +31,8 @@ Item {
                                                            : participants.height
     implicitHeight: Math.max(Theme.callHeaderHeight, participantsHeight + 98)
                     + (isGroupCall ? 18 : 0)
-                    + (cameraError.visible ? cameraError.implicitHeight + 8 : 0)
+                    + (screenStage.visible ? screenStage.implicitHeight + 10 : 0)
+                    + (mediaError.visible ? mediaError.implicitHeight + 8 : 0)
 
     Rectangle {
         anchors.fill: parent
@@ -171,10 +176,27 @@ Item {
         }
     }
 
+    // Appears by itself when a share starts — ours or theirs — and is gone the
+    // moment it stops, exactly as an incoming camera tile does above it.
+    ScreenShareStage {
+        id: screenStage
+        controller: callHeader.controller
+        anchors.top: callHeader.isGroupCall ? groupParticipants.bottom : participants.bottom
+        anchors.topMargin: visible ? 10 : 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: 24
+        anchors.rightMargin: 24
+        height: implicitHeight
+        maxHeight: Math.max(140, callHeader.maxShareHeight)
+    }
+
     Text {
         id: statusLine
         objectName: "callStatusText"
-        anchors.top: callHeader.isGroupCall ? groupParticipants.bottom : participants.bottom
+        anchors.top: screenStage.visible
+                     ? screenStage.bottom
+                     : (callHeader.isGroupCall ? groupParticipants.bottom : participants.bottom)
         anchors.topMargin: 8
         anchors.horizontalCenter: parent.horizontalCenter
         text: callHeader.controller.isActive ? callHeader.controller.durationText
@@ -226,6 +248,20 @@ Item {
             onClicked: callHeader.controller.toggleCamera()
         }
         CallActionButton {
+            objectName: "screenShareButton"
+            visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
+            label: callHeader.controller.screenShareEnabled ? "Stop sharing" : "Share screen"
+            screenIcon: true
+            checked: callHeader.controller.screenShareEnabled === true
+            disabled: callHeader.controller.screenShareAvailable !== true
+            tooltip: callHeader.controller.screenShareAvailable !== true
+                     ? "Screen sharing is not available on this system"
+                     : (callHeader.controller.screenShareEnabled
+                        ? "Stop sharing your screen"
+                        : "Share a screen or a window")
+            onClicked: callHeader.controller.toggleScreenShare()
+        }
+        CallActionButton {
             objectName: "endCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: "End call"
@@ -242,14 +278,17 @@ Item {
     }
 
     Text {
-        id: cameraError
+        id: mediaError
         objectName: "cameraErrorText"
         anchors.top: actions.bottom
         anchors.topMargin: 8
         anchors.horizontalCenter: parent.horizontalCenter
         width: parent.width - 40
         visible: text.length > 0
-        text: callHeader.controller.cameraError
+        text: callHeader.controller.cameraError.length > 0
+              ? callHeader.controller.cameraError
+              : (callHeader.controller.screenShareError !== undefined
+                 ? callHeader.controller.screenShareError : "")
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
         color: Theme.declineBottom

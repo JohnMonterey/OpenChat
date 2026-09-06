@@ -86,6 +86,8 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/CallParticipant.qml
         qml/OpenChat/components/CallActionButton.qml
         qml/OpenChat/components/CallHeader.qml
+        qml/OpenChat/components/ScreenShareStage.qml
+        qml/OpenChat/components/ScreenSharePicker.qml
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
@@ -368,12 +370,14 @@ add_library(openchat_call STATIC
     src/call/SyncCallTransport.cpp
     src/call/QtAudioIo.cpp
     src/call/CallVideoSession.cpp
+    src/call/CallScreenSession.cpp
     src/call/QtVideoCapture.cpp
+    src/call/QtScreenCapture.cpp
     src/call/VideoFrameCopy.cpp
 )
 target_include_directories(openchat_call PUBLIC src)
 target_link_libraries(openchat_call
-    PUBLIC openchat_media openchat_network openchat_domain Qt6::Core Qt6::Multimedia
+    PUBLIC openchat_media openchat_network openchat_domain Qt6::Core Qt6::Gui Qt6::Multimedia
     PRIVATE OpenSSL::Crypto
 )
 
@@ -725,6 +729,10 @@ add_executable(tst_videocall tests/tst_videocall.cpp)
 target_link_libraries(tst_videocall PRIVATE openchat_call Qt6::Test)
 add_test(NAME tst_videocall COMMAND tst_videocall)
 
+add_executable(tst_screenshare tests/tst_screenshare.cpp)
+target_link_libraries(tst_screenshare PRIVATE openchat_call Qt6::Gui Qt6::Test)
+add_test(NAME tst_screenshare COMMAND tst_screenshare)
+
 # The voice-call test: pushes a real audio file (and synthesised references)
 # through the whole pipeline and checks what comes out the far end, plus the
 # malformed-input, loss, reordering, duplication, replay and tampering edges
@@ -851,6 +859,8 @@ add_openchat_capture_test(capture_minimum 720 560)
 add_openchat_capture_test(capture_large 1024 768)
 add_openchat_capture_test(capture_video 900 680 --call-video)
 add_openchat_capture_test(capture_video_minimum 720 560 --call-video)
+add_openchat_capture_test(capture_screen 1100 780 --call-screen)
+add_openchat_capture_test(capture_screen_minimum 720 560 --call-screen)
 
 # The add-contact preview sub-mode: renders the dialog over a populated mock
 # Requests list. Uses the same verify runner with the extra --add-contact argument.

@@ -23,6 +23,15 @@ constexpr int playbackTailSlackMs = 250;
 // A group member's camera whose frames stop arriving reads as off after this.
 constexpr qint64 videoStaleMs = 2500;
 
+// A share sends a heartbeat every second even when the desktop is motionless,
+// so several missed in a row is a share that has genuinely gone rather than one
+// whose sender simply stopped moving the mouse.
+constexpr qint64 screenStaleMs = 4000;
+
+// How often each receiving session is asked whether its periodic report is due.
+// The report interval itself lives in the session; this only has to be finer.
+constexpr int screenFeedbackPumpMs = 200;
+
 // Sums `frame` into `mix` sample by sample, saturating rather than wrapping, so
 // three people talking at once get loud instead of turning into noise.
 void mixInto(AudioFrame &mix, const AudioFrame &frame)
@@ -86,6 +95,21 @@ CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFacto
     m_videoTimeout = new QTimer(this);
     m_videoTimeout->setSingleShot(true);
     connect(m_videoTimeout, &QTimer::timeout, this, [this] { emit remoteVideoFrame(QImage()); });
+
+    m_screenTimeout = new QTimer(this);
+    m_screenTimeout->setSingleShot(true);
+    connect(m_screenTimeout, &QTimer::timeout, this, [this] {
+        if (m_remoteScreenActive) {
+            m_remoteScreenActive = false;
+            if (m_screenSession)
+                m_screenSession->resetReceiver();
+            emit remoteScreenFrame({});
+        }
+    });
+
+    m_screenFeedbackTimer = new QTimer(this);
+    m_screenFeedbackTimer->setInterval(screenFeedbackPumpMs);
+    connect(m_screenFeedbackTimer, &QTimer::timeout, this, &CallEngine::pumpScreenFeedback);
 
     m_ringTimer = new QTimer(this);
     m_ringTimer->setSingleShot(true);
@@ -889,6 +913,20 @@ void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sen
     if (!m_session || sender != m_peer.device || conversation != m_peer.conversation)
         return;
 
+    if (!packet.isEmpty() && static_cast<quint8>(packet[0]) == CallScreenSession::wireVersion) {
+        if (!m_screenSession)
+            return;
+        qint64 lastSeenMs = 0;
+        const ScreenPacketOutcome outcome =
+            handleScreenPacket(*m_screenSession, packet, m_remoteScreenActive, lastSeenMs);
+        if (m_remoteScreenActive)
+            m_screenTimeout->start(screenStaleMs);
+        else
+            m_screenTimeout->stop();
+        if (outcome.ended || outcome.changed)
+            emit remoteScreenFrame(outcome.canvas);
+        return;
+    }
     if (!packet.isEmpty() && static_cast<quint8>(packet[0]) == CallVideoSession::wireVersion) {
         if (m_videoSession) {
             const auto image = m_videoSession->decode(packet);
@@ -918,6 +956,15 @@ void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sen
 
 void CallEngine::onGroupMedia(Member &member, const QByteArray &packet)
 {
+    if (!packet.isEmpty() && static_cast<quint8>(packet[0]) == CallScreenSession::wireVersion) {
+        if (!member.screen)
+            return;
+        const ScreenPacketOutcome outcome =
+            handleScreenPacket(*member.screen, packet, member.screenOn, member.lastScreenMs);
+        if (outcome.ended || outcome.changed)
+            emit participantScreenFrame(member.info.peer.device, outcome.canvas);
+        return;
+    }
     if (!packet.isEmpty() && static_cast<quint8>(packet[0]) == CallVideoSession::wireVersion) {
         if (!member.video)
             return;
@@ -1006,6 +1053,12 @@ bool CallEngine::startMedia()
         return false;
     }
     m_videoSession = CallVideoSession::create(*m_callId, m_direction, m_secret);
+    // The encoder allocates nothing until a desktop is actually handed to it,
+    // so a call that never shares a screen pays for an empty object and no more.
+    m_screenEncoder = std::make_shared<ScreenTileEncoder>();
+    m_screenSession =
+        CallScreenSession::create(*m_callId, m_direction, m_secret, m_screenEncoder);
+    m_screenFeedbackTimer->start();
     m_session->setMuted(m_muted);
 
     if (!startCapture()) {
@@ -1041,6 +1094,11 @@ bool CallEngine::openMemberMedia(Member &member)
         return false;
     member.session->setMuted(m_muted);
     member.video = CallVideoSession::create(*m_callId, direction, pairSecret);
+    if (!m_screenEncoder)
+        m_screenEncoder = std::make_shared<ScreenTileEncoder>();
+    member.screen =
+        CallScreenSession::create(*m_callId, direction, pairSecret, m_screenEncoder);
+    m_screenFeedbackTimer->start();
     return true;
 }
 
@@ -1050,6 +1108,11 @@ void CallEngine::closeMemberMedia(Member &member)
         member.cameraOn = false;
         emit participantVideoFrame(member.info.peer.device, QImage());
     }
+    if (member.screenOn) {
+        member.screenOn = false;
+        emit participantScreenFrame(member.info.peer.device, {});
+    }
+    member.screen.reset();
     member.video.reset();
     member.session.reset();
     member.info.speaking = false;
@@ -1091,6 +1154,18 @@ void CallEngine::stopCapture()
     m_videoTimeout->stop();
     m_videoSession.reset();
     emit remoteVideoFrame(QImage());
+    // The screen path goes down whole: the capture is the app's, but every
+    // buffer, key and canvas the engine holds for it is released here, so a
+    // finished call leaves nothing of a share behind.
+    m_screenFeedbackTimer->stop();
+    m_screenTimeout->stop();
+    m_screenSharing = false;
+    m_screenSession.reset();
+    m_screenEncoder.reset();
+    if (m_remoteScreenActive) {
+        m_remoteScreenActive = false;
+        emit remoteScreenFrame({});
+    }
     m_session.reset();
     if (m_group) {
         bool changed = false;
@@ -1159,6 +1234,214 @@ void CallEngine::sendVideoFrame(const QImage &image)
         m_transport.sendMedia(m_peer.conversation, m_peer.device, packet);
 }
 
+CallEngine::ScreenPacketOutcome CallEngine::handleScreenPacket(CallScreenSession &session,
+                                                               const QByteArray &packet,
+                                                               bool &activeFlag,
+                                                               qint64 &lastSeenMs)
+{
+    ScreenPacketOutcome outcome;
+    // The media clock, not the wall clock: the round-trip and report timing a
+    // share adapts on must not jump when the system time is corrected.
+    const qint64 now = m_config.mediaClock ? m_config.mediaClock() : steadyClockMs();
+    const auto update = session.decode(packet, now);
+    if (!update)
+        return outcome;
+    switch (update->kind) {
+    case CallScreenSession::Update::Kind::Feedback:
+        // The peer said what it can take and how big its window is. One encoder
+        // serves everyone, so it runs at the worst answer anybody gave.
+        applyScreenEncoderPolicy();
+        break;
+    case CallScreenSession::Update::Kind::Stopped:
+        if (activeFlag) {
+            activeFlag = false;
+            outcome.ended = true;
+        }
+        break;
+    case CallScreenSession::Update::Kind::Frame:
+        // Staleness is judged on the same wall clock the camera uses, because
+        // that is the clock the sweep that checks it runs on.
+        lastSeenMs = QDateTime::currentMSecsSinceEpoch();
+        // A heartbeat from a motionless desktop carries no tiles and no dirty
+        // region; it keeps the share alive without costing the UI a repaint.
+        if (!activeFlag || update->canvasReplaced || !update->dirty.isNull()) {
+            outcome.changed = true;
+            outcome.canvas = update->canvas;
+        }
+        activeFlag = true;
+        break;
+    }
+    return outcome;
+}
+
+bool CallEngine::startScreenShare()
+{
+    if (!m_screenEncoder || (m_state != CallState::Connecting && m_state != CallState::Active))
+        return false;
+    m_screenSharing = true;
+    return true;
+}
+
+void CallEngine::sendScreenFrame(const ScreenFrameView &frame)
+{
+    if (!m_screenSharing || !m_screenEncoder
+        || (m_state != CallState::Connecting && m_state != CallState::Active))
+        return;
+    // Checked before the frame is looked at, not after: building an update
+    // consumes the change set, so doing it with nowhere to send would silently
+    // lose whatever moved.
+    if (!m_transport.isConnected())
+        return;
+
+    const qint64 now = m_config.mediaClock ? m_config.mediaClock() : steadyClockMs();
+    const QByteArrayView payload = m_screenEncoder->buildUpdate(frame, now);
+    if (payload.isEmpty())
+        return;
+
+    if (m_group) {
+        // One desktop, one encode, one seal per member: the picture is built
+        // once however many people are in the call.
+        for (Member &member : m_group->members) {
+            if (!member.screen)
+                continue;
+            const QByteArray packet = member.screen->sealUpdate(payload, now);
+            if (!packet.isEmpty())
+                m_transport.sendMedia(m_group->conversation, member.info.peer.device, packet);
+        }
+        return;
+    }
+    if (!m_screenSession)
+        return;
+    const QByteArray packet = m_screenSession->sealUpdate(payload, now);
+    if (!packet.isEmpty())
+        m_transport.sendMedia(m_peer.conversation, m_peer.device, packet);
+}
+
+void CallEngine::stopScreenShare()
+{
+    if (!m_screenSharing)
+        return;
+    m_screenSharing = false;
+    if (m_transport.isConnected()) {
+        if (m_group) {
+            for (Member &member : m_group->members) {
+                if (!member.screen)
+                    continue;
+                const QByteArray packet = member.screen->encodeStop();
+                if (!packet.isEmpty())
+                    m_transport.sendMedia(m_group->conversation, member.info.peer.device, packet);
+            }
+        } else if (m_screenSession) {
+            const QByteArray packet = m_screenSession->encodeStop();
+            if (!packet.isEmpty())
+                m_transport.sendMedia(m_peer.conversation, m_peer.device, packet);
+        }
+    }
+    releaseScreenSender();
+}
+
+void CallEngine::releaseScreenSender()
+{
+    // The call may well continue, so the sessions and their keys stay; what goes
+    // is everything the size of a desktop.
+    if (m_screenEncoder)
+        m_screenEncoder->reset();
+    if (m_screenSession)
+        m_screenSession->resetSendState();
+    if (m_group) {
+        for (Member &member : m_group->members) {
+            if (member.screen)
+                member.screen->resetSendState();
+        }
+    }
+}
+
+int CallEngine::screenShareTargetFps() const
+{
+    return m_screenEncoder ? m_screenEncoder->targetFps()
+                           : screenShareLevels().front().targetFps;
+}
+
+void CallEngine::setScreenViewSize(QSize size)
+{
+    if (m_screenSession)
+        m_screenSession->setViewSize(size);
+}
+
+void CallEngine::setScreenViewSize(const DeviceId &device, QSize size)
+{
+    if (Member *member = memberFor(device); member != nullptr && member->screen)
+        member->screen->setViewSize(size);
+}
+
+ScreenShareStats CallEngine::screenShareStats() const
+{
+    if (m_screenSession)
+        return m_screenSession->stats();
+    if (m_group) {
+        for (const Member &member : m_group->members) {
+            if (member.screen)
+                return member.screen->stats();
+        }
+    }
+    return {};
+}
+
+void CallEngine::pumpScreenFeedback()
+{
+    if (!m_transport.isConnected())
+        return;
+    const qint64 now = m_config.mediaClock ? m_config.mediaClock() : steadyClockMs();
+    if (m_screenSession && m_screenSession->isReceiving()) {
+        const QByteArray report = m_screenSession->encodeFeedback(now);
+        if (!report.isEmpty())
+            m_transport.sendMedia(m_peer.conversation, m_peer.device, report);
+    }
+    if (!m_group)
+        return;
+    for (Member &member : m_group->members) {
+        if (!member.screen || !member.screen->isReceiving())
+            continue;
+        const QByteArray report = member.screen->encodeFeedback(now);
+        if (!report.isEmpty())
+            m_transport.sendMedia(m_group->conversation, member.info.peer.device, report);
+    }
+}
+
+void CallEngine::applyScreenEncoderPolicy()
+{
+    if (!m_screenEncoder)
+        return;
+    int worstLevel = 0;
+    QSize largestView;
+    bool anyoneWatching = false;
+    bool sawPeer = false;
+    const auto fold = [&](const CallScreenSession &session) {
+        sawPeer = true;
+        // The worst rung anyone asked for wins: one payload serves every peer,
+        // so it has to be one the weakest of them can actually receive.
+        worstLevel = std::max(worstLevel, session.desiredLevel());
+        if (session.remoteViewHidden())
+            return;
+        anyoneWatching = true;
+        const QSize view = session.remoteViewSize();
+        largestView = QSize(std::max(largestView.width(), view.width()),
+                            std::max(largestView.height(), view.height()));
+    };
+    if (m_screenSession)
+        fold(*m_screenSession);
+    if (m_group) {
+        for (const Member &member : m_group->members) {
+            if (member.screen)
+                fold(*member.screen);
+        }
+    }
+    if (!sawPeer)
+        return;
+    m_screenEncoder->setLevel(worstLevel);
+    m_screenEncoder->setRemoteView(largestView, anyoneWatching);
+}
+
 AudioFrame CallEngine::pullPlaybackFrame()
 {
     // Before the call is answered there is no session at all and the frame is
@@ -1200,6 +1483,14 @@ void CallEngine::refreshParticipantLevels()
         if (member.cameraOn && now - member.lastVideoMs > videoStaleMs) {
             member.cameraOn = false;
             emit participantVideoFrame(member.info.peer.device, QImage());
+        }
+        // A share heartbeats every second even when nothing moves, so silence
+        // this long is a share that ended without its stop packet arriving.
+        if (member.screenOn && now - member.lastScreenMs > screenStaleMs) {
+            member.screenOn = false;
+            if (member.screen)
+                member.screen->resetReceiver();
+            emit participantScreenFrame(member.info.peer.device, {});
         }
     }
     if (changed)

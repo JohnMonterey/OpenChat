@@ -2,7 +2,9 @@
 
 #include "controllers/ChatController.h"
 
+#include <QDateTime>
 #include <QTimer>
+#include <QVariantMap>
 
 namespace OpenChat {
 
@@ -11,6 +13,14 @@ namespace {
 // The call duration only ever changes at second resolution, so refreshing it
 // once a second is exactly enough.
 constexpr int durationRefreshMs = 1000;
+
+// The sharer's own confirmation of what is going out. It is deliberately a
+// thumbnail and deliberately slow: it exists so nobody shares the wrong window,
+// not so they can read their own screen twice. A full-resolution local copy
+// would double the memory the whole feature costs, for a picture the user is
+// already looking at directly.
+constexpr int screenPreviewEdge = 240;
+constexpr int screenPreviewIntervalMs = 250;
 
 [[nodiscard]] QString formatDuration(qint64 milliseconds)
 {
@@ -49,6 +59,18 @@ CallController::CallController(QObject *parent)
         m_cameraError = message;
         emit videoChanged();
     });
+    m_screenCapture.onFrame = [this](const ScreenFrameView &view) {
+        onScreenFrameCaptured(view);
+    };
+    connect(&m_screenCapture, &QtScreenCapture::failed, this,
+            [this](const QString &message, bool permanent) {
+                if (permanent)
+                    m_screenShareUnsupported = true;
+                stopScreenShare();
+                m_screenShareError = message;
+                emit screenShareChanged();
+            });
+
     m_durationTimer = new QTimer(this);
     m_durationTimer->setInterval(durationRefreshMs);
     connect(m_durationTimer, &QTimer::timeout, this, [this] {
@@ -206,6 +228,232 @@ void CallController::setRemoteVideo(const QImage &image)
         emit videoChanged();
 }
 
+bool CallController::screenShareAvailable() const noexcept
+{
+    return m_engine != nullptr && !m_screenShareUnsupported;
+}
+
+bool CallController::remoteScreenShareActive() const
+{
+    return m_remoteScreen != nullptr || m_participants.anyoneSharingScreen();
+}
+
+double CallController::remoteScreenAspect() const
+{
+    if (!m_remoteScreen || m_remoteScreen->size().height() <= 0)
+        return 16.0 / 9.0;
+    return double(m_remoteScreen->size().width()) / m_remoteScreen->size().height();
+}
+
+void CallController::toggleScreenShare()
+{
+    if (m_screenShareEnabled) {
+        stopScreenShare();
+        return;
+    }
+    if (!inCall() || isRinging() || callEnded() || !screenShareAvailable())
+        return;
+    m_screenShareError.clear();
+    emit screenShareChanged();
+    // Which screen or window goes out is the user's decision, always: the view
+    // answers this by offering the picker.
+    emit screenSourcePickRequested();
+}
+
+QVariantList CallController::screenShareSources()
+{
+    m_screenSources = QtScreenCapture::availableSources();
+    QVariantList rows;
+    rows.reserve(m_screenSources.size());
+    for (const ScreenShareSource &source : std::as_const(m_screenSources)) {
+        QVariantMap row;
+        row.insert(QStringLiteral("name"), source.name);
+        row.insert(QStringLiteral("id"), source.id);
+        row.insert(QStringLiteral("isScreen"), source.kind == ScreenShareSource::Kind::Screen);
+        rows.append(row);
+    }
+    return rows;
+}
+
+void CallController::startScreenShare(int sourceIndex)
+{
+    if (!inCall() || isRinging() || callEnded() || m_engine == nullptr)
+        return;
+    // A stale index means the list was enumerated and then something closed.
+    // Refusing is the whole handling: nothing was started, so nothing leaks.
+    if (sourceIndex < 0 || sourceIndex >= m_screenSources.size()) {
+        m_screenShareError = QStringLiteral("That screen or window is no longer available.");
+        emit screenShareChanged();
+        return;
+    }
+    if (!m_engine->startScreenShare()) {
+        m_screenShareError = QStringLiteral("The call is not ready to share a screen yet.");
+        emit screenShareChanged();
+        return;
+    }
+    const ScreenShareSource source = m_screenSources.at(sourceIndex);
+    m_screenShareError.clear();
+    m_screenShareEnabled = true;
+    m_screenShareSourceName = source.name;
+    m_lastPreviewMs = 0;
+    m_appliedCaptureFps = 0;
+    m_screenCapture.start(source);
+    emit screenShareChanged();
+}
+
+void CallController::stopScreenShare()
+{
+    const bool wasEnabled = m_screenShareEnabled;
+    // The capture goes down before the engine is told, so no frame can arrive
+    // for a session that is already releasing its buffers.
+    m_screenCapture.stop();
+    m_screenShareEnabled = false;
+    m_screenShareSourceName.clear();
+    m_localScreenPreview = QImage();
+    m_lastPreviewMs = 0;
+    if (m_engine != nullptr)
+        m_engine->stopScreenShare();
+    if (wasEnabled) {
+        emit localScreenChanged();
+        emit screenShareChanged();
+    }
+}
+
+void CallController::onScreenFrameCaptured(const ScreenFrameView &view)
+{
+    if (!m_screenShareEnabled || m_engine == nullptr || !view.isValid())
+        return;
+    m_engine->sendScreenFrame(view);
+    // The encoder decides the rate — from the rung it is on, and from whether
+    // anyone is displaying the share at all — and the capture follows it.
+    const int wanted = m_engine->screenShareTargetFps();
+    if (wanted != m_appliedCaptureFps) {
+        m_appliedCaptureFps = wanted;
+        m_screenCapture.setTargetFps(wanted);
+    }
+    updateScreenPreview(view, QDateTime::currentMSecsSinceEpoch());
+}
+
+void CallController::updateScreenPreview(const ScreenFrameView &view, qint64 nowMs)
+{
+    if (m_lastPreviewMs != 0 && nowMs - m_lastPreviewMs < screenPreviewIntervalMs)
+        return;
+    m_lastPreviewMs = nowMs;
+    // Borrowed pixels: the scale reads them in place and produces its own small
+    // image, so nothing desktop-sized is ever allocated for the preview.
+    const QImage source(view.bits, view.width, view.height, view.bytesPerLine, view.format);
+    const QImage scaled = source.scaled(screenPreviewEdge, screenPreviewEdge,
+                                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    if (scaled.isNull())
+        return;
+    // Forced opaque: a capture is free to leave its alpha channel as noise.
+    m_localScreenPreview = scaled.convertToFormat(QImage::Format_RGB32);
+    emit localScreenChanged();
+}
+
+void CallController::setRemoteScreen(const ScreenCanvasPtr &canvas)
+{
+    const bool wasActive = m_remoteScreen != nullptr;
+    m_remoteScreen = canvas;
+    m_remoteScreenDevice.clear();
+    m_remoteScreenSharerName = canvas ? m_peerName : QString();
+    emit remoteScreenChanged();
+    if (wasActive != (canvas != nullptr))
+        emit screenShareChanged();
+}
+
+void CallController::refreshGroupScreenStage()
+{
+    ScreenCanvasPtr staged;
+    QString stagedDevice;
+    QString stagedName;
+    for (const CallParticipantRow &row : m_participants.participants()) {
+        if (!row.screenCanvas)
+            continue;
+        // Whoever already holds the stage keeps it; only when they stop does
+        // somebody else take it, so the view does not flip between desktops.
+        if (row.deviceId == m_remoteScreenDevice) {
+            staged = row.screenCanvas;
+            stagedDevice = row.deviceId;
+            stagedName = row.name;
+            break;
+        }
+        if (!staged) {
+            staged = row.screenCanvas;
+            stagedDevice = row.deviceId;
+            stagedName = row.name;
+        }
+    }
+    const bool wasActive = m_remoteScreen != nullptr;
+    const bool stageMoved = stagedDevice != m_remoteScreenDevice;
+    m_remoteScreen = staged;
+    m_remoteScreenDevice = stagedDevice;
+    m_remoteScreenSharerName = stagedName;
+    emit remoteScreenChanged();
+    if (wasActive != (staged != nullptr) || stageMoved)
+        emit screenShareChanged();
+}
+
+void CallController::setRemoteScreenViewSize(int width, int height)
+{
+    if (m_engine == nullptr)
+        return;
+    const QSize size(std::max(0, width), std::max(0, height));
+    if (m_remoteScreenDevice.isEmpty()) {
+        m_engine->setScreenViewSize(size);
+        return;
+    }
+    // Only the member on the stage is being displayed. Everyone else is told
+    // their share has no window here, so their encoder idles instead of
+    // encoding a desktop nobody is looking at.
+    for (const CallParticipantRow &row : m_participants.participants()) {
+        const auto device = DeviceId::fromBytes(QByteArray::fromHex(row.deviceId.toLatin1()));
+        if (!device)
+            continue;
+        m_engine->setScreenViewSize(*device, row.deviceId == m_remoteScreenDevice ? size : QSize());
+    }
+}
+
+void CallController::setParticipantScreenViewSize(const QString &deviceId, int width, int height)
+{
+    if (m_engine == nullptr)
+        return;
+    const auto device = DeviceId::fromBytes(QByteArray::fromHex(deviceId.toLatin1()));
+    if (!device)
+        return;
+    m_engine->setScreenViewSize(*device, QSize(std::max(0, width), std::max(0, height)));
+}
+
+QString CallController::screenShareDiagnostics() const
+{
+    if (m_engine == nullptr)
+        return {};
+    const ScreenShareStats stats = m_engine->screenShareStats();
+    return QStringLiteral("%1x%2 L%3 %4fps q%5%6 | tiles %7/%8 | %9 B in %10 us | "
+                          "sent %11 idle %12 paced %13 | loss %14% rtt %15 ms | view %16x%17 | "
+                          "rx %18 frames, %19 tiles, %20 rejected")
+        .arg(stats.outputSize.width())
+        .arg(stats.outputSize.height())
+        .arg(stats.level)
+        .arg(stats.targetFps)
+        .arg(stats.jpegQuality)
+        .arg(stats.motionMode ? QStringLiteral(" motion") : QString())
+        .arg(stats.lastTileCount)
+        .arg(stats.totalTiles)
+        .arg(stats.lastPayloadBytes)
+        .arg(stats.lastEncodeUs)
+        .arg(stats.framesSent)
+        .arg(stats.framesIdle)
+        .arg(stats.framesSkipped)
+        .arg(stats.lossRatio * 100.0, 0, 'f', 1)
+        .arg(stats.rttMs)
+        .arg(stats.remoteViewSize.width())
+        .arg(stats.remoteViewSize.height())
+        .arg(stats.framesReceived)
+        .arg(stats.tilesApplied)
+        .arg(stats.framesRejected);
+}
+
 void CallController::setPreviewVideo(const QImage &local, const QImage &remote)
 {
     if (m_engine)
@@ -215,6 +463,18 @@ void CallController::setPreviewVideo(const QImage &local, const QImage &remote)
     setRemoteVideo(remote);
     emit localVideoChanged();
     emit videoChanged();
+}
+
+void CallController::setPreviewScreenShare(const ScreenCanvasPtr &canvas,
+                                           const QString &sharerName)
+{
+    if (m_engine)
+        return;
+    m_remoteScreen = canvas;
+    m_remoteScreenDevice.clear();
+    m_remoteScreenSharerName = sharerName;
+    emit remoteScreenChanged();
+    emit screenShareChanged();
 }
 
 void CallController::dismissCall()
@@ -242,6 +502,12 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
     setLocalIdentity(chats->localUserName(), chats->localAvatarKey());
 
     connect(engine, &CallEngine::remoteVideoFrame, this, &CallController::setRemoteVideo);
+    connect(engine, &CallEngine::remoteScreenFrame, this, &CallController::setRemoteScreen);
+    connect(engine, &CallEngine::participantScreenFrame, this,
+            [this](const DeviceId &device, const ScreenCanvasPtr &canvas) {
+                m_participants.setScreenCanvas(device.toHex(), canvas);
+                refreshGroupScreenStage();
+            });
     connect(engine, &CallEngine::stateChanged, this, &CallController::syncFromEngine);
     connect(engine, &CallEngine::mutedChanged, this, &CallController::syncFromEngine);
     connect(engine, &CallEngine::levelsChanged, this, &CallController::syncLevels);
@@ -277,9 +543,14 @@ void CallController::syncFromEngine()
     m_muted = m_engine->isMuted();
     if (m_state == CallState::Idle || m_state == CallState::Ended || isRinging()) {
         stopCamera();
+        stopScreenShare();
         setRemoteVideo(QImage());
+        m_remoteScreenDevice.clear();
+        setRemoteScreen({});
         m_cameraError.clear();
+        m_screenShareError.clear();
         emit videoChanged();
+        emit screenShareChanged();
     }
 
     const CallEngine::CallPeer &peer = m_engine->peer();

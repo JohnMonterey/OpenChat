@@ -88,6 +88,7 @@ Window {
 
                     CallHeader {
                         maxVideoHeight: Math.min(230, root.height * 0.34)
+                        maxShareHeight: Math.min(300, root.height * 0.32)
                         controller: root.callController
                     }
                 }
@@ -364,5 +365,35 @@ Window {
     // is closed, so the default and capture paths render unchanged.
     SafetyNumberDialog {
         contactController: root.contactController
+    }
+
+    // Screen-source picker: raised by the call surface's share button, which
+    // never guesses what to capture. It floats above every section like the
+    // other overlays and, with no call bridge attached, never loads at all.
+    Loader {
+        id: screenSharePickerLoader
+        anchors.fill: parent
+        active: root.callController !== null
+        z: 20
+
+        sourceComponent: ScreenSharePicker {
+            controller: root.callController
+        }
+    }
+
+    Connections {
+        target: root.callController
+        ignoreUnknownSignals: true
+
+        function onScreenSourcePickRequested() {
+            if (screenSharePickerLoader.item)
+                screenSharePickerLoader.item.show();
+        }
+
+        // A call that ends while the picker is open takes the picker with it.
+        function onCallChanged() {
+            if (screenSharePickerLoader.item && !root.inCall)
+                screenSharePickerLoader.item.dismiss();
+        }
     }
 }

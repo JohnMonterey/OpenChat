@@ -3,6 +3,7 @@
 #include "AudioTestSupport.h"
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
+#include "call/CallScreenSession.h"
 #include "call/CallSignal.h"
 #include "call/CallTransport.h"
 #include "media/AudioConvert.h"
@@ -70,6 +71,24 @@ void MeshTransport::sendMedia(const ConversationId &conversation, const DeviceId
     const auto it = mesh->byDevice.find(recipientDevice.bytes());
     if (it != mesh->byDevice.end() && it->second->onMedia)
         it->second->onMedia(conversation, localDevice, packet);
+}
+
+// A desktop of flat regions and hard edges, which is what a share is made of.
+[[nodiscard]] QImage desktopImage(QSize size, int seed = 1)
+{
+    QImage image(size, QImage::Format_RGB32);
+    image.fill(QColor(24, 30, 38));
+    for (int band = 0; band < 5; ++band) {
+        const int y = 18 + band * 36 + seed;
+        if (y + 10 >= size.height())
+            break;
+        for (int line = y; line < y + 10; ++line) {
+            auto *pixels = reinterpret_cast<QRgb *>(image.scanLine(line));
+            for (int x = 12; x < size.width() - 12 && x < 12 + 70 + band * 25 + seed * 5; ++x)
+                pixels[x] = qRgb(214, 226, 240);
+        }
+    }
+    return image;
 }
 
 struct Endpoint final {
@@ -498,6 +517,119 @@ private slots:
         QVERIFY(carolVideo.last().second.isNull());
         // Video never disturbs the audio paths.
         QCOMPARE(m_bob.engine->state(), CallState::Active);
+    }
+
+    void oneSharedScreenIsEncodedOnceAndSealedForEveryMember()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->acceptCall();
+        exchangeMedia();
+
+        // Captured by hand: a DeviceId cannot ride through a QSignalSpy.
+        QList<std::pair<QByteArray, ScreenCanvasPtr>> bobScreen;
+        QList<std::pair<QByteArray, ScreenCanvasPtr>> carolScreen;
+        connect(m_bob.engine.get(), &CallEngine::participantScreenFrame, this,
+                [&](const DeviceId &device, const ScreenCanvasPtr &canvas) {
+                    bobScreen.append({device.bytes(), canvas});
+                });
+        connect(m_carol.engine.get(), &CallEngine::participantScreenFrame, this,
+                [&](const DeviceId &device, const ScreenCanvasPtr &canvas) {
+                    carolScreen.append({device.bytes(), canvas});
+                });
+
+        const QImage desktop = desktopImage(QSize(1024, 640));
+        QVERIFY(m_alice.engine->startScreenShare());
+        for (int i = 0; i < 400; ++i) {
+            m_alice.nowMs += 200;
+            m_alice.engine->sendScreenFrame(ScreenFrameView::fromImage(desktop));
+            if (!bobScreen.isEmpty() && bobScreen.last().second
+                && bobScreen.last().second->isComplete())
+                break;
+        }
+        QVERIFY(!bobScreen.isEmpty());
+        QVERIFY(!carolScreen.isEmpty());
+        QCOMPARE(bobScreen.first().first, m_alice.transport.localDevice.bytes());
+        QCOMPARE(carolScreen.first().first, m_alice.transport.localDevice.bytes());
+
+        // Both members reconstructed the same desktop from their own sealed
+        // copies, and each holds its own canvas rather than sharing one.
+        const ScreenCanvasPtr bobCanvas = bobScreen.last().second;
+        const ScreenCanvasPtr carolCanvas = carolScreen.last().second;
+        QVERIFY(bobCanvas && carolCanvas);
+        QVERIFY(bobCanvas != carolCanvas);
+        QCOMPARE(bobCanvas->size(), desktop.size());
+        QCOMPARE(carolCanvas->size(), desktop.size());
+        QCOMPARE(bobCanvas->image().pixel(500, 400), desktop.pixel(500, 400));
+        QCOMPARE(carolCanvas->image().pixel(20, 22), desktop.pixel(20, 22));
+
+        // The desktop was hashed and encoded ONCE for the whole mesh, not once
+        // per member: that is the entire point of the shared encoder. Every
+        // frame produced went to both members.
+        const ScreenShareStats stats = m_alice.engine->screenShareStats();
+        QVERIFY(stats.framesSent > 0);
+        int bobPackets = 0;
+        int carolPackets = 0;
+        for (const DeviceId &recipient : m_alice.transport.mediaRecipients) {
+            if (recipient.bytes() == m_bob.transport.localDevice.bytes())
+                ++bobPackets;
+            else if (recipient.bytes() == m_carol.transport.localDevice.bytes())
+                ++carolPackets;
+        }
+        QCOMPARE(bobPackets, carolPackets);
+        QVERIFY(bobPackets >= int(stats.framesSent));
+
+        // Stopping clears it for everyone at once.
+        m_alice.engine->stopScreenShare();
+        QVERIFY(!bobScreen.last().second);
+        QVERIFY(!carolScreen.last().second);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QCOMPARE(m_carol.engine->state(), CallState::Active);
+    }
+
+    void aMemberLeavingMidShareTakesTheirViewOfItWithThem()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->acceptCall();
+        exchangeMedia();
+
+        QList<ScreenCanvasPtr> carolScreen;
+        connect(m_carol.engine.get(), &CallEngine::participantScreenFrame, this,
+                [&](const DeviceId &, const ScreenCanvasPtr &canvas) {
+                    carolScreen.append(canvas);
+                });
+        // Alice's view of Bob's share, so that Bob leaving can be seen to clear
+        // it on every other member's side too.
+        QList<ScreenCanvasPtr> aliceScreen;
+        connect(m_alice.engine.get(), &CallEngine::participantScreenFrame, this,
+                [&](const DeviceId &, const ScreenCanvasPtr &canvas) {
+                    aliceScreen.append(canvas);
+                });
+
+        const QImage desktop = desktopImage(QSize(800, 600));
+        QVERIFY(m_bob.engine->startScreenShare());
+        for (int i = 0; i < 400; ++i) {
+            m_bob.nowMs += 200;
+            m_bob.engine->sendScreenFrame(ScreenFrameView::fromImage(desktop));
+            if (!carolScreen.isEmpty() && carolScreen.last() && carolScreen.last()->isComplete())
+                break;
+        }
+        QVERIFY(!carolScreen.isEmpty() && carolScreen.last());
+        QVERIFY(!aliceScreen.isEmpty() && aliceScreen.last());
+
+        // Bob leaves mid-share. Everyone else's view of it closes, and Bob's
+        // own sending half is released with the call.
+        m_bob.engine->hangUp();
+        QVERIFY2(!carolScreen.last(), "a departed member's share was left on screen");
+        QVERIFY2(!aliceScreen.last(), "a departed member's share was left on screen");
+        QVERIFY(!m_bob.engine->isScreenSharing());
+        QCOMPARE(m_bob.engine->screenShareStats().outputSize, QSize());
+        // The call carries on for the two who are left.
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_carol.engine->state(), CallState::Active);
     }
 
     void groupCallsNeedALocalDeviceAndSomeoneToCall()

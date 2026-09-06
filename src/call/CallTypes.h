@@ -15,6 +15,15 @@ enum class CallDirection {
     Incoming,
 };
 
+// What a video track on a call actually shows. A call can carry both at once,
+// and the receiving end has to know which is which to put the picture in the
+// right place, so the distinction is part of the media path rather than a UI
+// guess: each source has its own wire version and its own key schedule.
+enum class MediaSourceKind {
+    Camera,
+    Screen,
+};
+
 // The observable lifecycle of a call. Only Active carries media; every other
 // state is a transition the UI renders differently.
 enum class CallState {

@@ -11,15 +11,25 @@ Item {
     // "accept" (green), "end" (red), or anything else for the neutral chrome.
     property string accent: "neutral"
     property bool cameraIcon: false
+    property bool screenIcon: false
     property bool checked: false
-    activeFocusOnTab: true
+    // A control that is present but cannot be used right now: greyed, still
+    // focusable and still readable, so it can explain itself through its
+    // tooltip rather than vanishing and leaving the row a different shape.
+    property bool disabled: false
+    // Shown on hover. Says what the button does, and when it is disabled, why.
+    property string tooltip: ""
+    readonly property bool iconic: cameraIcon || screenIcon
+    activeFocusOnTab: !disabled
+    opacity: disabled ? 0.45 : 1.0
     Accessible.role: Accessible.Button
     Accessible.name: label
-    Accessible.checkable: cameraIcon
+    Accessible.description: tooltip
+    Accessible.checkable: iconic
     Accessible.checked: checked
-    Accessible.onPressAction: clicked()
-    Keys.onSpacePressed: clicked()
-    Keys.onReturnPressed: clicked()
+    Accessible.onPressAction: if (!button.disabled) clicked()
+    Keys.onSpacePressed: if (!button.disabled) clicked()
+    Keys.onReturnPressed: if (!button.disabled) clicked()
     signal clicked
 
     readonly property color topColor: accent === "accept" ? Theme.acceptTop
@@ -32,7 +42,7 @@ Item {
                                     : accent === "end" ? Theme.endCallBorder : Theme.buttonBorder
     readonly property bool onAccent: accent === "accept" || accent === "end"
 
-    implicitWidth: caption.implicitWidth + 34 + (cameraIcon ? 24 : 0)
+    implicitWidth: caption.implicitWidth + 34 + (iconic ? 24 : 0)
     implicitHeight: 30
     width: implicitWidth
     height: implicitHeight
@@ -41,7 +51,8 @@ Item {
         anchors.fill: parent
         radius: 4
         border.width: 1
-        border.color: button.activeFocus || button.checked ? Theme.focusBorder : button.rimColor
+        border.color: (button.activeFocus || button.checked) && !button.disabled
+                      ? Theme.focusBorder : button.rimColor
         gradient: Gradient {
             GradientStop { position: 0; color: button.topColor }
             GradientStop { position: 0.5; color: button.midColor }
@@ -55,7 +66,7 @@ Item {
             anchors.margins: 1
             height: parent.height / 2
             radius: 3
-            opacity: buttonMouse.containsMouse ? 0.42 : 0.28
+            opacity: buttonMouse.containsMouse && !button.disabled ? 0.42 : 0.28
             gradient: Gradient {
                 GradientStop { position: 0; color: Theme.glossStrong }
                 GradientStop { position: 1; color: "#ffffff00" }
@@ -83,6 +94,24 @@ Item {
                 }
             }
         }
+        // A display on a stand, drawn to the same 17px box and the same accent as
+        // the camera above it: the two controls are siblings and look it.
+        Item {
+            visible: button.screenIcon
+            width: 17
+            height: 17
+
+            Rectangle {
+                x: 1; y: 3; width: 15; height: 10; radius: 2
+                color: "transparent"
+                border.width: 1.5
+                border.color: button.checked ? Theme.cameraAccent : Theme.buttonText
+            }
+            Rectangle {
+                x: 6; y: 13; width: 5; height: 1.5
+                color: button.checked ? Theme.cameraAccent : Theme.buttonText
+            }
+        }
         Text {
             id: caption
             text: button.label
@@ -97,7 +126,37 @@ Item {
         id: buttonMouse
         anchors.fill: parent
         hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
-        onClicked: button.clicked()
+        cursorShape: button.disabled ? Qt.ArrowCursor : Qt.PointingHandCursor
+        onClicked: {
+            if (!button.disabled)
+                button.clicked();
+        }
+    }
+
+    // The tooltip, in the same flat card the rest of the app uses for
+    // transient explanations.
+    Rectangle {
+        objectName: "callActionTooltip"
+        visible: button.tooltip.length > 0 && buttonMouse.containsMouse
+        anchors.bottom: parent.top
+        anchors.bottomMargin: 6
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: tooltipText.implicitWidth + 16
+        height: tooltipText.implicitHeight + 10
+        radius: 3
+        color: Theme.contentBackground
+        border.width: 1
+        border.color: Theme.inputBorder
+        z: 10
+
+        Text {
+            id: tooltipText
+            anchors.centerIn: parent
+            text: button.tooltip
+            color: Theme.textPrimary
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+            renderType: Text.NativeRendering
+        }
     }
 }

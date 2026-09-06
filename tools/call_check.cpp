@@ -12,6 +12,12 @@
 //   openchat-call-check --relay https://host/v1 --answer
 //   openchat-call-check --relay https://host/v1 --call <handle-printed-by-the-answerer>
 //
+// Add --screen to carry a synthetic desktop alongside the audio. The calling
+// side shares it; the answering side reconstructs it and reports whether the
+// picture that arrived is the picture that was sent, pixel for pixel in the
+// regions a screen share is supposed to carry losslessly. That is the check
+// that a share works over a REAL network path rather than only in-process.
+//
 // The caller streams a deterministic reference signal at real-time pace; the
 // answerer regenerates the same signal locally and reports how much of it
 // arrived intact. No files are exchanged, so the two sides need share nothing
@@ -25,6 +31,7 @@
 #include "app/ContactRequestService.h"
 #include "app/ProfileSession.h"
 #include "call/CallEngine.h"
+#include "call/CallScreenSession.h"
 #include "call/QtAudioIo.h"
 #include "call/SyncCallTransport.h"
 #include "media/AudioConvert.h"
@@ -33,6 +40,9 @@
 #include "network/RelayTransport.h"
 #include "security/KeyVault.h"
 #include "storage/SqlCipherContactRepository.h"
+
+#include <QImage>
+#include <QPainter>
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -255,6 +265,9 @@ int main(int argc, char *argv[])
     const QCommandLineOption pcmOption(
         QStringLiteral("pcm"),
         QStringLiteral("Force the lossless codec, so frames can be compared exactly."));
+    const QCommandLineOption screenOption(
+        QStringLiteral("screen"),
+        QStringLiteral("Also share a synthetic desktop, and verify it arrived intact."));
     const QCommandLineOption waitOption(
         QStringLiteral("wait"), QStringLiteral("Seconds the answerer waits for a call."),
         QStringLiteral("n"), QStringLiteral("180"));
@@ -264,7 +277,8 @@ int main(int argc, char *argv[])
     const QCommandLineOption prefixOption(
         QStringLiteral("handle-prefix"), QStringLiteral("Prefix for the throwaway handle."),
         QStringLiteral("text"), QStringLiteral("callcheck"));
-    parser.addOptions({relayOption, answerOption, callOption, secondsOption, pcmOption, waitOption,
+    parser.addOptions({relayOption, answerOption, callOption, secondsOption, pcmOption,
+                       screenOption, waitOption,
                        audioOption, prefixOption});
     parser.process(application);
 
@@ -413,10 +427,94 @@ int main(int argc, char *argv[])
         return made;
     };
 
+    // The reference desktop. Built the same way on both sides from nothing but
+    // its size, so the answerer can compare pixel for pixel without the caller
+    // having to send it twice.
+    const auto referenceDesktop = []() {
+        QImage image(1280, 800, QImage::Format_RGB32);
+        image.fill(QColor(24, 30, 38));
+        QPainter painter(&image);
+        painter.fillRect(QRect(0, 0, 1280, 44), QColor(52, 62, 74));
+        for (int line = 0; line < 20; ++line) {
+            painter.fillRect(QRect(36, 74 + line * 30, 90 + (line * 53) % 420, 11),
+                             line % 2 == 0 ? QColor(226, 232, 240) : QColor(150, 200, 240));
+        }
+        painter.end();
+        // A smooth gradient: many colours, so this block takes the JPEG path
+        // while everything above it takes the lossless one. Deterministic, so
+        // both sides can generate the identical reference.
+        for (int y = 420; y < 740; ++y) {
+            auto *pixels = reinterpret_cast<QRgb *>(image.scanLine(y));
+            for (int x = 700; x < 1180; ++x)
+                pixels[x] = qRgb((x * 7) % 256, (y * 5) % 256, ((x + y) * 3) % 256);
+        }
+        return image;
+    }();
+
+    const bool sharingScreen = parser.isSet(screenOption);
+    QImage sharedDesktop = referenceDesktop;
+    QTimer screenTimer;
+    ScreenCanvasPtr receivedDesktop;
+    qint64 screenBytes = 0;
+    int screenUpdates = 0;
+
     // Reports what arrived, by matching each played frame against the reference
     // sequence it should have come from.
     const bool lossless = parser.isSet(pcmOption);
-    const auto report = [&reference, &heard, calling, &source, lossless]() -> int {
+    const auto reportScreen = [&]() -> bool {
+        if (!sharingScreen)
+            return true;
+        if (calling) {
+            say(QStringLiteral("screen     shared %1 updates, %2 KiB")
+                    .arg(screenUpdates)
+                    .arg(screenBytes / 1024));
+            return true;
+        }
+        if (!receivedDesktop) {
+            say(QStringLiteral("screen     NOTHING ARRIVED"));
+            return false;
+        }
+        say(QStringLiteral("screen     received %1x%2 in %3 updates, %4 KiB")
+                .arg(receivedDesktop->size().width())
+                .arg(receivedDesktop->size().height())
+                .arg(screenUpdates)
+                .arg(screenBytes / 1024));
+        if (receivedDesktop->size() != referenceDesktop.size()) {
+            say(QStringLiteral("screen     WRONG SIZE (expected %1x%2)")
+                    .arg(referenceDesktop.width())
+                    .arg(referenceDesktop.height()));
+            return false;
+        }
+        if (!receivedDesktop->isComplete()) {
+            say(QStringLiteral("screen     INCOMPLETE — parts of the desktop never arrived"));
+            return false;
+        }
+        // The backdrop, the header bar and the text are flat or few-coloured,
+        // so they take the lossless path and must come back byte for byte. The
+        // photographic block is JPEG and only has to be close.
+        const QList<QPoint> exact{{10, 300}, {40, 78}, {600, 20}, {1240, 300}, {300, 400}};
+        int wrong = 0;
+        for (const QPoint &at : exact) {
+            if (receivedDesktop->image().pixel(at) != referenceDesktop.pixel(at))
+                ++wrong;
+        }
+        if (wrong > 0) {
+            say(QStringLiteral("screen     %1 of %2 lossless sample points differ")
+                    .arg(wrong)
+                    .arg(exact.size()));
+            return false;
+        }
+        const QColor got = receivedDesktop->image().pixelColor(900, 600);
+        const QColor want = referenceDesktop.pixelColor(900, 600);
+        const int drift = qAbs(got.red() - want.red()) + qAbs(got.green() - want.green())
+            + qAbs(got.blue() - want.blue());
+        say(QStringLiteral("screen     lossless regions exact; photographic drift %1/765")
+                .arg(drift));
+        return drift < 120;
+    };
+
+    const auto report = [&reference, &heard, calling, &source, lossless, &reportScreen]() -> int {
+        const bool screenOk = reportScreen();
         if (calling) {
             // This side sent the audio; the other side is the one that can say
             // whether it arrived. Reporting a match here would be measuring the
@@ -425,7 +523,7 @@ int main(int argc, char *argv[])
                     .arg(source ? source->sent() : 0)
                     .arg(reference.size()));
             say(QStringLiteral("RESULT     see the answering side for the verdict"));
-            return 0;
+            return screenOk ? 0 : 1;
         }
         // A compressing codec delays its output by a fraction of a frame, so a
         // decoded frame straddles two reference frames and the best per-frame
@@ -492,7 +590,9 @@ int main(int argc, char *argv[])
         }
         say(good ? QStringLiteral("RESULT     PASS — audio crossed the relay intact")
                  : QStringLiteral("RESULT     FAIL — too much of the audio did not arrive"));
-        return good ? 0 : 1;
+        if (!screenOk)
+            say(QStringLiteral("RESULT     FAIL — the shared screen did not arrive intact"));
+        return good && screenOk ? 0 : 1;
     };
 
     const auto finish = [&application, &exitCode](int code) {
@@ -524,8 +624,54 @@ int main(int argc, char *argv[])
         call = std::make_unique<CallEngine>(config, *callTransport, devices);
         call->setSoundsEnabled(false); // the tones would mix into the measurement
 
+        // The answering side reconstructs whatever the caller shares.
+        QObject::connect(call.get(), &CallEngine::remoteScreenFrame, &application,
+                         [&](const ScreenCanvasPtr &canvas) {
+                             // Ending the call correctly clears the view, so the
+                             // last picture that actually arrived is what gets
+                             // reported rather than the null that follows it.
+                             if (!canvas)
+                                 return;
+                             receivedDesktop = canvas;
+                             ++screenUpdates;
+                         });
+
+        // The calling side's capture: a synthetic desktop rather than a real
+        // one, so the two sides can agree on what should have arrived. The
+        // pacing is the encoder's, exactly as a real capture's would be.
+        screenTimer.setInterval(33);
+        QObject::connect(&screenTimer, &QTimer::timeout, &application, [&] {
+            if (!call || !call->isScreenSharing())
+                return;
+            // A moving cursor, so the share is not one motionless frame.
+            const int step = (screenUpdates * 7) % 900;
+            QPainter painter(&sharedDesktop);
+            painter.fillRect(QRect(0, 760, 1280, 40), QColor(24, 30, 38));
+            painter.fillRect(QRect(120 + step, 764, 26, 26), QColor(250, 200, 60));
+            painter.end();
+            ++screenUpdates;
+            call->sendScreenFrame(ScreenFrameView::fromImage(sharedDesktop));
+            screenBytes = qint64(call->screenShareStats().bytesSent);
+            const int wanted = call->screenShareTargetFps();
+            const int interval = std::max(8, 1000 / std::max(1, wanted));
+            if (screenTimer.interval() != interval)
+                screenTimer.setInterval(interval);
+        });
+
         QObject::connect(call.get(), &CallEngine::stateChanged, &application, [&] {
             say(QStringLiteral("call state %1").arg(callStateName(call->state())));
+            if (sharingScreen && calling
+                && (call->state() == CallState::Connecting
+                    || call->state() == CallState::Active)) {
+                if (!call->isScreenSharing() && call->startScreenShare()) {
+                    say(QStringLiteral("sharing the reference desktop"));
+                    screenTimer.start();
+                }
+            }
+            if (call->state() == CallState::Ended) {
+                screenTimer.stop();
+                call->stopScreenShare();
+            }
             // Capture starts at Connecting, the moment the call is answered and
             // the devices are up — not at Active, which is itself a consequence
             // of the peer's media arriving.

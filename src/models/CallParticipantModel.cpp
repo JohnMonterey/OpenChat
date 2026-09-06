@@ -1,5 +1,7 @@
 #include "models/CallParticipantModel.h"
 
+#include <algorithm>
+
 namespace OpenChat {
 
 CallParticipantModel::CallParticipantModel(QObject *parent)
@@ -41,6 +43,10 @@ QVariant CallParticipantModel::data(const QModelIndex &index, int role) const
     case VideoAspectRole:
         return row.videoFrame.isNull() ? 4.0 / 3.0
                                        : double(row.videoFrame.width()) / row.videoFrame.height();
+    case ScreenCanvasRole:
+        return QVariant::fromValue(row.screenCanvas);
+    case ScreenSharingRole:
+        return row.screenCanvas != nullptr;
     default:
         return {};
     }
@@ -60,6 +66,8 @@ QHash<int, QByteArray> CallParticipantModel::roleNames() const
         {VideoFrameRole, "videoFrame"},
         {CameraEnabledRole, "cameraEnabled"},
         {VideoAspectRole, "videoAspect"},
+        {ScreenCanvasRole, "screenCanvas"},
+        {ScreenSharingRole, "screenSharing"},
     };
 }
 
@@ -72,8 +80,10 @@ void CallParticipantModel::setParticipants(QVector<CallParticipantRow> rows)
 {
     for (CallParticipantRow &row : rows) {
         for (const CallParticipantRow &existing : m_rows)
-            if (existing.deviceId == row.deviceId && row.joined)
+            if (existing.deviceId == row.deviceId && row.joined) {
                 row.videoFrame = existing.videoFrame;
+                row.screenCanvas = existing.screenCanvas;
+            }
     }
     // Same devices in the same order: update in place so the delegates keep
     // their state (and their video items) rather than being rebuilt.
@@ -107,6 +117,27 @@ void CallParticipantModel::setVideoFrame(const QString &deviceId, const QImage &
         emit dataChanged(index(row), index(row), roles);
         return;
     }
+}
+
+void CallParticipantModel::setScreenCanvas(const QString &deviceId, const ScreenCanvasPtr &canvas)
+{
+    for (int row = 0; row < m_rows.size(); ++row) {
+        if (m_rows[row].deviceId != deviceId)
+            continue;
+        const bool wasSharing = m_rows[row].screenCanvas != nullptr;
+        m_rows[row].screenCanvas = canvas;
+        QList<int> roles{ScreenCanvasRole};
+        if (wasSharing != (canvas != nullptr))
+            roles << ScreenSharingRole;
+        emit dataChanged(index(row), index(row), roles);
+        return;
+    }
+}
+
+bool CallParticipantModel::anyoneSharingScreen() const
+{
+    return std::any_of(m_rows.cbegin(), m_rows.cend(),
+                       [](const CallParticipantRow &row) { return row.screenCanvas != nullptr; });
 }
 
 } // namespace OpenChat

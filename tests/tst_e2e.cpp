@@ -14,6 +14,8 @@
 // requires the server to echo `openchat.ciphertext.v1`. The proxy injects that
 // echo into the 101 response, just as Caddy does with a header_down directive.
 
+#include <QPainter>
+
 #include "app/AccountBootstrap.h"
 #include "app/AddContactService.h"
 #include "app/ContactRequestService.h"
@@ -25,6 +27,7 @@
 #include "AudioTestSupport.h"
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
+#include "call/CallScreenSession.h"
 #include "call/SyncCallTransport.h"
 #include "controllers/ChatController.h"
 #include "media/AudioConvert.h"
@@ -317,7 +320,7 @@ private slots:
 
     void pipelineDeliversMessagesOverRealTls();
     void relockedProfileRelinksWithoutTokens();
-    void callCarriesAudioAndVideoOverRealTls();
+    void callCarriesAudioVideoAndAScreenOverRealTls();
     void groupChatAndGroupCallOverRealTls();
 
 private:
@@ -800,7 +803,7 @@ void EndToEndTest::relockedProfileRelinksWithoutTokens()
     carol.session->lock();
 }
 
-void EndToEndTest::callCarriesAudioAndVideoOverRealTls()
+void EndToEndTest::callCarriesAudioVideoAndAScreenOverRealTls()
 {
     if (!m_available)
         QSKIP("PostgreSQL not available for the E2E test");
@@ -962,6 +965,75 @@ void EndToEndTest::callCarriesAudioAndVideoOverRealTls()
     QTRY_VERIFY_WITH_TIMEOUT(qvariant_cast<QImage>(bobVideo.last().first()).isNull(), 5000);
     QCOMPARE(bobCall.state(), CallState::Active);
 
+    // --- A shared screen over the same real path: real TLS, a real relay, a
+    //     real socket, and the tile encoder rather than the camera codec. ---
+    QList<OpenChat::ScreenCanvasPtr> bobScreen;
+    connect(&bobCall, &CallEngine::remoteScreenFrame, this,
+            [&](const OpenChat::ScreenCanvasPtr &canvas) { bobScreen.append(canvas); });
+
+    // A desktop, not a photograph: flat backdrop, a header bar, and hard-edged
+    // text — the content a screen share exists to carry legibly.
+    const auto makeDesktop = [](QSize size, int seed) {
+        QImage image(size, QImage::Format_RGB32);
+        image.fill(QColor(24, 30, 38));
+        QPainter painter(&image);
+        painter.fillRect(QRect(0, 0, size.width(), 40), QColor(52, 62, 74));
+        for (int line = 0; line < 14; ++line) {
+            const int y = 70 + line * 24;
+            if (y + 10 >= size.height())
+                break;
+            painter.fillRect(QRect(30, y, 80 + (line * 41 + seed * 17) % 380, 10),
+                             line % 2 == 0 ? QColor(226, 232, 240) : QColor(150, 200, 240));
+        }
+        return image;
+    };
+
+    const auto driveShare = [&](const QImage &desktop, int maxFrames) {
+        for (int i = 0; i < maxFrames; ++i) {
+            aliceCall.sendScreenFrame(OpenChat::ScreenFrameView::fromImage(desktop));
+            QTest::qWait(15);
+            if (!bobScreen.isEmpty() && bobScreen.last() && bobScreen.last()->isComplete()
+                && bobScreen.last()->size() == desktop.size())
+                return true;
+        }
+        return false;
+    };
+
+    const QImage desktop = makeDesktop(QSize(1280, 800), 1);
+    QVERIFY(aliceCall.startScreenShare());
+    QVERIFY2(driveShare(desktop, 400), "the shared screen never crossed the relay intact");
+
+    const OpenChat::ScreenCanvasPtr received = bobScreen.last();
+    QCOMPARE(received->size(), desktop.size());
+    // The flat and hard-edged regions are carried losslessly, which is the
+    // whole reason a screen share is not encoded like a camera.
+    QCOMPARE(received->image().pixel(900, 600), desktop.pixel(900, 600));
+    QCOMPARE(received->image().pixel(40, 74), desktop.pixel(40, 74));
+    QCOMPARE(received->image().pixel(600, 20), desktop.pixel(600, 20));
+    // A share is a distinct source from the camera: Alice's camera picture is
+    // still what arrived on the camera path, not the desktop.
+    QCOMPARE(qvariant_cast<QImage>(bobVideo.last().first()).isNull(), true);
+
+    // Stopping removes the far end's view at once, over the real link.
+    aliceCall.stopScreenShare();
+    QTRY_VERIFY_WITH_TIMEOUT(!bobScreen.isEmpty() && !bobScreen.last(), 15000);
+    QVERIFY(!aliceCall.isScreenSharing());
+
+    // And it can be started again, with a different display geometry, on the
+    // same call and the same connection.
+    const QImage tallDesktop = makeDesktop(QSize(720, 1280), 2);
+    QVERIFY(aliceCall.startScreenShare());
+    QVERIFY2(driveShare(tallDesktop, 400), "a restarted share never crossed the relay");
+    QCOMPARE(bobScreen.last()->size(), tallDesktop.size());
+    QCOMPARE(bobScreen.last()->image().pixel(300, 900), tallDesktop.pixel(300, 900));
+    aliceCall.stopScreenShare();
+    QTRY_VERIFY_WITH_TIMEOUT(!bobScreen.isEmpty() && !bobScreen.last(), 15000);
+
+    // Both calls are still live and still carrying voice: the share never had
+    // to displace anything.
+    QCOMPARE(aliceCall.state(), CallState::Active);
+    QCOMPARE(bobCall.state(), CallState::Active);
+
     // Media rode the unreliable path, so none of it was stored in anyone's inbox
     // and none of it became a message row.
     {
@@ -971,8 +1043,10 @@ void EndToEndTest::callCarriesAudioAndVideoOverRealTls()
         inbox.bindValue(QStringLiteral(":device"), bob.deviceId.bytes());
         QVERIFY(inbox.exec());
         QVERIFY(inbox.next());
-        // Whatever is left is signalling and handshake traffic awaiting an ack;
-        // a stored media frame per 20 ms would put this in the hundreds.
+        // Whatever is left is signalling and handshake traffic awaiting an ack.
+        // A stored frame per 20 ms of audio, or one per screen update, would
+        // put this in the hundreds: the relay routes media and stores none of
+        // it, and it never decodes a pixel of the share to do so.
         QVERIFY2(inbox.value(0).toInt() < 20,
                  qPrintable(QStringLiteral("the relay stored %1 envelopes for Bob; media must "
                                            "not be persisted")

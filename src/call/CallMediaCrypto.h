@@ -40,6 +40,18 @@ struct CallMediaKeySchedule final {
                                                                     const CallId &callId);
     [[nodiscard]] static std::optional<CallMediaKeySchedule> deriveVideo(QByteArrayView secret,
                                                                        const CallId &callId);
+    // The screen share's own domain. A call can carry a camera and a screen at
+    // the same time, and both number their frames from zero, so they must never
+    // share a key: two streams under one key with overlapping sequences is the
+    // exact (key, nonce) collision AES-GCM does not survive.
+    [[nodiscard]] static std::optional<CallMediaKeySchedule> deriveScreen(QByteArrayView secret,
+                                                                         const CallId &callId);
+    // The receiver's congestion reports travel back along the screen path and
+    // number themselves independently, so they get a fourth domain rather than
+    // borrowing the reverse direction of the screen stream — which the peer is
+    // entitled to be using for its own screen at the same moment.
+    [[nodiscard]] static std::optional<CallMediaKeySchedule>
+    deriveScreenFeedback(QByteArrayView secret, const CallId &callId);
 
     // The pair this end uses, given which side of the call it is on.
     [[nodiscard]] const CallMediaKeys &sendKeys(CallDirection direction) const noexcept;

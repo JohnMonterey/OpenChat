@@ -2,6 +2,7 @@
 
 #include "call/AudioIo.h"
 #include "call/CallSession.h"
+#include "call/CallScreenSession.h"
 #include "call/CallVideoSession.h"
 #include "call/CallSounds.h"
 #include "call/CallSignal.h"
@@ -178,6 +179,36 @@ public:
     void setMuted(bool muted);
     void sendVideoFrame(const QImage &image);
 
+    // --- Screen sharing ----------------------------------------------------
+    //
+    // A screen is a second video source alongside the camera, not a replacement
+    // for it: both can run at once, and the far end can tell them apart because
+    // they are separate streams with separate keys.
+
+    // Arms the share. Frames are refused until this is called and again after
+    // stopScreenShare(), so a capture callback still in flight when the user
+    // stops cannot quietly start the whole thing up again. Returns false when
+    // there is no live call to share into.
+    [[nodiscard]] bool startScreenShare();
+    // Encodes and sends one captured desktop frame to every peer in the call.
+    // The view is read and released inside the call; nothing about it is kept.
+    // Cheap to call at any rate — the encoder paces itself and returns without
+    // touching a pixel when a frame arrives too early or nothing has changed.
+    void sendScreenFrame(const ScreenFrameView &frame);
+    // Tells every peer the share is over and releases every buffer the sending
+    // half holds. Safe to call when not sharing.
+    void stopScreenShare();
+    [[nodiscard]] bool isScreenSharing() const noexcept { return m_screenSharing; }
+    // The rate the capture should run at: the encoder's current rung, or a
+    // trickle while nobody on the far end is displaying the share.
+    [[nodiscard]] int screenShareTargetFps() const;
+    // How large an incoming share is being displayed here. An empty size means
+    // it is not on screen, which the sender uses to stop encoding for it.
+    void setScreenViewSize(QSize size);
+    void setScreenViewSize(const DeviceId &device, QSize size);
+    // Development instrumentation for the one-to-one path.
+    [[nodiscard]] ScreenShareStats screenShareStats() const;
+
     // Silences the call's own tones (ring, pick-up, hang-up, mute). The call
     // itself is unaffected; only the interface sounds stop.
     void setSoundsEnabled(bool enabled);
@@ -205,6 +236,12 @@ signals:
     void remoteVideoFrame(const QImage &image);
     // A group member's camera frame (null when their camera is off or gone).
     void participantVideoFrame(const OpenChat::DeviceId &device, const QImage &image);
+    // The peer's shared screen. The canvas is a live surface written in place,
+    // not a frame: holders keep the pointer and repaint its dirty rectangle. A
+    // null pointer means the share ended.
+    void remoteScreenFrame(const OpenChat::ScreenCanvasPtr &canvas);
+    void participantScreenFrame(const OpenChat::DeviceId &device,
+                                const OpenChat::ScreenCanvasPtr &canvas);
     // Who is in a group call, or what they are doing, changed.
     void participantsChanged();
     // A call arrived and is ringing. The UI raises the incoming-call surface.
@@ -221,8 +258,11 @@ private:
         AudioCodecKind codec = AudioCodecKind::Pcm;
         std::unique_ptr<CallSession> session;
         std::unique_ptr<CallVideoSession> video;
+        std::unique_ptr<CallScreenSession> screen;
         qint64 lastVideoMs = 0;
+        qint64 lastScreenMs = 0;
         bool cameraOn = false;
+        bool screenOn = false;
     };
     struct GroupCall final {
         ConversationId conversation = ConversationId::generate();
@@ -282,6 +322,23 @@ private:
     void setState(CallState state);
     void endCall(CallEndReason reason, bool notifyPeer);
 
+    // What one peer's screen packet turned into. Shared by the one-to-one and
+    // the group path, which differ only in which signal carries the result.
+    struct ScreenPacketOutcome final {
+        bool changed = false; // there is a new picture to show
+        bool ended = false;   // the peer stopped sharing
+        ScreenCanvasPtr canvas;
+    };
+    [[nodiscard]] ScreenPacketOutcome handleScreenPacket(CallScreenSession &session,
+                                                         const QByteArray &packet,
+                                                         bool &activeFlag, qint64 &lastSeenMs);
+    // Sends each receiving session's periodic report back to its sender, and
+    // folds every peer's reported capability into the one shared encoder.
+    void pumpScreenFeedback();
+    void applyScreenEncoderPolicy();
+    // Drops the sending half of every screen session and the encoder with it.
+    void releaseScreenSender();
+
     void onCapturedFrame(const AudioFrame &frame);
     [[nodiscard]] AudioFrame pullPlaybackFrame();
     void refreshParticipantLevels();
@@ -292,6 +349,15 @@ private:
 
     std::unique_ptr<CallVideoSession> m_videoSession;
     QTimer *m_videoTimeout = nullptr;
+    // One encoder for the whole call: a mesh has one desktop and several peers,
+    // so the pixels are hashed and the tiles encoded once, and only the AES
+    // seal is repeated for each of them.
+    std::shared_ptr<ScreenTileEncoder> m_screenEncoder;
+    std::unique_ptr<CallScreenSession> m_screenSession;
+    QTimer *m_screenTimeout = nullptr;
+    QTimer *m_screenFeedbackTimer = nullptr;
+    bool m_screenSharing = false;
+    bool m_remoteScreenActive = false;
     CallState m_state = CallState::Idle;
     CallEndReason m_endReason = CallEndReason::None;
     CallDirection m_direction = CallDirection::Outgoing;

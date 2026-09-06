@@ -3,6 +3,7 @@
 #include "AudioTestSupport.h"
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
+#include "call/CallScreenSession.h"
 #include "call/CallSignal.h"
 #include "call/CallSounds.h"
 #include "call/CallTransport.h"
@@ -108,6 +109,25 @@ struct Endpoint final {
     return peak;
 }
 
+// A desktop with flat regions and hard edges, which is what a screen share is
+// actually made of.
+[[nodiscard]] QImage desktopImage(QSize size, int seed = 1)
+{
+    QImage image(size, QImage::Format_RGB32);
+    image.fill(QColor(24, 30, 38));
+    for (int band = 0; band < 6; ++band) {
+        const int y = 20 + band * 40 + seed;
+        if (y + 12 >= size.height())
+            break;
+        for (int line = y; line < y + 12; ++line) {
+            auto *pixels = reinterpret_cast<QRgb *>(image.scanLine(line));
+            for (int x = 16; x < size.width() - 16 && x < 16 + 90 + band * 30 + seed * 7; ++x)
+                pixels[x] = qRgb(210, 224, 238);
+        }
+    }
+    return image;
+}
+
 [[nodiscard]] CallEngine::CallPeer peerFor(const ConversationId &conversation,
                                            const DeviceId &device, const QString &name)
 {
@@ -150,6 +170,43 @@ private:
     [[nodiscard]] CallEngine::CallPeer aliceCallsBob() const
     {
         return peerFor(m_conversation, m_bob.transport.localDevice, QStringLiteral("Bob"));
+    }
+
+    // Pushes one desktop frame from `from`, advancing its media clock past the
+    // encoder's pacing gate so the frame is actually looked at.
+    void shareScreen(Endpoint &from, const QImage &desktop)
+    {
+        from.nowMs += 200;
+        from.engine->sendScreenFrame(ScreenFrameView::fromImage(desktop));
+    }
+
+    // Arms a share and pushes its first frame, the way the app does.
+    [[nodiscard]] bool beginShare(Endpoint &from, const QImage &desktop)
+    {
+        if (!from.engine->startScreenShare())
+            return false;
+        shareScreen(from, desktop);
+        return true;
+    }
+
+    // Drives a share until the far end has a complete picture of it, or gives
+    // up. A share fills in over several frames by design.
+    [[nodiscard]] ScreenCanvasPtr settleShare(Endpoint &from, Endpoint &to,
+                                              const QImage &desktop, QSignalSpy &spy,
+                                              int maxFrames = 400)
+    {
+        Q_UNUSED(to);
+        if (!from.engine->isScreenSharing() && !from.engine->startScreenShare())
+            return {};
+        for (int i = 0; i < maxFrames; ++i) {
+            shareScreen(from, desktop);
+            if (spy.isEmpty())
+                continue;
+            const auto canvas = qvariant_cast<ScreenCanvasPtr>(spy.last().first());
+            if (canvas && canvas->isComplete())
+                return canvas;
+        }
+        return {};
     }
 
     // Drives one media frame in each direction, which is what promotes a
@@ -231,6 +288,186 @@ private slots:
         const int frames = bobVideo.count();
         m_alice.engine->sendVideoFrame(landscape);
         QCOMPARE(bobVideo.count(), frames);
+    }
+
+    void aSharedScreenReachesThePeerAndDisappearsWhenItStops()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobScreen(m_bob.engine.get(), &CallEngine::remoteScreenFrame);
+        QSignalSpy aliceScreen(m_alice.engine.get(), &CallEngine::remoteScreenFrame);
+        QVERIFY(!m_alice.engine->isScreenSharing());
+
+        const QImage desktop = desktopImage(QSize(1280, 800));
+        const ScreenCanvasPtr canvas = settleShare(m_alice, m_bob, desktop, bobScreen);
+        QVERIFY2(canvas, "the peer never received a complete picture of the share");
+        QCOMPARE(canvas->size(), desktop.size());
+        QVERIFY(m_alice.engine->isScreenSharing());
+        // Receiving a share never turns our own on.
+        QCOMPARE(aliceScreen.count(), 0);
+        // The flat backdrop crosses the engine untouched.
+        QCOMPARE(canvas->image().pixel(600, 600), desktop.pixel(600, 600));
+        QCOMPARE(canvas->image().pixel(40, 26), desktop.pixel(40, 26));
+
+        // Stopping clears the far end at once, rather than on a timeout.
+        m_alice.engine->stopScreenShare();
+        QVERIFY(!m_alice.engine->isScreenSharing());
+        QVERIFY(!bobScreen.isEmpty());
+        QVERIFY2(!qvariant_cast<ScreenCanvasPtr>(bobScreen.last().first()),
+                 "the share's view was left on screen after it stopped");
+        // A frame from a capture callback still in flight when the user pressed
+        // stop must not quietly start the whole thing up again.
+        const int settled = bobScreen.count();
+        const int sentBefore = m_alice.transport.mediaSent;
+        shareScreen(m_alice, desktop);
+        QCOMPARE(bobScreen.count(), settled);
+        QCOMPARE(m_alice.transport.mediaSent, sentBefore);
+        QVERIFY(!m_alice.engine->isScreenSharing());
+    }
+
+    void aScreenAndACameraRunAtTheSameTimeWithoutDisturbingVoice()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobScreen(m_bob.engine.get(), &CallEngine::remoteScreenFrame);
+        QSignalSpy bobCamera(m_bob.engine.get(), &CallEngine::remoteVideoFrame);
+
+        QImage camera(640, 360, QImage::Format_RGB32);
+        camera.fill(Qt::blue);
+        const QImage desktop = desktopImage(QSize(1024, 640));
+        const auto audioBefore = m_bob.engine->session()->stats().packetsReceived;
+
+        // Three sources at once: microphone, camera, screen.
+        QVERIFY(m_alice.engine->startScreenShare());
+        for (int i = 0; i < 60; ++i) {
+            m_alice.engine->sendVideoFrame(camera);
+            shareScreen(m_alice, desktop);
+        }
+        QVERIFY(!bobCamera.isEmpty());
+        QCOMPARE(qvariant_cast<QImage>(bobCamera.last().first()).size(), camera.size());
+        QVERIFY(!bobScreen.isEmpty());
+        const auto canvas = qvariant_cast<ScreenCanvasPtr>(bobScreen.last().first());
+        QVERIFY(canvas);
+        QCOMPARE(canvas->size(), desktop.size());
+        // Neither video source disturbed the voice path.
+        QCOMPARE(m_bob.engine->session()->stats().packetsReceived, audioBefore);
+        exchangeMedia();
+        QCOMPARE(m_bob.engine->session()->stats().packetsReceived, audioBefore + 1);
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+
+        // Stopping the screen leaves the camera alone, and the reverse.
+        m_alice.engine->stopScreenShare();
+        QVERIFY(!qvariant_cast<ScreenCanvasPtr>(bobScreen.last().first()));
+        m_alice.engine->sendVideoFrame(camera);
+        QVERIFY(!qvariant_cast<QImage>(bobCamera.last().first()).isNull());
+    }
+
+    void sharesCanBeStartedAndStoppedRepeatedly()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobScreen(m_bob.engine.get(), &CallEngine::remoteScreenFrame);
+
+        for (int cycle = 0; cycle < 6; ++cycle) {
+            const QImage desktop =
+                desktopImage(cycle % 2 == 0 ? QSize(1024, 640) : QSize(800, 600), cycle + 1);
+            const ScreenCanvasPtr canvas = settleShare(m_alice, m_bob, desktop, bobScreen);
+            QVERIFY2(canvas, qPrintable(QStringLiteral("cycle %1 never delivered").arg(cycle)));
+            QCOMPARE(canvas->size(), desktop.size());
+            QCOMPARE(canvas->image().pixel(400, 500 % desktop.height()),
+                     desktop.pixel(400, 500 % desktop.height()));
+            m_alice.engine->stopScreenShare();
+            QVERIFY(!qvariant_cast<ScreenCanvasPtr>(bobScreen.last().first()));
+            bobScreen.clear();
+        }
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+    }
+
+    void aShareIsNotSentWhileTheLinkIsDownAndLosesNothingWhenItReturns()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobScreen(m_bob.engine.get(), &CallEngine::remoteScreenFrame);
+
+        QImage desktop = desktopImage(QSize(1024, 640));
+        QVERIFY(settleShare(m_alice, m_bob, desktop, bobScreen));
+
+        // The link drops. Nothing is put on the wire, and — the point of the
+        // check — nothing the encoder was told about is quietly discarded.
+        QVERIFY(m_alice.engine->isScreenSharing());
+        m_alice.transport.connected = false;
+        const int sentBefore = m_alice.transport.mediaSent;
+        desktop = desktopImage(QSize(1024, 640), 9);
+        for (int i = 0; i < 20; ++i)
+            shareScreen(m_alice, desktop);
+        QCOMPARE(m_alice.transport.mediaSent, sentBefore);
+
+        // It comes back, and the change made while it was down still arrives.
+        m_alice.transport.connected = true;
+        const ScreenCanvasPtr repaired = settleShare(m_alice, m_bob, desktop, bobScreen);
+        QVERIFY2(repaired, "the share never recovered after the link returned");
+        QCOMPARE(repaired->image().pixel(40, 30), desktop.pixel(40, 30));
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+    }
+
+    void endingACallReleasesEverythingTheShareHeld()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobScreen(m_bob.engine.get(), &CallEngine::remoteScreenFrame);
+        const QImage desktop = desktopImage(QSize(1280, 800));
+        const ScreenCanvasPtr canvas = settleShare(m_alice, m_bob, desktop, bobScreen);
+        QVERIFY(canvas);
+        std::weak_ptr<ScreenCanvas> observer = canvas;
+
+        // Bob hangs up mid-share. Alice's sending half and Bob's canvas both go.
+        m_bob.engine->hangUp();
+        QCOMPARE(m_alice.engine->state(), CallState::Ended);
+        QVERIFY(!m_alice.engine->isScreenSharing());
+        QVERIFY2(!qvariant_cast<ScreenCanvasPtr>(bobScreen.last().first()),
+                 "the view was left up after the call ended");
+        // The only thing still holding those pixels is this test's own handle.
+        QVERIFY(!observer.expired());
+
+        // And a share pushed at a dead call goes nowhere at all.
+        const int sentBefore = m_alice.transport.mediaSent;
+        QVERIFY(!m_alice.engine->startScreenShare());
+        shareScreen(m_alice, desktop);
+        QCOMPARE(m_alice.transport.mediaSent, sentBefore);
+        QCOMPARE(m_alice.engine->screenShareStats().outputSize, QSize());
+    }
+
+    void aShareOfferedBeforeACallExistsIsSimplyIgnored()
+    {
+        connectEndpoints();
+        const QImage desktop = desktopImage(QSize(640, 480));
+        // Idle: there is nothing to arm, so there is nothing to send.
+        QVERIFY(!m_alice.engine->startScreenShare());
+        shareScreen(m_alice, desktop);
+        QVERIFY(!m_alice.engine->isScreenSharing());
+        QCOMPARE(m_alice.transport.mediaSent, 0);
+        m_alice.engine->stopScreenShare(); // safe when nothing is running
+        QVERIFY(!m_alice.engine->isScreenSharing());
+
+        // Still ringing: a call that has not been answered has no media keys,
+        // so there is nothing to seal a share with.
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        QVERIFY(!m_alice.engine->startScreenShare());
+        shareScreen(m_alice, desktop);
+        QVERIFY(!m_alice.engine->isScreenSharing());
+        QCOMPARE(m_alice.engine->screenShareStats().outputSize, QSize());
     }
 
     void audioCrossesTheEngineIntact()

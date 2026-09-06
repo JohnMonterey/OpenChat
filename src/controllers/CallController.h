@@ -2,6 +2,7 @@
 
 #include "call/CallEngine.h"
 #include "call/CallTypes.h"
+#include "call/QtScreenCapture.h"
 #include "call/QtVideoCapture.h"
 #include "models/CallParticipantModel.h"
 
@@ -41,6 +42,30 @@ class CallController final : public QObject
     Q_PROPERTY(double localVideoAspect READ localVideoAspect NOTIFY videoChanged)
     Q_PROPERTY(double remoteVideoAspect READ remoteVideoAspect NOTIFY videoChanged)
     Q_PROPERTY(QString cameraError READ cameraError NOTIFY videoChanged)
+    // Screen sharing. A screen is a second video source beside the camera, not
+    // a replacement for it, so these live alongside the camera's properties and
+    // both can be true at once.
+    //
+    // True when this build and this machine can capture a screen at all, so the
+    // button can be shown disabled with a reason rather than silently failing.
+    Q_PROPERTY(bool screenShareAvailable READ screenShareAvailable NOTIFY screenShareChanged)
+    Q_PROPERTY(bool screenShareEnabled READ screenShareEnabled NOTIFY screenShareChanged)
+    Q_PROPERTY(QString screenShareError READ screenShareError NOTIFY screenShareChanged)
+    // What is being shared, for the caption on the local preview.
+    Q_PROPERTY(QString screenShareSourceName READ screenShareSourceName NOTIFY screenShareChanged)
+    // True while the peer (or anyone in a group) is sharing a screen with us.
+    Q_PROPERTY(bool remoteScreenShareActive READ remoteScreenShareActive NOTIFY screenShareChanged)
+    // Holds a ScreenCanvasPtr; QML passes it straight to a CallVideoItem.
+    Q_PROPERTY(QVariant remoteScreenCanvas READ remoteScreenCanvas NOTIFY remoteScreenChanged)
+    // Who is on the stage. In a group several people could share at once; one
+    // of them holds the stage until they stop, and then the next takes it,
+    // rather than several desktops competing for the same strip of window.
+    Q_PROPERTY(QString remoteScreenSharerName READ remoteScreenSharerName
+                   NOTIFY remoteScreenChanged)
+    // A deliberately small picture of our own share: enough to confirm what is
+    // going out, nowhere near the resolution it is going out at.
+    Q_PROPERTY(QImage localScreenPreview READ localScreenPreview NOTIFY localScreenChanged)
+    Q_PROPERTY(double remoteScreenAspect READ remoteScreenAspect NOTIFY remoteScreenChanged)
     Q_PROPERTY(bool inCall READ inCall NOTIFY callChanged)
     Q_PROPERTY(bool isIncoming READ isIncoming NOTIFY callChanged)
     // True only while an incoming call is still waiting to be answered, i.e.
@@ -109,6 +134,33 @@ public:
     Q_INVOKABLE void hangUp();
     Q_INVOKABLE void toggleMute();
     Q_INVOKABLE void toggleCamera();
+
+    // Screen sharing. Stopping is unconditional; starting needs a source, so
+    // the button asks the view to offer the picker rather than guessing.
+    Q_INVOKABLE void toggleScreenShare();
+    // The screens and windows that can be shared right now, newly enumerated.
+    // Each entry is {name, kind, id}; the index is what startScreenShare takes.
+    Q_INVOKABLE QVariantList screenShareSources();
+    Q_INVOKABLE void startScreenShare(int sourceIndex);
+    Q_INVOKABLE void stopScreenShare();
+    // How large an incoming share is actually being displayed. Reported back to
+    // the sender, which stops encoding more than this. A zero size means the
+    // view is closed and the sender can idle.
+    Q_INVOKABLE void setRemoteScreenViewSize(int width, int height);
+    Q_INVOKABLE void setParticipantScreenViewSize(const QString &deviceId, int width, int height);
+    // A one-line summary of the live share for development builds.
+    Q_INVOKABLE QString screenShareDiagnostics() const;
+
+    [[nodiscard]] bool screenShareAvailable() const noexcept;
+    [[nodiscard]] bool screenShareEnabled() const noexcept { return m_screenShareEnabled; }
+    [[nodiscard]] QString screenShareError() const { return m_screenShareError; }
+    [[nodiscard]] QString screenShareSourceName() const { return m_screenShareSourceName; }
+    [[nodiscard]] bool remoteScreenShareActive() const;
+    [[nodiscard]] QVariant remoteScreenCanvas() const { return QVariant::fromValue(m_remoteScreen); }
+    [[nodiscard]] QString remoteScreenSharerName() const { return m_remoteScreenSharerName; }
+    [[nodiscard]] QImage localScreenPreview() const { return m_localScreenPreview; }
+    [[nodiscard]] double remoteScreenAspect() const;
+
     bool cameraEnabled() const { return m_cameraEnabled; }
     bool remoteCameraEnabled() const { return !m_remoteVideo.isNull(); }
     QImage localVideoFrame() const { return m_localVideo; }
@@ -125,6 +177,10 @@ public:
     }
     QString cameraError() const { return m_cameraError; }
     void setPreviewVideo(const QImage &local, const QImage &remote);
+    // Preview seam for a received screen share: pins a canvas into the call
+    // surface without an engine, for the capture path and the QML tests. Never
+    // reachable from a live session.
+    void setPreviewScreenShare(const ScreenCanvasPtr &canvas, const QString &sharerName);
 
     Q_INVOKABLE void dismissCall();
 
@@ -150,6 +206,12 @@ public:
 signals:
     void callChanged();
     void videoChanged();
+    void screenShareChanged();
+    void remoteScreenChanged();
+    void localScreenChanged();
+    // Raised by toggleScreenShare() when a source still has to be chosen. The
+    // view answers by showing the picker and calling startScreenShare().
+    void screenSourcePickRequested();
     void localVideoChanged();
     void remoteVideoChanged();
     void levelsChanged();
@@ -162,9 +224,28 @@ private:
     void syncParticipants();
     void stopCamera();
     void setRemoteVideo(const QImage &image);
+    void setRemoteScreen(const ScreenCanvasPtr &canvas);
+    // Picks which group member's share is on the stage, keeping whoever is
+    // already there until they stop.
+    void refreshGroupScreenStage();
+    void onScreenFrameCaptured(const ScreenFrameView &view);
+    void updateScreenPreview(const ScreenFrameView &view, qint64 nowMs);
     void syncLevels();
 
     QtVideoCapture m_camera;
+    QtScreenCapture m_screenCapture;
+    QVector<ScreenShareSource> m_screenSources;
+    bool m_screenShareEnabled = false;
+    bool m_screenShareUnsupported = false;
+    QString m_screenShareError;
+    QString m_screenShareSourceName;
+    ScreenCanvasPtr m_remoteScreen;
+    // Empty in a one-to-one call; the staged member's device in a group.
+    QString m_remoteScreenDevice;
+    QString m_remoteScreenSharerName;
+    QImage m_localScreenPreview;
+    qint64 m_lastPreviewMs = 0;
+    int m_appliedCaptureFps = 0;
     bool m_cameraEnabled = false;
     QImage m_localVideo;
     QImage m_remoteVideo;

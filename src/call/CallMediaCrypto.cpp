@@ -117,6 +117,36 @@ std::optional<CallMediaKeySchedule> CallMediaKeySchedule::deriveVideo(QByteArray
     return schedule;
 }
 
+std::optional<CallMediaKeySchedule> CallMediaKeySchedule::deriveScreen(QByteArrayView secret,
+                                                                       const CallId &callId)
+{
+    if (secret.size() != callSecretBytes)
+        return std::nullopt;
+    CallMediaKeySchedule schedule;
+    schedule.fromCaller = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/screen/caller"), derivedPerDirection));
+    schedule.fromCallee = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/screen/callee"), derivedPerDirection));
+    if (!schedule.fromCaller.isValid() || !schedule.fromCallee.isValid())
+        return std::nullopt;
+    return schedule;
+}
+
+std::optional<CallMediaKeySchedule>
+CallMediaKeySchedule::deriveScreenFeedback(QByteArrayView secret, const CallId &callId)
+{
+    if (secret.size() != callSecretBytes)
+        return std::nullopt;
+    CallMediaKeySchedule schedule;
+    schedule.fromCaller = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/screenfb/caller"), derivedPerDirection));
+    schedule.fromCallee = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/screenfb/callee"), derivedPerDirection));
+    if (!schedule.fromCaller.isValid() || !schedule.fromCallee.isValid())
+        return std::nullopt;
+    return schedule;
+}
+
 QByteArray deriveGroupPairSecret(QByteArrayView callSecret, const CallId &callId,
                                  const DeviceId &first, const DeviceId &second)
 {

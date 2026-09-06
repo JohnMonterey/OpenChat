@@ -22,6 +22,7 @@
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include "call/ScreenCanvas.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 
@@ -1551,6 +1552,120 @@ private slots:
                 > plain->property("implicitHeight").toReal());
         QVERIFY(!plain->findChild<QObject *>(QStringLiteral("messageSender"))->property("visible").toBool());
         QVERIFY(!outgoing->findChild<QObject *>(QStringLiteral("messageSender"))->property("visible").toBool());
+    }
+
+    void theScreenShareButtonSitsBesideTheCameraAndTracksItsState()
+    {
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        auto *camera = root->findChild<QQuickItem *>(QStringLiteral("cameraCallButton"));
+        auto *share = root->findChild<QQuickItem *>(QStringLiteral("screenShareButton"));
+        auto *end = root->findChild<QQuickItem *>(QStringLiteral("endCallButton"));
+        QVERIFY2(share, "the call screen has no screen-share button");
+        QVERIFY(camera && end);
+
+        // Directly beside the camera, in the same row, at the same size — one
+        // pair of media controls rather than two unrelated ones.
+        QVERIFY(share->isVisible());
+        QCOMPARE(share->parentItem(), camera->parentItem());
+        QCOMPARE(share->y(), camera->y());
+        QCOMPARE(share->height(), camera->height());
+        QVERIFY2(share->x() > camera->x(), "the share button is not beside the camera");
+        QVERIFY2(share->x() < end->x(), "the share button is past the end-call button");
+
+        // Available but idle: it offers to share and is not checked.
+        QCOMPARE(share->property("label").toString(), QStringLiteral("Share screen"));
+        QCOMPARE(share->property("checked").toBool(), false);
+        QCOMPARE(share->property("screenIcon").toBool(), true);
+        // No live call engine in a preview, so the control explains itself
+        // rather than silently doing nothing.
+        QCOMPARE(callController.screenShareAvailable(), false);
+        QCOMPARE(share->property("disabled").toBool(), true);
+        QVERIFY(!share->property("tooltip").toString().isEmpty());
+
+        // The stage only exists while there is something on it.
+        auto *stage = root->findChild<QQuickItem *>(QStringLiteral("screenShareStage"));
+        QVERIFY(stage);
+        QVERIFY2(!stage->isVisible(), "the share stage was shown with nothing being shared");
+
+        // Ringing and ended are not moments to start a share, exactly as for
+        // the camera beside it.
+        callController.enableForPreview(OpenChat::CallState::Ringing, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(!share->isVisible());
+        QCOMPARE(share->isVisible(), camera->isVisible());
+        callController.enableForPreview(OpenChat::CallState::Ended, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(!share->isVisible());
+        QCOMPARE(share->isVisible(), camera->isVisible());
+    }
+
+    void anIncomingShareAppearsOnTheStageByItself()
+    {
+        // The whole seam between the C++ side and the view: a share is handed
+        // across as a live surface rather than as a picture, and the stage has
+        // to appear on its own when one arrives and go away when it stops —
+        // exactly as an incoming camera tile does.
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        auto *stage = root->findChild<QQuickItem *>(QStringLiteral("screenShareStage"));
+        auto *video = root->findChild<QQuickItem *>(QStringLiteral("remoteScreenVideo"));
+        QVERIFY(stage && video);
+        QVERIFY(!stage->isVisible());
+        QCOMPARE(stage->property("implicitHeight").toDouble(), 0.0);
+
+        auto canvas = std::make_shared<OpenChat::ScreenCanvas>(QSize(1600, 900));
+        QVERIFY(!canvas->isEmpty());
+        callController.setPreviewScreenShare(canvas, QStringLiteral("Jessica"));
+        QCoreApplication::processEvents();
+
+        QVERIFY2(stage->isVisible(), "an incoming share did not raise the stage");
+        QVERIFY(stage->property("implicitHeight").toDouble() > 0.0);
+        // The surface itself crossed into the view, not a copy of its pixels.
+        // Scoped, so this check is not itself the thing keeping it alive below.
+        {
+            const QVariant held = video->property("canvas");
+            QCOMPARE(held.value<OpenChat::ScreenCanvasPtr>(), canvas);
+        }
+        QCOMPARE(video->property("sourceAspect").toDouble(), 1600.0 / 900.0);
+        auto *caption = root->findChild<QQuickItem *>(QStringLiteral("remoteScreenCaption"));
+        QVERIFY(caption);
+        QCOMPARE(caption->property("text").toString(), QStringLiteral("Jessica's screen"));
+
+        // Stopping takes the stage down with it and lets go of the pixels.
+        std::weak_ptr<OpenChat::ScreenCanvas> observer = canvas;
+        callController.setPreviewScreenShare({}, QString());
+        QCoreApplication::processEvents();
+        QVERIFY2(!stage->isVisible(), "the stage stayed up after the share stopped");
+        QVERIFY(!video->property("canvas").value<OpenChat::ScreenCanvasPtr>());
+        canvas.reset();
+        QVERIFY2(observer.expired(), "the view kept the share's pixels alive after it ended");
     }
 
     void theCallScreenOffersTheRightActionForEachStage()

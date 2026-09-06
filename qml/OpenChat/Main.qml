@@ -15,8 +15,20 @@ Window {
     // null (or reports no call) the conversation pane renders exactly as before.
     property var callController: null
     readonly property bool inCall: callController !== null && callController.inCall
+    // True while the call surface is the whole window: the sidebar and the
+    // conversation are collapsed, nothing else is laid out or drawn, and the
+    // call takes every pixel. Ends with the call, or from its corner chip.
+    property bool callFullscreen: false
     readonly property int sidebarWidth: Math.round(
         Math.max(250, Math.min(300, width * Theme.sidebarWidth / 860)))
+    // Where the pane to the right of the sidebar starts — at the sidebar's
+    // edge, or at the window's when the sidebar is collapsed for a call.
+    readonly property int paneX: callFullscreen ? 0 : sidebarWidth
+
+    onInCallChanged: {
+        if (!inCall)
+            callFullscreen = false;
+    }
 
     width: 860
     height: 680
@@ -40,6 +52,7 @@ Window {
         ContactSidebar {
             width: root.sidebarWidth
             height: parent.height
+            visible: !root.callFullscreen
             controller: root.chatController
             contactController: root.contactController
         }
@@ -51,10 +64,11 @@ Window {
         Item {
             id: conversationPane
             objectName: "conversationPane"
-            x: root.sidebarWidth
-            width: parent.width - root.sidebarWidth
+            x: root.paneX
+            width: parent.width - root.paneX
             height: parent.height
             visible: root.chatController.navSection === ChatController.NavSection.Chat
+                     || root.callFullscreen
 
             Rectangle {
                 anchors.fill: parent
@@ -69,13 +83,15 @@ Window {
             // name, picture, presence and call buttons. In a call that header is
             // gone entirely and the call surface takes the slot, showing both
             // people at once. They are never both present, so the contact is
-            // never pictured twice.
+            // never pictured twice. When the call fills the window the slot is
+            // the whole pane, and the conversation below it is not laid out.
             Item {
                 id: headerSlot
                 objectName: "conversationHeaderSlot"
                 width: parent.width
-                height: root.inCall && callHeaderLoader.item
-                        ? callHeaderLoader.item.implicitHeight : Theme.conversationHeaderHeight
+                height: root.callFullscreen ? parent.height
+                        : root.inCall && callHeaderLoader.item
+                          ? callHeaderLoader.item.implicitHeight : Theme.conversationHeaderHeight
                 visible: root.chatController.hasCurrentContact || root.inCall
                 clip: true
 
@@ -96,6 +112,11 @@ Window {
                         maxVideoHeight: Math.min(230, root.height * 0.34)
                         maxShareHeight: Math.min(300, root.height * 0.32)
                         controller: root.callController
+                        fullscreen: root.callFullscreen
+                        availableHeight: root.height
+                        zoom: mediaZoom
+                        onFullscreenToggled: root.callFullscreen = !root.callFullscreen
+                        onEnlargeRequested: videoItem => mediaZoom.enlarge(videoItem)
                     }
                 }
 
@@ -147,6 +168,7 @@ Window {
                 id: securityBanner
                 objectName: "securityBanner"
                 readonly property bool active: root.chatController.sessionStateText.length > 0
+                                               && !root.callFullscreen
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: headerSlot.bottom
@@ -189,7 +211,7 @@ Window {
                 anchors.top: securityBanner.bottom
                 anchors.bottom: messageComposer.top
                 controller: root.chatController
-                visible: root.chatController.hasCurrentContact
+                visible: root.chatController.hasCurrentContact && !root.callFullscreen
             }
 
             Composer {
@@ -199,7 +221,7 @@ Window {
                 anchors.bottom: parent.bottom
                 height: implicitHeight
                 controller: root.chatController
-                visible: root.chatController.hasCurrentContact
+                visible: root.chatController.hasCurrentContact && !root.callFullscreen
                 onMessageSent: history.positionAtEnd()
             }
         }
@@ -214,6 +236,7 @@ Window {
             width: parent.width - root.sidebarWidth
             height: parent.height
             visible: root.chatController.navSection === ChatController.NavSection.Call
+                     && !root.callFullscreen
 
             Rectangle {
                 anchors.fill: parent
@@ -236,6 +259,7 @@ Window {
             width: parent.width - root.sidebarWidth
             height: parent.height
             visible: root.chatController.navSection === ChatController.NavSection.Settings
+                     && !root.callFullscreen
 
             Rectangle {
                 anchors.fill: parent
@@ -416,6 +440,22 @@ Window {
         }
     }
 
+    // One camera or shared screen, enlarged over the whole window. Above the
+    // picker, which cannot be opened while it is up anyway: the button that
+    // opens the picker is under the scrim.
+    MediaZoomOverlay {
+        id: mediaZoom
+        z: 30
+    }
+
+    // Escape hands the window back when the call fills it. The enlarged
+    // picture has its own Escape and goes first, so one press closes one thing.
+    Shortcut {
+        sequences: ["Escape"]
+        enabled: root.callFullscreen && !mediaZoom.expanded
+        onActivated: root.callFullscreen = false
+    }
+
     Connections {
         target: root.callController
         ignoreUnknownSignals: true
@@ -425,10 +465,14 @@ Window {
                 screenSharePickerLoader.item.show();
         }
 
-        // A call that ends while the picker is open takes the picker with it.
+        // A call that ends while the picker is open takes the picker with it,
+        // and an enlarged picture of it as well.
         function onCallChanged() {
-            if (screenSharePickerLoader.item && !root.inCall)
+            if (root.inCall)
+                return;
+            if (screenSharePickerLoader.item)
                 screenSharePickerLoader.item.dismiss();
+            mediaZoom.dismiss(true);
         }
     }
 }

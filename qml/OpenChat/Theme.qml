@@ -121,6 +121,15 @@ QtObject {
     readonly property color requestSuccess: darkMode ? "#8bd5a2" : "#5aa06a"
     readonly property color navText: darkMode ? "#a3bed3" : "#6f8eac"
     readonly property color dialogScrim: darkMode ? "#99060d14" : "#66223247"
+    // Behind an enlarged picture: darker than the dialog scrim in both themes,
+    // so the picture is the only thing left to look at.
+    readonly property color zoomScrim: darkMode ? "#d0030608" : "#b0101a26"
+    // The small round controls drawn on top of a picture (zoom, full screen):
+    // a dark glass chip with a light glyph, readable over any video.
+    readonly property color mediaChip: "#8a101820"
+    readonly property color mediaChipHover: "#c0182634"
+    readonly property color mediaChipBorder: "#50ffffff"
+    readonly property color mediaChipGlyph: "#f2f6fa"
     readonly property color tooltipBorder: darkMode ? "#668ba6" : "#9bbdd4"
     readonly property color tooltipTop: darkMode ? "#3b556b" : "#ffffff"
     readonly property color tooltipMid: darkMode ? "#2c4559" : "#f2faff"

@@ -20,6 +20,12 @@ Item {
 
     required property var controller
     property real maxHeight: 300
+    // The window-level enlarge overlay, when there is one. While it is showing
+    // the far end's share, the size it draws at is what the sender is told,
+    // so an enlarged share is encoded for the window and not for the strip.
+    property Item zoom: null
+    // Asks for one of the pictures here to be enlarged over the window.
+    signal enlargeRequested(Item videoItem)
 
     readonly property bool remoteActive: stage.controller.remoteScreenShareActive === true
     readonly property bool localActive: stage.controller.screenShareEnabled === true
@@ -42,18 +48,27 @@ Item {
         ? Math.max(stage.remotePaneHeight, stage.localPaneHeight) + stage.captionHeight + 8
         : 0
 
+    readonly property bool remoteEnlarged: stage.zoom !== null && stage.zoom.expanded
+                                           && stage.zoom.sourceItem === remoteScreenVideo
+    // The size the far end's share is actually being drawn at: the strip's
+    // pane, or the enlarged picture while that is up.
+    readonly property real remoteViewWidth: stage.remoteEnlarged ? stage.zoom.fitWidth
+                                                                  : stage.remotePaneWidth
+    readonly property real remoteViewHeight: stage.remoteEnlarged ? stage.zoom.fitHeight
+                                                                   : stage.remotePaneHeight
+
     // What the sender is told about this view. Zero while the panel is not
     // being shown, which is the sender's cue to stop encoding for us entirely.
     function reportViewSize() {
         if (!stage.controller)
             return;
         const showing = stage.visible && stage.remoteActive;
-        stage.controller.setRemoteScreenViewSize(showing ? Math.round(stage.remotePaneWidth) : 0,
-                                                 showing ? Math.round(stage.remotePaneHeight) : 0);
+        stage.controller.setRemoteScreenViewSize(showing ? Math.round(stage.remoteViewWidth) : 0,
+                                                 showing ? Math.round(stage.remoteViewHeight) : 0);
     }
 
-    onRemotePaneWidthChanged: stage.reportViewSize()
-    onRemotePaneHeightChanged: stage.reportViewSize()
+    onRemoteViewWidthChanged: stage.reportViewSize()
+    onRemoteViewHeightChanged: stage.reportViewSize()
     onVisibleChanged: stage.reportViewSize()
     Component.onCompleted: stage.reportViewSize()
     Component.onDestruction: {
@@ -102,6 +117,16 @@ Item {
                     font.pixelSize: 13
                     renderType: Text.NativeRendering
                 }
+
+                MediaIconButton {
+                    objectName: "remoteScreenZoomButton"
+                    icon: "zoom"
+                    tooltip: "Enlarge"
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 6
+                    onClicked: stage.enlargeRequested(remoteScreenVideo)
+                }
             }
 
             Text {
@@ -143,6 +168,16 @@ Item {
                     anchors.fill: parent
                     anchors.margins: 1
                     frame: stage.controller.localScreenPreview
+                }
+
+                MediaIconButton {
+                    objectName: "localScreenZoomButton"
+                    icon: "zoom"
+                    tooltip: "Enlarge"
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 6
+                    onClicked: stage.enlargeRequested(localScreenVideo)
                 }
             }
 

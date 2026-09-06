@@ -35,7 +35,7 @@ void CallVideoItem::setFrame(const QImage &frame)
 {
     const QSize previous = m_frame.size();
     m_frame = frame;
-    if (isVisible())
+    if (isVisible() && !m_paused)
         update();
     emit frameChanged();
     if (previous != m_frame.size() && !m_canvas)
@@ -47,6 +47,11 @@ void CallVideoItem::setCanvas(const QVariant &value)
     ScreenCanvasPtr next;
     if (value.canConvert<ScreenCanvasPtr>())
         next = value.value<ScreenCanvasPtr>();
+    applyCanvas(std::move(next));
+}
+
+void CallVideoItem::applyCanvas(ScreenCanvasPtr next)
+{
     const bool replaced = next != m_canvas;
     const QRect dirty = next ? next->dirtyRect() : QRect();
     m_canvas = std::move(next);
@@ -59,7 +64,7 @@ void CallVideoItem::setCanvas(const QVariant &value)
     }
     // Nothing is drawn for a view nobody can see. The sender is told the same
     // thing separately, so it stops encoding for it as well.
-    if (!isVisible() || width() <= 0 || height() <= 0)
+    if (!isVisible() || m_paused || width() <= 0 || height() <= 0)
         return;
     if (replaced || !m_canvas) {
         update();
@@ -82,6 +87,50 @@ void CallVideoItem::setMirrored(bool value)
     if (isVisible())
         update();
     emit mirroredChanged();
+}
+
+void CallVideoItem::setSource(CallVideoItem *source)
+{
+    if (m_source == source || source == this)
+        return;
+    if (m_source)
+        disconnect(m_source, nullptr, this, nullptr);
+    m_source = source;
+    if (m_source) {
+        connect(m_source, &CallVideoItem::frameChanged, this,
+                [this] { setFrame(m_source->m_frame); });
+        connect(m_source, &CallVideoItem::canvasChanged, this,
+                [this] { applyCanvas(m_source->m_canvas); });
+        connect(m_source, &CallVideoItem::mirroredChanged, this,
+                [this] { setMirrored(m_source->m_mirrored); });
+        // A source that goes away (a participant leaving a group call) leaves
+        // the copy showing nothing, not pointing at freed memory.
+        connect(m_source, &QObject::destroyed, this, [this] {
+            m_source = nullptr;
+            setFrame(QImage());
+            applyCanvas({});
+            emit sourceChanged();
+        });
+        setFrame(m_source->m_frame);
+        applyCanvas(m_source->m_canvas);
+        setMirrored(m_source->m_mirrored);
+    } else {
+        setFrame(QImage());
+        applyCanvas({});
+    }
+    emit sourceChanged();
+}
+
+void CallVideoItem::setPaused(bool value)
+{
+    if (m_paused == value)
+        return;
+    m_paused = value;
+    // Whatever arrived while paused was never painted, so the whole view is
+    // stale, not one rectangle of it.
+    if (!m_paused && isVisible())
+        update();
+    emit pausedChanged();
 }
 
 QRectF CallVideoItem::targetRect(QSize sourceSize) const

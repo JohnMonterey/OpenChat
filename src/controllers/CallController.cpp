@@ -396,9 +396,10 @@ void CallController::refreshGroupScreenStage()
 
 void CallController::setRemoteScreenViewSize(int width, int height)
 {
+    const QSize size(std::max(0, width), std::max(0, height));
+    m_remoteScreenViewSize = size;
     if (m_engine == nullptr)
         return;
-    const QSize size(std::max(0, width), std::max(0, height));
     if (m_remoteScreenDevice.isEmpty()) {
         m_engine->setScreenViewSize(size);
         return;

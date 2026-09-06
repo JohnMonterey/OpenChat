@@ -146,6 +146,43 @@ timers. The engine refuses screen frames until a share is explicitly armed
 again, so a capture callback still in flight when the user presses stop cannot
 quietly start the whole thing up again.
 
+## Enlarging a picture, and filling the window with the call
+
+Every camera tile and every screen pane carries a small zoom chip in its
+bottom-right corner (`MediaIconButton`). Pressing it grows that picture to the
+largest rectangle of its own aspect that fits the window, over a scrim that
+darkens everything else and swallows every click; a click anywhere off the
+picture, or Escape, shrinks it back onto the tile it came from. The picture
+grows from exactly where the tile is and returns to exactly there, so the eye
+follows one object rather than watching one vanish and another appear.
+
+The enlarged picture (`MediaZoomOverlay`, one instance at the window level) is
+a *second* `CallVideoItem`, not the tile re-parented: it follows the tile
+through the view's `source` property, which copies frame, canvas and mirroring
+in C++ from the source's own change signals. That keeps thirty camera frames a
+second out of QML bindings, and it matters more for a share: a `ScreenCanvasPtr`
+read through a two-level binding is wrapped in a JavaScript object that keeps a
+desktop's worth of pixels alive until the next garbage collection, whereas the
+C++ path lets go of them the moment the share stops. While the copy is up the
+tile underneath is `paused` — it is under the scrim, so repainting it would be
+work nobody could see — and it repaints itself whole when resumed.
+
+Enlarging the far end's share changes what the sender is told: the stage
+reports the enlarged size as the view size, so the share is encoded for most of
+the window rather than for the strip, and the strip's size again when it
+closes. A share that stops, or a camera that turns off, takes its enlarged copy
+down at once rather than leaving an empty frame on screen.
+
+The chip in the bottom-right corner of the call surface fills the window with
+the call. The sidebar and the conversation are hidden — not shrunk or scrolled
+away, so nothing about them is laid out or painted — and the call surface
+becomes the whole pane, centring its content and letting the pictures grow into
+the room: a lone camera row takes what the controls leave, and with a share on
+stage the cameras stay modest and the share takes the rest. Escape, the chip
+again, or the end of the call give the window back. At the minimum window width
+the live-call action row only just fits the pane, so when it would run under the
+chip it closes up and leans left instead.
+
 ## Instrumentation
 
 `CallController::screenShareDiagnostics()` reports resolution, rung, frame rate,
@@ -169,8 +206,12 @@ nothing about a running share.
   losing nothing, and hangup releasing everything.
 - `tst_groupcall`: one encode sealed for every member, and a member leaving
   mid-share.
-- `tst_qmlload`: the button beside the camera in every call state, and a share
-  raising and releasing the stage across the C++/QML boundary.
+- `tst_qmlload`: the button beside the camera in every call state, a share
+  raising and releasing the stage across the C++/QML boundary, a camera
+  enlarging over the window at its own aspect and shrinking back on a click
+  outside, an enlarged share reported to the sender at the enlarged size and
+  released the moment the share stops, and the call filling the window and
+  giving it back on Escape and when the call ends.
 - `tst_e2e::callCarriesAudioVideoAndAScreenOverRealTls`: a share through real
   TLS, a real relay and real PostgreSQL, including restart at a new geometry and
   the relay storing none of it. Requires the PostgreSQL test service.
@@ -178,6 +219,9 @@ nothing about a running share.
   share, rendered without opening a display, at 1100x780 and at the minimum
   720x560. `--call-picker` renders the source picker over it, listing this
   machine's real displays and windows without capturing any of them.
+  `--call-zoom` enlarges the far end's share (or, with `--call-video`, its
+  camera) over the window, and `--call-fullscreen` fills the window with the
+  call; both combine with `--call-screen` and `--call-video`.
 - `openchat-call-check --screen`: one side of a real call against a real relay,
   so two machines can verify a share over an actual network path. The answering
   side reports whether the lossless regions arrived byte for byte.

@@ -8,6 +8,7 @@
 #include <QPainter>
 #include <QQmlApplicationEngine>
 #include <QQuickView>
+#include <QQuickItem>
 #include <QQuickWindow>
 #include <QSslCertificate>
 #include <QSslConfiguration>
@@ -811,7 +812,7 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
                   const QCommandLineOption &captureOption,
                   const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
                   const QCommandLineOption &heightOption, bool incoming, bool video, bool group,
-                  bool screenShare, bool sourcePicker)
+                  bool screenShare, bool sourcePicker, bool fullscreen, bool zoom)
 {
     OpenChat::ChatController chatController;
     chatController.setLocalUserName(QStringLiteral("Developer"));
@@ -894,6 +895,23 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         if (auto *picker = window->findChild<QObject *>(QStringLiteral("screenSharePicker")))
             QMetaObject::invokeMethod(picker, "show", Qt::QueuedConnection);
     }
+    if (fullscreen)
+        window->setProperty("callFullscreen", true);
+    if (zoom) {
+        // Enlarge the far end's share when there is one, else the far end's
+        // camera: whichever the preview put on screen. Queued, so the tile has
+        // a place to grow from.
+        const QString tile = screenShare ? QStringLiteral("remoteScreenVideo")
+                                         : QStringLiteral("remoteParticipant");
+        auto *overlay = window->findChild<QObject *>(QStringLiteral("mediaZoomOverlay"));
+        auto *source = window->findChild<QQuickItem *>(tile);
+        if (source && !screenShare)
+            source = source->findChild<QQuickItem *>(QStringLiteral("participantVideo"));
+        if (overlay && source) {
+            QMetaObject::invokeMethod(overlay, "enlarge", Qt::QueuedConnection,
+                                      Q_ARG(QVariant, QVariant::fromValue(source)));
+        }
+    }
     scheduleCaptureIfRequested(parser, window, captureOption, delayOption);
     return application.exec();
 }
@@ -955,10 +973,18 @@ int main(int argc, char *argv[])
     const QCommandLineOption callPickerOption(
         QStringLiteral("call-picker"),
         QStringLiteral("Preview the screen-source picker, listing this machine's real sources."));
+    const QCommandLineOption callFullscreenOption(
+        QStringLiteral("call-fullscreen"),
+        QStringLiteral("Preview the call filling the whole window (combine with --call-video "
+                       "or --call-screen)."));
+    const QCommandLineOption callZoomOption(
+        QStringLiteral("call-zoom"),
+        QStringLiteral("Preview the far end's share or camera enlarged over the window "
+                       "(combine with --call-video or --call-screen)."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, addContactOption, verifyOption, callOption,
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
-                       callPickerOption});
+                       callPickerOption, callFullscreenOption, callZoomOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -986,11 +1012,13 @@ int main(int argc, char *argv[])
     const bool previewIncomingCall = parser.isSet(callIncomingOption);
     if (parser.isSet(callOption) || previewIncomingCall || parser.isSet(callVideoOption)
         || parser.isSet(callGroupOption) || parser.isSet(callScreenOption)
-        || parser.isSet(callPickerOption))
+        || parser.isSet(callPickerOption) || parser.isSet(callFullscreenOption)
+        || parser.isSet(callZoomOption))
         return runCallWindow(application, parser, captureOption, delayOption, widthOption,
                              heightOption, previewIncomingCall, parser.isSet(callVideoOption),
                              parser.isSet(callGroupOption), parser.isSet(callScreenOption),
-                             parser.isSet(callPickerOption));
+                             parser.isSet(callPickerOption), parser.isSet(callFullscreenOption),
+                             parser.isSet(callZoomOption));
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

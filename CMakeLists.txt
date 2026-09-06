@@ -91,6 +91,8 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/CallHeader.qml
         qml/OpenChat/components/ScreenShareStage.qml
         qml/OpenChat/components/ScreenSharePicker.qml
+        qml/OpenChat/components/MediaIconButton.qml
+        qml/OpenChat/components/MediaZoomOverlay.qml
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
@@ -854,7 +856,7 @@ function(add_openchat_capture_test test_name capture_width capture_height)
             -DCAPTURE_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/${test_name}.png
             -DCAPTURE_WIDTH=${capture_width}
             -DCAPTURE_HEIGHT=${capture_height}
-            -DCAPTURE_EXTRA_ARG=${ARGV3}
+            "-DCAPTURE_EXTRA_ARG=${ARGV3}"
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
     )
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 5)
@@ -868,6 +870,12 @@ add_openchat_capture_test(capture_video_minimum 720 560 --call-video)
 add_openchat_capture_test(capture_screen 1100 780 --call-screen)
 add_openchat_capture_test(capture_screen_minimum 720 560 --call-screen)
 add_openchat_capture_test(capture_screen_picker 900 700 --call-picker)
+# A share and a camera enlarged over the window, and the call filling it:
+# several flags, quoted into one list so the runner passes them all through.
+add_openchat_capture_test(capture_screen_zoom 1100 780 "--call-screen;--call-zoom")
+add_openchat_capture_test(capture_video_zoom 900 680 "--call-video;--call-zoom")
+add_openchat_capture_test(capture_screen_fullscreen 1100 780 "--call-screen;--call-fullscreen")
+add_openchat_capture_test(capture_video_fullscreen 720 560 "--call-video;--call-fullscreen")
 
 # The add-contact preview sub-mode: renders the dialog over a populated mock
 # Requests list. Uses the same verify runner with the extra --add-contact argument.

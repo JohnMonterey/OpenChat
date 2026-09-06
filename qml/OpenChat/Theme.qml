@@ -28,6 +28,16 @@ QtObject {
     readonly property color categoryText: darkMode ? "#9cc9eb" : "#35618f"
     readonly property color rule: darkMode ? "#3b5061" : "#bfced8"
 
+    // The sidebar's overlay scrollbar. It is hidden until the list is actually
+    // scrolled, so the handle is tuned to read clearly for the moment it is up
+    // rather than to sit quietly alongside the rows; it takes the same
+    // three-stop-plus-rim Aero treatment as the request buttons.
+    readonly property color scrollTrack: darkMode ? "#26ffffff" : "#26526878"
+    readonly property color scrollHandleTop: darkMode ? "#9dcdf0" : "#93bde0"
+    readonly property color scrollHandleMid: darkMode ? "#72abd6" : "#5f95c6"
+    readonly property color scrollHandleBottom: darkMode ? "#578fb8" : "#4a7fb0"
+    readonly property color scrollHandleBorder: darkMode ? "#b0d8f4" : "#3c6b98"
+
     readonly property color contentBackground: darkMode ? "#18232e" : "#f8fbfd"
     readonly property color contentBottom: darkMode ? "#141e28" : "#f5f9fc"
     readonly property color textPrimary: darkMode ? "#e0eaf3" : "#2b3b53"

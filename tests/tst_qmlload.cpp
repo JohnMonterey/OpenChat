@@ -743,6 +743,89 @@ private slots:
         QVERIFY(noMessages->property("visible").toBool());
     }
 
+    void theSidebarScrollsAndShowsItsBarOnlyWhileScrolling()
+    {
+        // Enough pending requests that the sidebar's middle band cannot show
+        // them all at the window's minimum height.
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        for (int i = 0; i < 12; ++i) {
+            contactController.addMockRequest(QStringLiteral("Requester %1").arg(i),
+                                             QStringLiteral("ID abcdef%1").arg(i, 4, 10,
+                                                                               QLatin1Char('0')));
+        }
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        auto *window = qobject_cast<QWindow *>(root);
+        QVERIFY(window);
+        window->resize(720, 560);
+        QCoreApplication::processEvents();
+
+        QObject *area = root->findChild<QObject *>(QStringLiteral("chatContactArea"));
+        QObject *bar = root->findChild<QObject *>(QStringLiteral("chatScrollBar"));
+        QVERIFY(area);
+        QVERIFY(bar);
+
+        // The band scrolls rather than clipping the overflow away, so the list
+        // stays reachable without enlarging the window.
+        QTRY_VERIFY(area->property("contentHeight").toReal()
+                    > area->property("height").toReal());
+        QVERIFY(area->property("interactive").toBool());
+        QVERIFY(bar->property("scrollable").toBool());
+
+        // The bar hugs the left edge of the band.
+        QCOMPARE(bar->property("x").toReal(), area->property("x").toReal());
+
+        // At rest it is invisible: it appears only once the view actually moves,
+        // and it retires again on its own a beat after the movement stops.
+        QTRY_VERIFY_WITH_TIMEOUT(!bar->property("shown").toBool(), 3000);
+        QTRY_COMPARE(bar->property("opacity").toReal(), 0.0);
+        QVERIFY(!bar->property("visible").toBool());
+
+        area->setProperty("contentY", 60.0);
+        QCoreApplication::processEvents();
+        QVERIFY(bar->property("shown").toBool());
+        QTRY_COMPARE(bar->property("opacity").toReal(), 1.0);
+        QVERIFY(bar->property("visible").toBool());
+
+        QTRY_VERIFY_WITH_TIMEOUT(!bar->property("shown").toBool(), 3000);
+        QTRY_COMPARE(bar->property("opacity").toReal(), 0.0);
+
+        // A list that fits gets no bar and no flicking at all: the default
+        // contact set stays inside the band at the same window size.
+        OpenChat::ChatController plainController;
+        QQmlApplicationEngine plainEngine;
+        plainEngine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&plainController)}});
+        plainEngine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        plainEngine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(plainEngine.rootObjects().size(), 1);
+        QObject *plainRoot = plainEngine.rootObjects().constFirst();
+        auto *plainWindow = qobject_cast<QWindow *>(plainRoot);
+        QVERIFY(plainWindow);
+        plainWindow->resize(720, 560);
+        QCoreApplication::processEvents();
+
+        QObject *plainArea = plainRoot->findChild<QObject *>(QStringLiteral("chatContactArea"));
+        QObject *plainBar = plainRoot->findChild<QObject *>(QStringLiteral("chatScrollBar"));
+        QVERIFY(plainArea);
+        QVERIFY(plainBar);
+        QTRY_VERIFY(plainArea->property("contentHeight").toReal()
+                    <= plainArea->property("height").toReal());
+        QVERIFY(!plainArea->property("interactive").toBool());
+        QVERIFY(!plainBar->property("scrollable").toBool());
+        QVERIFY(!plainBar->property("shown").toBool());
+    }
+
     void securityStatesHideUnverifiedPlaintext()
     {
         OpenChat::ChatController controller;

@@ -402,7 +402,7 @@ Item {
     // time; each fills the same middle band so the panes line up. Chat keeps the
     // approved contact list unchanged; Call shows the (currently empty) call
     // history list.
-    Item {
+    Flickable {
         id: chatContactArea
         objectName: "chatContactArea"
         anchors.left: parent.left
@@ -410,10 +410,18 @@ Item {
         anchors.top: searchArea.bottom
         anchors.bottom: bottomNav.top
         visible: sidebar.controller.navSection === ChatController.NavSection.Chat
+        // Only takes over the wheel and drag once the categories outgrow the
+        // band, so a short list behaves exactly as it did before.
+        clip: true
+        interactive: contentHeight > height
+        boundsBehavior: Flickable.StopAtBounds
+        contentWidth: width
+        contentHeight: chatColumn.height
 
         Column {
-            anchors.top: parent.top
-            width: parent.width
+            id: chatColumn
+            y: 0
+            width: chatContactArea.width
 
             // Search & Find: the exact-handle directory match for the search
             // text, with a grey "add person" affordance that sends a friend
@@ -703,6 +711,16 @@ Item {
         }
     }
 
+    // Overlay scrollbars for the two lists that can outgrow the band. They sit
+    // above their flickable so the handle is not clipped, and stay hidden until
+    // the list is actually scrolled.
+    AeroScrollBar {
+        objectName: "chatScrollBar"
+        flickable: chatContactArea
+        visible: chatContactArea.visible && opacity > 0.01
+        z: 2
+    }
+
     Item {
         id: sidebarCallList
         objectName: "sidebarCallList"
@@ -730,7 +748,7 @@ Item {
 
     // Settings section: a selectable list of setting categories in the sidebar
     // list style. The selected category drives the detail pane on the right.
-    Item {
+    Flickable {
         id: settingsCategoryList
         objectName: "settingsCategoryList"
         anchors.left: parent.left
@@ -738,10 +756,16 @@ Item {
         anchors.top: searchArea.bottom
         anchors.bottom: bottomNav.top
         visible: sidebar.controller.navSection === ChatController.NavSection.Settings
+        clip: true
+        interactive: contentHeight > height
+        boundsBehavior: Flickable.StopAtBounds
+        contentWidth: width
+        contentHeight: settingsColumn.height
 
         Column {
-            anchors.top: parent.top
-            width: parent.width
+            id: settingsColumn
+            y: 0
+            width: settingsCategoryList.width
 
             Repeater {
                 model: sidebar.controller.settingsCategories
@@ -781,6 +805,13 @@ Item {
                 }
             }
         }
+    }
+
+    AeroScrollBar {
+        objectName: "settingsScrollBar"
+        flickable: settingsCategoryList
+        visible: settingsCategoryList.visible && opacity > 0.01
+        z: 2
     }
 
     // Bottom navigation. Three equal columns switch the main pane between the

@@ -76,6 +76,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/AeroButton.qml
         qml/OpenChat/components/AeroSwitch.qml
         qml/OpenChat/components/AeroSlider.qml
+        qml/OpenChat/components/AeroScrollBar.qml
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml

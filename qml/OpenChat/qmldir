@@ -20,6 +20,8 @@ CallActionButton 1.0 components/CallActionButton.qml
 CallHeader 1.0 components/CallHeader.qml
 ScreenShareStage 1.0 components/ScreenShareStage.qml
 ScreenSharePicker 1.0 components/ScreenSharePicker.qml
+MediaIconButton 1.0 components/MediaIconButton.qml
+MediaZoomOverlay 1.0 components/MediaZoomOverlay.qml
 MessageDelegate 1.0 components/MessageDelegate.qml
 MessageHistory 1.0 components/MessageHistory.qml
 Composer 1.0 components/Composer.qml

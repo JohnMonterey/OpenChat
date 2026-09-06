@@ -6,6 +6,7 @@ endif()
 
 # Optional passthrough: when CAPTURE_EXTRA_ARG is defined and non-empty it is
 # prepended to the OpenChat arguments (e.g. --add-contact to select a sub-mode).
+# A semicolon-separated value is a CMake list and becomes several arguments.
 # When it is undefined the invocation is byte-for-byte the historical one.
 set(openchat_extra_args "")
 if(DEFINED CAPTURE_EXTRA_ARG AND NOT CAPTURE_EXTRA_ARG STREQUAL "")

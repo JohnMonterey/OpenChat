@@ -32,6 +32,17 @@ class CallVideoItem : public QQuickPaintedItem
     Q_PROPERTY(double sourceAspect READ sourceAspect NOTIFY sourceAspectChanged)
     // True while a screen share is still filling in its first sweep.
     Q_PROPERTY(bool canvasComplete READ canvasComplete NOTIFY canvasChanged)
+    // A paused view keeps its source bound but stops repainting for it: the
+    // tile an enlarged copy was opened from sits under the scrim, where nobody
+    // can see it move, so it costs nothing while the copy does the moving. It
+    // repaints itself whole the moment it is resumed.
+    Q_PROPERTY(bool paused READ paused WRITE setPaused NOTIFY pausedChanged)
+    // Another view to show the same thing as. A copy follows its source's
+    // frame, canvas and mirroring in C++, straight from signal to setter, so
+    // an enlarged camera does not push thirty frames a second through a QML
+    // binding and an enlarged share never leaves a desktop-sized pointer on the
+    // JavaScript heap waiting for a garbage collection.
+    Q_PROPERTY(OpenChat::CallVideoItem *source READ source WRITE setSource NOTIFY sourceChanged)
 
 public:
     explicit CallVideoItem(QQuickItem *parent = nullptr);
@@ -44,6 +55,10 @@ public:
     void setMirrored(bool value);
     [[nodiscard]] double sourceAspect() const;
     [[nodiscard]] bool canvasComplete() const { return m_canvas && m_canvas->isComplete(); }
+    [[nodiscard]] bool paused() const { return m_paused; }
+    void setPaused(bool value);
+    [[nodiscard]] CallVideoItem *source() const { return m_source; }
+    void setSource(CallVideoItem *source);
 
     void paint(QPainter *painter) override;
 
@@ -52,8 +67,11 @@ signals:
     void canvasChanged();
     void mirroredChanged();
     void sourceAspectChanged();
+    void pausedChanged();
+    void sourceChanged();
 
 private:
+    void applyCanvas(ScreenCanvasPtr next);
     // The item-space rectangle a canvas-space rectangle lands in, inflated by a
     // pixel so smooth scaling cannot leave a seam at the edge of the repaint.
     [[nodiscard]] QRect mapFromSource(const QRect &rect) const;
@@ -64,6 +82,8 @@ private:
     ScreenCanvasPtr m_canvas;
     QSize m_lastSourceSize;
     bool m_mirrored = false;
+    bool m_paused = false;
+    CallVideoItem *m_source = nullptr;
 };
 
 } // namespace OpenChat

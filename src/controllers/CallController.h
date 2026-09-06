@@ -7,6 +7,7 @@
 #include "models/CallParticipantModel.h"
 
 #include <QObject>
+#include <QSize>
 #include <QString>
 
 QT_BEGIN_NAMESPACE
@@ -147,6 +148,9 @@ public:
     // the sender, which stops encoding more than this. A zero size means the
     // view is closed and the sender can idle.
     Q_INVOKABLE void setRemoteScreenViewSize(int width, int height);
+    // The size the view last reported for the staged share, engine or not, so
+    // what the sender would be told can be checked without a live call.
+    [[nodiscard]] QSize remoteScreenViewSize() const { return m_remoteScreenViewSize; }
     Q_INVOKABLE void setParticipantScreenViewSize(const QString &deviceId, int width, int height);
     // A one-line summary of the live share for development builds.
     Q_INVOKABLE QString screenShareDiagnostics() const;
@@ -244,6 +248,7 @@ private:
     QString m_remoteScreenDevice;
     QString m_remoteScreenSharerName;
     QImage m_localScreenPreview;
+    QSize m_remoteScreenViewSize;
     qint64 m_lastPreviewMs = 0;
     int m_appliedCaptureFps = 0;
     bool m_cameraEnabled = false;

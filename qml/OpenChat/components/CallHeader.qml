@@ -19,6 +19,22 @@ Item {
     // a desktop wants more height than a face, but not so much that the
     // conversation underneath disappears at the minimum window size.
     property real maxShareHeight: 300
+    // The window-level enlarge overlay, handed down to the share stage so an
+    // enlarged share is encoded at the size it is drawn.
+    property Item zoom: null
+    // True while this surface is the whole window rather than the top of the
+    // conversation. Its height is then the window's, not its own, so the
+    // content centres itself and the pictures grow to use the room.
+    property bool fullscreen: false
+    // The height the surface has when it fills the window. Handed in rather
+    // than read from `height`: the slot sizes itself from this surface's
+    // implicit height, and the caps below feed that, so reading our own height
+    // here would be a loop the moment the two modes swap.
+    property real availableHeight: height
+    // Raised by the corner chip; the window decides what to collapse.
+    signal fullscreenToggled
+    // Raised by any zoom chip on any picture here, with the video view to copy.
+    signal enlargeRequested(Item videoItem)
     readonly property bool isGroupCall: controller.isGroupCall === true
     readonly property bool hasVideo: controller.cameraEnabled || controller.remoteCameraEnabled
     readonly property real videoWidth: Math.max(100,
@@ -26,13 +42,32 @@ Item {
          - (controller.cameraEnabled && controller.remoteCameraEnabled ? 0 : 132))
         / (controller.cameraEnabled && controller.remoteCameraEnabled ? 2 : 1))
     // In a group every camera shares the row, so each gets a narrower slot.
-    readonly property real groupVideoWidth: Math.max(100, Math.min(260, (width - 60) / 3))
+    readonly property real groupVideoWidth: Math.max(100, Math.min(fullscreen ? 480 : 260,
+                                                                   (width - 60) / 3))
     readonly property real participantsHeight: isGroupCall ? groupParticipants.height
                                                            : participants.height
-    implicitHeight: Math.max(Theme.callHeaderHeight, participantsHeight + 98)
+    // Everything below the pictures — status, actions, errors, and the air
+    // around them — which is what a full-window layout has to leave room for.
+    readonly property real chromeHeight: 98 + (isGroupCall ? 18 : 0)
+                                         + (mediaError.visible ? mediaError.implicitHeight + 8 : 0)
+    // The caps the pictures are actually laid out with. Filling the window,
+    // a lone camera row takes what the chrome leaves; with a share on stage
+    // the cameras stay modest and the share gets the rest.
+    readonly property real videoHeightCap: !fullscreen ? maxVideoHeight
+        : (screenStage.visible ? Math.min(240, availableHeight * 0.28)
+                               : Math.max(120, availableHeight - chromeHeight - 100))
+    readonly property real shareHeightCap: !fullscreen ? Math.max(140, maxShareHeight)
+        : Math.max(140, availableHeight - participantsHeight - chromeHeight - 70)
+    // The height this surface asks for when it is only the top of the pane.
+    readonly property real naturalHeight: Math.max(Theme.callHeaderHeight, participantsHeight + 98)
                     + (isGroupCall ? 18 : 0)
                     + (screenStage.visible ? screenStage.implicitHeight + 10 : 0)
                     + (mediaError.visible ? mediaError.implicitHeight + 8 : 0)
+    // Where the content starts: at the top, or — given more height than it
+    // needs — centred in it.
+    readonly property real contentTop: fullscreen
+        ? Math.max(18, 18 + (availableHeight - naturalHeight) / 2) : 18
+    implicitHeight: naturalHeight
 
     Rectangle {
         anchors.fill: parent
@@ -47,7 +82,7 @@ Item {
         id: groupTitle
         objectName: "groupCallTitle"
         anchors.top: parent.top
-        anchors.topMargin: 10
+        anchors.topMargin: callHeader.contentTop - 8
         anchors.horizontalCenter: parent.horizontalCenter
         width: parent.width - 40
         horizontalAlignment: Text.AlignHCenter
@@ -68,7 +103,7 @@ Item {
         objectName: "groupParticipants"
         visible: callHeader.isGroupCall
         anchors.top: parent.top
-        anchors.topMargin: callHeader.isGroupCall ? 34 : 18
+        anchors.topMargin: callHeader.contentTop + (callHeader.isGroupCall ? 16 : 0)
         anchors.horizontalCenter: parent.horizontalCenter
         width: Math.min(parent.width - 40, 5 * 132 + 4 * 14)
         spacing: 14
@@ -79,8 +114,9 @@ Item {
             videoFrame: callHeader.controller.localVideoFrame
             videoAspect: callHeader.controller.localVideoAspect
             videoMaxWidth: callHeader.groupVideoWidth
-            videoMaxHeight: callHeader.maxVideoHeight
+            videoMaxHeight: callHeader.videoHeightCap
             mirrored: true
+            onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
             name: callHeader.controller.localName.length > 0
                   ? callHeader.controller.localName : "You"
             avatarKey: callHeader.controller.localAvatarKey
@@ -108,9 +144,10 @@ Item {
                 required videoAspect
                 objectName: "groupParticipant_" + deviceId
                 videoMaxWidth: callHeader.groupVideoWidth
-                videoMaxHeight: callHeader.maxVideoHeight
+                videoMaxHeight: callHeader.videoHeightCap
                 caption: stateText
                 dimmed: !joined && !ringing
+                onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
             }
         }
     }
@@ -123,7 +160,7 @@ Item {
         height: Math.max(localParticipant.height, remoteParticipant.height)
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
-        anchors.topMargin: 18
+        anchors.topMargin: callHeader.contentTop
         spacing: callHeader.hasVideo ? 22 : 34
 
         CallParticipant {
@@ -133,8 +170,9 @@ Item {
             videoFrame: callHeader.controller.localVideoFrame
             videoAspect: callHeader.controller.localVideoAspect
             videoMaxWidth: callHeader.videoWidth
-            videoMaxHeight: callHeader.maxVideoHeight
+            videoMaxHeight: callHeader.videoHeightCap
             mirrored: true
+            onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
             name: callHeader.controller.localName.length > 0
                   ? callHeader.controller.localName : "You"
             avatarKey: callHeader.controller.localAvatarKey
@@ -168,11 +206,12 @@ Item {
             videoFrame: callHeader.controller.remoteVideoFrame
             videoAspect: callHeader.controller.remoteVideoAspect
             videoMaxWidth: callHeader.videoWidth
-            videoMaxHeight: callHeader.maxVideoHeight
+            videoMaxHeight: callHeader.videoHeightCap
             name: callHeader.controller.peerName
             avatarKey: callHeader.controller.peerAvatarKey
             speaking: callHeader.controller.remoteSpeaking
             level: callHeader.controller.remoteLevel
+            onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
         }
     }
 
@@ -188,7 +227,9 @@ Item {
         anchors.leftMargin: 24
         anchors.rightMargin: 24
         height: implicitHeight
-        maxHeight: Math.max(140, callHeader.maxShareHeight)
+        maxHeight: callHeader.shareHeightCap
+        zoom: callHeader.zoom
+        onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
     }
 
     Text {
@@ -213,10 +254,32 @@ Item {
     Row {
         id: actions
         objectName: "callActions"
+        // The room the full-screen chip needs at the right edge: its width,
+        // its margin, and a gap.
+        readonly property real chipReserve: fullscreenChip.width + 8 + 6
+        // The row's width with its usual spacing, from the buttons' own widths
+        // so it can be known before the spacing is chosen from it.
+        readonly property real naturalWidth: {
+            let total = 0;
+            let count = 0;
+            for (const child of actions.children) {
+                if (!child.visible)
+                    continue;
+                total += child.width;
+                ++count;
+            }
+            return total + Math.max(0, count - 1) * 12;
+        }
+        // At the minimum window width the live-call row only just fits the
+        // pane; rather than run under the chip it closes up and leans left.
+        readonly property bool tight: naturalWidth + 2 * chipReserve > callHeader.width
         anchors.top: statusLine.bottom
         anchors.topMargin: 12
         anchors.horizontalCenter: parent.horizontalCenter
-        spacing: 12
+        anchors.horizontalCenterOffset: Math.max(
+            -Math.max(0, (callHeader.width - actions.width) / 2 - 4),
+            Math.min(0, (callHeader.width - actions.width) / 2 - chipReserve))
+        spacing: tight ? 6 : 12
 
         CallActionButton {
             objectName: "acceptCallButton"
@@ -319,11 +382,25 @@ Item {
         }
     }
 
+    // The corner of the call surface: fill the window with it, or give the
+    // sidebar and the conversation back.
+    MediaIconButton {
+        id: fullscreenChip
+        objectName: "callFullscreenButton"
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 8
+        icon: callHeader.fullscreen ? "collapse" : "expand"
+        tooltip: callHeader.fullscreen ? "Exit full screen" : "Full screen"
+        onClicked: callHeader.fullscreenToggled()
+    }
+
     Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 1
         color: Theme.rule
+        visible: !callHeader.fullscreen
     }
 }

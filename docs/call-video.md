@@ -28,7 +28,11 @@ Older voice clients ignore version `2` packets and continue carrying audio.
 Each participant's existing avatar frame expands independently to the camera's
 aspect ratio, preserving the speaking ring and name. The renderer fits the whole
 image and rounds its corners. Only the local preview is mirrored. The layout
-reserves room for chat and controls at the minimum 720 × 560 window size.
+reserves room for chat and controls at the minimum 720 × 560 window size. Each
+camera tile has a zoom chip that enlarges it over the window, and the call
+surface has a corner chip that fills the window with the call; both are
+described in [screen-sharing.md](screen-sharing.md), which they share with the
+screen panes.
 
 Validation:
 

@@ -35,6 +35,9 @@ Item {
     property real videoMaxWidth: 260
     property real videoMaxHeight: 210
     property bool mirrored: false
+    // Asks for this person's camera to be enlarged over the window. Carries
+    // the video view itself, so whoever grows it can show the same frames.
+    signal enlargeRequested(Item videoItem)
     readonly property real pictureWidth: cameraEnabled
         ? Math.min(videoMaxWidth, videoMaxHeight * videoAspect) : avatarSize
     readonly property real pictureHeight: cameraEnabled ? pictureWidth / videoAspect : avatarSize
@@ -92,6 +95,7 @@ Item {
         }
 
         CallVideoItem {
+            id: video
             objectName: "participantVideo"
             anchors.fill: parent
             visible: participant.cameraEnabled
@@ -99,15 +103,30 @@ Item {
             mirrored: participant.mirrored
         }
 
+        // Only a camera can be enlarged; an avatar is already as big as it
+        // gets. Sits in the corner of the picture, small enough to ignore.
+        MediaIconButton {
+            objectName: "zoomButton"
+            visible: participant.cameraEnabled
+            icon: "zoom"
+            tooltip: "Enlarge"
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 6
+            onClicked: participant.enlargeRequested(video)
+        }
+
         // A muted participant is marked on the picture, because a muted person
         // is silent for a reason and should not read as merely "not talking".
+        // On a camera it takes the other corner, leaving the zoom its own.
         Rectangle {
             objectName: "mutedBadge"
             visible: participant.muted
             width: 22
             height: 22
             radius: 11
-            anchors.right: parent.right
+            anchors.right: participant.cameraEnabled ? undefined : parent.right
+            anchors.left: participant.cameraEnabled ? parent.left : undefined
             anchors.bottom: parent.bottom
             anchors.margins: -4
             color: Theme.outgoingBottom

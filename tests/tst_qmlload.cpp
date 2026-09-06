@@ -13,6 +13,8 @@
 #include <QtTest>
 #include <QQuickWindow>
 
+#include <algorithm>
+#include <memory>
 #include <optional>
 
 #include "controllers/CallController.h"
@@ -1792,6 +1794,250 @@ private slots:
         QVERIFY(!mute->isVisible());
         QVERIFY(!end->isVisible());
         QVERIFY(dismiss->isVisible());
+    }
+
+    // The window an in-call test shows for real: mouse clicks and shortcuts
+    // only reach a window that is exposed and active.
+    static QQuickWindow *showActiveWindow(QObject *root)
+    {
+        auto *window = qobject_cast<QQuickWindow *>(root);
+        if (!window)
+            return nullptr;
+        window->show();
+        window->requestActivate();
+        if (!QTest::qWaitForWindowExposed(window) || !QTest::qWaitForWindowActive(window))
+            return nullptr;
+        return window;
+    }
+
+    static void clickItem(QQuickWindow *window, QQuickItem *item)
+    {
+        const QPointF centre = item->mapToScene(QPointF(item->width() / 2, item->height() / 2));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre.toPoint());
+    }
+
+    void aPictureEnlargesOverTheWindowAndAClickOutsideShrinksIt()
+    {
+        // The zoom chip on a camera tile grows a copy of that camera to fill
+        // the window at its own aspect, behind a scrim that takes every click;
+        // a click anywhere off the picture shrinks it back onto the tile.
+        OpenChat::ChatController chats;
+        OpenChat::CallController calls;
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), true, false);
+        QImage wide(640, 360, QImage::Format_RGB32);
+        QImage portrait(360, 640, QImage::Format_RGB32);
+        wide.fill(Qt::blue);
+        portrait.fill(Qt::green);
+        calls.setPreviewVideo(wide, portrait);
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QQuickWindow *window = showActiveWindow(root);
+        QVERIFY(window);
+
+        auto *remote = root->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+        QVERIFY(remote);
+        auto *remoteVideo = remote->findChild<QQuickItem *>(QStringLiteral("participantVideo"));
+        auto *zoomChip = remote->findChild<QQuickItem *>(QStringLiteral("zoomButton"));
+        auto *overlay = root->findChild<QQuickItem *>(QStringLiteral("mediaZoomOverlay"));
+        auto *picture = root->findChild<QQuickItem *>(QStringLiteral("mediaZoomPicture"));
+        QVERIFY(remoteVideo && zoomChip && overlay && picture);
+        QVERIFY(zoomChip->isVisible());
+        // The chip sits in the tile's bottom-right corner, on the picture.
+        const QPointF chipCorner = zoomChip->mapToItem(
+            remoteVideo, QPointF(zoomChip->width(), zoomChip->height()));
+        QVERIFY(qAbs(chipCorner.x() - (remoteVideo->width() - 6)) < 1.0);
+        QVERIFY(qAbs(chipCorner.y() - (remoteVideo->height() - 6)) < 1.0);
+        QVERIFY(!overlay->isVisible());
+
+        clickItem(window, zoomChip);
+        QTRY_VERIFY2(overlay->isVisible(), "the zoom chip did not open the enlarged picture");
+        QVERIFY(overlay->property("expanded").toBool());
+        QCOMPARE(overlay->property("sourceItem").value<QQuickItem *>(), remoteVideo);
+        // The tile under the scrim stops repainting while its copy is up.
+        QVERIFY(remoteVideo->property("paused").toBool());
+
+        // It grows to the largest rectangle of the remote camera's aspect that
+        // fits the window with air around it, centred — never stretched.
+        const double aspect = 360.0 / 640.0;
+        const double margin = overlay->property("margin").toDouble();
+        const double fitWidth = std::min(window->width() - 2 * margin,
+                                         (window->height() - 2 * margin) * aspect);
+        QTRY_VERIFY(qAbs(picture->width() - fitWidth) < 1.0);
+        QVERIFY(qAbs(picture->width() / picture->height() - aspect) < 0.005);
+        QVERIFY(qAbs(picture->x() + picture->width() / 2 - window->width() / 2.0) < 1.5);
+        QVERIFY(qAbs(picture->y() + picture->height() / 2 - window->height() / 2.0) < 1.5);
+        // And it shows the same frames the tile does.
+        auto *copy = root->findChild<QQuickItem *>(QStringLiteral("mediaZoomVideo"));
+        QVERIFY(copy);
+        QCOMPARE(copy->property("frame").value<QImage>().size(), portrait.size());
+        QCOMPARE(copy->property("sourceAspect").toDouble(), aspect);
+
+        // A click on the picture is nothing; a click anywhere else closes it.
+        clickItem(window, picture);
+        QCoreApplication::processEvents();
+        QVERIFY(overlay->property("expanded").toBool());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          QPoint(12, window->height() / 2));
+        QTRY_VERIFY(!overlay->property("expanded").toBool());
+        QVERIFY(!remoteVideo->property("paused").toBool());
+        // It shrinks back onto the tile it came from before it goes.
+        const QPointF tileOrigin = remoteVideo->mapToScene(QPointF());
+        QTRY_VERIFY(qAbs(picture->x() - tileOrigin.x()) < 1.0);
+        QVERIFY(qAbs(picture->width() - remoteVideo->width()) < 1.0);
+        QTRY_VERIFY2(!overlay->isVisible(), "the enlarged picture stayed after the shrink");
+        QVERIFY(!overlay->property("sourceItem").value<QQuickItem *>());
+    }
+
+    void anEnlargedShareIsEncodedForTheWindowAndClosesWithTheShare()
+    {
+        // Enlarging the far end's screen changes what the sender is told about
+        // our view — the size it is drawn at is now most of the window, so the
+        // share is encoded for that and not for the strip. Escape closes it,
+        // and a share that stops takes its enlarged copy with it at once.
+        OpenChat::ChatController chats;
+        OpenChat::CallController calls;
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), false, false);
+        auto canvas = std::make_shared<OpenChat::ScreenCanvas>(QSize(1600, 900));
+        calls.setPreviewScreenShare(canvas, QStringLiteral("Jessica"));
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QQuickWindow *window = showActiveWindow(root);
+        QVERIFY(window);
+
+        auto *video = root->findChild<QQuickItem *>(QStringLiteral("remoteScreenVideo"));
+        auto *chip = root->findChild<QQuickItem *>(QStringLiteral("remoteScreenZoomButton"));
+        auto *overlay = root->findChild<QQuickItem *>(QStringLiteral("mediaZoomOverlay"));
+        QVERIFY(video && chip && overlay);
+        QVERIFY(video->isVisible() && chip->isVisible());
+        const QSize stripSize = calls.remoteScreenViewSize();
+        QVERIFY(stripSize.width() > 0);
+        QVERIFY(stripSize.width() < window->width() / 2);
+
+        clickItem(window, chip);
+        QTRY_VERIFY(overlay->property("expanded").toBool());
+        QCOMPARE(overlay->property("sourceItem").value<QQuickItem *>(), video);
+        auto *copy = root->findChild<QQuickItem *>(QStringLiteral("mediaZoomVideo"));
+        QVERIFY(copy);
+        QCOMPARE(copy->property("canvas").value<OpenChat::ScreenCanvasPtr>(), canvas);
+        const double margin = overlay->property("margin").toDouble();
+        const double fitWidth = std::min(window->width() - 2 * margin,
+                                         (window->height() - 2 * margin) * 1600.0 / 900.0);
+        QCOMPARE(calls.remoteScreenViewSize(),
+                 QSize(qRound(fitWidth), qRound(fitWidth * 900.0 / 1600.0)));
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY2(!overlay->property("expanded").toBool(), "Escape did not close it");
+        QCOMPARE(calls.remoteScreenViewSize(), stripSize);
+        QTRY_VERIFY(!overlay->isVisible());
+
+        clickItem(window, chip);
+        QTRY_VERIFY(overlay->property("expanded").toBool());
+        calls.setPreviewScreenShare({}, QString());
+        QCoreApplication::processEvents();
+        QVERIFY2(!overlay->isVisible(), "the enlarged copy outlived the share");
+        QVERIFY(!overlay->property("sourceItem").value<QQuickItem *>());
+        // The copy follows its source in C++, so nothing is left on the
+        // JavaScript heap waiting for a collection: the pixels go at once.
+        std::weak_ptr<OpenChat::ScreenCanvas> observer = canvas;
+        canvas.reset();
+        QVERIFY2(observer.expired(), "the enlarged copy kept the share's pixels alive");
+    }
+
+    void theCallCanFillTheWholeWindowAndGivesItBackWhenItEnds()
+    {
+        // The corner chip collapses the sidebar and the conversation and hands
+        // the call surface the whole window. Escape or the chip give them
+        // back, and so does the end of the call, without being asked.
+        OpenChat::ChatController chats;
+        OpenChat::CallController calls;
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), true, false);
+        QImage wide(640, 360, QImage::Format_RGB32);
+        wide.fill(Qt::blue);
+        calls.setPreviewVideo(wide, QImage());
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QQuickWindow *window = showActiveWindow(root);
+        QVERIFY(window);
+
+        auto *chip = root->findChild<QQuickItem *>(QStringLiteral("callFullscreenButton"));
+        auto *callHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
+        auto *sidebar = root->findChild<QQuickItem *>(QStringLiteral("contactSidebar"));
+        auto *pane = root->findChild<QQuickItem *>(QStringLiteral("conversationPane"));
+        auto *slot = root->findChild<QQuickItem *>(QStringLiteral("conversationHeaderSlot"));
+        auto *history = root->findChild<QQuickItem *>(QStringLiteral("messageHistory"));
+        auto *actions = root->findChild<QQuickItem *>(QStringLiteral("callActions"));
+        QVERIFY(chip && callHeader && sidebar && pane && slot && history && actions);
+        QVERIFY(chip->isVisible());
+        QCOMPARE(chip->property("icon").toString(), QStringLiteral("expand"));
+        // In the surface's bottom-right corner, clear of the action row.
+        const QPointF corner = chip->mapToItem(callHeader, QPointF(chip->width(), chip->height()));
+        QVERIFY(qAbs(corner.x() - (callHeader->width() - 8)) < 1.0);
+        QVERIFY(qAbs(corner.y() - (callHeader->height() - 8)) < 1.0);
+        QVERIFY(actions->mapToItem(callHeader, QPointF(actions->width(), 0)).x()
+                <= chip->mapToItem(callHeader, QPointF()).x());
+        const int sidebarWidth = root->property("sidebarWidth").toInt();
+        QVERIFY(sidebar->isVisible());
+        QCOMPARE(pane->x(), double(sidebarWidth));
+        QVERIFY(history->isVisible());
+        QVERIFY(slot->height() < window->height() * 0.7);
+
+        clickItem(window, chip);
+        QTRY_VERIFY2(root->property("callFullscreen").toBool(),
+                     "the corner chip did not fill the window with the call");
+        QCOMPARE(chip->property("icon").toString(), QStringLiteral("collapse"));
+        QVERIFY(!sidebar->isVisible());
+        QVERIFY(!history->isVisible());
+        QCOMPARE(pane->x(), 0.0);
+        QCOMPARE(pane->width(), double(window->width()));
+        QCOMPARE(slot->height(), double(window->height()));
+        QCOMPARE(callHeader->height(), double(window->height()));
+        // The call's content is centred in the room it now has, and the
+        // pictures grow into it: a lone camera row takes most of the height.
+        auto *localVideo = root->findChild<QQuickItem *>(QStringLiteral("localParticipant"))
+                               ->findChild<QQuickItem *>(QStringLiteral("participantVideo"));
+        QVERIFY(localVideo);
+        QVERIFY(localVideo->height() > 230);
+        QVERIFY(callHeader->property("contentTop").toDouble() >= 18);
+        QVERIFY(actions->mapToItem(callHeader, QPointF(0, actions->height())).y()
+                < callHeader->height() - 8);
+
+        // Escape gives the window back...
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!root->property("callFullscreen").toBool());
+        QVERIFY(sidebar->isVisible());
+        QVERIFY(history->isVisible());
+        QCOMPARE(pane->x(), double(sidebarWidth));
+        QVERIFY(slot->height() < window->height() * 0.7);
+
+        // ...and so does the end of the call, on its own.
+        clickItem(window, chip);
+        QTRY_VERIFY(root->property("callFullscreen").toBool());
+        calls.enableForPreview(OpenChat::CallState::Idle, QString(), QString(), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY2(!root->property("callFullscreen").toBool(),
+                 "the call ended but kept the whole window");
+        QVERIFY(sidebar->isVisible());
     }
 };
 

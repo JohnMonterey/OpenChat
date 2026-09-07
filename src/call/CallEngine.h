@@ -39,6 +39,10 @@ enum class CallParticipantState {
     Left,     // hung up after joining
     Busy,     // was in another call
     NoAnswer, // never picked up before the ring timed out
+    // We are rejoining a call they were last seen in and are waiting for them
+    // to confirm they are still there. Becomes Joined on their answer, Left
+    // when the ring timeout passes without one.
+    Connecting,
 };
 
 [[nodiscard]] QString callParticipantStateName(CallParticipantState state);
@@ -46,7 +50,8 @@ enum class CallParticipantState {
 // True in the states where a participant may still end up in the call.
 [[nodiscard]] constexpr bool participantIsPending(CallParticipantState state) noexcept
 {
-    return state == CallParticipantState::Ringing || state == CallParticipantState::Joined;
+    return state == CallParticipantState::Ringing || state == CallParticipantState::Joined
+        || state == CallParticipantState::Connecting;
 }
 
 // The lifecycle of one voice call at a time: who is being called, what state the
@@ -62,6 +67,14 @@ enum class CallParticipantState {
 // each pair of members keys its own path from the shared call secret, so audio
 // never passes through a third device, and a member who leaves is simply
 // dropped from everyone else's mesh while the rest carry on.
+//
+// Leaving a call does not end it. The last member left in a call waits a grace
+// period for someone to come back before the call ends on its own, and a
+// member who left, declined, missed, or was busy for a call keeps a record of
+// it (ongoingCalls()) for as long as somebody is still in it, from which
+// joinCall() takes them back in. Rejoining always keys a fresh media path: the
+// rejoiner offers a new secret under the same call id, so no key is ever used
+// twice with frame numbers restarting from zero.
 //
 // Everything the engine touches is injected: the transport, the audio devices,
 // and the timeouts. It owns no sockets and opens no devices itself, so the whole
@@ -81,6 +94,9 @@ public:
         // sent continuously (silence included) so a gap this long means the path
         // is gone, not that the peer stopped talking.
         int mediaStallTimeoutMs = 20'000;
+        // How long the last member left in a call waits for somebody to come
+        // back before the call ends as Abandoned.
+        int rejoinGraceMs = 5 * 60'000;
         // The codec offered to the peer. Opus unless a caller asks for PCM by
         // name, which only the tests and the diagnostics tool do.
         AudioCodecKind preferredCodec = preferredAudioCodec();
@@ -127,6 +143,21 @@ public:
         double level = 0.0;
     };
 
+    // A call on one of this device's conversations that this device is not in
+    // — one it left, declined, missed, or was busy for — while somebody else
+    // still is. Kept up to date from the signals the members keep sending to
+    // everyone, and dropped the moment the last of them leaves.
+    struct OngoingCall final {
+        ConversationId conversation = ConversationId::generate();
+        CallId callId = CallId::generate();
+        bool group = false;
+        QString title;
+        // Every other member and what they are doing; for an ordinary call,
+        // the one peer.
+        QVector<Participant> participants;
+        [[nodiscard]] int joinedCount() const;
+    };
+
     CallEngine(Config config, CallTransport &transport, CallAudioIoFactory audioIo,
                QObject *parent = nullptr);
     ~CallEngine() override;
@@ -157,6 +188,22 @@ public:
     [[nodiscard]] QVector<Participant> participants() const;
     // How many members are in the call with us right now.
     [[nodiscard]] int joinedParticipantCount() const;
+    // The one peer of an ordinary call, as a participant state: Ringing while
+    // we dial, Joined while they are in, Left once they hang up on a call we
+    // stay in, Connecting while a rejoin of ours awaits their answer.
+    [[nodiscard]] CallParticipantState peerState() const noexcept { return m_peerState; }
+    // True while we are in a call with nobody else in it and the grace period
+    // is running; waitingRemainingMs() is how much of it is left.
+    [[nodiscard]] bool isWaitingForOthers() const;
+    [[nodiscard]] qint64 waitingRemainingMs() const;
+
+    // Calls this device could (re)join right now.
+    [[nodiscard]] QVector<OngoingCall> ongoingCalls() const;
+    [[nodiscard]] std::optional<OngoingCall> ongoingCall(const ConversationId &conversation) const;
+    // Joins the ongoing call on `conversation`. Fails (returning false) when
+    // there is none, when a call already occupies the device, or when a fresh
+    // call secret cannot be generated.
+    [[nodiscard]] bool joinCall(const ConversationId &conversation);
 
     // Non-null only between Connecting and Ended in an ordinary call; exposed
     // for diagnostics. A group call keeps one session per member instead.
@@ -176,8 +223,9 @@ public:
     void acceptCall();
     void declineCall();
 
-    // Ends whatever is in progress, at any stage. Safe to call when idle. In a
-    // group call this leaves the call: the others carry on without us.
+    // Ends whatever is in progress, at any stage. Safe to call when idle. This
+    // leaves the call rather than ending it: whoever is still in carries on
+    // without us, and the call stays joinable (see ongoingCalls()).
     void hangUp();
 
     void setMuted(bool muted);
@@ -262,6 +310,8 @@ signals:
     void incomingCall();
     // A call reached Ended. `reason` is also readable from endReason().
     void callEnded(OpenChat::CallEndReason reason);
+    // The set of calls this device could join, or who is in one, changed.
+    void ongoingCallsChanged();
 
 private:
     // A group call's view of one other member, and the media path to them.
@@ -270,6 +320,11 @@ private:
         // The codec this member announced; each pair runs the narrower of the
         // two ends' choices, which both compute the same way.
         AudioCodecKind codec = AudioCodecKind::Pcm;
+        // The secret this member last offered: the call's, until they rejoin
+        // with a fresh one. A pair keys from whichever of its two ends has the
+        // lower device id, so both ends pick the same secret however their
+        // offers and answers crossed.
+        QByteArray secret;
         std::unique_ptr<CallSession> session;
         std::unique_ptr<CallVideoSession> video;
         std::unique_ptr<CallScreenSession> screen;
@@ -302,9 +357,34 @@ private:
     void handleGroupAnswer(Member &member, const CallSignalMessage &message);
     void handleGroupHangup(Member &member, const CallSignalMessage &message);
     void onGroupMedia(Member &member, const QByteArray &packet);
-    // Ends the group call when there is nobody left to be in it with.
+    // Decides what a group call does once somebody's state changed: ends it
+    // when the offer went nowhere, or starts the grace period when the last
+    // other member has left.
     void settleGroup();
     [[nodiscard]] Member *memberFor(const DeviceId &device);
+    // The member for `device`, added (as not in the call) if the roster did
+    // not list them.
+    [[nodiscard]] Member &ensureMember(const DeviceId &device, const ConversationId &conversation);
+    // A member (re)joining the call we are in, with the secret their offer
+    // carried: keys a fresh path to them and tells them we are here.
+    void admitMember(Member &member, const QByteArray &secret, AudioCodecKind codec);
+    // The secret the pair with `member` keys from.
+    [[nodiscard]] const QByteArray &pairBaseSecret(const Member &member) const;
+    // Signals for a call other than the one in progress: a running call's
+    // reply to a redundant one of ours, or news about a call we are not in.
+    void handleForeignSignal(const ConversationId &conversation, const DeviceId &sender,
+                             const CallSignalMessage &message);
+    void noteOngoingSignal(const ConversationId &conversation, const DeviceId &sender,
+                           const CallSignalMessage &message);
+    [[nodiscard]] OngoingCall *ongoingFor(const ConversationId &conversation);
+    void rememberOngoing(OngoingCall call);
+    void forgetOngoing(const ConversationId &conversation);
+    // Enters `call` with `secret` as our fresh offer, from Idle or Ended.
+    void beginJoin(OngoingCall call, QByteArray secret);
+    // Starts or stops the grace period from who is in the call with us, and
+    // lets go of the microphone while there is nobody to send to.
+    void updateGrace();
+    void releaseMediaWhileAlone();
     [[nodiscard]] bool openMemberMedia(Member &member);
     void closeMemberMedia(Member &member);
     void broadcast(const CallSignalMessage &message);
@@ -375,7 +455,13 @@ private:
     CallState m_state = CallState::Idle;
     CallEndReason m_endReason = CallEndReason::None;
     CallDirection m_direction = CallDirection::Outgoing;
+    // Which half of the key schedule an ordinary call's media session runs.
+    // The call's direction until somebody rejoins, after which the rejoiner
+    // is the offering end whichever way the call was first placed.
+    CallDirection m_sessionDirection = CallDirection::Outgoing;
+    CallParticipantState m_peerState = CallParticipantState::Ringing;
     CallPeer m_peer;
+    std::vector<OngoingCall> m_ongoing;
     std::unique_ptr<GroupCall> m_group;
     std::optional<CallId> m_callId;
     QByteArray m_secret;
@@ -395,6 +481,8 @@ private:
 
     QTimer *m_ringTimer = nullptr;
     QTimer *m_stallTimer = nullptr;
+    // Runs while we are the only one in the call; ends it when it fires.
+    QTimer *m_graceTimer = nullptr;
     QTimer *m_levelTimer = nullptr;
     // Holds the speaker open after a call ends, just long enough for the
     // hang-up sound to finish playing through it.

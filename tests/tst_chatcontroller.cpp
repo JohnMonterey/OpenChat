@@ -1221,6 +1221,10 @@ private slots:
             encodeCallSignal(CallSignalMessage::offer(
                 CallId::generate(), generateCallSecret(), AudioCodecKind::Pcm)));
         QVERIFY(calls.isRinging());
+        // The call belongs to the caller's chat, which is the one open; a
+        // caller with no chat at all is shown wherever the user is.
+        QCOMPARE(calls.callChatId(), knownConversation ? live.peerAccount.toHex() : QString());
+        QVERIFY(calls.callInCurrentChat());
         QCOMPARE(nameAtAlert, expected);
         QCOMPARE(calls.peerName(), expected);
         QCOMPARE(calls.peerAvatarKey(), QStringLiteral("userpfp_none"));

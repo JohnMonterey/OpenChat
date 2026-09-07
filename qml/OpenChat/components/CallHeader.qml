@@ -211,6 +211,11 @@ Item {
             avatarKey: callHeader.controller.peerAvatarKey
             speaking: callHeader.controller.remoteSpeaking
             level: callHeader.controller.remoteLevel
+            // "Left" while they are out of a call we stayed in, "Reconnecting…"
+            // while our rejoin awaits them; nothing while they are simply here.
+            caption: callHeader.controller.peerStateText !== undefined
+                     ? callHeader.controller.peerStateText : ""
+            dimmed: caption.length > 0
             onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
         }
     }
@@ -240,8 +245,12 @@ Item {
                      : (callHeader.isGroupCall ? groupParticipants.bottom : participants.bottom)
         anchors.topMargin: 8
         anchors.horizontalCenter: parent.horizontalCenter
-        text: callHeader.controller.isActive ? callHeader.controller.durationText
-                                            : callHeader.controller.statusText
+        // Alone in the call, the line counts down the wait instead of the
+        // call's length: what matters then is how long the door stays open.
+        text: callHeader.controller.waitingForOthers === true
+              ? callHeader.controller.waitingText
+              : (callHeader.controller.isActive ? callHeader.controller.durationText
+                                                : callHeader.controller.statusText)
         color: Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 14
@@ -330,6 +339,15 @@ Item {
             label: "End call"
             accent: "end"
             onClicked: callHeader.controller.hangUp()
+        }
+        // The call we just left is still going: the way back in is right
+        // here, before the surface is put away.
+        CallActionButton {
+            objectName: "rejoinCallButton"
+            visible: callHeader.controller.callEnded && callHeader.controller.canRejoin === true
+            label: "Rejoin"
+            accent: "accept"
+            onClicked: callHeader.controller.rejoinCall()
         }
         CallActionButton {
             objectName: "dismissCallButton"

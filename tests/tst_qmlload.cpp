@@ -606,7 +606,7 @@ private slots:
             {"contactId", "bob"}, {"name", "Bob"}, {"statusText", "Offline"},
             {"presence", 2}, {"favorite", false}, {"selected", false},
             {"avatarKey", "userpfp_none"}, {"isGroup", false}, {"unreadCount", 12},
-            {"width", 250}, {"height", 60}}));
+            {"callInProgress", false}, {"width", 250}, {"height", 60}}));
         QVERIFY2(row, qPrintable(component.errorString()));
         auto *badge = row->findChild<QObject *>("contactUnreadBadge");
         auto *label = row->findChild<QObject *>("contactUnreadLabel");
@@ -1637,6 +1637,215 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(leave, "clicked"));
         QTRY_VERIFY(!controller.currentIsGroup());
         QVERIFY(!leave->isVisible());
+    }
+
+    void theCallScreenWaitsForThePeerAndOffersToRejoin()
+    {
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::CallController callController;
+        callController.setLocalIdentity(chatController.localUserName(), chatController.localAvatarKey());
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        // Jessica hung up on a call we are still in: her picture is captioned
+        // and faded, the controls stay (we are in a call), and the status
+        // line counts the grace period down instead of the call's length.
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        callController.setPreviewWaiting(true, 4 * 60'000 + 59'000, QStringLiteral("Left"));
+        QCoreApplication::processEvents();
+        auto *remote = root->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+        auto *status = root->findChild<QQuickItem *>(QStringLiteral("callStatusText"));
+        auto *end = root->findChild<QQuickItem *>(QStringLiteral("endCallButton"));
+        auto *rejoin = root->findChild<QQuickItem *>(QStringLiteral("rejoinCallButton"));
+        auto *dismiss = root->findChild<QQuickItem *>(QStringLiteral("dismissCallButton"));
+        QVERIFY(remote && status && end && rejoin && dismiss);
+        QCOMPARE(remote->property("caption").toString(), QStringLiteral("Left"));
+        QVERIFY(remote->property("dimmed").toBool());
+        QCOMPARE(status->property("text").toString(),
+                 QStringLiteral("Waiting for Jessica to come back · 4:59"));
+        QVERIFY(end->isVisible());
+        QVERIFY(!rejoin->isVisible());
+
+        // She is back: the caption goes and the duration returns.
+        callController.setPreviewWaiting(false, 0, QString());
+        QCoreApplication::processEvents();
+        QVERIFY(remote->property("caption").toString().isEmpty());
+        QVERIFY(!remote->property("dimmed").toBool());
+        QCOMPARE(status->property("text").toString(), callController.durationText());
+
+        // We hung up while she stayed: the ended surface offers Rejoin beside
+        // Back to chat, and only while there is a call to go back to.
+        callController.enableForPreview(OpenChat::CallState::Ended, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        callController.setPreviewCanRejoin(true);
+        QCoreApplication::processEvents();
+        QVERIFY(rejoin->isVisible());
+        QVERIFY(dismiss->isVisible());
+        QVERIFY(!end->isVisible());
+        QCOMPARE(rejoin->property("label").toString(), QStringLiteral("Rejoin"));
+        QCOMPARE(rejoin->property("accent").toString(), QStringLiteral("accept"));
+        QTRY_VERIFY(rejoin->x() < dismiss->x());
+        callController.setPreviewCanRejoin(false);
+        QCoreApplication::processEvents();
+        QVERIFY(!rejoin->isVisible());
+        QVERIFY(dismiss->isVisible());
+    }
+
+    void theCallSurfaceStaysInItsOwnConversationAndIsAStripElsewhere()
+    {
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::CallController callController;
+        callController.setLocalIdentity(chatController.localUserName(), chatController.localAvatarKey());
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+
+        auto *callHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
+        auto *conversationHeader =
+            root->findChild<QQuickItem *>(QStringLiteral("conversationHeader"));
+        auto *stripSlot = root->findChild<QQuickItem *>(QStringLiteral("callStripSlot"));
+        auto *history = root->findChild<QQuickItem *>(QStringLiteral("messageHistory"));
+        QVERIFY(callHeader && conversationHeader && stripSlot);
+        // No call: no strip, and no room taken by it.
+        QVERIFY(!stripSlot->isVisible());
+        QCOMPARE(stripSlot->height(), 0.0);
+
+        // A call on the open conversation: the surface, as ever, and no strip.
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(callHeader->isVisible());
+        QVERIFY(!conversationHeader->isVisible());
+        QVERIFY(!stripSlot->isVisible());
+
+        // The user opens another conversation: that conversation's own header
+        // comes back, the call surface is gone from it, and a strip under the
+        // header keeps the call in reach — named, timed, with Return and End.
+        callController.setPreviewCallInCurrentChat(false);
+        QCoreApplication::processEvents();
+        QVERIFY(!callHeader->isVisible());
+        QVERIFY(conversationHeader->isVisible());
+        QVERIFY(stripSlot->isVisible());
+        QVERIFY(stripSlot->height() > 0);
+        auto *strip = root->findChild<QQuickItem *>(QStringLiteral("callStrip"));
+        auto *text = root->findChild<QQuickItem *>(QStringLiteral("callStripText"));
+        auto *back = root->findChild<QQuickItem *>(QStringLiteral("callStripReturnButton"));
+        auto *end = root->findChild<QQuickItem *>(QStringLiteral("callStripEndButton"));
+        auto *answer = root->findChild<QQuickItem *>(QStringLiteral("callStripAnswerButton"));
+        auto *decline = root->findChild<QQuickItem *>(QStringLiteral("callStripDeclineButton"));
+        QVERIFY(strip && text && back && end && answer && decline);
+        QCOMPARE(text->property("text").toString(),
+                 QStringLiteral("In call with Jessica · ") + callController.durationText());
+        QVERIFY(back->isVisible());
+        QCOMPARE(back->property("label").toString(), QStringLiteral("Return"));
+        QVERIFY(end->isVisible());
+        QVERIFY(!answer->isVisible());
+        QVERIFY(!decline->isVisible());
+        // Directly under the header, and the conversation below it moved down.
+        auto *slot = root->findChild<QQuickItem *>(QStringLiteral("conversationHeaderSlot"));
+        QVERIFY(slot);
+        QCOMPARE(stripSlot->mapToScene(QPointF()).y(), slot->mapToScene(QPointF()).y() + slot->height());
+        if (history)
+            QVERIFY(history->mapToScene(QPointF()).y() >= stripSlot->mapToScene(QPointF()).y() + stripSlot->height());
+
+        // A call ringing from another conversation can be answered or refused
+        // from the strip without leaving.
+        callController.enableForPreview(OpenChat::CallState::Ringing, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        callController.setPreviewCallInCurrentChat(false);
+        QCoreApplication::processEvents();
+        QVERIFY(stripSlot->isVisible());
+        QCOMPARE(text->property("text").toString(), QStringLiteral("Incoming call from Jessica"));
+        QVERIFY(answer->isVisible());
+        QVERIFY(decline->isVisible());
+        QVERIFY(!end->isVisible());
+        QCOMPARE(back->property("label").toString(), QStringLiteral("Open"));
+
+        // Back to the call's own conversation: the surface again, strip gone.
+        callController.setPreviewCallInCurrentChat(true);
+        QCoreApplication::processEvents();
+        QVERIFY(callHeader->isVisible());
+        QVERIFY(!stripSlot->isVisible());
+        QCOMPARE(stripSlot->height(), 0.0);
+    }
+
+    void theConversationHeaderSaysWhoIsInACallAndOffersToJoin()
+    {
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QVERIFY(chatController.hasCurrentContact());
+
+        auto *banner = root->findChild<QQuickItem *>(QStringLiteral("ongoingCallBanner"));
+        auto *text = root->findChild<QQuickItem *>(QStringLiteral("ongoingCallText"));
+        auto *join = root->findChild<QQuickItem *>(QStringLiteral("joinCallButton"));
+        auto *header = root->findChild<QQuickItem *>(QStringLiteral("conversationHeader"));
+        QVERIFY(banner && text && join && header);
+        // Nothing to say while no call is going.
+        QVERIFY(!banner->isVisible());
+
+        callController.setPreviewOngoingCall(QStringLiteral("Jessica and Michael are in a call"));
+        QCoreApplication::processEvents();
+        QVERIFY(banner->isVisible());
+        QVERIFY(join->isVisible());
+        QCOMPARE(text->property("text").toString(),
+                 QStringLiteral("Jessica and Michael are in a call"));
+        QCOMPARE(join->property("label").toString(), QStringLiteral("Join"));
+        // Under the subtitle, inside the header, clear of the call buttons.
+        auto *phone = root->findChild<QQuickItem *>(QStringLiteral("phoneCallButton"));
+        QVERIFY(phone);
+        QVERIFY(banner->mapToScene(QPointF()).y() > 60);
+        QVERIFY(banner->mapToScene(QPointF(banner->width(), 0)).x()
+                <= phone->mapToScene(QPointF()).x());
+        QVERIFY(banner->y() + banner->height() <= header->height());
+
+        callController.setPreviewOngoingCall(QString());
+        QCoreApplication::processEvents();
+        QVERIFY(!banner->isVisible());
+    }
+
+    void chatRowsMarkACallInProgress()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "ContactRow");
+        QScopedPointer<QObject> row(component.createWithInitialProperties({
+            {"contactId", "bob"}, {"name", "Bob"}, {"statusText", "Offline"},
+            {"presence", 2}, {"favorite", false}, {"selected", false},
+            {"avatarKey", "userpfp_none"}, {"isGroup", false}, {"unreadCount", 3},
+            {"callInProgress", true}, {"width", 250}, {"height", 60}}));
+        QVERIFY2(row, qPrintable(component.errorString()));
+        auto *pill = row->findChild<QQuickItem *>("contactCallPill");
+        auto *badge = row->findChild<QQuickItem *>("contactUnreadBadge");
+        QVERIFY(pill && badge);
+        QVERIFY(pill->isVisible());
+        QVERIFY(badge->isVisible());
+        // The mark sits left of the unread badge and never runs under it.
+        QVERIFY(pill->x() + pill->width() <= badge->x());
+        row->setProperty("callInProgress", false);
+        QVERIFY(!pill->isVisible());
     }
 
     void theGroupCallScreenShowsEveryMemberAndWhatTheyAreDoing()

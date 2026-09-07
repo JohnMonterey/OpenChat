@@ -230,6 +230,8 @@ public:
     groupCallRouteFor(const ConversationId &conversation) const;
     // The chat id ("group:" + conversation hex) of a live group, or empty.
     [[nodiscard]] QString groupChatIdFor(const ConversationId &conversation) const;
+    // The chat (contact or group id) a conversation belongs to; empty if none.
+    [[nodiscard]] QString chatIdFor(const ConversationId &conversation) const;
     [[nodiscard]] static bool isGroupChatId(const QString &chatId);
 
     // The contact currently open in the conversation pane, or empty when none

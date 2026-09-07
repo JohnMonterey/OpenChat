@@ -1098,6 +1098,11 @@ void ChatController::loadGroups(QVector<Contact> &rows, QHash<QByteArray, QStrin
     m_liveGroups = std::move(groups);
 }
 
+QString ChatController::chatIdFor(const ConversationId &conversation) const
+{
+    return contactForConversation(conversation);
+}
+
 QString ChatController::groupChatIdFor(const ConversationId &conversation) const
 {
     const QString id = m_contactByConversation.value(conversation.bytes());

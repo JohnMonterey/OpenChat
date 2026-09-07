@@ -43,10 +43,21 @@ public:
         return count;
     }
 
+    // Signals are normally delivered synchronously. Held, they queue until
+    // flush(), which is how two members can be made to act "at the same time".
+    struct HeldSignal final {
+        ConversationId conversation;
+        DeviceId recipient;
+        QByteArray payload;
+    };
+    void flush();
+
     Mesh *mesh = nullptr;
     DeviceId localDevice = DeviceId::generate();
     bool connected = true;
     bool dropMedia = false;
+    bool holdSignals = false;
+    QList<HeldSignal> held;
     QList<std::pair<DeviceId, QByteArray>> sentSignals;
     QList<DeviceId> mediaRecipients;
 };
@@ -57,9 +68,24 @@ void MeshTransport::sendSignal(const ConversationId &conversation, const DeviceI
     sentSignals.append({recipientDevice, payload});
     if (mesh == nullptr)
         return;
+    if (holdSignals) {
+        held.append({conversation, recipientDevice, payload});
+        return;
+    }
     const auto it = mesh->byDevice.find(recipientDevice.bytes());
     if (it != mesh->byDevice.end() && it->second->onSignal)
         it->second->onSignal(conversation, localDevice, payload);
+}
+
+void MeshTransport::flush()
+{
+    holdSignals = false;
+    while (!held.isEmpty()) {
+        const HeldSignal signal = held.takeFirst();
+        const auto it = mesh->byDevice.find(signal.recipient.bytes());
+        if (it != mesh->byDevice.end() && it->second->onSignal)
+            it->second->onSignal(signal.conversation, localDevice, signal.payload);
+    }
 }
 
 void MeshTransport::sendMedia(const ConversationId &conversation, const DeviceId &recipientDevice,
@@ -104,6 +130,9 @@ struct Endpoint final {
         mesh.byDevice[transport.localDevice.bytes()] = &transport;
         config.mediaClock = [this] { return nowMs; };
         config.localDevice = transport.localDevice;
+        // A rebuild (a "restart") lets the old engine drop its transport hooks
+        // before the new one installs its own.
+        engine.reset();
         engine = std::make_unique<CallEngine>(config, transport, devices.factory());
         engine->setSoundsEnabled(false);
     }
@@ -160,6 +189,7 @@ class GroupCallTest final : public QObject
 
 private:
     Mesh m_mesh;
+    CallEngine::Config m_config;
     ConversationId m_group = ConversationId::generate();
     Endpoint m_alice;
     Endpoint m_bob;
@@ -177,6 +207,17 @@ private:
         return route;
     }
 
+    void installResolver(Endpoint &endpoint)
+    {
+        endpoint.engine->groupRouteResolver =
+            [this, &endpoint](const ConversationId &conversation)
+            -> std::optional<CallEngine::GroupCallRoute> {
+            if (conversation != m_group)
+                return std::nullopt;
+            return routeFrom(endpoint);
+        };
+    }
+
     // Every endpoint answers "which group is this?" from the same roster,
     // the way the app's chat roster does.
     void connectEndpoints(CallEngine::Config config = {}, bool withDave = false)
@@ -184,6 +225,7 @@ private:
         m_mesh = Mesh{};
         m_group = ConversationId::generate();
         config.preferredCodec = AudioCodecKind::Pcm;
+        m_config = config;
         m_alice.name = QStringLiteral("Alice");
         m_bob.name = QStringLiteral("Bob");
         m_carol.name = QStringLiteral("Carol");
@@ -193,17 +235,37 @@ private:
         m_carol.build(m_mesh, config);
         if (withDave)
             m_dave.build(m_mesh, config);
-        for (Endpoint *endpoint : {&m_alice, &m_bob, &m_carol, &m_dave}) {
-            if (!endpoint->engine)
-                continue;
-            endpoint->engine->groupRouteResolver =
-                [this, endpoint](const ConversationId &conversation)
-                -> std::optional<CallEngine::GroupCallRoute> {
-                if (conversation != m_group)
-                    return std::nullopt;
-                return routeFrom(*endpoint);
-            };
+        for (Endpoint *endpoint : {&m_alice, &m_bob, &m_carol, &m_dave})
+            if (endpoint->engine)
+                installResolver(*endpoint);
+    }
+
+    // Puts a fresh engine on an endpoint's device: everything it knew about
+    // any call is gone, exactly as after the app is restarted.
+    void restart(Endpoint &endpoint)
+    {
+        endpoint.build(m_mesh, m_config);
+        installResolver(endpoint);
+    }
+
+    // Everyone in the call speaks one frame and hears one, so each pair's
+    // fresh session gets its first packet and every end reaches Active.
+    [[nodiscard]] AudioFrame heardBy(Endpoint &listener, const AudioFrame &frame, int rounds = 8)
+    {
+        AudioFrame heard;
+        for (int i = 0; i < rounds; ++i) {
+            for (Endpoint *endpoint : {&m_alice, &m_bob, &m_carol, &m_dave})
+                if (endpoint->engine && callOccupiesDevice(endpoint->engine->state()))
+                    endpoint->speak(frame);
+            for (Endpoint *endpoint : {&m_alice, &m_bob, &m_carol, &m_dave}) {
+                if (!endpoint->engine || !callOccupiesDevice(endpoint->engine->state()))
+                    continue;
+                const AudioFrame got = endpoint->listen();
+                if (endpoint == &listener)
+                    heard = got;
+            }
         }
+        return heard;
     }
 
     // One frame from each joined member, so every pair path carries media in
@@ -364,11 +426,282 @@ private slots:
                  toBobBefore);
         QCOMPARE(m_alice.engine->state(), CallState::Active);
 
-        // When the last other member leaves, the call is over for the one left.
+        // When the last other member leaves, the one left stays in the call
+        // waiting for somebody to come back, with nothing open to send from.
         m_carol.engine->hangUp();
-        QCOMPARE(m_alice.engine->state(), CallState::Ended);
-        QCOMPARE(m_alice.engine->endReason(), CallEndReason::RemoteHangup);
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QVERIFY(m_alice.engine->isWaitingForOthers());
+        QCOMPARE(m_alice.engine->joinedParticipantCount(), 0);
         QVERIFY(!m_alice.devices.capture->started);
+        QVERIFY(m_alice.engine->sessionFor(m_carol.transport.localDevice) == nullptr);
+        // Carol knows Alice is still there; Bob, who left earlier, learned
+        // of Carol leaving too and still sees Alice in the call.
+        QCOMPARE(m_carol.engine->ongoingCall(m_group)->joinedCount(), 1);
+        QCOMPARE(m_bob.engine->ongoingCall(m_group)->joinedCount(), 1);
+        // Alice leaving too ends it for good: nothing is left to rejoin.
+        m_alice.engine->hangUp();
+        QCOMPARE(m_alice.engine->endReason(), CallEndReason::LocalHangup);
+        QVERIFY(!m_carol.engine->ongoingCall(m_group).has_value());
+        QVERIFY(!m_bob.engine->ongoingCall(m_group).has_value());
+        QVERIFY(!m_alice.engine->ongoingCall(m_group).has_value());
+    }
+
+    void aMemberWhoLeftSeesTheCallGoOnAndRejoinsOnFreshKeys()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobOngoing(m_bob.engine.get(), &CallEngine::ongoingCallsChanged);
+
+        // Bob leaves. What he keeps is a picture of the call without him: the
+        // group, and the two still in it.
+        m_bob.engine->hangUp();
+        QCOMPARE(m_bob.engine->state(), CallState::Ended);
+        QCOMPARE(bobOngoing.count(), 1);
+        const auto ongoing = m_bob.engine->ongoingCall(m_group);
+        QVERIFY(ongoing.has_value());
+        QVERIFY(ongoing->group);
+        QCOMPARE(ongoing->title, QStringLiteral("Weekend plans"));
+        QCOMPARE(ongoing->joinedCount(), 2);
+        QCOMPARE(m_bob.engine->ongoingCalls().size(), 1);
+        // Media still flows for the other two, keyed as before.
+        exchangeMedia();
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+
+        // Bob comes back, straight from the ended-call surface. His offer
+        // carries a fresh secret under the same call id; the two who stayed
+        // answer at once, and each keys a new path to him from that secret.
+        QSignalSpy aliceRinging(m_alice.engine.get(), &CallEngine::incomingCall);
+        QVERIFY(m_bob.engine->joinCall(m_group));
+        QCOMPARE(aliceRinging.count(), 0);
+        QCOMPARE(m_bob.engine->state(), CallState::Connecting);
+        QVERIFY(m_bob.engine->isGroupCall());
+        QVERIFY(!m_bob.engine->ongoingCall(m_group).has_value());
+        QCOMPARE(m_bob.stateOf(m_alice.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_bob.stateOf(m_carol.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_alice.stateOf(m_bob.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_carol.stateOf(m_bob.transport.localDevice), CallParticipantState::Joined);
+        QVERIFY(m_bob.engine->sessionFor(m_alice.transport.localDevice) != nullptr);
+        QVERIFY(m_bob.engine->sessionFor(m_carol.transport.localDevice) != nullptr);
+        QVERIFY(m_alice.engine->sessionFor(m_bob.transport.localDevice) != nullptr);
+        QVERIFY(m_carol.engine->sessionFor(m_bob.transport.localDevice) != nullptr);
+        QCOMPARE(m_alice.engine->sessionFor(m_bob.transport.localDevice)->stats().packetsReceived,
+                 0);
+        QVERIFY(m_bob.devices.capture->started);
+        // The pair Alice–Carol was never touched.
+        QVERIFY(m_alice.engine->sessionFor(m_carol.transport.localDevice)->stats().packetsReceived
+                >= 2);
+
+        // Everyone hears everyone again, and nothing is rejected on the new
+        // paths — which is what "both ends keyed from the same fresh secret"
+        // looks like from the outside.
+        const AudioFrame tone = toneFrame(440.0);
+        const AudioFrame bobHeard = heardBy(m_bob, tone);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_carol.engine->state(), CallState::Active);
+        QCOMPARE(bobHeard, sum(tone, tone));
+        QCOMPARE(m_alice.engine->sessionFor(m_bob.transport.localDevice)->stats().packetsRejected,
+                 0);
+        QCOMPARE(m_bob.engine->sessionFor(m_alice.transport.localDevice)->stats().packetsRejected,
+                 0);
+        QCOMPARE(m_bob.engine->sessionFor(m_carol.transport.localDevice)->stats().packetsRejected,
+                 0);
+    }
+
+    void aMemberWhoDeclinedOrMissedTheCallCanJoinItLater()
+    {
+        CallEngine::Config config;
+        config.ringTimeoutMs = 150;
+        connectEndpoints(config, /*withDave=*/true);
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->declineCall();
+        // Dave never picks up.
+        QTRY_COMPARE_WITH_TIMEOUT(m_dave.engine->state(), CallState::Ended, 2000);
+        QCOMPARE(m_dave.engine->endReason(), CallEndReason::Unanswered);
+        exchangeMedia();
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+
+        // Both of them can see the call is on, with Alice and Bob in it.
+        QCOMPARE(m_carol.engine->ongoingCall(m_group)->joinedCount(), 2);
+        QCOMPARE(m_dave.engine->ongoingCall(m_group)->joinedCount(), 2);
+        m_carol.engine->dismissEndedCall();
+        QVERIFY(m_carol.engine->ongoingCall(m_group).has_value());
+
+        // Carol joins. Alice and Bob admit her; Dave, still out, sees her in.
+        QVERIFY(m_carol.engine->joinCall(m_group));
+        QCOMPARE(m_alice.stateOf(m_carol.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_bob.stateOf(m_carol.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_dave.engine->ongoingCall(m_group)->joinedCount(), 3);
+        const AudioFrame tone = toneFrame(500.0);
+        const AudioFrame carolHeard = heardBy(m_carol, tone);
+        QCOMPARE(m_carol.engine->state(), CallState::Active);
+        QCOMPARE(carolHeard, sum(tone, tone));
+        QCOMPARE(m_alice.engine->joinedParticipantCount(), 2);
+    }
+
+    void theLastOneLeftWaitsAndThenTheCallEnds()
+    {
+        CallEngine::Config config;
+        config.rejoinGraceMs = 150;
+        connectEndpoints(config);
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->acceptCall();
+        exchangeMedia();
+        m_bob.engine->hangUp();
+        // Someone is still there: no grace period yet.
+        QVERIFY(!m_alice.engine->isWaitingForOthers());
+        m_carol.engine->hangUp();
+        QVERIFY(m_alice.engine->isWaitingForOthers());
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->ongoingCall(m_group)->joinedCount(), 1);
+
+        // Nobody comes back in time: the call ends, and it is gone for the
+        // two who might have rejoined it.
+        QSignalSpy aliceEnded(m_alice.engine.get(), &CallEngine::callEnded);
+        QVERIFY(aliceEnded.wait(2000));
+        QCOMPARE(m_alice.engine->endReason(), CallEndReason::Abandoned);
+        QVERIFY(!m_bob.engine->ongoingCall(m_group).has_value());
+        QVERIFY(!m_carol.engine->ongoingCall(m_group).has_value());
+        QVERIFY(!m_alice.engine->ongoingCall(m_group).has_value());
+
+        // But somebody coming back in time stops the clock.
+        m_alice.engine->dismissEndedCall();
+        m_bob.engine->dismissEndedCall();
+        m_carol.engine->dismissEndedCall();
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->declineCall();
+        exchangeMedia();
+        m_bob.engine->hangUp();
+        QVERIFY(m_alice.engine->isWaitingForOthers());
+        QVERIFY(m_bob.engine->joinCall(m_group));
+        QVERIFY(!m_alice.engine->isWaitingForOthers());
+        exchangeMedia();
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QTest::qWait(300);
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+    }
+
+    void aBusyMemberSeesTheCallAndJoinsOnceFree()
+    {
+        connectEndpoints({}, /*withDave=*/true);
+        const ConversationId aside = ConversationId::generate();
+        QVERIFY(m_carol.engine->placeCall(m_dave.asPeer(aside)));
+        m_dave.engine->acceptCall();
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        QCOMPARE(m_alice.stateOf(m_carol.transport.localDevice), CallParticipantState::Busy);
+        // Carol, busy, still learns that a call started, and who joins it.
+        QVERIFY(m_carol.engine->ongoingCall(m_group).has_value());
+        QCOMPARE(m_carol.engine->ongoingCall(m_group)->joinedCount(), 1);
+        m_bob.engine->acceptCall();
+        QCOMPARE(m_carol.engine->ongoingCall(m_group)->joinedCount(), 2);
+        exchangeMedia();
+
+        // Her own call over, she joins the group's.
+        m_carol.engine->hangUp();
+        m_carol.engine->dismissEndedCall();
+        QVERIFY(m_carol.engine->joinCall(m_group));
+        QCOMPARE(m_alice.stateOf(m_carol.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_bob.stateOf(m_carol.transport.localDevice), CallParticipantState::Joined);
+        const AudioFrame tone = toneFrame(600.0);
+        const AudioFrame carolHeard = heardBy(m_carol, tone);
+        QCOMPARE(m_carol.engine->state(), CallState::Active);
+        QCOMPARE(carolHeard, sum(tone, tone));
+    }
+
+    void callingAGroupThatIsAlreadyOnACallJoinsThatCall()
+    {
+        // Bob's device forgot the call — a restart — and he rings the group
+        // again. The two in the call answer with the running call's id
+        // instead of "busy", and Bob lands in it without a new call starting.
+        connectEndpoints({}, /*withDave=*/true);
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->acceptCall();
+        m_dave.engine->declineCall();
+        exchangeMedia();
+        m_bob.engine->hangUp();
+        restart(m_bob);
+        QVERIFY(!m_bob.engine->ongoingCall(m_group).has_value());
+        QSignalSpy daveRinging(m_dave.engine.get(), &CallEngine::incomingCall);
+        QSignalSpy bobEnded(m_bob.engine.get(), &CallEngine::callEnded);
+        const int aliceHangupsBefore = m_alice.transport.signalsOfType(CallSignalType::Hangup);
+
+        QVERIFY(m_bob.engine->placeGroupCall(routeFrom(m_bob)));
+        // Nobody said busy, and Bob's own call was dropped without ever
+        // reaching Ended. Dave, who declined the running call, was not rung
+        // for the redundant one: it was abandoned before his offer went out,
+        // and he simply sees Bob back in the call he already knew about.
+        QCOMPARE(m_alice.transport.signalsOfType(CallSignalType::Hangup), aliceHangupsBefore);
+        QCOMPARE(bobEnded.count(), 0);
+        QCOMPARE(m_bob.engine->state(), CallState::Connecting);
+        QCOMPARE(daveRinging.count(), 0);
+        QVERIFY(!callOccupiesDevice(m_dave.engine->state()));
+        QCOMPARE(m_dave.engine->ongoingCall(m_group)->joinedCount(), 3);
+        QCOMPARE(m_alice.stateOf(m_bob.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_carol.stateOf(m_bob.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_bob.stateOf(m_alice.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_bob.stateOf(m_carol.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_bob.stateOf(m_dave.transport.localDevice), CallParticipantState::Left);
+        const AudioFrame tone = toneFrame(700.0);
+        const AudioFrame bobHeard = heardBy(m_bob, tone);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QCOMPARE(bobHeard, sum(tone, tone));
+        QCOMPARE(m_alice.engine->joinedParticipantCount(), 2);
+    }
+
+    void twoMembersRejoiningAtOnceSettleOnOneKeyPerPair()
+    {
+        connectEndpoints({}, /*withDave=*/true);
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->acceptCall();
+        m_dave.engine->acceptCall();
+        exchangeMedia();
+        m_bob.engine->hangUp();
+        m_carol.engine->hangUp();
+        QCOMPARE(m_alice.engine->joinedParticipantCount(), 1);
+
+        // Bob and Carol rejoin in the same instant: each offers the other a
+        // different secret before hearing the other's. The pair has to end up
+        // on one of them, on both sides.
+        m_bob.transport.holdSignals = true;
+        m_carol.transport.holdSignals = true;
+        QVERIFY(m_bob.engine->joinCall(m_group));
+        QVERIFY(m_carol.engine->joinCall(m_group));
+        // Each still has the other as gone: neither offer has arrived.
+        QCOMPARE(m_bob.stateOf(m_carol.transport.localDevice), CallParticipantState::Left);
+        QCOMPARE(m_carol.stateOf(m_bob.transport.localDevice), CallParticipantState::Left);
+        m_bob.transport.flush();
+        m_carol.transport.flush();
+        QCOMPARE(m_bob.stateOf(m_carol.transport.localDevice), CallParticipantState::Joined);
+        QCOMPARE(m_carol.stateOf(m_bob.transport.localDevice), CallParticipantState::Joined);
+
+        QVERIFY(m_bob.engine->sessionFor(m_carol.transport.localDevice) != nullptr);
+        QVERIFY(m_carol.engine->sessionFor(m_bob.transport.localDevice) != nullptr);
+        const AudioFrame tone = toneFrame(800.0);
+        const AudioFrame bobHeard = heardBy(m_bob, tone);
+        const AudioFrame carolHeard = heardBy(m_carol, tone);
+        for (Endpoint *endpoint : {&m_alice, &m_bob, &m_carol, &m_dave})
+            QCOMPARE(endpoint->engine->state(), CallState::Active);
+        // Three others each: the Bob–Carol pair carries audio both ways, so
+        // they agreed on a key, and nothing on it was ever rejected.
+        QCOMPARE(bobHeard, sum(sum(tone, tone), tone));
+        QCOMPARE(carolHeard, sum(sum(tone, tone), tone));
+        QCOMPARE(m_bob.engine->sessionFor(m_carol.transport.localDevice)->stats().packetsRejected,
+                 0);
+        QCOMPARE(m_carol.engine->sessionFor(m_bob.transport.localDevice)->stats().packetsRejected,
+                 0);
+        QVERIFY(m_bob.engine->sessionFor(m_carol.transport.localDevice)->stats().packetsReceived
+                > 0);
+        QVERIFY(m_carol.engine->sessionFor(m_bob.transport.localDevice)->stats().packetsReceived
+                > 0);
     }
 
     void aDeclineIsMarkedAndTheCallGoesOnForTheOthers()

@@ -89,6 +89,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/CallParticipant.qml
         qml/OpenChat/components/CallActionButton.qml
         qml/OpenChat/components/CallHeader.qml
+        qml/OpenChat/components/CallStrip.qml
         qml/OpenChat/components/ScreenShareStage.qml
         qml/OpenChat/components/ScreenSharePicker.qml
         qml/OpenChat/components/MediaIconButton.qml

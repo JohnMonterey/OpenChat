@@ -44,6 +44,8 @@ QString callEndReasonName(CallEndReason reason)
         return QStringLiteral("Connection lost");
     case CallEndReason::Superseded:
         return QStringLiteral("Call ended");
+    case CallEndReason::Abandoned:
+        return QStringLiteral("Nobody rejoined");
     }
     return QString();
 }

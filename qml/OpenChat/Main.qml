@@ -15,9 +15,14 @@ Window {
     // null (or reports no call) the conversation pane renders exactly as before.
     property var callController: null
     readonly property bool inCall: callController !== null && callController.inCall
+    // A call belongs to one conversation. Its surface replaces that
+    // conversation's header and no other; from anywhere else the call is a
+    // strip under the header with the way back to it.
+    readonly property bool callInView: inCall && callController.callInCurrentChat !== false
     // True while the call surface is the whole window: the sidebar and the
     // conversation are collapsed, nothing else is laid out or drawn, and the
-    // call takes every pixel. Ends with the call, or from its corner chip.
+    // call takes every pixel. Ends with the call, with leaving its
+    // conversation, or from its corner chip.
     property bool callFullscreen: false
     readonly property int sidebarWidth: Math.round(
         Math.max(250, Math.min(300, width * Theme.sidebarWidth / 860)))
@@ -25,8 +30,8 @@ Window {
     // edge, or at the window's when the sidebar is collapsed for a call.
     readonly property int paneX: callFullscreen ? 0 : sidebarWidth
 
-    onInCallChanged: {
-        if (!inCall)
+    onCallInViewChanged: {
+        if (!callInView)
             callFullscreen = false;
     }
 
@@ -90,9 +95,9 @@ Window {
                 objectName: "conversationHeaderSlot"
                 width: parent.width
                 height: root.callFullscreen ? parent.height
-                        : root.inCall && callHeaderLoader.item
+                        : root.callInView && callHeaderLoader.item
                           ? callHeaderLoader.item.implicitHeight : Theme.conversationHeaderHeight
-                visible: root.chatController.hasCurrentContact || root.inCall
+                visible: root.chatController.hasCurrentContact || root.callInView
                 clip: true
 
                 ConversationHeader {
@@ -100,7 +105,7 @@ Window {
                     anchors.fill: parent
                     controller: root.chatController
                     callController: root.callController
-                    visible: !root.inCall
+                    visible: !root.callInView
                 }
 
                 // Loaded only when a call bridge exists at all, so the default
@@ -124,8 +129,26 @@ Window {
                     id: callHeaderLoader
                     anchors.fill: parent
                     active: root.callController !== null
-                    visible: root.inCall
+                    visible: root.callInView
                     sourceComponent: callHeaderComponent
+                }
+            }
+
+            // The call, from any other conversation: one line, and the way
+            // back. Loaded only with a call bridge, like the surface itself.
+            Loader {
+                id: callStripLoader
+                objectName: "callStripSlot"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: headerSlot.bottom
+                active: root.callController !== null
+                readonly property bool shown: root.inCall && !root.callInView && !root.callFullscreen
+                visible: shown
+                height: shown && item ? item.implicitHeight : 0
+                sourceComponent: CallStrip {
+                    controller: root.callController
+                    onReturnRequested: root.callController.showCallChat()
                 }
             }
 
@@ -136,7 +159,7 @@ Window {
                 anchors.centerIn: parent
                 width: Math.min(360, parent.width - 48)
                 spacing: 10
-                visible: !root.chatController.hasCurrentContact && !root.inCall
+                visible: !root.chatController.hasCurrentContact && !root.callInView
 
                 Text {
                     width: parent.width
@@ -171,7 +194,7 @@ Window {
                                                && !root.callFullscreen
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.top: headerSlot.bottom
+                anchors.top: callStripLoader.bottom
                 height: active ? 30 : 0
                 visible: active
                 clip: true

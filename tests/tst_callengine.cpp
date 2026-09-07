@@ -432,16 +432,18 @@ private slots:
         QVERIFY(canvas);
         std::weak_ptr<ScreenCanvas> observer = canvas;
 
-        // Bob hangs up mid-share. Alice's sending half and Bob's canvas both go.
+        // Bob hangs up mid-share. Alice stays in the call waiting for him, but
+        // with nobody to send to her sending half and Bob's canvas both go.
         m_bob.engine->hangUp();
-        QCOMPARE(m_alice.engine->state(), CallState::Ended);
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QVERIFY(m_alice.engine->isWaitingForOthers());
         QVERIFY(!m_alice.engine->isScreenSharing());
         QVERIFY2(!qvariant_cast<ScreenCanvasPtr>(bobScreen.last().first()),
                  "the view was left up after the call ended");
         // The only thing still holding those pixels is this test's own handle.
         QVERIFY(!observer.expired());
 
-        // And a share pushed at a dead call goes nowhere at all.
+        // And a share pushed at a call with nobody in it goes nowhere at all.
         const int sentBefore = m_alice.transport.mediaSent;
         QVERIFY(!m_alice.engine->startScreenShare());
         shareScreen(m_alice, desktop);
@@ -604,29 +606,249 @@ private slots:
         QVERIFY(!m_bob.devices.capture->started);
     }
 
-    void hangingUpTearsDownTheDevicesOnBothSides()
+    void hangingUpLeavesTheCallAndThePeerWaits()
     {
         connectEndpoints();
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         m_bob.engine->acceptCall();
         exchangeMedia();
         QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->peerState(), CallParticipantState::Joined);
+        QSignalSpy bobChanged(m_bob.engine.get(), &CallEngine::stateChanged);
 
         m_alice.engine->hangUp();
+        QCOMPARE(m_alice.engine->state(), CallState::Ended);
         QCOMPARE(m_alice.engine->endReason(), CallEndReason::LocalHangup);
-        QCOMPARE(m_bob.engine->endReason(), CallEndReason::RemoteHangup);
         // The microphone stops the instant the call does — that is the part that
         // must not linger — along with the session holding the call keys.
         QVERIFY(!m_alice.devices.capture->started);
-        QVERIFY(!m_bob.devices.capture->started);
         QVERIFY(m_alice.engine->session() == nullptr);
-        QVERIFY(m_bob.engine->session() == nullptr);
-
         // The speaker is held a moment longer so the hang-up sound is heard
         // rather than cut off by its own device closing, then released.
         QVERIFY(m_alice.devices.playback->started);
         QTRY_VERIFY_WITH_TIMEOUT(!m_alice.devices.playback->started, 5000);
+
+        // Bob's call is not over: he is in it alone, waiting for Alice to come
+        // back. His microphone closes too — there is nobody to send to — and
+        // the keys of the old session go with it.
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->peerState(), CallParticipantState::Left);
+        QVERIFY(m_bob.engine->isWaitingForOthers());
+        QVERIFY(m_bob.engine->waitingRemainingMs() > 0);
+        QCOMPARE(bobChanged.count(), 1);
+        QVERIFY(!m_bob.devices.capture->started);
+        QVERIFY(m_bob.engine->session() == nullptr);
+        QVERIFY(m_bob.devices.playback->started);
+        QVERIFY(!m_bob.engine->isRemoteSpeaking());
+
+        // Alice, for her part, knows the call is still going with Bob in it.
+        const auto ongoing = m_alice.engine->ongoingCall(m_conversation);
+        QVERIFY(ongoing.has_value());
+        QVERIFY(!ongoing->group);
+        QCOMPARE(ongoing->joinedCount(), 1);
+        QCOMPARE(ongoing->participants.size(), 1);
+        QCOMPARE(ongoing->participants.first().peer.device, m_bob.transport.localDevice);
+        QCOMPARE(ongoing->participants.first().state, CallParticipantState::Joined);
+        QCOMPARE(m_alice.engine->ongoingCalls().size(), 1);
+        // And nothing is going on Bob's side: he is in the call, not out of it.
+        QVERIFY(!m_bob.engine->ongoingCall(m_conversation).has_value());
+
+        // Bob gives up waiting. His hang-up reaches Alice's record of the call,
+        // and with nobody in it any more there is nothing left to rejoin.
+        QSignalSpy aliceOngoing(m_alice.engine.get(), &CallEngine::ongoingCallsChanged);
+        m_bob.engine->hangUp();
+        QCOMPARE(m_bob.engine->state(), CallState::Ended);
+        QCOMPARE(m_bob.engine->endReason(), CallEndReason::LocalHangup);
+        QVERIFY(!m_bob.engine->ongoingCall(m_conversation).has_value());
+        QCOMPARE(aliceOngoing.count(), 1);
+        QVERIFY(!m_alice.engine->ongoingCall(m_conversation).has_value());
+        QVERIFY(!m_alice.engine->joinCall(m_conversation));
         QTRY_VERIFY_WITH_TIMEOUT(!m_bob.devices.playback->started, 5000);
+    }
+
+    void theOneWhoLeftCanRejoinAndThePathIsKeyedAfresh()
+    {
+        CallEngine::Config config;
+        config.preferredCodec = AudioCodecKind::Pcm;
+        connectEndpoints(config);
+        m_alice.engine->setSoundsEnabled(false);
+        m_bob.engine->setSoundsEnabled(false);
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        const auto bobReceivedBefore = m_bob.engine->session()->stats().packetsReceived;
+        QVERIFY(bobReceivedBefore >= 1);
+
+        // Alice leaves, then comes back. Same call, from Bob's point of view:
+        // it never ended for him.
+        m_alice.engine->hangUp();
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QSignalSpy bobEnded(m_bob.engine.get(), &CallEngine::callEnded);
+        QSignalSpy bobRinging(m_bob.engine.get(), &CallEngine::incomingCall);
+        QVERIFY(m_alice.engine->joinCall(m_conversation));
+        // Rejoining is an offer under the same call id, answered by Bob at
+        // once because he is still in the call. Nobody rings, nothing ends.
+        QCOMPARE(bobRinging.count(), 0);
+        QCOMPARE(bobEnded.count(), 0);
+        QCOMPARE(m_alice.engine->state(), CallState::Connecting);
+        QCOMPARE(m_alice.engine->peerState(), CallParticipantState::Joined);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->peerState(), CallParticipantState::Joined);
+        QVERIFY(!m_bob.engine->isWaitingForOthers());
+        QVERIFY(m_alice.engine->session() != nullptr);
+        QVERIFY(m_bob.engine->session() != nullptr);
+        QVERIFY(m_alice.devices.capture->started);
+        QVERIFY(m_bob.devices.capture->started);
+        QVERIFY(!m_alice.engine->ongoingCall(m_conversation).has_value());
+        // Alice's offer carried a fresh secret, so the sessions are new and
+        // count from zero: nothing of the first session's keys is reused with
+        // frame numbers that would collide with it.
+        QCOMPARE(m_bob.engine->session()->stats().packetsReceived, 0);
+        const QList<CallSignalMessage> aliceSignals = m_alice.transport.decodedSignals();
+        int offers = 0;
+        QByteArray firstSecret;
+        QByteArray secondSecret;
+        for (const CallSignalMessage &signal : aliceSignals) {
+            if (signal.type != CallSignalType::Offer)
+                continue;
+            (offers == 0 ? firstSecret : secondSecret) = signal.secret;
+            ++offers;
+        }
+        QCOMPARE(offers, 2);
+        QCOMPARE(aliceSignals.first().callId, aliceSignals.last().callId);
+        QVERIFY(firstSecret != secondSecret);
+
+        // Audio crosses again, exactly, on the new keys.
+        const QList<AudioFrame> speech =
+            AudioConvert::toFrames(OpenChat::AudioTest::syntheticSpeech(100));
+        QList<AudioFrame> heard;
+        for (const AudioFrame &frame : speech) {
+            m_alice.speak(frame);
+            m_bob.speak(silentAudioFrame());
+            heard.append(m_bob.listen());
+            (void)m_alice.listen();
+        }
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+        constexpr int leadIn = 3;
+        QCOMPARE(heard.mid(leadIn), speech.first(speech.size() - leadIn));
+        QCOMPARE(m_alice.engine->session()->stats().packetsRejected, 0);
+        QCOMPARE(m_bob.engine->session()->stats().packetsRejected, 0);
+    }
+
+    void aCallNobodyComesBackToEndsWhenTheGracePeriodRunsOut()
+    {
+        CallEngine::Config config;
+        config.rejoinGraceMs = 150;
+        connectEndpoints(config);
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobEnded(m_bob.engine.get(), &CallEngine::callEnded);
+
+        m_alice.engine->hangUp();
+        QVERIFY(m_bob.engine->isWaitingForOthers());
+        QVERIFY(m_alice.engine->ongoingCall(m_conversation).has_value());
+        QVERIFY(bobEnded.wait(2000));
+        QCOMPARE(m_bob.engine->state(), CallState::Ended);
+        QCOMPARE(m_bob.engine->endReason(), CallEndReason::Abandoned);
+        QVERIFY(!m_bob.engine->isWaitingForOthers());
+        // Alice is told, in the plainest terms — an ordinary hang-up on the
+        // wire — and her record of the call goes.
+        const QList<CallSignalMessage> bobSignals = m_bob.transport.decodedSignals();
+        QVERIFY(!bobSignals.isEmpty());
+        QCOMPARE(bobSignals.last().type, CallSignalType::Hangup);
+        QCOMPARE(bobSignals.last().reason, CallEndReason::LocalHangup);
+        QVERIFY(!m_alice.engine->ongoingCall(m_conversation).has_value());
+        QTRY_VERIFY_WITH_TIMEOUT(!m_bob.devices.playback->started, 5000);
+    }
+
+    void aPeerWhoComesBackByCallingAgainRingsTheOneWaiting()
+    {
+        // Alice's device forgot the call (a restart, say) and she simply calls
+        // Bob again. Bob, still waiting in the old call, is rung by the new one
+        // rather than told he is busy with himself.
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        m_alice.engine->hangUp();
+        QVERIFY(m_bob.engine->isWaitingForOthers());
+        m_alice.engine->dismissEndedCall();
+        QSignalSpy bobRinging(m_bob.engine.get(), &CallEngine::incomingCall);
+
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        QCOMPARE(bobRinging.count(), 1);
+        QCOMPARE(m_bob.engine->state(), CallState::Ringing);
+        QCOMPARE(m_bob.engine->direction(), CallDirection::Incoming);
+        QCOMPARE(m_alice.engine->state(), CallState::Ringing);
+        QCOMPARE(m_alice.engine->endReason(), CallEndReason::None);
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+    }
+
+    void aRejoinThatFindsThePeerGoneRingsThemInstead()
+    {
+        // Bob's own hang-up never reached Alice, so she still believes he is
+        // waiting. Her rejoin lands on an idle device as an ordinary offer:
+        // Bob rings, and picking up connects them under the same call.
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        m_alice.engine->hangUp();
+        m_bob.transport.blockSignals = true;
+        m_bob.engine->hangUp();
+        m_bob.transport.blockSignals = false;
+        m_bob.engine->dismissEndedCall();
+        QVERIFY(m_alice.engine->ongoingCall(m_conversation).has_value());
+        QSignalSpy bobRinging(m_bob.engine.get(), &CallEngine::incomingCall);
+
+        QVERIFY(m_alice.engine->joinCall(m_conversation));
+        QCOMPARE(bobRinging.count(), 1);
+        QCOMPARE(m_alice.engine->state(), CallState::Connecting);
+        QCOMPARE(m_alice.engine->peerState(), CallParticipantState::Connecting);
+        m_bob.engine->acceptCall();
+        QCOMPARE(m_alice.engine->peerState(), CallParticipantState::Joined);
+        exchangeMedia();
+        QCOMPARE(m_alice.engine->state(), CallState::Active);
+        QCOMPARE(m_bob.engine->state(), CallState::Active);
+
+        // And a rejoin nobody answers at all gives up as unanswered.
+        m_alice.engine->hangUp();
+        m_alice.engine->dismissEndedCall();
+        m_bob.transport.blockSignals = true;
+        m_bob.engine->hangUp();
+        m_bob.transport.blockSignals = false;
+        m_bob.engine->dismissEndedCall();
+        m_bob.transport.peer = nullptr; // Bob is unreachable now
+        QSignalSpy aliceEnded(m_alice.engine.get(), &CallEngine::callEnded);
+        QVERIFY(m_alice.engine->joinCall(m_conversation));
+        QCOMPARE(m_alice.engine->state(), CallState::Connecting);
+        m_alice.engine->hangUp();
+        QCOMPARE(aliceEnded.count(), 1);
+        QCOMPARE(m_alice.engine->endReason(), CallEndReason::LocalHangup);
+        QVERIFY(!m_alice.engine->ongoingCall(m_conversation).has_value());
+    }
+
+    void aRejoinNobodyAnswersTimesOut()
+    {
+        CallEngine::Config config;
+        config.ringTimeoutMs = 100;
+        connectEndpoints(config);
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        m_alice.engine->hangUp();
+        // Bob's device drops off the network without a word.
+        m_alice.transport.peer = nullptr;
+        QSignalSpy aliceEnded(m_alice.engine.get(), &CallEngine::callEnded);
+        QVERIFY(m_alice.engine->joinCall(m_conversation));
+        QVERIFY(aliceEnded.wait(2000));
+        QCOMPARE(m_alice.engine->endReason(), CallEndReason::NoAnswer);
+        QVERIFY(!m_alice.engine->ongoingCall(m_conversation).has_value());
     }
 
     void anEndedCallIsHeldUntilItIsDismissed()

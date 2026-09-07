@@ -20,6 +20,7 @@ ConversationHeader 1.0 components/ConversationHeader.qml
 CallParticipant 1.0 components/CallParticipant.qml
 CallActionButton 1.0 components/CallActionButton.qml
 CallHeader 1.0 components/CallHeader.qml
+CallStrip 1.0 components/CallStrip.qml
 ScreenShareStage 1.0 components/ScreenShareStage.qml
 ScreenSharePicker 1.0 components/ScreenSharePicker.qml
 MediaIconButton 1.0 components/MediaIconButton.qml

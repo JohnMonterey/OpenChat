@@ -4,6 +4,7 @@
 #include "KeyPackageService.h"
 #include "PostgresStore.h"
 #include "RelayServer.h"
+#include "UdpMediaService.h"
 
 #include <QCoreApplication>
 #include <QHostAddress>

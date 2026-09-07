@@ -25,6 +25,7 @@
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
 #include "app/MicrophoneSettings.h"
+#include "app/TransportSettings.h"
 #include <QQmlExpression>
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
@@ -406,6 +407,65 @@ private slots:
         settings->resetToDefaults();
         QCOMPARE(settings->gain(), 1.0);
         QVERIFY(qAbs(settings->processing().gateThreshold - 0.02) < 0.001);
+    }
+
+    void theConnectionPanelDrivesAndRemembersTheSettings()
+    {
+        OpenChat::ChatController chats;
+        chats.setLocalUserName(QStringLiteral("Developer"));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        chats.setCurrentSettingsCategory(4); // Audio & Video
+        OpenChat::ContactController contacts;
+        contacts.enableForPreview();
+        OpenChat::CallController calls;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("contactController"), QVariant::fromValue(&contacts)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *settings = engine.singletonInstance<OpenChat::TransportSettings *>(
+            "OpenChat.Native", "TransportSettings");
+        QVERIFY(settings);
+        QCOMPARE(settings->mode(), QStringLiteral("auto"));
+
+        auto *panel = findVisualItem(window->contentItem(), QStringLiteral("connectionSettingsPanel"));
+        QVERIFY(panel && panel->isVisible());
+        auto *autoRow = findVisualItem(window->contentItem(), QStringLiteral("connectionMode_auto"));
+        QVERIFY(autoRow && autoRow->isVisible());
+        QVERIFY(autoRow->property("selected").toBool());
+
+        auto *udpRow = findVisualItem(window->contentItem(), QStringLiteral("connectionMode_udp"));
+        QVERIFY(udpRow && udpRow->isVisible());
+        QVERIFY(!udpRow->property("selected").toBool());
+
+        // Select UDP
+        QMetaObject::invokeMethod(udpRow, "activate");
+        QCOMPARE(settings->mode(), QStringLiteral("udp"));
+        QVERIFY(udpRow->property("selected").toBool());
+        QVERIFY(!autoRow->property("selected").toBool());
+
+        // Verify across engine reboot
+        {
+            QQmlApplicationEngine nextEngine;
+            nextEngine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            QQmlComponent component(&nextEngine);
+            component.setData("import QtQuick; import OpenChat.Native; "
+                              "QtObject { property string mode: TransportSettings.mode }",
+                              QUrl());
+            std::unique_ptr<QObject> restored(component.create());
+            QVERIFY2(restored, qPrintable(component.errorString()));
+            QCOMPARE(restored->property("mode").toString(), QStringLiteral("udp"));
+        }
+
+        // Reset back to auto
+        settings->setMode(QStringLiteral("auto"));
+        QCOMPARE(settings->mode(), QStringLiteral("auto"));
     }
 
     void darkModeSwitchUpdatesTheAppAndRemembersTheChoice()
@@ -2451,6 +2511,9 @@ int main(int argc, char **argv)
     qmlRegisterSingletonType<OpenChat::MicrophoneSettings>(
         "OpenChat.Native", 1, 0, "MicrophoneSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MicrophoneSettings; });
+    qmlRegisterSingletonType<OpenChat::TransportSettings>(
+        "OpenChat.Native", 1, 0, "TransportSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::TransportSettings; });
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");

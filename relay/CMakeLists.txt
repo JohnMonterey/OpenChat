@@ -28,6 +28,7 @@ qt_add_resources(openchat_relay_core "openchat_relay_migrations"
 
 add_library(openchat_relay_server STATIC
     src/RelayServer.cpp
+    src/UdpMediaService.cpp
 )
 target_include_directories(openchat_relay_server PUBLIC src)
 target_link_libraries(openchat_relay_server

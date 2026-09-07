@@ -351,9 +351,13 @@ Window {
                             readonly property bool microphoneSetting:
                                 root.chatController.currentSettingsCategoryName === "Audio & Video"
                                 && elementLabel === "Microphone"
+                            readonly property bool connectionSetting:
+                                root.chatController.currentSettingsCategoryName === "Audio & Video"
+                                && elementLabel === "Connection"
                             width: parent.width
                             height: microphoneSetting ? microphonePanel.height
-                                                      : (themeSetting ? 70 : 48)
+                                                      : (connectionSetting ? connectionPanel.height
+                                                      : (themeSetting ? 70 : 48))
 
                             // Built only on its own row: the panel is the one
                             // settings control with a device behind it.
@@ -366,8 +370,17 @@ Window {
                                 sourceComponent: MicrophoneSettingsPanel {}
                             }
 
+                            Loader {
+                                id: connectionPanel
+                                active: settingsElementRow.connectionSetting
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: item ? item.implicitHeight : 0
+                                sourceComponent: ConnectionSettingsPanel {}
+                            }
+
                             Text {
-                                visible: !settingsElementRow.microphoneSetting
+                                visible: !settingsElementRow.microphoneSetting && !settingsElementRow.connectionSetting
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.verticalCenterOffset: settingsElementRow.themeSetting ? -10 : 0

@@ -69,6 +69,11 @@ std::unique_ptr<PostgresStore> PostgresStore::open(const Config &config,
     return store;
 }
 
+std::unique_ptr<PostgresStore> PostgresStore::createNull(const QString &connectionName)
+{
+    return std::unique_ptr<PostgresStore>(new PostgresStore(connectionName));
+}
+
 qint64 PostgresStore::nowMs() const
 {
     return m_clock ? m_clock() : QDateTime::currentMSecsSinceEpoch();

@@ -35,6 +35,7 @@ target_link_libraries(openchat_domain PUBLIC Qt6::Core)
 add_library(openchat_protocol STATIC
     src/protocol/CiphertextEnvelope.cpp
     src/protocol/CanonicalCborCodec.cpp
+    src/protocol/UdpMediaFrame.cpp
 )
 target_include_directories(openchat_protocol PUBLIC src)
 target_link_libraries(openchat_protocol PUBLIC openchat_domain Qt6::Core)

@@ -86,6 +86,7 @@ class CallController final : public QObject
     Q_PROPERTY(double remoteLevel READ remoteLevel NOTIFY levelsChanged)
     Q_PROPERTY(bool muted READ muted NOTIFY callChanged)
     Q_PROPERTY(QString durationText READ durationText NOTIFY durationChanged)
+    Q_PROPERTY(QString mediaPathText READ mediaPathText NOTIFY durationChanged)
     // True when this build/machine can actually place a call, so the header's
     // call button can explain itself instead of failing silently.
     Q_PROPERTY(bool callsAvailable READ callsAvailable NOTIFY callChanged)
@@ -140,6 +141,7 @@ public:
     [[nodiscard]] double remoteLevel() const noexcept { return m_remoteLevel; }
     [[nodiscard]] bool muted() const noexcept { return m_muted; }
     [[nodiscard]] QString durationText() const;
+    [[nodiscard]] QString mediaPathText() const;
     [[nodiscard]] bool callsAvailable() const noexcept { return m_engine != nullptr; }
     [[nodiscard]] bool isGroupCall() const noexcept { return m_isGroupCall; }
     [[nodiscard]] QString groupTitle() const { return m_groupTitle; }

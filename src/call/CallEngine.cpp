@@ -1,5 +1,7 @@
 #include "call/CallEngine.h"
 
+#include "call/UdpCallMediaPath.h"
+
 #include <QDateTime>
 #include <QTimer>
 
@@ -169,6 +171,30 @@ CallEngine::~CallEngine()
     m_transport.onMedia = nullptr;
     m_sounds.stopAll();
     stopMedia();
+}
+
+void CallEngine::setUdpMediaPath(UdpCallMediaPath *path)
+{
+    if (m_udpPath == path)
+        return;
+    if (m_udpPath) {
+        disconnect(m_udpPath, &UdpCallMediaPath::mediaReceived, this,
+                   &CallEngine::receiveDirectMedia);
+    }
+    m_udpPath = path;
+    if (m_udpPath) {
+        connect(m_udpPath, &UdpCallMediaPath::mediaReceived, this,
+                &CallEngine::receiveDirectMedia);
+    }
+}
+
+void CallEngine::receiveDirectMedia(const DeviceId &sender, const QByteArray &packet)
+{
+    if (m_group) {
+        onMedia(m_group->conversation, sender, packet);
+    } else if (m_session && sender == m_peer.device) {
+        onMedia(m_peer.conversation, sender, packet);
+    }
 }
 
 qint64 CallEngine::activeDurationMs() const
@@ -1374,6 +1400,8 @@ bool CallEngine::startMedia()
         endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
         return false;
     }
+    if (m_udpPath)
+        m_udpPath->startProbing(m_peer.device);
     return true;
 }
 
@@ -1409,6 +1437,8 @@ bool CallEngine::openMemberMedia(Member &member)
     member.screen =
         CallScreenSession::create(*m_callId, direction, pairSecret, m_screenEncoder);
     m_screenFeedbackTimer->start();
+    if (m_udpPath)
+        m_udpPath->startProbing(member.info.peer.device);
     return true;
 }
 
@@ -1424,6 +1454,8 @@ const QByteArray &CallEngine::pairBaseSecret(const Member &member) const
 
 void CallEngine::closeMemberMedia(Member &member)
 {
+    if (m_udpPath)
+        m_udpPath->stop(member.info.peer.device);
     if (member.cameraOn) {
         member.cameraOn = false;
         emit participantVideoFrame(member.info.peer.device, QImage());
@@ -1887,6 +1919,15 @@ void CallEngine::endCall(CallEndReason reason, bool notifyPeer)
         m_playbackTailTimer->start(m_sounds.remainingOneShotMs() + playbackTailSlackMs);
     } else {
         m_sounds.stopAll();
+    }
+    if (m_udpPath) {
+        if (m_group) {
+            for (const Member &member : m_group->members) {
+                m_udpPath->stop(member.info.peer.device);
+            }
+        } else {
+            m_udpPath->stop(m_peer.device);
+        }
     }
     m_callId.reset();
     m_activeSinceMs = 0;

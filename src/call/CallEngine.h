@@ -291,6 +291,10 @@ public:
     // An offer on a conversation this returns nothing for is an ordinary call.
     std::function<std::optional<GroupCallRoute>(const ConversationId &)> groupRouteResolver;
 
+    void setUdpMediaPath(class UdpCallMediaPath *path);
+    [[nodiscard]] class UdpCallMediaPath *udpMediaPath() const { return m_udpPath; }
+    void receiveDirectMedia(const DeviceId &sender, const QByteArray &packet);
+
 signals:
     void stateChanged();
     void mutedChanged();
@@ -487,6 +491,7 @@ private:
     // Holds the speaker open after a call ends, just long enough for the
     // hang-up sound to finish playing through it.
     QTimer *m_playbackTailTimer = nullptr;
+    class UdpCallMediaPath *m_udpPath = nullptr;
 };
 
 } // namespace OpenChat

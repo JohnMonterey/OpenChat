@@ -222,6 +222,8 @@ private slots:
     void publishKeyPackageSucceeds();
     void keyPackageSupplyHintIsValidated();
     void keyPackageCountRejectsMalformedResponses();
+    void mediaTokenRequestSucceeds();
+    void mediaTokenRequestRejectsMalformed();
     void publishKeyPackageUnauthorizedRefreshExhaustionExpires();
 
     void resolveHandleSucceeds();
@@ -996,6 +998,89 @@ void RelayClientTest::keyPackageCountRejectsMalformedResponses()
     client.fetchKeyPackageCount();
     QTRY_COMPARE(counts.count(), 1);
     QCOMPARE(counts.first().at(0).toInt(), 0);
+}
+
+void RelayClientTest::mediaTokenRequestSucceeds()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                    {QString::fromLatin1(relaySubprotocol)});
+    QVERIFY(server.isListening());
+
+    const QByteArray sampleToken(32, 'M');
+    server.onConnected = [sampleToken](QWebSocket *socket) {
+        connect(socket, &QWebSocket::binaryMessageReceived, socket,
+                [socket, sampleToken](const QByteArray &message) {
+                    QCborParserError error{};
+                    const auto val = QCborValue::fromCbor(message, &error);
+                    if (error.error == QCborError::NoError && val.isArray()) {
+                        const auto arr = val.toArray();
+                        if (arr.size() == 1 && arr.at(0).toInteger() == 12) {
+                            QCborArray reply;
+                            reply.append(13);
+                            reply.append(sampleToken);
+                            socket->sendBinaryMessage(reply.toCborValue().toCbor());
+                        }
+                    }
+                });
+    };
+
+    RelayEndpoints endpoints;
+    endpoints.live = server.liveUrl();
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, {});
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy tokenSpy(&client, &RelayClient::mediaTokenReceived);
+    QSignalSpy failSpy(&client, &RelayClient::mediaTokenFailed);
+
+    // Calling while disconnected should fail immediately
+    client.requestMediaToken();
+    QCOMPARE(failSpy.count(), 1);
+
+    client.connectLive(0);
+    QTRY_VERIFY(client.isConnected());
+
+    client.requestMediaToken();
+    QTRY_COMPARE(tokenSpy.count(), 1);
+    QCOMPARE(tokenSpy.first().at(0).toByteArray(), sampleToken);
+
+    client.disconnect();
+}
+
+void RelayClientTest::mediaTokenRequestRejectsMalformed()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                    {QString::fromLatin1(relaySubprotocol)});
+    QVERIFY(server.isListening());
+
+    server.onConnected = [](QWebSocket *socket) {
+        connect(socket, &QWebSocket::binaryMessageReceived, socket,
+                [socket](const QByteArray &) {
+                    // Send malformed token (only 16 bytes instead of 32)
+                    QCborArray reply;
+                    reply.append(13);
+                    reply.append(QByteArray(16, 'X'));
+                    socket->sendBinaryMessage(reply.toCborValue().toCbor());
+                });
+    };
+
+    RelayEndpoints endpoints;
+    endpoints.live = server.liveUrl();
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, {});
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    QSignalSpy tokenSpy(&client, &RelayClient::mediaTokenReceived);
+    QSignalSpy failSpy(&client, &RelayClient::mediaTokenFailed);
+
+    client.connectLive(0);
+    QTRY_VERIFY(client.isConnected());
+
+    client.requestMediaToken();
+    QTRY_COMPARE(failSpy.count(), 1);
+    QCOMPARE(tokenSpy.count(), 0);
+
+    client.disconnect();
 }
 
 void RelayClientTest::publishKeyPackageSucceeds()

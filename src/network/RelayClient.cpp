@@ -58,6 +58,8 @@ enum class ControlType : int {
     // acknowledged, which is why neither frame carries a server sequence.
     DatagramSubmit = 5,   // client -> server: [5, bstr canonicalEnvelope]
     DatagramDelivery = 6, // server -> client: [6, bstr canonicalEnvelope]
+    MediaTokenRequest = 12, // client -> server: [12]
+    MediaToken = 13,        // server -> client: [13, bstr token(32)]
 };
 
 [[nodiscard]] bool isSecureScheme(const QUrl &url, QLatin1StringView scheme)
@@ -571,13 +573,23 @@ public:
             deliverDatagram(array->at(1).toByteArray());
             return;
         }
+        case ControlType::MediaToken: {
+            if (array->size() != 2 || !array->at(1).isByteArray()
+                || array->at(1).toByteArray().size() != 32) {
+                emit q->mediaTokenFailed();
+                return;
+            }
+            emit q->mediaTokenReceived(array->at(1).toByteArray());
+            return;
+        }
         case ControlType::AuthExpired:
             attemptRefresh();
             return;
         case ControlType::Acknowledge:
         case ControlType::DatagramSubmit:
+        case ControlType::MediaTokenRequest:
         default:
-            // Acknowledge and DatagramSubmit are client->server frames; receiving
+            // Acknowledge, DatagramSubmit and MediaTokenRequest are client->server frames; receiving
             // one means the peer is not speaking this protocol.
             emit q->transportError(RelayTransportError::InvalidControlFrame);
             return;
@@ -942,6 +954,17 @@ void RelayClient::requestPresence(const QList<DeviceId> &devices)
         request.append(ids);
         d->socket->sendBinaryMessage(request.toCborValue().toCbor());
     }
+}
+
+void RelayClient::requestMediaToken()
+{
+    if (!isConnected()) {
+        emit mediaTokenFailed();
+        return;
+    }
+    QCborArray request;
+    request.append(static_cast<int>(ControlType::MediaTokenRequest));
+    d->socket->sendBinaryMessage(request.toCborValue().toCbor());
 }
 
 void RelayClient::fetchSince(quint64 watermark)

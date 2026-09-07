@@ -249,8 +249,11 @@ Item {
         // call's length: what matters then is how long the door stays open.
         text: callHeader.controller.waitingForOthers === true
               ? callHeader.controller.waitingText
-              : (callHeader.controller.isActive ? callHeader.controller.durationText
-                                                : callHeader.controller.statusText)
+              : (callHeader.controller.isActive
+                 ? (callHeader.controller.mediaPathText && callHeader.controller.mediaPathText.length > 0
+                    ? callHeader.controller.durationText + " · " + callHeader.controller.mediaPathText
+                    : callHeader.controller.durationText)
+                 : callHeader.controller.statusText)
         color: Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 14

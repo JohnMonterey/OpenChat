@@ -18,7 +18,7 @@ Item {
         width: 26
         height: 26
         anchors.horizontalCenter: parent.horizontalCenter
-        y: 10
+        y: 8
     }
 
     Rectangle {

@@ -35,8 +35,12 @@ public:
     // frame is dropped harmlessly downstream anyway).
     void setConnected(bool connected);
 
+    void setUdpMediaPath(class UdpCallMediaPath *path);
+    [[nodiscard]] class UdpCallMediaPath *udpMediaPath() const { return m_udpMediaPath; }
+
 private:
     SyncEngine &m_engine;
+    class UdpCallMediaPath *m_udpMediaPath = nullptr;
     bool m_connected = true;
 };
 

@@ -269,6 +269,11 @@ public:
     void publishKeyPackage(const QByteArray &keyPackage);
     void fetchKeyPackageCount();
 
+    // Requests a 32-byte single-use UDP media routing token from the relay over the
+    // authenticated live connection. Emits mediaTokenReceived(token) on success or
+    // mediaTokenFailed() on error.
+    void requestMediaToken();
+
     // Resolves a handle to an account and its active devices over the
     // authenticated HTTPS directory endpoint (bearer access token attached). The
     // handle is URL-encoded into a `handle` query item. Emits handleResolved()
@@ -346,6 +351,8 @@ signals:
     void keyPackageCountReceived(int available);
     void keyPackageCountFailed();
     void keyPackagePublishFailed();
+    void mediaTokenReceived(const QByteArray &token);
+    void mediaTokenFailed();
     // Directory lookup: a defensively validated entry, or a typed failure.
     void handleResolved(const RelayDirectoryEntry &entry);
     void handleResolutionFailed(RelayDirectoryError error);

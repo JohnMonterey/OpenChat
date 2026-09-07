@@ -22,6 +22,8 @@
 //   OPENCHAT_RELAY_PG_DATABASE
 //   OPENCHAT_RELAY_BIND         (default 127.0.0.1)
 //   OPENCHAT_RELAY_PORT         (default 8443)
+//   OPENCHAT_RELAY_MEDIA_BIND   (default off)
+//   OPENCHAT_RELAY_MEDIA_PORT   (default 8444)
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -77,6 +79,9 @@ int main(int argc, char **argv)
         return 5;
     }
     qInfo("openchat-relay listening on %s:%u", qUtf8Printable(bindAddress), bound);
+    if (server.udpMediaService() && server.udpMediaService()->isRunning()) {
+        qInfo("openchat-relay UDP media listening on port %u", server.udpMediaService()->localPort());
+    }
 
     return app.exec();
 }

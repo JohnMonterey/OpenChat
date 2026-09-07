@@ -46,7 +46,9 @@
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
 #include "app/MicrophoneSettings.h"
+#include "app/TransportSettings.h"
 #include "call/ScreenCanvas.h"
+#include "call/UdpCallMediaPath.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
@@ -73,6 +75,15 @@ void registerQmlTypes()
                 return shared;
             }
             return new OpenChat::MicrophoneSettings;
+        });
+    qmlRegisterSingletonType<OpenChat::TransportSettings>(
+        "OpenChat.Native", 1, 0, "TransportSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * {
+            if (auto *shared = OpenChat::TransportSettings::instance()) {
+                QQmlEngine::setObjectOwnership(shared, QQmlEngine::CppOwnership);
+                return shared;
+            }
+            return new OpenChat::TransportSettings;
         });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
@@ -421,11 +432,28 @@ private:
         m_deviceLink = std::make_unique<OpenChat::DeviceLink>(*m_session, *m_relay);
         m_deviceLink->start(linkStart);
 
+        const auto credential = m_session->publicCredential();
+        const OpenChat::DeviceId localDevice = credential.hasValue()
+            ? credential.value().deviceId
+            : OpenChat::DeviceId::generate();
+        m_udpCallMediaPath = std::make_unique<OpenChat::UdpCallMediaPath>(localDevice);
+        m_udpCallMediaPath->setRelayClient(m_relay.get());
+        m_udpCallMediaPath->setSettings(m_transportSettings.get());
+        const QString relayHost = m_endpoints.live.host().isEmpty()
+            ? QStringLiteral("127.0.0.1")
+            : m_endpoints.live.host();
+        const quint16 mediaPort = static_cast<quint16>(
+            qEnvironmentVariableIntValue("OPENCHAT_RELAY_MEDIA_PORT") > 0
+                ? qEnvironmentVariableIntValue("OPENCHAT_RELAY_MEDIA_PORT")
+                : 8444);
+        m_udpCallMediaPath->setRelayEndpoint(QHostAddress(relayHost), mediaPort);
+
         // Voice calls ride the same engine: signalling as durable MLS control
         // messages, media as unreliable datagrams. The transport tracks the live
         // link so media is dropped rather than piling up while offline.
         m_callTransport = std::make_unique<OpenChat::SyncCallTransport>(*engine);
         m_callTransport->setConnected(m_relay->isConnected());
+        m_callTransport->setUdpMediaPath(m_udpCallMediaPath.get());
         QObject::connect(m_relay.get(), &OpenChat::RelayClient::connected, m_callTransport.get(),
                          [this] { m_callTransport->setConnected(true); });
         QObject::connect(m_relay.get(), &OpenChat::RelayClient::disconnected,
@@ -437,7 +465,7 @@ private:
         if (OpenChat::hasUsableCallAudioDevices()) {
             OpenChat::CallEngine::Config callConfig;
             // A group call keys each pair's media from both device ids.
-            if (const auto credential = m_session->publicCredential(); credential.hasValue())
+            if (credential.hasValue())
                 callConfig.localDevice = credential.value().deviceId;
             // The microphone the user picked, with their gain and gate; the
             // engine follows the settings for as long as both exist.
@@ -446,6 +474,7 @@ private:
                 callConfig, *m_callTransport,
                 OpenChat::makeQtCallAudioIoFactory(
                     [this] { return m_microphoneSettings->selectedInputDevice(); }));
+            m_callEngine->setUdpMediaPath(m_udpCallMediaPath.get());
             QObject::connect(m_microphoneSettings.get(),
                              &OpenChat::MicrophoneSettings::processingChanged,
                              m_callEngine.get(), [this] {
@@ -633,9 +662,12 @@ private:
     // must outlive any engine.
     std::unique_ptr<OpenChat::MicrophoneSettings> m_microphoneSettings =
         std::make_unique<OpenChat::MicrophoneSettings>();
+    std::unique_ptr<OpenChat::TransportSettings> m_transportSettings =
+        std::make_unique<OpenChat::TransportSettings>();
     // The voice-call stack. Declared after the engine/relay they borrow, so both
     // are torn down while the SyncEngine and RelayClient are still alive; the
     // engine is destroyed before the transport it holds a reference to.
+    std::unique_ptr<OpenChat::UdpCallMediaPath> m_udpCallMediaPath;
     std::unique_ptr<OpenChat::SyncCallTransport> m_callTransport;
     std::unique_ptr<OpenChat::CallEngine> m_callEngine;
 

@@ -12,6 +12,7 @@ AeroMenu 1.0 components/AeroMenu.qml
 AeroMenuItem 1.0 components/AeroMenuItem.qml
 MicrophoneContextMenu 1.0 components/MicrophoneContextMenu.qml
 MicrophoneSettingsPanel 1.0 components/MicrophoneSettingsPanel.qml
+ConnectionSettingsPanel 1.0 components/ConnectionSettingsPanel.qml
 ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml
 ContactRow 1.0 components/ContactRow.qml

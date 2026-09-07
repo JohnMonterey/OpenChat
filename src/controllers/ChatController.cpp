@@ -85,7 +85,8 @@ QStringList settingsElementsForCategory(int index)
                 QStringLiteral("Notification sounds"), QStringLiteral("Do not disturb")};
     case 4:
         return {QStringLiteral("Microphone"), QStringLiteral("Speakers"),
-                QStringLiteral("Camera"), QStringLiteral("Ringtone")};
+                QStringLiteral("Camera"), QStringLiteral("Ringtone"),
+                QStringLiteral("Connection")};
     case 5:
         return {QStringLiteral("Theme"), QStringLiteral("Chat font size"),
                 QStringLiteral("Bubble style"), QStringLiteral("Compact contact list")};

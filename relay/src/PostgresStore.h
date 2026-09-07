@@ -32,6 +32,8 @@ public:
     [[nodiscard]] static std::unique_ptr<PostgresStore> open(const Config &config,
                                                              const QString &connectionName,
                                                              QString *error = nullptr);
+    // Creates an unopened store instance for testing services that require no DB queries.
+    [[nodiscard]] static std::unique_ptr<PostgresStore> createNull(const QString &connectionName = QStringLiteral("null_store"));
     ~PostgresStore();
 
     PostgresStore(const PostgresStore &) = delete;

@@ -1,4 +1,5 @@
 #include "RelayServer.h"
+#include "UdpMediaService.h"
 
 #include "RelayTypes.h"
 
@@ -180,7 +181,28 @@ quint16 RelayServer::start(const QHostAddress &address, quint16 port)
         return 0;
     if (!m_http.bind(m_tcp))
         return 0;
+
+    if (!m_udpMedia) {
+        const QString mediaBind = qEnvironmentVariable("OPENCHAT_RELAY_MEDIA_BIND");
+        const int mediaPort = qEnvironmentVariableIntValue("OPENCHAT_RELAY_MEDIA_PORT");
+        if (!mediaBind.isEmpty() || mediaPort > 0) {
+            (void)startUdpMedia(QHostAddress(!mediaBind.isEmpty() ? mediaBind : QStringLiteral("127.0.0.1")),
+                                static_cast<quint16>(mediaPort > 0 ? mediaPort : 8444));
+        }
+    }
+
     return m_tcp->serverPort();
+}
+
+quint16 RelayServer::startUdpMedia(const QHostAddress &address, quint16 port)
+{
+    m_udpMedia = std::make_unique<UdpMediaService>(this);
+    return m_udpMedia->start(address, port);
+}
+
+void RelayServer::registerTestToken(const QByteArray &token, const AuthenticatedDevice &device)
+{
+    m_testTokens.insert(token, device);
 }
 
 void RelayServer::registerRoutes()
@@ -444,7 +466,12 @@ void RelayServer::onWebSocketConnection()
         if (!owned)
             continue;
 
-        const auto identity = m_auth.authenticate(bearerToken(owned->request()));
+        auto identity = m_auth.authenticate(bearerToken(owned->request()));
+        if (!identity) {
+            const auto it = m_testTokens.find(bearerToken(owned->request()));
+            if (it != m_testTokens.end())
+                identity = *it;
+        }
         if (!identity) {
             owned->close(QWebSocketProtocol::CloseCodePolicyViolated,
                          QStringLiteral("unauthenticated"));
@@ -505,9 +532,11 @@ void RelayServer::onWebSocketConnection()
             raw->close(QWebSocketProtocol::CloseCodeDatatypeNotSupported,
                        QStringLiteral("binary only"));
         });
-        connect(raw, &QWebSocket::disconnected, this, [this, raw, key]() {
+        connect(raw, &QWebSocket::disconnected, this, [this, raw, key, devId = identity->deviceId]() {
             if (m_liveByDevice.value(key) == raw)
                 m_liveByDevice.remove(key);
+            if (m_udpMedia)
+                m_udpMedia->clearBinding(devId);
             raw->deleteLater();
         });
     }
@@ -620,6 +649,17 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
             delivery.append(6); // DatagramDelivery
             delivery.append(envelopeBytes);
             recipient->sendBinaryMessage(delivery.toCborValue().toCbor());
+            return;
+        }
+        if (control.size() == 1 && control.at(0).toInteger() == 12) {
+            // MediaTokenRequest: [12] -> mint token -> [13, token]
+            if (m_udpMedia) {
+                const QByteArray token = m_udpMedia->mintToken(device.deviceId);
+                QCborArray reply;
+                reply.append(13); // MediaToken
+                reply.append(token);
+                socket->sendBinaryMessage(reply.toCborValue().toCbor());
+            }
             return;
         }
         return;

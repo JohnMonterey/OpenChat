@@ -68,6 +68,10 @@ public:
     static constexpr qint64 lossTimeoutMs = 3000;
     static constexpr qint64 pingIntervalMs = 5000;
     static constexpr qint64 reprobeIntervalMs = 5000;
+    // A relay media token is single-use, so every Hello needs a fresh one. This
+    // floor keeps a relay that rejects every Hello from turning into a request
+    // storm on the live socket.
+    static constexpr qint64 minTokenRequestIntervalMs = 1000;
 
     explicit UdpCallMediaPath(const DeviceId &localDeviceId, QObject *parent = nullptr);
     ~UdpCallMediaPath() override;
@@ -161,6 +165,10 @@ private:
     void sendHello(const QByteArray &token);
     void sendPing(PeerInfo &peer);
     void handleDatagram(const QByteArray &datagram);
+    // Asks the relay for a fresh single-use media token, naming the reason in
+    // the diagnostic trail so a path stuck on the WebSocket says why.
+    void requestToken(const QString &reason);
+    void logDiagnostic(const QString &category, const QString &message, const QString &severity);
 
     DeviceId m_localDeviceId;
     QHostAddress m_relayAddress = QHostAddress::LocalHost;
@@ -174,7 +182,10 @@ private:
     std::function<qint64()> m_clock;
 
     QHash<DeviceId, PeerInfo> m_peers;
-    QByteArray m_lastToken;
+    // When the last token request went out. A token itself is never cached: the
+    // relay consumes it on the first Hello, so replaying one only ever earns a
+    // HelloErr.
+    qint64 m_lastTokenRequestMs = 0;
     quint64 m_totalBytesSent = 0;
     quint64 m_totalBytesReceived = 0;
 };

@@ -849,6 +849,35 @@ target_link_libraries(tst_calludp PRIVATE
 )
 add_test(NAME tst_calludp COMMAND tst_calludp)
 
+# The seam the other UDP tests leave open: a real RelayClient asking for a media
+# token over its live socket, a real UdpMediaService minting and binding it, and
+# a real UdpCallMediaPath reaching Active with nothing hand-injected.
+add_executable(tst_udpmediae2e
+    tests/tst_udpmediae2e.cpp
+    tests/relay/RelayTestSupport.cpp
+    src/app/TransportSettings.cpp
+)
+target_include_directories(tst_udpmediae2e PRIVATE src tests relay/src)
+target_link_libraries(tst_udpmediae2e PRIVATE
+    openchat_call
+    openchat_media
+    openchat_network
+    openchat_protocol
+    openchat_domain
+    openchat_security
+    openchat_relay_server
+    openchat_relay_core
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Sql
+    Qt6::HttpServer
+    Qt6::Test
+    OpenSSL::Crypto
+)
+add_test(NAME tst_udpmediae2e COMMAND tst_udpmediae2e)
+set_tests_properties(tst_udpmediae2e PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # Group calls over a mesh of scripted endpoints: everyone rings, joins one by
 # one, hears the others mixed, leaves without ending it for the rest, and the
 # decline/busy/timeout/glare edges.

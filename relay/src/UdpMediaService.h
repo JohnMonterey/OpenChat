@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QHostAddress>
+#include <QLoggingCategory>
 #include <QObject>
 
 #include <functional>
@@ -18,6 +19,8 @@ class QTimer;
 QT_END_NAMESPACE
 
 namespace OpenChat::Relay {
+
+Q_DECLARE_LOGGING_CATEGORY(udpMediaLog)
 
 // Relay UDP media forwarding service.
 //
@@ -66,10 +69,28 @@ public:
     // Prunes expired tokens and silent bindings.
     void prune();
 
+    // Why a datagram was not forwarded. Counted per reason and reported through
+    // the openchat.relay.udp logging category.
+    enum class DropReason {
+        Undecodable,
+        Oversize,
+        UnknownToken,
+        TokenDeviceMismatch,
+        SenderNotBound,
+        SourceMismatch,
+        SenderExpired,
+        RateLimited,
+        NoRecipientId,
+        RecipientNotBound,
+        RecipientExpired,
+    };
+
     // Inspection for tests
     [[nodiscard]] bool isBound(const DeviceId &device) const;
     [[nodiscard]] int activeBindingCount() const;
     [[nodiscard]] int pendingTokenCount() const;
+    [[nodiscard]] quint64 dropCount(DropReason reason) const;
+    [[nodiscard]] quint64 forwardedCount() const { return m_forwarded; }
 
 private slots:
     void onReadyRead();
@@ -97,6 +118,8 @@ private:
     void handleDatagram(const QNetworkDatagram &datagram);
     [[nodiscard]] bool checkRateLimit(Binding &binding, qint64 now);
     [[nodiscard]] static bool addressesMatch(const QHostAddress &a, const QHostAddress &b);
+    void noteDrop(DropReason reason, const QNetworkDatagram &datagram);
+    void reportCounters();
 
     std::unique_ptr<QUdpSocket> m_socket;
     QTimer *m_pruneTimer = nullptr;
@@ -106,6 +129,11 @@ private:
     QHash<QByteArray, PendingToken> m_pendingTokens;
     // DeviceId -> Binding
     QHash<DeviceId, Binding> m_bindings;
+
+    QHash<int, quint64> m_drops;
+    quint64 m_forwarded = 0;
+    quint64 m_helloOk = 0;
+    quint64 m_lastReportedActivity = 0;
 };
 
 } // namespace OpenChat::Relay

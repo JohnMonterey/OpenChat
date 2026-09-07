@@ -17,6 +17,7 @@ add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui HttpServer Multimedia Network Quick QuickControls2 Sql Svg Test WebSockets)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
+include(cmake/dependencies/AudioPlugins.cmake)
 include(cmake/dependencies/Opus.cmake)
 include(cmake/dependencies/QtKeychain.cmake)
 include(cmake/dependencies/SqlCipher.cmake)
@@ -315,6 +316,41 @@ target_include_directories(openchat_media PUBLIC src)
 target_link_libraries(openchat_media
     PUBLIC openchat_domain Qt6::Core
     PRIVATE openchat_opus
+)
+
+# Third-party audio plugin hosting for voice effects: the two plugin ABIs, the
+# trust layer that gates loading one, and the chain a call runs them in.
+#
+# Its own library, and separate from openchat_media specifically BECAUSE of what
+# it does. openchat_media is deliberately free of anything but arithmetic on
+# samples; this vendors third-party ABI headers and calls dlopen on files the
+# application did not build. Keeping that in one target with one set of
+# dependencies is what makes "which code can execute a plugin" a question with a
+# short answer.
+#
+# Links openchat_domain rather than openchat_media even though it is audio code:
+# everything it needs from there is the header-only CallAudioFormat in
+# src/media/AudioTypes.h, and openchat_domain already puts src/ on the include
+# path. Depending on openchat_media would drag in Opus, and with it a network
+# fetch at configure time on machines without a system libopus -- for a header.
+add_library(openchat_effects STATIC
+    src/effects/AudioPluginTypes.cpp
+    src/effects/AudioPluginTrust.cpp
+    src/effects/ClapHostContext.cpp
+    src/effects/ClapModule.cpp
+    src/effects/ClapEffect.cpp
+    src/effects/Vst3InterfaceIds.cpp
+    src/effects/Vst3Support.cpp
+    src/effects/Vst3Module.cpp
+    src/effects/Vst3Effect.cpp
+    src/effects/PluginScanner.cpp
+    src/effects/VoiceEffectChain.cpp
+    src/effects/LocalVoiceEffect.cpp
+)
+target_include_directories(openchat_effects PUBLIC src)
+target_link_libraries(openchat_effects
+    PUBLIC openchat_domain Qt6::Core
+    PRIVATE openchat_clap openchat_vst3 ${CMAKE_DL_LIBS}
 )
 
 add_library(openchat_security STATIC

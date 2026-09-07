@@ -97,6 +97,27 @@ class CallController final : public QObject
     Q_PROPERTY(QString groupTitle READ groupTitle NOTIFY callChanged)
     Q_PROPERTY(int joinedCount READ joinedCount NOTIFY callChanged)
     Q_PROPERTY(CallParticipantModel *participants READ participants CONSTANT)
+    // Leaving a call does not end it, and coming back is a thing a call
+    // screen has to offer. While we are in a call with nobody else in it the
+    // grace period runs, counted down by waitingText; the one peer of an
+    // ordinary call is captioned with what they are doing when it is not
+    // simply "in the call"; and the ended-call surface offers Rejoin for as
+    // long as the call we just left is still going.
+    Q_PROPERTY(bool waitingForOthers READ waitingForOthers NOTIFY callChanged)
+    Q_PROPERTY(QString waitingText READ waitingText NOTIFY durationChanged)
+    Q_PROPERTY(QString peerStateText READ peerStateText NOTIFY callChanged)
+    Q_PROPERTY(bool canRejoin READ canRejoin NOTIFY callChanged)
+    // The open conversation has a call running that this device is not in:
+    // the header says who is in it and offers to join.
+    Q_PROPERTY(bool currentHasOngoingCall READ currentHasOngoingCall NOTIFY ongoingCallChanged)
+    Q_PROPERTY(QString ongoingCallText READ ongoingCallText NOTIFY ongoingCallChanged)
+    // A call belongs to one conversation, and its surface only ever replaces
+    // that conversation's header. callChatId is the chat it belongs to (empty
+    // when the caller is unknown, in which case the surface shows wherever the
+    // user is); callInCurrentChat says whether that chat is the one open.
+    // Elsewhere the window shows a strip instead.
+    Q_PROPERTY(QString callChatId READ callChatId NOTIFY callChanged)
+    Q_PROPERTY(bool callInCurrentChat READ callInCurrentChat NOTIFY callChanged)
 
 public:
     explicit CallController(QObject *parent = nullptr);
@@ -124,12 +145,28 @@ public:
     [[nodiscard]] QString groupTitle() const { return m_groupTitle; }
     [[nodiscard]] int joinedCount() const noexcept { return m_joinedCount; }
     [[nodiscard]] CallParticipantModel *participants() { return &m_participants; }
+    [[nodiscard]] bool waitingForOthers() const noexcept { return m_waiting; }
+    [[nodiscard]] QString waitingText() const;
+    [[nodiscard]] QString peerStateText() const { return m_peerStateText; }
+    [[nodiscard]] bool canRejoin() const noexcept { return m_canRejoin; }
+    [[nodiscard]] bool currentHasOngoingCall() const noexcept { return m_currentHasOngoingCall; }
+    [[nodiscard]] QString ongoingCallText() const { return m_ongoingCallText; }
+    [[nodiscard]] QString callChatId() const { return m_callChatId; }
+    [[nodiscard]] bool callInCurrentChat() const noexcept { return m_callInCurrentChat; }
 
     // Calls whoever is open in the conversation pane. No-op when nothing is
     // open, when the contact has no reachable device, or when a call is running.
-    // An open group chat rings every member.
+    // An open group chat rings every member — unless a call is already going
+    // there, in which case this joins it rather than ringing anyone.
     Q_INVOKABLE void callCurrentContact(bool video = false);
     Q_INVOKABLE void callContact(const QString &contactId);
+    // Joins the call running on the open conversation (see currentHasOngoingCall).
+    Q_INVOKABLE void joinCurrentCall();
+    // From the ended-call surface: back into the call we just left.
+    Q_INVOKABLE void rejoinCall();
+    // Opens the conversation the current call belongs to (the strip's way
+    // back to the call surface).
+    Q_INVOKABLE void showCallChat();
     Q_INVOKABLE void acceptCall();
     Q_INVOKABLE void declineCall();
     Q_INVOKABLE void hangUp();
@@ -206,6 +243,15 @@ public:
     // --call-group capture and the QML tests.
     void enableForGroupPreview(CallState state, const QString &title,
                                const QVector<CallParticipantRow> &participants);
+    // Preview seams for the rejoin surfaces: a call we are waiting alone in
+    // (and what the peer is captioned with), the ended surface's Rejoin, and
+    // the header's "call in progress" line. Never reachable from a live session.
+    void setPreviewWaiting(bool waiting, qint64 remainingMs, const QString &peerStateText);
+    void setPreviewCanRejoin(bool canRejoin);
+    void setPreviewOngoingCall(const QString &text);
+    // Whether the previewed call is on the open conversation (true by default,
+    // so every existing preview shows the surface).
+    void setPreviewCallInCurrentChat(bool inCurrentChat);
 
 signals:
     void callChanged();
@@ -220,12 +266,20 @@ signals:
     void remoteVideoChanged();
     void levelsChanged();
     void durationChanged();
+    void ongoingCallChanged();
     // Raised when a call arrives, so the app can alert the user.
     void incomingCall();
 
 private:
     void syncFromEngine();
     void syncParticipants();
+    // Refreshes what is known about calls we are not in: the header line for
+    // the open conversation, the sidebar marks, and whether Rejoin applies.
+    void syncOngoingCalls();
+    // Recomputes callInCurrentChat when either the call or the open chat moved.
+    void syncCallChat();
+    [[nodiscard]] std::optional<ConversationId> currentConversation() const;
+    [[nodiscard]] QString describeOngoingCall(const CallEngine::OngoingCall &call) const;
     void stopCamera();
     void setRemoteVideo(const QImage &image);
     void setRemoteScreen(const ScreenCanvasPtr &canvas);
@@ -276,6 +330,14 @@ private:
     bool m_isGroupCall = false;
     QString m_groupTitle;
     int m_joinedCount = 0;
+    bool m_waiting = false;
+    qint64 m_waitingRemainingMs = 0;
+    QString m_peerStateText;
+    bool m_canRejoin = false;
+    bool m_currentHasOngoingCall = false;
+    QString m_ongoingCallText;
+    QString m_callChatId;
+    bool m_callInCurrentChat = true;
 };
 
 } // namespace OpenChat

@@ -3,6 +3,8 @@
 #include "controllers/ChatController.h"
 
 #include <QDateTime>
+#include <QSet>
+#include <QStringList>
 #include <QTimer>
 #include <QVariantMap>
 
@@ -77,11 +79,24 @@ CallController::CallController(QObject *parent)
         if (m_engine == nullptr)
             return;
         const qint64 elapsed = m_engine->activeDurationMs();
-        if (elapsed / 1000 == m_durationMs / 1000)
+        const qint64 remaining = m_engine->waitingRemainingMs();
+        if (elapsed / 1000 == m_durationMs / 1000
+            && remaining / 1000 == m_waitingRemainingMs / 1000)
             return;
         m_durationMs = elapsed;
+        m_waitingRemainingMs = remaining;
         emit durationChanged();
     });
+}
+
+QString CallController::waitingText() const
+{
+    if (!m_waiting)
+        return QString();
+    const QString who = m_isGroupCall || m_peerName.isEmpty()
+        ? QStringLiteral("others") : m_peerName;
+    return QStringLiteral("Waiting for %1 to come back · %2")
+        .arg(who, formatDuration(m_waitingRemainingMs));
 }
 
 CallController::~CallController() = default;
@@ -142,6 +157,13 @@ void CallController::callCurrentContact(bool video)
         return;
     if (m_engine == nullptr || callOccupiesDevice(m_engine->state()))
         return;
+    // A call already going here is joined, not rung over.
+    if (m_currentHasOngoingCall) {
+        joinCurrentCall();
+        if (video && callOccupiesDevice(m_engine->state()))
+            toggleCamera();
+        return;
+    }
     callContact(m_chats->currentContactId());
     if (video && callOccupiesDevice(m_engine->state()) && !isIncoming())
         toggleCamera();
@@ -167,6 +189,125 @@ void CallController::callContact(const QString &contactId)
     peer.displayName = route->displayName;
     peer.avatarKey = route->avatarKey;
     (void)m_engine->placeCall(peer);
+}
+
+void CallController::joinCurrentCall()
+{
+    if (m_engine == nullptr)
+        return;
+    const std::optional<ConversationId> conversation = currentConversation();
+    if (conversation)
+        (void)m_engine->joinCall(*conversation);
+}
+
+void CallController::showCallChat()
+{
+    if (m_chats == nullptr || m_callChatId.isEmpty())
+        return;
+    m_chats->setNavSection(ChatController::NavSection::Chat);
+    (void)m_chats->selectContact(m_callChatId);
+}
+
+void CallController::syncCallChat()
+{
+    if (m_engine == nullptr || m_chats == nullptr)
+        return;
+    // A call with no known chat (an unknown caller) is shown wherever the
+    // user is: there is no conversation to send them to.
+    const bool inCurrent = m_state == CallState::Idle || m_callChatId.isEmpty()
+        || m_callChatId == m_chats->currentContactId();
+    if (inCurrent == m_callInCurrentChat)
+        return;
+    m_callInCurrentChat = inCurrent;
+    emit callChanged();
+}
+
+void CallController::rejoinCall()
+{
+    if (m_engine == nullptr || m_engine->state() != CallState::Ended)
+        return;
+    (void)m_engine->joinCall(m_engine->peer().conversation);
+}
+
+std::optional<ConversationId> CallController::currentConversation() const
+{
+    if (m_chats == nullptr)
+        return std::nullopt;
+    const QString id = m_chats->currentContactId();
+    if (id.isEmpty())
+        return std::nullopt;
+    if (ChatController::isGroupChatId(id)) {
+        if (const auto group = m_chats->groupCallRouteFor(id))
+            return group->conversation;
+        return std::nullopt;
+    }
+    if (const auto route = m_chats->callRouteFor(id))
+        return route->conversation;
+    return std::nullopt;
+}
+
+QString CallController::describeOngoingCall(const CallEngine::OngoingCall &call) const
+{
+    QStringList names;
+    for (const CallEngine::Participant &participant : call.participants) {
+        if (participant.state != CallParticipantState::Joined)
+            continue;
+        // The roster's current name beats the one the call was recorded with.
+        const auto route = m_chats ? m_chats->callRouteFor(participant.peer.contactId)
+                                   : std::nullopt;
+        QString name = route ? route->displayName : participant.peer.displayName;
+        if (name.isEmpty() && m_chats) {
+            if (const auto byDevice = m_chats->callRouteFor(participant.peer.conversation,
+                                                            participant.peer.device))
+                name = byDevice->displayName;
+        }
+        names.append(name.isEmpty() ? QStringLiteral("Someone") : name);
+    }
+    if (names.isEmpty())
+        return QString();
+    if (names.size() == 1)
+        return QStringLiteral("%1 is in a call").arg(names.first());
+    if (names.size() == 2)
+        return QStringLiteral("%1 and %2 are in a call").arg(names.at(0), names.at(1));
+    return QStringLiteral("%1, %2 and %3 others are in a call")
+        .arg(names.at(0), names.at(1))
+        .arg(names.size() - 2);
+}
+
+void CallController::syncOngoingCalls()
+{
+    if (m_engine == nullptr || m_chats == nullptr)
+        return;
+    const QVector<CallEngine::OngoingCall> calls = m_engine->ongoingCalls();
+    QSet<QString> chatsInCall;
+    for (const CallEngine::OngoingCall &call : calls) {
+        const QString id = m_chats->chatIdFor(call.conversation);
+        if (!id.isEmpty())
+            chatsInCall.insert(id);
+    }
+    // The chat our own call is on gets the mark too: with the call surface
+    // living only there, the sidebar is how it is found again.
+    if (callOccupiesDevice(m_state) && !m_callChatId.isEmpty())
+        chatsInCall.insert(m_callChatId);
+    m_chats->contacts()->setChatsInCall(chatsInCall);
+
+    QString text;
+    if (const std::optional<ConversationId> current = currentConversation()) {
+        if (const auto call = m_engine->ongoingCall(*current))
+            text = describeOngoingCall(*call);
+    }
+    const bool has = !text.isEmpty();
+    const bool canRejoin = m_state == CallState::Ended
+        && m_engine->ongoingCall(m_engine->peer().conversation).has_value();
+    const bool rejoinChanged = canRejoin != m_canRejoin;
+    m_canRejoin = canRejoin;
+    if (has != m_currentHasOngoingCall || text != m_ongoingCallText) {
+        m_currentHasOngoingCall = has;
+        m_ongoingCallText = text;
+        emit ongoingCallChanged();
+    }
+    if (rejoinChanged)
+        emit callChanged();
 }
 
 void CallController::acceptCall()
@@ -520,6 +661,11 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
             });
     connect(chats->contacts(), &QAbstractItemModel::modelReset,
             this, &CallController::syncFromEngine);
+    connect(engine, &CallEngine::ongoingCallsChanged, this, &CallController::syncOngoingCalls);
+    connect(chats, &ChatController::currentContactChanged, this,
+            &CallController::syncOngoingCalls);
+    connect(chats, &ChatController::currentContactChanged, this,
+            &CallController::syncCallChat);
     // An offer on a group conversation rings the group. The roster answers
     // which conversations are groups and who is in them.
     engine->groupRouteResolver = [chats](const ConversationId &conversation) {
@@ -542,6 +688,12 @@ void CallController::syncFromEngine()
     m_endReason = m_engine->endReason();
     m_direction = m_engine->direction();
     m_muted = m_engine->isMuted();
+    m_waiting = m_engine->isWaitingForOthers();
+    m_waitingRemainingMs = m_engine->waitingRemainingMs();
+    // A share the engine let go of (nobody left to send to) is stopped here
+    // too, so the capture is not left running into nothing.
+    if (m_screenShareEnabled && !m_engine->isScreenSharing())
+        stopScreenShare();
     if (m_state == CallState::Idle || m_state == CallState::Ended || isRinging()) {
         stopCamera();
         stopScreenShare();
@@ -556,6 +708,11 @@ void CallController::syncFromEngine()
 
     const CallEngine::CallPeer &peer = m_engine->peer();
     m_isGroupCall = m_engine->isGroupCall();
+    m_callChatId = m_state == CallState::Idle ? QString() : m_chats->chatIdFor(peer.conversation);
+    if (m_callChatId.isEmpty() && m_state != CallState::Idle && !m_isGroupCall)
+        m_callChatId = peer.contactId;
+    m_callInCurrentChat = m_state == CallState::Idle || m_callChatId.isEmpty()
+        || m_callChatId == m_chats->currentContactId();
     if (m_isGroupCall) {
         // The headline is the group; the members are the participant rows.
         const auto route = m_chats->groupCallRouteFor(peer.conversation);
@@ -578,8 +735,16 @@ void CallController::syncFromEngine()
             m_participants.setParticipants({});
         m_joinedCount = 0;
     }
+    m_peerStateText.clear();
+    if (!m_isGroupCall && (m_state == CallState::Connecting || m_state == CallState::Active)) {
+        const CallParticipantState peerState = m_engine->peerState();
+        if (peerState == CallParticipantState::Left || peerState == CallParticipantState::Connecting)
+            m_peerStateText = callParticipantStateName(peerState);
+    }
+    m_canRejoin = m_state == CallState::Ended
+        && m_engine->ongoingCall(peer.conversation).has_value();
 
-    if (m_state == CallState::Active) {
+    if (m_state == CallState::Active || m_waiting) {
         m_durationTimer->start();
     } else {
         m_durationTimer->stop();
@@ -597,6 +762,7 @@ void CallController::syncFromEngine()
     }
     emit callChanged();
     emit durationChanged();
+    syncOngoingCalls();
 }
 
 void CallController::syncParticipants()
@@ -619,7 +785,8 @@ void CallController::syncParticipants()
             row.avatarKey = QStringLiteral("userpfp_none");
         row.stateText = callParticipantStateName(participant.state);
         row.joined = participant.state == CallParticipantState::Joined;
-        row.ringing = participant.state == CallParticipantState::Ringing;
+        row.ringing = participant.state == CallParticipantState::Ringing
+            || participant.state == CallParticipantState::Connecting;
         row.speaking = participant.speaking;
         row.level = participant.level;
         if (row.joined)
@@ -709,6 +876,43 @@ void CallController::enableForPreview(CallState state, const QString &peerName,
     emit callChanged();
     emit levelsChanged();
     emit durationChanged();
+}
+
+void CallController::setPreviewWaiting(bool waiting, qint64 remainingMs,
+                                       const QString &peerStateText)
+{
+    if (m_engine != nullptr)
+        return;
+    m_waiting = waiting;
+    m_waitingRemainingMs = remainingMs;
+    m_peerStateText = peerStateText;
+    emit callChanged();
+    emit durationChanged();
+}
+
+void CallController::setPreviewCanRejoin(bool canRejoin)
+{
+    if (m_engine != nullptr)
+        return;
+    m_canRejoin = canRejoin;
+    emit callChanged();
+}
+
+void CallController::setPreviewCallInCurrentChat(bool inCurrentChat)
+{
+    if (m_engine != nullptr || m_callInCurrentChat == inCurrentChat)
+        return;
+    m_callInCurrentChat = inCurrentChat;
+    emit callChanged();
+}
+
+void CallController::setPreviewOngoingCall(const QString &text)
+{
+    if (m_engine != nullptr)
+        return;
+    m_ongoingCallText = text;
+    m_currentHasOngoingCall = !text.isEmpty();
+    emit ongoingCallChanged();
 }
 
 } // namespace OpenChat

@@ -2,7 +2,7 @@ import QtQuick
 import OpenChat
 import OpenChat.Native
 
-// Audio & Video → Microphone: which device, how loud, and the noise gate that
+// Audio & Video → Input: which device, how loud, and the noise gate that
 // keeps the room out of the call. Every control writes straight to
 // MicrophoneSettings, which persists it and hands it to the live call engine,
 // so a change made mid-call is heard on the next frame.
@@ -37,7 +37,7 @@ Item {
 
         // --- Device -------------------------------------------------------
         Text {
-            text: "Microphone"
+            text: "Input device"
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 15

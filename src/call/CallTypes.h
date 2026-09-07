@@ -48,6 +48,7 @@ enum class CallEndReason {
     SetupFailed,     // keys/codec could not be agreed
     TransportFailed, // the link went away mid-call
     Superseded,      // lost a glare tie-break to the peer's simultaneous call
+    Abandoned,       // nobody rejoined within the grace period after the others left
 };
 
 [[nodiscard]] QString callStateName(CallState state);

@@ -31,7 +31,10 @@ struct CallSignalMessage final {
     CallSignalType type = CallSignalType::Hangup;
     CallId callId = CallId::generate();
 
-    // Offer only.
+    // Offer: the secret the call (or a rejoin of it) is keyed from. Answer: in
+    // a group call, the secret the answerer itself last offered — the one the
+    // pair keys from when the answerer is the lower device id. Empty from a
+    // build that predates rejoining, which never changed its secret.
     QByteArray secret;
     AudioCodecKind codec = AudioCodecKind::Pcm;
 
@@ -45,7 +48,8 @@ struct CallSignalMessage final {
                                                  AudioCodecKind codec);
     [[nodiscard]] static CallSignalMessage ringing(const CallId &callId);
     [[nodiscard]] static CallSignalMessage answer(const CallId &callId, bool accepted,
-                                                  AudioCodecKind codec);
+                                                  AudioCodecKind codec,
+                                                  const QByteArray &secret = {});
     [[nodiscard]] static CallSignalMessage hangup(const CallId &callId, CallEndReason reason);
 };
 

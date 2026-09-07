@@ -51,7 +51,9 @@ the call replies to a newcomer so both key their side of the pair. Playback is
 the sum of every member's jitter buffer. The call screen shows everyone with
 what they are doing (ringing, declined, busy, no answer, left); the talker is
 ringed green. A member who hangs up is dropped from the others' mesh and the
-call carries on; it ends for a device only when nobody else is left.
+call carries on; the last member left waits a grace period for somebody to
+come back, and anyone who left, declined, missed or was busy for the call can
+join it while it lasts — see [call-rejoin.md](call-rejoin.md).
 
 ## Conversation events
 

@@ -13,7 +13,11 @@ Item {
     required property string avatarKey
     required property int unreadCount
     required property bool isGroup
-    readonly property real badgeSpace: unreadBadge.visible ? unreadBadge.width + 12 : 0
+    // A call is running in this chat without us: a quiet green mark says so
+    // from the sidebar, wherever the user happens to be looking.
+    required property bool callInProgress
+    readonly property real badgeSpace: (unreadBadge.visible ? unreadBadge.width + 12 : 0)
+                                       + (callPill.visible ? callPill.width + 8 : 0)
     readonly property bool compact: height < 55
     property bool statusBubbleEnabled: true
     property bool statusBubbleReady: false
@@ -90,6 +94,30 @@ Item {
         font.family: Theme.uiFont
         font.pixelSize: 14
         renderType: Text.NativeRendering
+    }
+
+    Rectangle {
+        id: callPill
+        objectName: "contactCallPill"
+        visible: row.callInProgress
+        anchors.right: unreadBadge.visible ? unreadBadge.left : parent.right
+        anchors.rightMargin: unreadBadge.visible ? 8 : 12
+        anchors.verticalCenter: parent.verticalCenter
+        width: callPillLabel.implicitWidth + 12
+        height: 20
+        radius: 10
+        color: Theme.callBackdropTop
+        border.width: 1
+        border.color: Theme.acceptBorder
+        Text {
+            id: callPillLabel
+            anchors.centerIn: parent
+            text: "In call"
+            color: Theme.textPrimary
+            font.family: Theme.uiFont
+            font.pixelSize: 11
+            renderType: Text.NativeRendering
+        }
     }
 
     Rectangle {

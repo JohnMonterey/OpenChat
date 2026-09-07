@@ -2,12 +2,20 @@ module OpenChat
 Main 1.0 Main.qml
 Onboarding 1.0 Onboarding.qml
 singleton Theme 1.0 Theme.qml
+singleton VocalFx 1.0 VocalFx.qml
+VocalFxPanel 1.0 components/VocalFxPanel.qml
+VocalFxPicker 1.0 components/VocalFxPicker.qml
+VoiceEffectsMenu 1.0 components/VoiceEffectsMenu.qml
 PresenceBead 1.0 components/PresenceBead.qml
 Avatar 1.0 components/Avatar.qml
 AeroTextField 1.0 components/AeroTextField.qml
 AeroButton 1.0 components/AeroButton.qml
 AeroSwitch 1.0 components/AeroSwitch.qml
 AeroSlider 1.0 components/AeroSlider.qml
+AeroMenu 1.0 components/AeroMenu.qml
+AeroMenuItem 1.0 components/AeroMenuItem.qml
+AeroMenuSetting 1.0 components/AeroMenuSetting.qml
+MicrophoneContextMenu 1.0 components/MicrophoneContextMenu.qml
 MicrophoneSettingsPanel 1.0 components/MicrophoneSettingsPanel.qml
 ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml
@@ -20,6 +28,7 @@ ConversationHeader 1.0 components/ConversationHeader.qml
 CallParticipant 1.0 components/CallParticipant.qml
 CallActionButton 1.0 components/CallActionButton.qml
 CallHeader 1.0 components/CallHeader.qml
+CallStrip 1.0 components/CallStrip.qml
 ScreenShareStage 1.0 components/ScreenShareStage.qml
 ScreenSharePicker 1.0 components/ScreenSharePicker.qml
 MediaIconButton 1.0 components/MediaIconButton.qml

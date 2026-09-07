@@ -56,13 +56,14 @@ CallSignalMessage CallSignalMessage::ringing(const CallId &callId)
 }
 
 CallSignalMessage CallSignalMessage::answer(const CallId &callId, bool accepted,
-                                            AudioCodecKind codec)
+                                            AudioCodecKind codec, const QByteArray &secret)
 {
     CallSignalMessage message;
     message.type = CallSignalType::Answer;
     message.callId = callId;
     message.accepted = accepted;
     message.codec = codec;
+    message.secret = accepted ? secret : QByteArray();
     return message;
 }
 
@@ -80,7 +81,9 @@ QByteArray encodeCallSignal(const CallSignalMessage &message)
     QCborArray fields;
     fields.append(static_cast<qint64>(message.type));
     fields.append(message.callId.bytes());
-    fields.append(message.type == CallSignalType::Offer ? message.secret : QByteArray());
+    const bool carriesSecret = message.type == CallSignalType::Offer
+        || (message.type == CallSignalType::Answer && message.accepted);
+    fields.append(carriesSecret ? message.secret : QByteArray());
     fields.append(static_cast<qint64>(message.codec));
     fields.append(message.accepted);
     fields.append(static_cast<qint64>(message.reason));
@@ -133,6 +136,12 @@ std::optional<CallSignalMessage> decodeCallSignal(QByteArrayView bytes)
     // means no later stage has to cope with a short or absent key.
     if (message.type == CallSignalType::Offer && message.secret.size() != callSecretBytes)
         return std::nullopt;
+    // An answer's secret is optional, but a partial one is a malformed one.
+    if (message.type == CallSignalType::Answer && !message.secret.isEmpty()
+        && message.secret.size() != callSecretBytes)
+        return std::nullopt;
+    if (message.type != CallSignalType::Offer && message.type != CallSignalType::Answer)
+        message.secret.clear();
     return message;
 }
 

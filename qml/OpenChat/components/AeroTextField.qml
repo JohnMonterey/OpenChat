@@ -10,6 +10,10 @@ Item {
     property alias text: fieldInput.text
     property string placeholder: ""
     property string prefix: ""
+    property int fontPixelSize: 16
+    property string accessibleName: placeholder
+    signal accepted()
+    function focusInput() { fieldInput.forceActiveFocus(); }
     height: 38
 
     Rectangle {
@@ -40,8 +44,10 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         color: Theme.textPrimary
         font.family: Theme.uiFont
-        font.pixelSize: 16
+        font.pixelSize: field.fontPixelSize
         clip: true
+        Accessible.name: field.accessibleName
+        onAccepted: field.accepted()
         selectByMouse: true
         selectionColor: Theme.selectionBackground
         selectedTextColor: Theme.selectionText

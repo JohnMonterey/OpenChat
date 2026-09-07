@@ -860,6 +860,10 @@ void EndToEndTest::callCarriesAudioVideoAndAScreenOverRealTls()
     // checked as an exact comparison rather than as a similarity score.
     CallEngine::Config callConfig;
     callConfig.preferredCodec = AudioCodecKind::Pcm;
+    // The noise gate has its own tests; a quiet reference recording must not
+    // be silenced by it here, where the point is the transport carrying the
+    // audio unchanged.
+    callConfig.microphone.gateEnabled = false;
     CallEngine aliceCall(callConfig, aliceCallTransport, aliceDevices.factory());
     CallEngine bobCall(callConfig, bobCallTransport, bobDevices.factory());
     // The call's own ring and pick-up tones mix into the same playback stream by
@@ -1056,11 +1060,40 @@ void EndToEndTest::callCarriesAudioVideoAndAScreenOverRealTls()
     QVERIFY(bobMessages.hasValue());
     QCOMPARE(bobMessages.value().size(), 0);
 
-    // --- Hanging up tears the call down on both sides through the relay. ---
+    // --- Hanging up leaves the call: Bob stays in it waiting, Alice keeps a
+    //     way back in, and taking it re-keys the path through the relay. ---
     aliceCall.hangUp();
     QCOMPARE(aliceCall.state(), CallState::Ended);
-    QTRY_COMPARE_WITH_TIMEOUT(bobCall.state(), CallState::Ended, 30000);
-    QCOMPARE(bobCall.endReason(), CallEndReason::RemoteHangup);
+    QTRY_COMPARE_WITH_TIMEOUT(bobCall.peerState(), CallParticipantState::Left, 30000);
+    QCOMPARE(bobCall.state(), CallState::Active);
+    QVERIFY(bobCall.isWaitingForOthers());
+    QVERIFY(!aliceDevices.capture->started);
+    QVERIFY(!bobDevices.capture->started);
+    QVERIFY(aliceCall.ongoingCall(*aliceConversation).has_value());
+    QVERIFY(aliceCall.joinCall(*aliceConversation));
+    QTRY_COMPARE_WITH_TIMEOUT(bobCall.peerState(), CallParticipantState::Joined, 30000);
+    QVERIFY(!bobCall.isWaitingForOthers());
+    for (int i = 0; i < 60; ++i) {
+        aliceDevices.speak(silentAudioFrame());
+        bobDevices.speak(silentAudioFrame());
+        QTest::qWait(5);
+        (void)aliceDevices.listen();
+        (void)bobDevices.listen();
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.state(), CallState::Active, 30000);
+    QCOMPARE(bobCall.state(), CallState::Active);
+    QCOMPARE(aliceCall.session()->stats().packetsRejected, 0);
+    QCOMPARE(bobCall.session()->stats().packetsRejected, 0);
+    QVERIFY(bobCall.session()->stats().packetsReceived > 0);
+
+    // Both gone: nothing is left to rejoin on either side.
+    bobCall.hangUp();
+    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.peerState(), CallParticipantState::Left, 30000);
+    QVERIFY(aliceCall.isWaitingForOthers());
+    aliceCall.hangUp();
+    QCOMPARE(aliceCall.state(), CallState::Ended);
+    QTRY_VERIFY_WITH_TIMEOUT(!bobCall.ongoingCall(*aliceConversation).has_value(), 30000);
+    QVERIFY(!aliceCall.ongoingCall(*aliceConversation).has_value());
     QVERIFY(!aliceDevices.capture->started);
     QVERIFY(!bobDevices.capture->started);
 
@@ -1177,22 +1210,38 @@ void EndToEndTest::groupChatAndGroupCallOverRealTls()
 
     // --- One message from Alice reaches both; a reply from Carol reaches Bob
     //     directly, named, although they are not contacts. ---
+    // Membership changes are rows of their own in the history, so the text
+    // messages are counted apart from them.
+    const auto textRows = [](ChatController &chat) {
+        int count = 0;
+        for (int row = 0; row < chat.messages()->rowCount(); ++row) {
+            const QModelIndex index = chat.messages()->index(row);
+            if (chat.messages()->data(index, MessageListModel::KindRole).toInt()
+                == static_cast<int>(ContentKind::Text))
+                ++count;
+        }
+        return count;
+    };
+    const auto lastText = [](ChatController &chat, int role) {
+        for (int row = chat.messages()->rowCount() - 1; row >= 0; --row) {
+            const QModelIndex index = chat.messages()->index(row);
+            if (chat.messages()->data(index, MessageListModel::KindRole).toInt()
+                == static_cast<int>(ContentKind::Text))
+                return chat.messages()->data(index, role).toString();
+        }
+        return QString();
+    };
     aliceChat.setComposerText(QStringLiteral("hello group"));
     QVERIFY(aliceChat.sendMessage());
-    QTRY_COMPARE_WITH_TIMEOUT(bobChat.messages()->rowCount(), 1, 30000);
-    QTRY_COMPARE_WITH_TIMEOUT(carolChat.messages()->rowCount(), 1, 30000);
-    QCOMPARE(bobChat.messages()->data(bobChat.messages()->index(0), MessageListModel::BodyRole).toString(),
-             QStringLiteral("hello group"));
-    QCOMPARE(bobChat.messages()->data(bobChat.messages()->index(0), MessageListModel::SenderNameRole)
-                 .toString(),
-             alice.handle);
+    QTRY_COMPARE_WITH_TIMEOUT(textRows(bobChat), 1, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(textRows(carolChat), 1, 30000);
+    QCOMPARE(lastText(bobChat, MessageListModel::BodyRole), QStringLiteral("hello group"));
+    QCOMPARE(lastText(bobChat, MessageListModel::SenderNameRole), alice.handle);
     carolChat.setComposerText(QStringLiteral("hi from carol"));
     QVERIFY(carolChat.sendMessage());
-    QTRY_COMPARE_WITH_TIMEOUT(bobChat.messages()->rowCount(), 2, 30000);
-    QTRY_COMPARE_WITH_TIMEOUT(aliceChat.messages()->rowCount(), 2, 30000);
-    QCOMPARE(bobChat.messages()->data(bobChat.messages()->index(1), MessageListModel::SenderNameRole)
-                 .toString(),
-             carol.handle);
+    QTRY_COMPARE_WITH_TIMEOUT(textRows(bobChat), 2, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(textRows(aliceChat), 2, 30000);
+    QCOMPARE(lastText(bobChat, MessageListModel::SenderNameRole), carol.handle);
 
     // --- Bob renames it; everyone sees the new name. ---
     QVERIFY(bobChat.renameCurrentGroup(QStringLiteral("Weekend plans")));
@@ -1210,6 +1259,7 @@ void EndToEndTest::groupChatAndGroupCallOverRealTls()
     const auto callConfigFor = [](const ClientStack &stack) {
         CallEngine::Config config;
         config.preferredCodec = AudioCodecKind::Pcm;
+        config.microphone.gateEnabled = false;
         config.localDevice = stack.deviceId;
         return config;
     };
@@ -1274,10 +1324,25 @@ void EndToEndTest::groupChatAndGroupCallOverRealTls()
     QCOMPARE(carolCall.state(), CallState::Ended);
     QVERIFY(!carolDevices.capture->started);
 
-    // Bob leaves the call: with nobody left, Alice's call ends too.
+    // Bob leaves the call: Alice stays in it waiting, and Carol — who
+    // declined — sees a call with Alice in it that she could still join.
     bobCall.hangUp();
-    QTRY_COMPARE_WITH_TIMEOUT(aliceCall.state(), CallState::Ended, 30000);
-    QCOMPARE(aliceCall.endReason(), CallEndReason::RemoteHangup);
+    QTRY_COMPARE_WITH_TIMEOUT(stateOf(aliceCall, bob.deviceId), CallParticipantState::Left, 30000);
+    QCOMPARE(aliceCall.state(), CallState::Active);
+    QVERIFY(aliceCall.isWaitingForOthers());
+    QTRY_VERIFY_WITH_TIMEOUT(carolCall.ongoingCall(group).has_value(), 30000);
+    QCOMPARE(carolCall.ongoingCall(group)->joinedCount(), 1);
+    // Bob comes back through the ended surface's Rejoin; the pair is keyed
+    // afresh and Alice admits him over the relay.
+    QVERIFY(bobCalls.canRejoin());
+    bobCalls.rejoinCall();
+    QTRY_COMPARE_WITH_TIMEOUT(stateOf(aliceCall, bob.deviceId), CallParticipantState::Joined, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(stateOf(bobCall, alice.deviceId), CallParticipantState::Joined, 30000);
+    QVERIFY(!aliceCall.isWaitingForOthers());
+    aliceCall.hangUp();
+    QTRY_COMPARE_WITH_TIMEOUT(stateOf(bobCall, alice.deviceId), CallParticipantState::Left, 30000);
+    bobCall.hangUp();
+    QCOMPARE(bobCall.state(), CallState::Ended);
 
     // --- Carol leaves the group: Alice and Bob drop her, one of them re-keys
     //     the group, and a message after that still reaches the other. ---
@@ -1289,7 +1354,8 @@ void EndToEndTest::groupChatAndGroupCallOverRealTls()
     QTest::qWait(1500);
     aliceChat.setComposerText(QStringLiteral("just us now"));
     QVERIFY(aliceChat.sendMessage());
-    QTRY_COMPARE_WITH_TIMEOUT(bobChat.messages()->rowCount(), 3, 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(textRows(bobChat), 3, 30000);
+    QCOMPARE(lastText(bobChat, MessageListModel::BodyRole), QStringLiteral("just us now"));
     QCOMPARE(carolChat.messages()->rowCount(), 0); // she is looking at a person now
     QVERIFY(!alice.session->syncEngine()->isFailedClosed());
     QVERIFY(!bob.session->syncEngine()->isFailedClosed());

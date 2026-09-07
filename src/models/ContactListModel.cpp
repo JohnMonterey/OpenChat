@@ -36,6 +36,8 @@ QVariant ContactListModel::data(const QModelIndex &index, int role) const
         return contact->id == m_selectedId;
     case AvatarKeyRole:
         return contact->avatarKey;
+    case CallInProgressRole:
+        return m_inCall.contains(contact->id);
     case UnreadCountRole:
         return contact->unreadCount;
     case IsGroupRole:
@@ -57,6 +59,7 @@ QHash<int, QByteArray> ContactListModel::roleNames() const
         {AvatarKeyRole, "avatarKey"},
         {IsGroupRole, "isGroup"},
         {UnreadCountRole, "unreadCount"},
+        {CallInProgressRole, "callInProgress"},
     };
 }
 
@@ -97,6 +100,18 @@ void ContactListModel::setActivity(const QString &id, qint64 lastMessageAtMs, in
             emit dataChanged(index(row), index(row), {UnreadCountRole});
         }
         return;
+    }
+}
+
+void ContactListModel::setChatsInCall(const QSet<QString> &ids)
+{
+    if (ids == m_inCall)
+        return;
+    const QSet<QString> changed = (m_inCall | ids) - (m_inCall & ids);
+    m_inCall = ids;
+    for (int row = 0; row < m_visibleRows.size(); ++row) {
+        if (changed.contains(m_contacts.at(m_visibleRows.at(row)).id))
+            emit dataChanged(index(row), index(row), {CallInProgressRole});
     }
 }
 

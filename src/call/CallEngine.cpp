@@ -78,8 +78,18 @@ QString callParticipantStateName(CallParticipantState state)
         return QStringLiteral("Busy");
     case CallParticipantState::NoAnswer:
         return QStringLiteral("No answer");
+    case CallParticipantState::Connecting:
+        return QStringLiteral("Reconnecting…");
     }
     return QString();
+}
+
+int CallEngine::OngoingCall::joinedCount() const
+{
+    return static_cast<int>(std::count_if(
+        participants.cbegin(), participants.cend(), [](const Participant &participant) {
+            return participant.state == CallParticipantState::Joined;
+        }));
 }
 
 CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFactory audioIo,
@@ -120,6 +130,11 @@ CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFacto
     m_stallTimer->setSingleShot(true);
     connect(m_stallTimer, &QTimer::timeout, this,
             [this] { endCall(CallEndReason::TransportFailed, /*notifyPeer=*/true); });
+
+    m_graceTimer = new QTimer(this);
+    m_graceTimer->setSingleShot(true);
+    connect(m_graceTimer, &QTimer::timeout, this,
+            [this] { endCall(CallEndReason::Abandoned, /*notifyPeer=*/true); });
 
     m_levelTimer = new QTimer(this);
     m_levelTimer->setInterval(levelRefreshMs);
@@ -239,6 +254,68 @@ int CallEngine::joinedParticipantCount() const
         [](const Member &member) { return member.info.state == CallParticipantState::Joined; }));
 }
 
+bool CallEngine::isWaitingForOthers() const
+{
+    return m_graceTimer->isActive();
+}
+
+qint64 CallEngine::waitingRemainingMs() const
+{
+    return m_graceTimer->isActive() ? std::max(0, m_graceTimer->remainingTime()) : 0;
+}
+
+QVector<CallEngine::OngoingCall> CallEngine::ongoingCalls() const
+{
+    QVector<OngoingCall> result;
+    result.reserve(static_cast<qsizetype>(m_ongoing.size()));
+    for (const OngoingCall &call : m_ongoing)
+        result.append(call);
+    return result;
+}
+
+std::optional<CallEngine::OngoingCall>
+CallEngine::ongoingCall(const ConversationId &conversation) const
+{
+    for (const OngoingCall &call : m_ongoing)
+        if (call.conversation == conversation)
+            return call;
+    return std::nullopt;
+}
+
+CallEngine::OngoingCall *CallEngine::ongoingFor(const ConversationId &conversation)
+{
+    for (OngoingCall &call : m_ongoing)
+        if (call.conversation == conversation)
+            return &call;
+    return nullptr;
+}
+
+void CallEngine::rememberOngoing(OngoingCall call)
+{
+    // One call per conversation: a newer one replaces whatever was known.
+    for (OngoingCall &known : m_ongoing) {
+        if (known.conversation == call.conversation) {
+            known = std::move(call);
+            emit ongoingCallsChanged();
+            return;
+        }
+    }
+    m_ongoing.push_back(std::move(call));
+    emit ongoingCallsChanged();
+}
+
+void CallEngine::forgetOngoing(const ConversationId &conversation)
+{
+    const auto it = std::find_if(m_ongoing.begin(), m_ongoing.end(),
+                                 [&](const OngoingCall &call) {
+                                     return call.conversation == conversation;
+                                 });
+    if (it == m_ongoing.end())
+        return;
+    m_ongoing.erase(it);
+    emit ongoingCallsChanged();
+}
+
 const CallSession *CallEngine::sessionFor(const DeviceId &device) const
 {
     if (!m_group)
@@ -259,6 +336,22 @@ CallEngine::Member *CallEngine::memberFor(const DeviceId &device)
     return nullptr;
 }
 
+CallEngine::Member &CallEngine::ensureMember(const DeviceId &device,
+                                            const ConversationId &conversation)
+{
+    if (Member *member = memberFor(device))
+        return *member;
+    // Somebody the roster has not told us about yet. The MLS group already
+    // vouched for them, so they are listed rather than refused.
+    Member member;
+    member.info.peer.conversation = conversation;
+    member.info.peer.device = device;
+    member.info.state = CallParticipantState::Left;
+    member.secret = m_secret;
+    m_group->members.push_back(std::move(member));
+    return m_group->members.back();
+}
+
 bool CallEngine::placeCall(const CallPeer &peer)
 {
     if (callOccupiesDevice(m_state))
@@ -269,9 +362,12 @@ bool CallEngine::placeCall(const CallPeer &peer)
     if (secret.size() != callSecretBytes)
         return false;
 
+    forgetOngoing(peer.conversation);
     m_group.reset();
     m_peer = peer;
     m_direction = CallDirection::Outgoing;
+    m_sessionDirection = CallDirection::Outgoing;
+    m_peerState = CallParticipantState::Ringing;
     m_callId = CallId::generate();
     m_secret = secret;
     m_codec = m_config.preferredCodec;
@@ -313,13 +409,17 @@ bool CallEngine::placeGroupCall(const GroupCallRoute &route)
         member.info.peer = peer;
         member.info.peer.conversation = route.conversation;
         member.info.state = CallParticipantState::Ringing;
+        member.secret = secret;
         group->members.push_back(std::move(member));
     }
     if (group->members.empty())
         return false;
+    forgetOngoing(route.conversation);
     m_group = std::move(group);
     m_peer = m_group->members.front().info.peer;
     m_direction = CallDirection::Outgoing;
+    m_sessionDirection = CallDirection::Outgoing;
+    m_peerState = CallParticipantState::Ringing;
     m_callId = CallId::generate();
     m_secret = secret;
     m_codec = m_config.preferredCodec;
@@ -355,7 +455,7 @@ void CallEngine::acceptCall()
         // learn we are in so they key a path to us when they pick up.
         if (!startGroupMedia())
             return;
-        broadcast(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec));
+        broadcast(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec, m_secret));
         m_stallTimer->start(m_config.connectTimeoutMs);
         return;
     }
@@ -398,6 +498,7 @@ void CallEngine::setMuted(bool muted)
     if (m_muted == muted)
         return;
     m_muted = muted;
+    m_microphone.reset();
     if (m_session)
         m_session->setMuted(muted);
     if (m_group)
@@ -487,14 +588,21 @@ void CallEngine::broadcast(const CallSignalMessage &message)
 {
     if (!m_group)
         return;
-    // Snapshot the recipients: a loopback transport can answer synchronously,
-    // and an answer may add or drop members while we are still iterating.
+    // Every member hears every join and leave, including the ones not in the
+    // call: that is how someone who left keeps an accurate picture of who is
+    // still there to rejoin. Snapshot the recipients: a loopback transport can
+    // answer synchronously, and an answer may add members mid-iteration.
     QVector<CallPeer> recipients;
     for (const Member &member : m_group->members)
-        if (participantIsPending(member.info.state))
-            recipients.append(member.info.peer);
-    for (const CallPeer &peer : recipients)
+        recipients.append(member.info.peer);
+    for (const CallPeer &peer : recipients) {
+        // A reply may have moved us into a different call (a group that was
+        // already on one answers with its id); the rest of this one's
+        // messages are then for a call we are no longer placing.
+        if (message.callId != m_callId.value_or(message.callId))
+            break;
         send(message, peer);
+    }
 }
 
 void CallEngine::setParticipantState(Member &member, CallParticipantState state)
@@ -521,9 +629,13 @@ void CallEngine::onSignal(const ConversationId &conversation, const DeviceId &se
 
     // Every other signal only makes sense for the call in progress. Matching on
     // the call id (not merely the sender) is what stops a stale hangup from a
-    // just-finished call tearing down the one that replaced it.
-    if (!m_callId || message->callId != *m_callId || m_state == CallState::Idle)
+    // just-finished call tearing down the one that replaced it. What does not
+    // match may still be news about a call we could join.
+    if (!m_callId || message->callId != *m_callId || m_state == CallState::Idle
+        || m_state == CallState::Ended) {
+        handleForeignSignal(conversation, sender, *message);
         return;
+    }
 
     if (m_group) {
         if (conversation != m_group->conversation)
@@ -593,6 +705,47 @@ void CallEngine::handleOffer(const ConversationId &conversation, const DeviceId 
     offeringPeer.conversation = conversation;
     offeringPeer.device = sender;
 
+    // The peer coming back into the call we are in (or a redelivery of the
+    // offer that started it). A rejoin carries a fresh secret: the old keys
+    // went with the old session, and the path is keyed again from scratch
+    // with them as the offering end.
+    if (!m_group && m_callId && message.callId == *m_callId && sender == m_peer.device
+        && (m_state == CallState::Connecting || m_state == CallState::Active)) {
+        if (m_peerState == CallParticipantState::Joined && m_session
+            && message.secret == m_secret) {
+            send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec));
+            return;
+        }
+        m_stallTimer->stop();
+        releaseMediaWhileAlone();
+        m_secret = message.secret;
+        m_codec = isAudioCodecAvailable(message.codec) ? message.codec : AudioCodecKind::Pcm;
+        m_sessionDirection = CallDirection::Incoming;
+        m_peerState = CallParticipantState::Joined;
+        if (!startMedia())
+            return;
+        send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec));
+        m_stallTimer->start(m_config.connectTimeoutMs);
+        updateGrace();
+        emit stateChanged();
+        return;
+    }
+
+    // An offer for a call we already know is running — the original offer,
+    // redelivered after we left it: they are in it, and we are not ringing.
+    if (const OngoingCall *known = ongoingFor(conversation);
+        known != nullptr && known->callId == message.callId) {
+        noteOngoingSignal(conversation, sender, message);
+        return;
+    }
+
+    // The peer of the call we are in is calling again: their side no longer
+    // knows that call is still up (a restart, say). Their new call is the one
+    // that matters, so ours ends and the ring below takes over.
+    if (!m_group && sender == m_peer.device
+        && (m_state == CallState::Connecting || m_state == CallState::Active))
+        endCall(CallEndReason::RemoteHangup, /*notifyPeer=*/false);
+
     if (callOccupiesDevice(m_state)) {
         // Glare: both ends called at the same instant. Some deterministic rule
         // has to pick a winner, and it must pick the SAME winner on both
@@ -617,10 +770,13 @@ void CallEngine::handleOffer(const ConversationId &conversation, const DeviceId 
 
     // An offer whose codec this build cannot run is answered on PCM, which every
     // build has, rather than refused.
+    forgetOngoing(conversation);
     m_group.reset();
     m_peer = offeringPeer;
     m_peer.contactId.clear();
     m_direction = CallDirection::Incoming;
+    m_sessionDirection = CallDirection::Incoming;
+    m_peerState = CallParticipantState::Joined;
     m_callId = message.callId;
     m_secret = message.secret;
     m_codec = isAudioCodecAvailable(message.codec) ? message.codec : AudioCodecKind::Pcm;
@@ -643,10 +799,34 @@ void CallEngine::handleGroupOffer(const ConversationId &conversation, const Devi
     offeringPeer.conversation = conversation;
     offeringPeer.device = sender;
 
-    // Redelivered offer for the call we are already ringing on: re-acknowledge.
-    if (m_group && m_callId && message.callId == *m_callId && m_state == CallState::Ringing
-        && m_direction == CallDirection::Incoming) {
+    const bool ourCall = m_group && m_callId && message.callId == *m_callId
+        && m_group->conversation == conversation;
+    // An offer for the call we are still deciding on: the original offer
+    // redelivered, or a member coming back into it while we ring. Either way
+    // we re-acknowledge; a rejoin also updates who is in, and with what
+    // secret their pair with us will be keyed once we pick up.
+    if (ourCall && m_state == CallState::Ringing && m_direction == CallDirection::Incoming) {
+        if (message.secret != m_secret) {
+            Member &member = ensureMember(sender, conversation);
+            member.secret = message.secret;
+            member.codec = message.codec;
+            member.info.state = CallParticipantState::Joined;
+            emit participantsChanged();
+        }
         send(CallSignalMessage::ringing(message.callId), offeringPeer);
+        return;
+    }
+    // A member (re)joining the call we are in.
+    if (ourCall && (m_state == CallState::Connecting || m_state == CallState::Active)) {
+        Member &member = ensureMember(sender, conversation);
+        if (member.info.state == CallParticipantState::Joined && member.session
+            && member.secret == message.secret) {
+            // Redelivered: they know we are here; say so again.
+            send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec, m_secret),
+                 member.info.peer);
+            return;
+        }
+        admitMember(member, message.secret, message.codec);
         return;
     }
     // Without our own device id there is no way to key a pair path; refuse
@@ -657,6 +837,15 @@ void CallEngine::handleGroupOffer(const ConversationId &conversation, const Devi
     }
 
     if (callOccupiesDevice(m_state)) {
+        // A member starting a new call on a group that already has one — they
+        // lost track of it (a restart, a missed signal). Rather than "busy",
+        // tell them which call is running: they drop theirs and join it.
+        if (m_group && m_group->conversation == conversation
+            && (m_state == CallState::Connecting || m_state == CallState::Active)) {
+            send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec, m_secret),
+                 offeringPeer);
+            return;
+        }
         // Glare within the group: two members started a call at once. The lower
         // call id survives on every device, so whoever loses abandons theirs.
         const bool isGlare = m_group && m_group->conversation == conversation
@@ -669,8 +858,42 @@ void CallEngine::handleGroupOffer(const ConversationId &conversation, const Devi
             m_ringTimer->stop();
         } else {
             send(CallSignalMessage::hangup(message.callId, CallEndReason::Busy), offeringPeer);
+            // Busy now is not busy later: remember the call so it can be
+            // joined once this one is over.
+            OngoingCall known;
+            known.conversation = conversation;
+            known.callId = message.callId;
+            known.group = true;
+            known.title = route.title;
+            bool callerListed = false;
+            for (const CallPeer &peer : route.members) {
+                if (peer.device == *m_config.localDevice)
+                    continue;
+                Participant participant;
+                participant.peer = peer;
+                participant.peer.conversation = conversation;
+                participant.state = peer.device == sender ? CallParticipantState::Joined
+                                                          : CallParticipantState::Ringing;
+                callerListed = callerListed || peer.device == sender;
+                known.participants.append(participant);
+            }
+            if (!callerListed) {
+                Participant participant;
+                participant.peer = offeringPeer;
+                participant.state = CallParticipantState::Joined;
+                known.participants.prepend(participant);
+            }
+            rememberOngoing(std::move(known));
             return;
         }
+    }
+
+    // A member joining a call we know is running and are not in: note it,
+    // without ringing for a call we already chose not to be in.
+    if (const OngoingCall *known = ongoingFor(conversation);
+        known != nullptr && known->callId == message.callId) {
+        noteOngoingSignal(conversation, sender, message);
+        return;
     }
 
     auto group = std::make_unique<GroupCall>();
@@ -683,6 +906,7 @@ void CallEngine::handleGroupOffer(const ConversationId &conversation, const Devi
         Member member;
         member.info.peer = peer;
         member.info.peer.conversation = conversation;
+        member.secret = message.secret;
         // The caller is in the call by definition; everyone else is being rung
         // alongside us and will say what they did.
         if (peer.device == sender) {
@@ -701,14 +925,18 @@ void CallEngine::handleGroupOffer(const ConversationId &conversation, const Devi
         member.info.peer = offeringPeer;
         member.info.state = CallParticipantState::Joined;
         member.codec = message.codec;
+        member.secret = message.secret;
         group->members.insert(group->members.begin(), std::move(member));
     }
+    forgetOngoing(conversation);
     m_group = std::move(group);
     m_peer = offeringPeer;
     for (const Member &member : m_group->members)
         if (member.info.peer.device == sender)
             m_peer = member.info.peer;
     m_direction = CallDirection::Incoming;
+    m_sessionDirection = CallDirection::Incoming;
+    m_peerState = CallParticipantState::Joined;
     m_callId = message.callId;
     m_secret = message.secret;
     m_codec = isAudioCodecAvailable(message.codec) ? message.codec : AudioCodecKind::Pcm;
@@ -736,7 +964,10 @@ void CallEngine::handleAnswer(const CallSignalMessage &message)
 {
     if (m_direction != CallDirection::Outgoing)
         return;
-    if (m_state != CallState::Dialing && m_state != CallState::Ringing)
+    // Our offer awaiting an answer: the call we placed, or the rejoin we sent.
+    const bool rejoining = m_state == CallState::Connecting
+        && m_peerState == CallParticipantState::Connecting;
+    if (m_state != CallState::Dialing && m_state != CallState::Ringing && !rejoining)
         return;
     m_ringTimer->stop();
     if (!message.accepted) {
@@ -751,10 +982,14 @@ void CallEngine::handleAnswer(const CallSignalMessage &message)
     m_sounds.stopLoop();
     if (m_soundsEnabled)
         m_sounds.playOnce(CallSound::Connected);
+    m_peerState = CallParticipantState::Joined;
     setState(CallState::Connecting);
     if (!startMedia())
         return;
     m_stallTimer->start(m_config.connectTimeoutMs);
+    updateGrace();
+    if (rejoining)
+        emit stateChanged();
 }
 
 void CallEngine::handleGroupAnswer(Member &member, const CallSignalMessage &message)
@@ -769,6 +1004,8 @@ void CallEngine::handleGroupAnswer(Member &member, const CallSignalMessage &mess
     if (member.info.state == CallParticipantState::Joined && member.session)
         return;
     member.codec = message.codec;
+    if (message.secret.size() == callSecretBytes)
+        member.secret = message.secret;
     const bool wasJoined = member.info.state == CallParticipantState::Joined;
     member.info.state = CallParticipantState::Joined;
 
@@ -786,18 +1023,39 @@ void CallEngine::handleGroupAnswer(Member &member, const CallSignalMessage &mess
             return;
         m_stallTimer->start(m_config.connectTimeoutMs);
     } else if (weAreIn) {
-        if (!openMemberMedia(member)) {
+        // The microphone may have been let go while we were alone in here.
+        if (!openMemberMedia(member) || !startCapture()) {
             endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
             return;
         }
         // Tell the newcomer we are here too, unicast. They mark us Joined and
         // key their side of the pair; if they already knew, they ignore it.
-        send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec), member.info.peer);
+        send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec, m_secret),
+             member.info.peer);
+        updateGrace();
     }
     // Otherwise we are still ringing ourselves: remember that they are in, so
     // accepting keys a path to them as well as to the caller.
     if (!wasJoined)
         emit participantsChanged();
+}
+
+void CallEngine::admitMember(Member &member, const QByteArray &secret, AudioCodecKind codec)
+{
+    // Whatever path there was to them is keyed from an old secret: it goes,
+    // and a fresh one comes up from the secret their offer carried.
+    closeMemberMedia(member);
+    member.secret = secret;
+    member.codec = codec;
+    member.info.state = CallParticipantState::Joined;
+    if (!openMemberMedia(member) || !startCapture()) {
+        endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
+        return;
+    }
+    send(CallSignalMessage::answer(*m_callId, /*accepted=*/true, m_codec, m_secret),
+         member.info.peer);
+    updateGrace();
+    emit participantsChanged();
 }
 
 void CallEngine::handleHangup(const CallSignalMessage &message)
@@ -815,6 +1073,24 @@ void CallEngine::handleHangup(const CallSignalMessage &message)
             return CallEndReason::RemoteHangup;
         }
     }();
+    // A rejoin of ours they answered by leaving: there is nobody to rejoin.
+    if (m_state == CallState::Connecting && m_peerState == CallParticipantState::Connecting) {
+        endCall(CallEndReason::NoAnswer, /*notifyPeer=*/false);
+        return;
+    }
+    // The peer leaving a call we are in does not end it: we stay, alone, for
+    // the grace period, and they can come back into it.
+    if (reason == CallEndReason::RemoteHangup
+        && (m_state == CallState::Connecting || m_state == CallState::Active)
+        && m_peerState != CallParticipantState::Left) {
+        m_peerState = CallParticipantState::Left;
+        m_stallTimer->stop();
+        releaseMediaWhileAlone();
+        updateGrace();
+        emit stateChanged();
+        emit levelsChanged();
+        return;
+    }
     endCall(reason, /*notifyPeer=*/false);
 }
 
@@ -853,6 +1129,7 @@ void CallEngine::settleGroup()
             ++joined;
             break;
         case CallParticipantState::Ringing:
+        case CallParticipantState::Connecting:
             ++ringing;
             break;
         case CallParticipantState::Declined:
@@ -873,8 +1150,10 @@ void CallEngine::settleGroup()
             endCall(CallEndReason::RemoteHangup, /*notifyPeer=*/false);
         return;
     }
-    if (joined > 0 || ringing > 0)
+    if (joined > 0 || ringing > 0) {
+        updateGrace();
         return;
+    }
     if (m_direction == CallDirection::Outgoing
         && (m_state == CallState::Dialing || m_state == CallState::Ringing)) {
         endCall(anyDeclined ? CallEndReason::Declined
@@ -882,19 +1161,40 @@ void CallEngine::settleGroup()
                 /*notifyPeer=*/false);
         return;
     }
-    // We were in the call and the last other member left it.
-    endCall(CallEndReason::RemoteHangup, /*notifyPeer=*/false);
+    // We were in the call and the last other member left it. The call stays
+    // up for the grace period so that any of them can come back.
+    updateGrace();
 }
 
 void CallEngine::onRingTimeout()
 {
-    if (m_group && m_direction == CallDirection::Outgoing) {
-        // Whoever has not picked up by now is not going to. The call itself
+    const bool deciding = m_direction == CallDirection::Incoming && m_state == CallState::Ringing;
+    if (m_group && !deciding) {
+        // Whoever has not picked up by now is not going to, and whoever has
+        // not confirmed a rejoin of ours was not there to. The call itself
         // only ends if nobody did.
-        for (Member &member : m_group->members)
-            if (member.info.state == CallParticipantState::Ringing)
+        bool confirming = false;
+        for (Member &member : m_group->members) {
+            if (member.info.state == CallParticipantState::Ringing) {
                 setParticipantState(member, CallParticipantState::NoAnswer);
+            } else if (member.info.state == CallParticipantState::Connecting) {
+                confirming = true;
+                setParticipantState(member, CallParticipantState::Left);
+            }
+        }
+        // A join that found nobody is told so, rather than left waiting in
+        // an empty call for people who have already gone.
+        if (confirming && joinedParticipantCount() == 0) {
+            endCall(CallEndReason::NoAnswer, /*notifyPeer=*/true);
+            return;
+        }
         settleGroup();
+        return;
+    }
+    if (!m_group && m_state == CallState::Connecting
+        && m_peerState == CallParticipantState::Connecting) {
+        // A rejoin nobody answered: the peer is no longer in the call.
+        endCall(CallEndReason::NoAnswer, /*notifyPeer=*/true);
         return;
     }
     // Whose "no answer" this is depends on the direction: the caller gave up
@@ -1053,7 +1353,7 @@ bool CallEngine::startMedia()
 
     CallSession::Config sessionConfig;
     sessionConfig.callId = *m_callId;
-    sessionConfig.direction = m_direction;
+    sessionConfig.direction = m_sessionDirection;
     sessionConfig.codec = m_codec;
     sessionConfig.jitter.clock = m_config.mediaClock;
     m_session = CallSession::create(sessionConfig, m_secret);
@@ -1061,12 +1361,12 @@ bool CallEngine::startMedia()
         endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
         return false;
     }
-    m_videoSession = CallVideoSession::create(*m_callId, m_direction, m_secret);
+    m_videoSession = CallVideoSession::create(*m_callId, m_sessionDirection, m_secret);
     // The encoder allocates nothing until a desktop is actually handed to it,
     // so a call that never shares a screen pays for an empty object and no more.
     m_screenEncoder = std::make_shared<ScreenTileEncoder>();
     m_screenSession =
-        CallScreenSession::create(*m_callId, m_direction, m_secret, m_screenEncoder);
+        CallScreenSession::create(*m_callId, m_sessionDirection, m_secret, m_screenEncoder);
     m_screenFeedbackTimer->start();
     m_session->setMuted(m_muted);
 
@@ -1086,7 +1386,8 @@ bool CallEngine::openMemberMedia(Member &member)
     // Each pair keys its own path from the call secret and both device ids,
     // and takes its direction from their order, so the two ends of a pair
     // always land on opposite halves of the same schedule.
-    const QByteArray pairSecret = deriveGroupPairSecret(m_secret, *m_callId, *m_config.localDevice,
+    const QByteArray pairSecret = deriveGroupPairSecret(pairBaseSecret(member), *m_callId,
+                                                        *m_config.localDevice,
                                                         member.info.peer.device);
     if (pairSecret.isEmpty())
         return false;
@@ -1109,6 +1410,16 @@ bool CallEngine::openMemberMedia(Member &member)
         CallScreenSession::create(*m_callId, direction, pairSecret, m_screenEncoder);
     m_screenFeedbackTimer->start();
     return true;
+}
+
+const QByteArray &CallEngine::pairBaseSecret(const Member &member) const
+{
+    // Whichever end has the lower device id, its latest offer keys the pair.
+    // Each end learns the other's from that offer, or from the answer to its
+    // own, so the choice comes out the same on both however they crossed.
+    const bool oursIsLower = m_config.localDevice
+        && m_config.localDevice->bytes() < member.info.peer.device.bytes();
+    return oursIsLower ? m_secret : member.secret;
 }
 
 void CallEngine::closeMemberMedia(Member &member)
@@ -1202,7 +1513,7 @@ void CallEngine::onCapturedFrame(const AudioFrame &captured)
         return;
     // Gain and gate once, here, so every session below encodes the same
     // frame and a closed gate sends real silence to the whole mesh.
-    const AudioFrame frame = m_microphone.process(captured);
+    const AudioFrame frame = m_muted ? silentAudioFrame() : m_microphone.process(captured);
     if (m_group) {
         // The same frame, sealed separately for each member: every pair has its
         // own key, and nobody's audio is ever forwarded by a third device.
@@ -1521,13 +1832,50 @@ void CallEngine::endCall(CallEndReason reason, bool notifyPeer)
 {
     if (m_state == CallState::Idle || m_state == CallState::Ended)
         return;
+    // Whoever is still in the call after we go is who we could rejoin. Taken
+    // before the teardown below forgets who that was.
+    std::optional<OngoingCall> departed;
+    if (m_callId && m_group) {
+        OngoingCall known;
+        known.conversation = m_group->conversation;
+        known.callId = *m_callId;
+        known.group = true;
+        known.title = m_group->title;
+        for (const Member &member : m_group->members) {
+            Participant participant = member.info;
+            participant.speaking = false;
+            participant.level = 0.0;
+            // A member we were still confirming is presumed in until they say
+            // otherwise; a join attempt sorts out whether they really are.
+            if (participant.state == CallParticipantState::Connecting)
+                participant.state = CallParticipantState::Joined;
+            known.participants.append(participant);
+        }
+        if (known.joinedCount() > 0)
+            departed = std::move(known);
+    } else if (m_callId && (m_state == CallState::Connecting || m_state == CallState::Active)
+               && m_peerState == CallParticipantState::Joined) {
+        OngoingCall known;
+        known.conversation = m_peer.conversation;
+        known.callId = *m_callId;
+        Participant participant;
+        participant.peer = m_peer;
+        participant.state = CallParticipantState::Joined;
+        known.participants.append(participant);
+        departed = std::move(known);
+    }
     if (notifyPeer && m_callId) {
+        // Why the grace period ran out is nobody else's business — and older
+        // builds would refuse a reason they do not know.
+        const CallEndReason wire = reason == CallEndReason::Abandoned ? CallEndReason::LocalHangup
+                                                                      : reason;
         if (m_group)
-            broadcast(CallSignalMessage::hangup(*m_callId, reason));
+            broadcast(CallSignalMessage::hangup(*m_callId, wire));
         else
-            send(CallSignalMessage::hangup(*m_callId, reason));
+            send(CallSignalMessage::hangup(*m_callId, wire));
     }
     m_ringTimer->stop();
+    m_graceTimer->stop();
     // The microphone and the call keys go immediately; the speaker stays a
     // moment longer so the hang-up sound is actually heard rather than cut off
     // by its own device closing.
@@ -1547,6 +1895,244 @@ void CallEngine::endCall(CallEndReason reason, bool notifyPeer)
     setState(CallState::Ended);
     emit callEnded(reason);
     emit levelsChanged();
+    if (departed)
+        rememberOngoing(std::move(*departed));
+}
+
+void CallEngine::updateGrace()
+{
+    const bool inCall = m_state == CallState::Connecting || m_state == CallState::Active;
+    if (!inCall) {
+        m_graceTimer->stop();
+        return;
+    }
+    bool anyoneComing = false;
+    bool anySession = m_session != nullptr;
+    if (m_group) {
+        for (const Member &member : m_group->members) {
+            anyoneComing = anyoneComing || participantIsPending(member.info.state);
+            anySession = anySession || member.session != nullptr;
+        }
+    } else {
+        anyoneComing = m_peerState != CallParticipantState::Left;
+    }
+    // Media is only expected while there is a path for it to arrive on. A
+    // stall clock running with nobody to hear from would end every wait as a
+    // lost connection.
+    if (!anySession) {
+        m_stallTimer->stop();
+        releaseMediaWhileAlone();
+    } else if (!m_stallTimer->isActive()) {
+        m_stallTimer->start(m_config.connectTimeoutMs);
+    }
+    if (anyoneComing) {
+        m_graceTimer->stop();
+    } else if (!m_graceTimer->isActive()) {
+        m_graceTimer->start(m_config.rejoinGraceMs);
+    }
+}
+
+void CallEngine::releaseMediaWhileAlone()
+{
+    // Nobody to send to: the microphone closes (so nothing is captured for
+    // no one) and every session goes, but the call, its id and the secret
+    // that members still ringing will key from all stay. Whoever comes back
+    // brings a fresh secret, and the capture reopens for them.
+    m_levelTimer->stop();
+    if (m_capture) {
+        m_capture->onFrame = nullptr;
+        m_capture->stop();
+        m_capture.reset();
+    }
+    m_videoTimeout->stop();
+    m_videoSession.reset();
+    emit remoteVideoFrame(QImage());
+    m_screenFeedbackTimer->stop();
+    m_screenTimeout->stop();
+    m_screenSharing = false;
+    m_screenSession.reset();
+    m_screenEncoder.reset();
+    if (m_remoteScreenActive) {
+        m_remoteScreenActive = false;
+        emit remoteScreenFrame({});
+    }
+    m_session.reset();
+}
+
+bool CallEngine::joinCall(const ConversationId &conversation)
+{
+    if (callOccupiesDevice(m_state))
+        return false;
+    const OngoingCall *known = ongoingFor(conversation);
+    if (known == nullptr || known->joinedCount() == 0 || known->participants.isEmpty())
+        return false;
+    if (known->group && !m_config.localDevice)
+        return false;
+    const QByteArray secret = generateCallSecret();
+    if (secret.size() != callSecretBytes)
+        return false;
+    beginJoin(*known, secret);
+    return true;
+}
+
+void CallEngine::beginJoin(OngoingCall call, QByteArray secret)
+{
+    forgetOngoing(call.conversation);
+    m_callId = call.callId;
+    m_secret = std::move(secret);
+    m_codec = m_config.preferredCodec;
+    m_direction = CallDirection::Outgoing;
+    m_sessionDirection = CallDirection::Outgoing;
+    m_endReason = CallEndReason::None;
+    m_muted = false;
+    m_activeSinceMs = 0;
+    m_lastMediaMs = 0;
+    if (call.group) {
+        auto group = std::make_unique<GroupCall>();
+        group->conversation = call.conversation;
+        group->title = call.title;
+        for (const Participant &participant : std::as_const(call.participants)) {
+            Member member;
+            member.info = participant;
+            member.info.speaking = false;
+            member.info.level = 0.0;
+            // Whoever was in when we last heard is asked to confirm; everyone
+            // else keeps the state they had, and can join the same way we are.
+            if (member.info.state == CallParticipantState::Joined)
+                member.info.state = CallParticipantState::Connecting;
+            member.secret = m_secret;
+            group->members.push_back(std::move(member));
+        }
+        m_group = std::move(group);
+        m_peer = m_group->members.front().info.peer;
+        for (const Member &member : m_group->members) {
+            if (member.info.state == CallParticipantState::Connecting) {
+                m_peer = member.info.peer;
+                break;
+            }
+        }
+        m_peerState = CallParticipantState::Connecting;
+    } else {
+        m_group.reset();
+        m_peer = call.participants.front().peer;
+        m_peerState = CallParticipantState::Connecting;
+    }
+    (void)openPlayback();
+    // No ringback: nobody is being rung. The timer only bounds how long we
+    // wait for those we believe are there to say so.
+    m_ringTimer->start(m_config.ringTimeoutMs);
+    setState(CallState::Connecting);
+    if (m_group)
+        emit participantsChanged();
+    // The same call id, a fresh secret: every path to us is keyed anew.
+    const CallSignalMessage offer = CallSignalMessage::offer(*m_callId, m_secret, m_codec);
+    if (m_group)
+        broadcast(offer);
+    else
+        send(offer);
+    updateGrace();
+}
+
+void CallEngine::handleForeignSignal(const ConversationId &conversation, const DeviceId &sender,
+                                     const CallSignalMessage &message)
+{
+    // We rang a group that already had a call, and a member in it answered
+    // with that call's id instead of "busy". Ours was redundant: drop it and
+    // join theirs, with everyone we rang told to stop.
+    const bool ringingRedundantly = m_group && m_group->conversation == conversation
+        && m_direction == CallDirection::Outgoing
+        && (m_state == CallState::Dialing || m_state == CallState::Ringing) && m_callId
+        && memberFor(sender) != nullptr;
+    if (ringingRedundantly && message.type == CallSignalType::Answer && message.accepted) {
+        const QByteArray secret = generateCallSecret();
+        if (secret.size() != callSecretBytes) {
+            endCall(CallEndReason::SetupFailed, /*notifyPeer=*/true);
+            return;
+        }
+        OngoingCall running;
+        running.conversation = conversation;
+        running.callId = message.callId;
+        running.group = true;
+        running.title = m_group->title;
+        for (const Member &member : m_group->members) {
+            Participant participant = member.info;
+            participant.speaking = false;
+            participant.level = 0.0;
+            // The one who answered is in; who else is, their answers to our
+            // join will tell.
+            participant.state = member.info.peer.device == sender ? CallParticipantState::Joined
+                                                                  : CallParticipantState::Left;
+            running.participants.append(participant);
+        }
+        broadcast(CallSignalMessage::hangup(*m_callId, CallEndReason::Superseded));
+        m_ringTimer->stop();
+        m_sounds.stopLoop();
+        stopCapture();
+        // Straight from our ringing into their call: no Ended in between, so
+        // the surface never says the call finished.
+        m_state = CallState::Idle;
+        beginJoin(std::move(running), secret);
+        return;
+    }
+    noteOngoingSignal(conversation, sender, message);
+}
+
+void CallEngine::noteOngoingSignal(const ConversationId &conversation, const DeviceId &sender,
+                                   const CallSignalMessage &message)
+{
+    OngoingCall *known = ongoingFor(conversation);
+    if (known == nullptr || known->callId != message.callId
+        || message.type == CallSignalType::Ringing)
+        return;
+    Participant *participant = nullptr;
+    for (Participant &candidate : known->participants)
+        if (candidate.peer.device == sender)
+            participant = &candidate;
+    if (participant == nullptr) {
+        if (!known->group)
+            return;
+        Participant added;
+        added.peer.conversation = conversation;
+        added.peer.device = sender;
+        known->participants.append(added);
+        participant = &known->participants.last();
+    }
+    switch (message.type) {
+    case CallSignalType::Offer:
+        participant->state = CallParticipantState::Joined;
+        break;
+    case CallSignalType::Answer:
+        participant->state = message.accepted ? CallParticipantState::Joined
+                                              : CallParticipantState::Declined;
+        break;
+    case CallSignalType::Hangup:
+        switch (message.reason) {
+        case CallEndReason::Busy:
+            participant->state = CallParticipantState::Busy;
+            break;
+        case CallEndReason::Declined:
+            participant->state = CallParticipantState::Declined;
+            break;
+        case CallEndReason::NoAnswer:
+        case CallEndReason::Unanswered:
+            participant->state = CallParticipantState::NoAnswer;
+            break;
+        default:
+            participant->state = participant->state == CallParticipantState::Ringing
+                ? CallParticipantState::NoAnswer
+                : CallParticipantState::Left;
+            break;
+        }
+        break;
+    case CallSignalType::Ringing:
+        break;
+    }
+    // With nobody left in it there is nothing to join.
+    if (known->joinedCount() == 0) {
+        forgetOngoing(conversation);
+        return;
+    }
+    emit ongoingCallsChanged();
 }
 
 } // namespace OpenChat

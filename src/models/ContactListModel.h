@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QSet>
 #include <QVector>
 
 #include <optional>
@@ -26,6 +27,8 @@ public:
         AvatarKeyRole,
         IsGroupRole,
         UnreadCountRole,
+        // A call is going on this chat that this device is not in.
+        CallInProgressRole,
     };
     Q_ENUM(Role)
 
@@ -40,6 +43,9 @@ public:
     void setQuery(const QString &query);
     bool selectContact(const QString &id);
     void setPresence(const QString &id, Presence presence);
+    // Marks which chats have a call running without us. Kept apart from the
+    // rows themselves so a roster reload does not lose it.
+    void setChatsInCall(const QSet<QString> &ids);
 
     [[nodiscard]] int totalUnreadCount() const;
     [[nodiscard]] int favoriteCount() const;
@@ -58,6 +64,7 @@ private:
     QVector<int> m_visibleRows;
     QString m_query;
     QString m_selectedId;
+    QSet<QString> m_inCall;
 };
 
 } // namespace OpenChat

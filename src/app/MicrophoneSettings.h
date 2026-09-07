@@ -45,6 +45,13 @@ class MicrophoneSettings final : public QObject
                    setNoiseGateThresholdDb NOTIFY processingChanged)
     Q_PROPERTY(double minThresholdDb READ minThresholdDb CONSTANT)
     Q_PROPERTY(double maxThresholdDb READ maxThresholdDb CONSTANT)
+    Q_PROPERTY(QVariantList voiceEffects READ voiceEffects CONSTANT)
+    Q_PROPERTY(QString voiceEffect READ voiceEffect WRITE setVoiceEffect NOTIFY processingChanged)
+    Q_PROPERTY(double effectIntensity READ effectIntensity WRITE setEffectIntensity NOTIFY processingChanged)
+    Q_PROPERTY(bool studioVoice READ studioVoice WRITE setStudioVoice NOTIFY processingChanged)
+    Q_PROPERTY(bool noiseReduction READ noiseReduction WRITE setNoiseReduction NOTIFY processingChanged)
+    Q_PROPERTY(bool automaticGain READ automaticGain WRITE setAutomaticGain NOTIFY processingChanged)
+    Q_PROPERTY(bool compressor READ compressor WRITE setCompressor NOTIFY processingChanged)
 
     // The live test meter.
     Q_PROPERTY(bool testing READ isTesting NOTIFY testingChanged)
@@ -78,6 +85,20 @@ public:
     [[nodiscard]] static constexpr double minThresholdDb() { return -60.0; }
     [[nodiscard]] static constexpr double maxThresholdDb() { return -10.0; }
 
+    [[nodiscard]] QVariantList voiceEffects() const;
+    [[nodiscard]] QString voiceEffect() const;
+    void setVoiceEffect(const QString &id);
+    [[nodiscard]] double effectIntensity() const { return m_processing.voice.intensity; }
+    void setEffectIntensity(double intensity);
+    [[nodiscard]] bool studioVoice() const { return m_processing.voice.studio; }
+    void setStudioVoice(bool enabled);
+    [[nodiscard]] bool noiseReduction() const { return m_processing.voice.noiseReduction; }
+    void setNoiseReduction(bool enabled);
+    [[nodiscard]] bool automaticGain() const { return m_processing.voice.automaticGain; }
+    void setAutomaticGain(bool enabled);
+    [[nodiscard]] bool compressor() const { return m_processing.voice.compressor; }
+    void setCompressor(bool enabled);
+
     // The gain and gate exactly as the call engine should apply them.
     [[nodiscard]] const MicrophoneProcessor::Config &processing() const { return m_processing; }
 
@@ -107,6 +128,7 @@ private:
     void load();
     void save() const;
     void onTestFrame(const AudioFrame &frame);
+    void processingUpdated();
 
     QMediaDevices m_devices;
     QString m_inputDeviceId;

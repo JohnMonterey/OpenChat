@@ -728,23 +728,30 @@ Item {
         }
     }
 
-    // Settings section: a selectable list of setting categories in the sidebar
-    // list style. The selected category drives the detail pane on the right.
-    Item {
+    // Categories become Back + subcategories after entering a settings section.
+    Flickable {
         id: settingsCategoryList
         objectName: "settingsCategoryList"
+        readonly property bool inCategory: sidebar.controller.currentSettingsCategory >= 0
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: searchArea.bottom
         anchors.bottom: bottomNav.top
         visible: sidebar.controller.navSection === ChatController.NavSection.Settings
+        contentHeight: settingsNavigationRows.height
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        onInCategoryChanged: contentY = 0
 
         Column {
+            id: settingsNavigationRows
             anchors.top: parent.top
             width: parent.width
 
             Repeater {
-                model: sidebar.controller.settingsCategories
+                model: settingsCategoryList.inCategory
+                       ? ["Back"].concat(sidebar.controller.settingsSubcategories)
+                       : sidebar.controller.settingsCategories
 
                 Item {
                     id: settingsCategoryRow
@@ -753,18 +760,35 @@ Item {
                     width: settingsCategoryList.width
                     height: sidebar.contactRowHeight
                     readonly property bool selected:
-                        rowIndex === sidebar.controller.currentSettingsCategory
+                        settingsCategoryList.inCategory && rowIndex > 0
+                        && rowIndex - 1 === sidebar.controller.currentSettingsSubcategory
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: modelData
+                    Accessible.onPressAction: activate()
+                    Keys.onReturnPressed: activate()
+                    Keys.onSpacePressed: activate()
+                    function activate() {
+                        if (!settingsCategoryList.inCategory)
+                            sidebar.controller.setCurrentSettingsCategory(rowIndex);
+                        else if (rowIndex === 0)
+                            sidebar.controller.showSettingsCategories();
+                        else
+                            sidebar.controller.setCurrentSettingsSubcategory(rowIndex - 1);
+                    }
 
                     Rectangle {
                         anchors.fill: parent
-                        visible: settingsCategoryRow.selected
+                        visible: settingsCategoryRow.selected || settingsCategoryRow.activeFocus
                         color: Theme.navSelected
                     }
 
                     Text {
                         x: 15
+                        width: parent.width - 30
                         anchors.verticalCenter: parent.verticalCenter
                         text: modelData
+                        elide: Text.ElideRight
                         color: settingsCategoryRow.selected ? Theme.categoryText
                                                             : Theme.textPrimary
                         font.family: Theme.uiFont
@@ -775,8 +799,7 @@ Item {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: sidebar.controller.setCurrentSettingsCategory(
-                                       settingsCategoryRow.rowIndex)
+                        onClicked: settingsCategoryRow.activate()
                     }
                 }
             }

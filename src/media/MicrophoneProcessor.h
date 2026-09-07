@@ -2,12 +2,13 @@
 
 #include "media/AudioTypes.h"
 #include "media/SpeechLevelMeter.h"
+#include "media/VoiceEffects.h"
 
 namespace OpenChat {
 
 // What happens to the microphone between the device and the call: a gain, then
-// a noise gate. Runs once per captured frame, before the frame is encoded for
-// anyone, so every peer in a group call hears the same thing.
+// a noise gate, then optional enhancement and effects. Runs once per captured
+// frame before encoding, so every peer in a group call hears the same thing.
 //
 // The gate is why a call does not carry the room. A microphone never captures
 // digital silence — there is always fan noise, keyboard clatter, the neighbour's
@@ -40,6 +41,7 @@ public:
         // threshold. 15 frames is 300 ms, the same hangover the speaking ring
         // uses and longer than any gap between words.
         int gateHoldFrames = 15;
+        VoiceEffects::Config voice;
     };
 
     MicrophoneProcessor()
@@ -52,9 +54,9 @@ public:
     void setConfig(Config config);
     [[nodiscard]] const Config &config() const noexcept { return m_config; }
 
-    // Returns the frame to send: the input with gain applied, or silence when
-    // the gate is closed. A frame of the wrong length is passed through
-    // untouched, because nothing downstream will accept it anyway.
+    // Returns the frame to send: gained/gated input with optional processing.
+    // Reverb tails may continue after the input gate closes. A malformed frame
+    // is passed through untouched; nothing downstream will accept it anyway.
     [[nodiscard]] AudioFrame process(const AudioFrame &frame);
 
     // What the last frame measured, after gain — what a settings meter shows.
@@ -67,9 +69,11 @@ public:
 private:
     [[nodiscard]] static AudioFrame applyGain(const AudioFrame &frame, double gain);
     [[nodiscard]] static AudioFrame fadeOut(const AudioFrame &frame);
+    [[nodiscard]] AudioFrame applyVoiceEffects(const AudioFrame &frame);
 
     Config m_config;
     SpeechLevelMeter m_meter;
+    VoiceEffects m_voice;
     bool m_open = true;
 };
 

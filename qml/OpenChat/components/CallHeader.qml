@@ -211,6 +211,11 @@ Item {
             avatarKey: callHeader.controller.peerAvatarKey
             speaking: callHeader.controller.remoteSpeaking
             level: callHeader.controller.remoteLevel
+            // "Left" while they are out of a call we stayed in, "Reconnecting…"
+            // while our rejoin awaits them; nothing while they are simply here.
+            caption: callHeader.controller.peerStateText !== undefined
+                     ? callHeader.controller.peerStateText : ""
+            dimmed: caption.length > 0
             onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
         }
     }
@@ -240,8 +245,12 @@ Item {
                      : (callHeader.isGroupCall ? groupParticipants.bottom : participants.bottom)
         anchors.topMargin: 8
         anchors.horizontalCenter: parent.horizontalCenter
-        text: callHeader.controller.isActive ? callHeader.controller.durationText
-                                            : callHeader.controller.statusText
+        // Alone in the call, the line counts down the wait instead of the
+        // call's length: what matters then is how long the door stays open.
+        text: callHeader.controller.waitingForOthers === true
+              ? callHeader.controller.waitingText
+              : (callHeader.controller.isActive ? callHeader.controller.durationText
+                                                : callHeader.controller.statusText)
         color: Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 14
@@ -296,17 +305,33 @@ Item {
             onClicked: callHeader.controller.declineCall()
         }
         CallActionButton {
+            id: muteButton
             objectName: "muteCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: callHeader.controller.muted ? "Unmute" : "Mute"
             accent: "neutral"
+            square: true
+            microphoneIcon: true
+            checked: callHeader.controller.muted
+            contextMenuEnabled: true
+            contextMenuExpanded: microphoneMenu.visible
+            tooltip: label + " · Right-click for microphone settings"
             onClicked: callHeader.controller.toggleMute()
+            // Anchor to the control, independent of the pointer's position.
+            onContextMenuRequested: microphoneMenu.popup(muteButton, 0, muteButton.height + 6)
+
+            MicrophoneContextMenu {
+                id: microphoneMenu
+            }
+            onVisibleChanged: if (!visible) microphoneMenu.dismiss()
         }
         CallActionButton {
             objectName: "cameraCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: callHeader.controller.cameraEnabled ? "Camera off" : "Camera on"
             cameraIcon: true
+            square: true
+            tooltip: label
             checked: callHeader.controller.cameraEnabled
             onClicked: callHeader.controller.toggleCamera()
         }
@@ -315,6 +340,7 @@ Item {
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: callHeader.controller.screenShareEnabled ? "Stop sharing" : "Share screen"
             screenIcon: true
+            square: true
             checked: callHeader.controller.screenShareEnabled === true
             disabled: callHeader.controller.screenShareAvailable !== true
             tooltip: callHeader.controller.screenShareAvailable !== true
@@ -327,9 +353,21 @@ Item {
         CallActionButton {
             objectName: "endCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
-            label: "End call"
+            label: callHeader.isGroupCall ? "Leave call" : "End call"
             accent: "end"
+            square: true
+            hangupIcon: true
+            tooltip: label
             onClicked: callHeader.controller.hangUp()
+        }
+        // The call we just left is still going: the way back in is right
+        // here, before the surface is put away.
+        CallActionButton {
+            objectName: "rejoinCallButton"
+            visible: callHeader.controller.callEnded && callHeader.controller.canRejoin === true
+            label: "Rejoin"
+            accent: "accept"
+            onClicked: callHeader.controller.rejoinCall()
         }
         CallActionButton {
             objectName: "dismissCallButton"

@@ -228,6 +228,53 @@ Item {
         }
     }
 
+    // A call is going on in this conversation without us — one we left,
+    // declined, missed, or were busy for. Says who is in it and offers the
+    // way in; the phone button joins it too rather than ringing anyone.
+    Rectangle {
+        id: ongoingCallBanner
+        objectName: "ongoingCallBanner"
+        x: 110
+        y: 80
+        width: Math.max(80, Math.min(ongoingCallText.implicitWidth + joinCallButton.width + 24,
+                                     leaveButton.x - x - 16))
+        height: 26
+        radius: 4
+        color: Theme.callBackdropTop
+        border.width: 1
+        border.color: Theme.acceptBorder
+        visible: header.callController !== null
+                 && header.callController.currentHasOngoingCall === true
+                 && header.controller.groupNotice.length === 0
+        z: 5
+
+        Text {
+            id: ongoingCallText
+            objectName: "ongoingCallText"
+            x: 8
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(0, parent.width - joinCallButton.width - 24)
+            elide: Text.ElideRight
+            text: header.callController !== null ? header.callController.ongoingCallText : ""
+            color: Theme.textPrimary
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+            renderType: Text.NativeRendering
+        }
+
+        CallActionButton {
+            id: joinCallButton
+            objectName: "joinCallButton"
+            anchors.right: parent.right
+            anchors.rightMargin: 3
+            anchors.verticalCenter: parent.verticalCenter
+            height: 20
+            label: "Join"
+            accent: "accept"
+            onClicked: header.callController.joinCurrentCall()
+        }
+    }
+
     // Leaving a group: a small red pill left of the call buttons, group only.
     CallActionButton {
         id: leaveButton

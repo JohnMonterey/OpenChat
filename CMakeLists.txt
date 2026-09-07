@@ -29,7 +29,7 @@ if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
     qt_policy(SET QTP0004 NEW)
 endif()
 
-set_source_files_properties(qml/OpenChat/Theme.qml PROPERTIES
+set_source_files_properties(qml/OpenChat/Theme.qml qml/OpenChat/VocalFx.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
 )
 
@@ -71,12 +71,20 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/Main.qml
         qml/OpenChat/Onboarding.qml
         qml/OpenChat/Theme.qml
+        qml/OpenChat/VocalFx.qml
+        qml/OpenChat/components/VocalFxPanel.qml
+        qml/OpenChat/components/VocalFxPicker.qml
+        qml/OpenChat/components/VoiceEffectsMenu.qml
         qml/OpenChat/components/PresenceBead.qml
         qml/OpenChat/components/Avatar.qml
         qml/OpenChat/components/AeroTextField.qml
         qml/OpenChat/components/AeroButton.qml
         qml/OpenChat/components/AeroSwitch.qml
         qml/OpenChat/components/AeroSlider.qml
+        qml/OpenChat/components/AeroMenu.qml
+        qml/OpenChat/components/AeroMenuItem.qml
+        qml/OpenChat/components/AeroMenuSetting.qml
+        qml/OpenChat/components/MicrophoneContextMenu.qml
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
@@ -90,6 +98,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/CallParticipant.qml
         qml/OpenChat/components/CallActionButton.qml
         qml/OpenChat/components/CallHeader.qml
+        qml/OpenChat/components/CallStrip.qml
         qml/OpenChat/components/ScreenShareStage.qml
         qml/OpenChat/components/ScreenSharePicker.qml
         qml/OpenChat/components/MediaIconButton.qml
@@ -185,6 +194,11 @@ target_link_libraries(openchat-call-check PRIVATE
 )
 
 enable_testing()
+
+add_executable(tst_voiceeffects tests/tst_voiceeffects.cpp src/media/VoiceEffects.cpp)
+target_include_directories(tst_voiceeffects PRIVATE src)
+set_target_properties(tst_voiceeffects PROPERTIES AUTOMOC OFF)
+add_test(NAME tst_voiceeffects COMMAND tst_voiceeffects)
 
 add_executable(tst_appmetadata tests/tst_appmetadata.cpp)
 target_include_directories(tst_appmetadata PRIVATE src)
@@ -311,6 +325,7 @@ add_library(openchat_media STATIC
     src/media/JitterBuffer.cpp
     src/media/SpeechLevelMeter.cpp
     src/media/MicrophoneProcessor.cpp
+    src/media/VoiceEffects.cpp
 )
 target_include_directories(openchat_media PUBLIC src)
 target_link_libraries(openchat_media

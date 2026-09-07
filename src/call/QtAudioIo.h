@@ -33,6 +33,12 @@ inline constexpr int playbackChannels = 2;
 inline constexpr int playbackBytesPerFrame = CallAudioFormat::samplesPerFrame
     * CallAudioFormat::bytesPerSample * playbackChannels;
 
+// Frames the output ring is allowed to hold. Whatever sits here is delay the
+// listener pays on every word, so it is pinned rather than left to the backend:
+// Qt's default is 250 ms, which measured out as ~290 ms of standing queue. Two
+// frames keeps the device fed across a scheduling hiccup at 40 ms of delay.
+inline constexpr int playbackRingFrames = 2;
+
 // True when this machine has both a usable default input and a usable default
 // output for the call format. Checked before a call is offered so "you have no
 // microphone" is reported up front rather than as a call that fails to connect.

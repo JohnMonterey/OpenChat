@@ -1,12 +1,15 @@
 # Microphone controls
 
-Mute, camera and end/leave call use 30 × 30 icon buttons. Left-click retains the normal
+Mute, camera, screen share and end/leave call use 30 × 30 icon buttons. Left-click retains the normal
 action. Right-click the microphone, or focus it and press Menu / Shift+F10, to
 open its context menu. The menu's top-left corner aligns with the microphone
 button's left edge, 6 pixels below the button. Submenus cascade sideways and
 stay within the window.
 The microphone's corner chevron points down when closed and up while its menu
 is visible, including while a submenu is open.
+Hovering a control shows a standard Qt tooltip after the platform's press-and-hold
+interval, rather than immediately. Tooltip styling follows the active Qt Controls
+platform style; the tooltip hides on pointer exit, press, or opening the mic menu.
 
 The menu shares the `MicrophoneSettings` instance used by the settings page:
 

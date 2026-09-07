@@ -340,6 +340,7 @@ Item {
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: callHeader.controller.screenShareEnabled ? "Stop sharing" : "Share screen"
             screenIcon: true
+            square: true
             checked: callHeader.controller.screenShareEnabled === true
             disabled: callHeader.controller.screenShareAvailable !== true
             tooltip: callHeader.controller.screenShareAvailable !== true

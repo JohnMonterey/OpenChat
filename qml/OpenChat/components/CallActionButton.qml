@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
+import QtQuick.Controls as Controls
 import OpenChat
 
 // Compact call controls. Shares the request row's Aero treatment
@@ -22,8 +23,10 @@ Item {
     // focusable and still readable, so it can explain itself through its
     // tooltip rather than vanishing and leaving the row a different shape.
     property bool disabled: false
-    // Shown on hover. Says what the button does, and when it is disabled, why.
-    property string tooltip: ""
+    // The platform's hold interval also gives hover hints a deliberate delay.
+    // Use the standard Qt tooltip so its appearance follows the platform style.
+    property string tooltip: label
+    readonly property int tooltipDelay: Qt.styleHints.mousePressAndHoldInterval
     readonly property bool iconic: cameraIcon || screenIcon || microphoneIcon || hangupIcon
     activeFocusOnTab: !disabled
     opacity: disabled ? 0.45 : 1.0
@@ -213,30 +216,12 @@ Item {
         }
     }
 
-    // The tooltip, in the same flat card the rest of the app uses for
-    // transient explanations.
-    Rectangle {
+    Controls.ToolTip {
         objectName: "callActionTooltip"
+        parent: button
+        text: button.tooltip
+        delay: button.tooltipDelay
         visible: button.tooltip.length > 0 && buttonMouse.containsMouse
-        anchors.bottom: parent.top
-        anchors.bottomMargin: 6
-        anchors.horizontalCenter: parent.horizontalCenter
-        width: tooltipText.implicitWidth + 16
-        height: tooltipText.implicitHeight + 10
-        radius: 3
-        color: Theme.contentBackground
-        border.width: 1
-        border.color: Theme.inputBorder
-        z: 10
-
-        Text {
-            id: tooltipText
-            anchors.centerIn: parent
-            text: button.tooltip
-            color: Theme.textPrimary
-            font.family: Theme.uiFont
-            font.pixelSize: 12
-            renderType: Text.NativeRendering
-        }
+                 && !buttonMouse.pressed && !button.contextMenuExpanded
     }
 }

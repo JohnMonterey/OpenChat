@@ -1,8 +1,9 @@
 #include "call/CallSounds.h"
 
-#include "media/ToneSynth.h"
+#include "media/WavFile.h"
 
 #include <QMutexLocker>
+#include <QString>
 #include <QtEndian>
 
 #include <algorithm>
@@ -11,112 +12,40 @@ namespace OpenChat {
 
 namespace {
 
-using ToneSynth::Partial;
-using ToneSynth::Segment;
-
-// Interface sounds sit well below full scale: they are layered over speech, and
-// a notification that drowns out the person talking is a bad notification.
-constexpr double chimeGain = 0.30;
-constexpr double ringGain = 0.22;
-
-// The two-tone ringback every telephone network has used for decades: 440 Hz and
-// 480 Hz together, ringing then resting. The cadence is shortened from the
-// telephone standard's 2 s on / 4 s off, which is a long time to stare at a
-// screen; this keeps the sound but returns every two seconds.
-[[nodiscard]] QVector<qint16> makeRingback()
+// Every call sound ships as a mono 48 kHz WAV under assets/sounds, embedded
+// into the binary as a Qt resource so there is no file to go missing at
+// runtime. The asset is the single source of truth: nothing here re-derives
+// or re-mixes the audio, so what plays is exactly what is on disk in the
+// repository and exactly what tools/render_call_sounds.cpp exports.
+[[nodiscard]] QVector<qint16> loadChime(const QString &name)
 {
-    const Segment ring{{Partial{440.0, 1.0}, Partial{480.0, 1.0}},
-                       /*durationMs=*/900,
-                       ringGain,
-                       /*attackMs=*/20,
-                       /*releaseMs=*/60};
-    const Segment rest{{}, /*durationMs=*/1100};
-    return ToneSynth::render({ring, rest});
+    auto decoded = WavFile::readFile(QStringLiteral(":/openchat/sounds/") + name
+                                     + QStringLiteral(".wav"));
+    Q_ASSERT_X(decoded.hasValue(), "loadChime", qPrintable(name));
+    if (!decoded.hasValue())
+        return {};
+    const WavAudio &audio = decoded.value();
+    Q_ASSERT_X(audio.sampleRate == CallAudioFormat::sampleRate, "loadChime",
+              "asset is not 48 kHz");
+    Q_ASSERT_X(audio.channels == CallAudioFormat::channels, "loadChime",
+              "asset is not mono");
+    return audio.samples;
 }
 
-// The incoming ring: a rising two-note chime struck twice, then a pause. Higher,
-// shorter and rhythmically busier than the ringback, so which direction a call
-// is going is obvious from the sound alone.
-[[nodiscard]] QVector<qint16> makeIncomingRing()
-{
-    const auto strike = [](double fundamental) {
-        return Segment{{Partial{fundamental, 1.0}, Partial{fundamental * 2.0, 0.35},
-                        Partial{fundamental * 3.0, 0.12}},
-                       /*durationMs=*/230,
-                       chimeGain,
-                       /*attackMs=*/5,
-                       /*releaseMs=*/70,
-                       /*decayHalfLifeMs=*/260.0};
-    };
-    const Segment gap{{}, /*durationMs=*/70};
-    const Segment pause{{}, /*durationMs=*/1500};
-    return ToneSynth::render({strike(659.25), gap, strike(880.0), gap,   // E5 -> A5
-                              strike(659.25), gap, strike(880.0), pause});
-}
-
-// Answered and finished are the same interval in opposite directions, so they
-// read as a matched pair: opening and closing.
-[[nodiscard]] QVector<qint16> makeConnected()
-{
-    const auto note = [](double frequency, int durationMs) {
-        return Segment{{Partial{frequency, 1.0}, Partial{frequency * 2.0, 0.28}},
-                       durationMs,
-                       chimeGain,
-                       /*attackMs=*/4,
-                       /*releaseMs=*/45,
-                       /*decayHalfLifeMs=*/220.0};
-    };
-    return ToneSynth::render({note(587.33, 90), note(880.0, 170)}); // D5 -> A5
-}
-
-[[nodiscard]] QVector<qint16> makeEnded()
-{
-    const auto note = [](double frequency, int durationMs) {
-        return Segment{{Partial{frequency, 1.0}, Partial{frequency * 2.0, 0.22}},
-                       durationMs,
-                       chimeGain,
-                       /*attackMs=*/4,
-                       /*releaseMs=*/70,
-                       /*decayHalfLifeMs=*/240.0};
-    };
-    return ToneSynth::render({note(880.0, 90), note(587.33, 210)}); // A5 -> D5
-}
-
-// Mute and unmute are one short blip each, low and high. They fire while
-// somebody may be mid-sentence, so they are the quietest and briefest sounds
-// here.
-[[nodiscard]] QVector<qint16> makeMuted()
-{
-    return ToneSynth::renderSegment({{Partial{392.0, 1.0}, Partial{196.0, 0.4}},
-                                     /*durationMs=*/120,
-                                     0.22,
-                                     /*attackMs=*/4,
-                                     /*releaseMs=*/60,
-                                     /*decayHalfLifeMs=*/140.0});
-}
-
-[[nodiscard]] QVector<qint16> makeUnmuted()
-{
-    return ToneSynth::renderSegment({{Partial{783.99, 1.0}, Partial{1568.0, 0.25}},
-                                     /*durationMs=*/120,
-                                     0.22,
-                                     /*attackMs=*/4,
-                                     /*releaseMs=*/60,
-                                     /*decayHalfLifeMs=*/140.0});
-}
-
-// Rendered once on first use and shared thereafter: a few hundred kilobytes of
+// Loaded once on first use and shared thereafter: a few hundred kilobytes of
 // samples that never change.
 [[nodiscard]] const QHash<int, QVector<qint16>> &soundBank()
 {
     static const QHash<int, QVector<qint16>> bank = [] {
         QHash<int, QVector<qint16>> made;
-        made.insert(static_cast<int>(CallSound::Ringback), makeRingback());
-        made.insert(static_cast<int>(CallSound::IncomingRing), makeIncomingRing());
-        made.insert(static_cast<int>(CallSound::Connected), makeConnected());
-        made.insert(static_cast<int>(CallSound::Ended), makeEnded());
-        made.insert(static_cast<int>(CallSound::Muted), makeMuted());
-        made.insert(static_cast<int>(CallSound::Unmuted), makeUnmuted());
+        made.insert(static_cast<int>(CallSound::Ringback), loadChime(QStringLiteral("ringback")));
+        made.insert(static_cast<int>(CallSound::IncomingRing),
+                    loadChime(QStringLiteral("incoming-ring")));
+        made.insert(static_cast<int>(CallSound::Connected),
+                    loadChime(QStringLiteral("connected")));
+        made.insert(static_cast<int>(CallSound::Ended), loadChime(QStringLiteral("ended")));
+        made.insert(static_cast<int>(CallSound::Muted), loadChime(QStringLiteral("muted")));
+        made.insert(static_cast<int>(CallSound::Unmuted), loadChime(QStringLiteral("unmuted")));
         return made;
     }();
     return bank;
@@ -167,7 +96,7 @@ QList<CallSound> CallSoundBoard::allSounds()
 
 CallSoundBoard::CallSoundBoard()
 {
-    (void)soundBank(); // render up front, never on the audio thread
+    (void)soundBank(); // load up front, never on the audio thread
 }
 
 void CallSoundBoard::playOnce(CallSound sound)

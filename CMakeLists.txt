@@ -388,6 +388,17 @@ target_link_libraries(openchat_call
     PUBLIC openchat_media openchat_network openchat_domain Qt6::Core Qt6::Gui Qt6::Multimedia
     PRIVATE OpenSSL::Crypto
 )
+qt_add_resources(openchat_call "openchat_call_sounds"
+    PREFIX "/openchat/sounds"
+    BASE "assets/sounds"
+    FILES
+        assets/sounds/ringback.wav
+        assets/sounds/incoming-ring.wav
+        assets/sounds/connected.wav
+        assets/sounds/ended.wav
+        assets/sounds/muted.wav
+        assets/sounds/unmuted.wav
+)
 
 add_library(openchat_app STATIC
     src/app/ProfileSession.cpp
@@ -749,8 +760,8 @@ add_test(NAME tst_screenshare COMMAND tst_screenshare)
 # that a real link produces. Runs headless -- no audio device is opened.
 add_executable(tst_voicecall tests/tst_voicecall.cpp)
 target_include_directories(tst_voicecall PRIVATE src tests)
-# So the test can check the rendered WAVs in assets/sounds still match the
-# sounds this code generates.
+# So the test can check the WAVs in assets/sounds still match what
+# CallSoundBoard actually loads.
 target_compile_definitions(tst_voicecall PRIVATE
     OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )

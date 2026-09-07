@@ -32,7 +32,7 @@ enum class CallSound {
     Unmuted,
 };
 
-// Generates the call sounds once and mixes whichever are playing into the
+// Loads the call sounds once and mixes whichever are playing into the
 // outgoing audio stream.
 //
 // Mixing into the call's own playback rather than opening a second output is

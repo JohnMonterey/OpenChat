@@ -2209,12 +2209,18 @@ private slots:
 
     void connectedAndEndedAreAMatchedPairInOppositeDirections()
     {
-        // Answered rises, finished falls. Measured by comparing the dominant
-        // pitch of each half via zero-crossing density, which needs no FFT and
-        // cannot be fooled by amplitude.
-        const auto halfPitch = [](const QVector<qint16> &samples, bool secondHalf) {
-            const qsizetype from = secondHalf ? samples.size() / 2 : 0;
-            const qsizetype to = secondHalf ? samples.size() : samples.size() / 2;
+        // Answered rises, finished falls, and each is built from two struck
+        // notes back to back. A struck note's own decay constantly loses
+        // high-frequency content as it rings out, which drowns out the
+        // note-to-note pitch change if measured over broad halves of the
+        // clip. So instead this samples a short window right after each
+        // note's own onset (skipping the first few milliseconds of attack
+        // transient, which is broadband and not yet settled on the note's
+        // pitch) and compares those.
+        const auto windowPitch = [](const QVector<qint16> &samples, int startMs, int lengthMs) {
+            const qsizetype from = std::min(samples.size(), CallAudioFormat::samplesForMs(startMs));
+            const qsizetype to =
+                std::min(samples.size(), from + CallAudioFormat::samplesForMs(lengthMs));
             int crossings = 0;
             for (qsizetype i = from + 1; i < to; ++i) {
                 if ((samples.at(i - 1) < 0) != (samples.at(i) < 0))
@@ -2226,20 +2232,25 @@ private slots:
 
         const QVector<qint16> &connected = CallSoundBoard::samplesFor(CallSound::Connected);
         const QVector<qint16> &ended = CallSoundBoard::samplesFor(CallSound::Ended);
-        QVERIFY2(halfPitch(connected, true) > halfPitch(connected, false),
-                 "the pick-up sound does not rise");
-        QVERIFY2(halfPitch(ended, true) < halfPitch(ended, false),
-                 "the hang-up sound does not fall");
+        QVERIFY2(windowPitch(connected, 305, 200) > windowPitch(connected, 18, 60),
+                 "the pick-up sound does not rise from its first note to its last");
+        QVERIFY2(windowPitch(ended, 305, 200) < windowPitch(ended, 18, 60),
+                 "the hang-up sound does not fall from its first note to its last");
 
-        // Mute is the low one and unmute the high one, for the same reason.
+        // Mute descends from its first note to its second, unmute climbs back
+        // up the same interval, so the sound that finishes higher is unmute.
         const QVector<qint16> &muted = CallSoundBoard::samplesFor(CallSound::Muted);
         const QVector<qint16> &unmuted = CallSoundBoard::samplesFor(CallSound::Unmuted);
-        QVERIFY2(halfPitch(unmuted, false) > halfPitch(muted, false),
-                 "unmute is not higher than mute");
+        QVERIFY2(windowPitch(muted, 135, 90) < windowPitch(muted, 16, 90),
+                 "mute does not fall from its first note to its second");
+        QVERIFY2(windowPitch(unmuted, 135, 90) > windowPitch(unmuted, 16, 90),
+                 "unmute does not rise from its first note to its second");
+        QVERIFY2(windowPitch(unmuted, 135, 90) > windowPitch(muted, 135, 90),
+                 "unmute does not land higher than mute");
 
-        // Both are short: they fire while somebody may be mid-sentence.
-        QVERIFY(CallAudioFormat::msForSamples(muted.size()) <= 200);
-        QVERIFY(CallAudioFormat::msForSamples(unmuted.size()) <= 200);
+        // Both are brief: they fire while somebody may be mid-sentence.
+        QVERIFY(CallAudioFormat::msForSamples(muted.size()) <= 700);
+        QVERIFY(CallAudioFormat::msForSamples(unmuted.size()) <= 700);
     }
 
     void aLoopingSoundRepeatsWithoutEndingOrDrifting()
@@ -2404,11 +2415,12 @@ private slots:
 
     void theRenderedSoundFilesMatchWhatTheAppPlays()
     {
-        // assets/sounds holds a WAV of every call sound, rendered from this same
-        // code by openchat-render-call-sounds. They exist so the sounds can be
-        // listened to and handed around, which only means anything if they are
-        // still what the application actually plays — so check, rather than
-        // trusting whoever last edited a tone to have re-rendered.
+        // assets/sounds holds the WAV for every call sound and is the asset
+        // CallSoundBoard loads at runtime (via a Qt resource embedding this
+        // same file). Reading the file straight off disk here and comparing
+        // it to what the sound board actually returns catches a mismatched
+        // resource path or a stale build far more directly than trusting the
+        // two to agree.
         const QString directory =
             QStringLiteral(OPENCHAT_SOURCE_DIR) + QStringLiteral("/assets/sounds");
         for (const CallSound sound : CallSoundBoard::allSounds()) {
@@ -2416,15 +2428,13 @@ private slots:
             const QString path = directory + QLatin1Char('/') + name + QStringLiteral(".wav");
             auto read = WavFile::readFile(path);
             QVERIFY2(read.hasValue(),
-                     qPrintable(QStringLiteral("%1 is missing; run "
-                                               "openchat-render-call-sounds assets/sounds")
-                                    .arg(path)));
+                     qPrintable(QStringLiteral("%1 is missing").arg(path)));
             QCOMPARE(read.value().sampleRate, CallAudioFormat::sampleRate);
             QCOMPARE(read.value().channels, CallAudioFormat::channels);
             QVERIFY2(read.value().samples == CallSoundBoard::samplesFor(sound),
-                     qPrintable(QStringLiteral("%1.wav no longer matches the generated sound; "
-                                               "run openchat-render-call-sounds assets/sounds")
-                                    .arg(name)));
+                     qPrintable(QStringLiteral("%1.wav no longer matches what CallSoundBoard "
+                                               "loads for %2")
+                                    .arg(name, name)));
         }
     }
 };

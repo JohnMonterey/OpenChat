@@ -7,13 +7,9 @@
 
 namespace OpenChat {
 
-// A small additive synthesiser for the interface's own sounds.
-//
-// The call tones are generated rather than shipped as audio files, for the same
-// reason the avatars and message bubbles are drawn rather than shipped as
-// images: they stay editable in one place, they cost nothing in the binary, and
-// they are exactly reproducible, which is what lets a test assert that a ring is
-// click-free and that two sounds are actually distinguishable.
+// A small additive synthesiser, kept around for anything that still wants a
+// generated tone rather than a shipped audio file: exactly reproducible, and
+// cheap to reason about in a test.
 namespace ToneSynth {
 
 // One sine component of a segment. Summing a few partials is what turns a bare

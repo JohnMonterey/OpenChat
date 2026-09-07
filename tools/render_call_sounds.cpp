@@ -1,9 +1,9 @@
-// Renders OpenChat's call sounds to WAV files.
+// Exports OpenChat's call sounds to WAV files.
 //
-// The sounds are synthesised in code rather than shipped as assets, so this is
-// how you get hold of them as audio: to listen to, to hand to someone else, or
-// to check a change before it ships. Run it again after editing
-// src/call/CallSounds.cpp and the files update.
+// The sounds themselves live as assets under assets/sounds, embedded into the
+// binary as Qt resources; this tool reads them back out of the running
+// CallSoundBoard so they can be listened to or handed to someone else, and so
+// a change to the assets can be checked before it ships.
 //
 //   openchat-render-call-sounds [output-directory]
 //

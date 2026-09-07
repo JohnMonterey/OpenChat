@@ -76,6 +76,9 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/AeroButton.qml
         qml/OpenChat/components/AeroSwitch.qml
         qml/OpenChat/components/AeroSlider.qml
+        qml/OpenChat/components/AeroMenu.qml
+        qml/OpenChat/components/AeroMenuItem.qml
+        qml/OpenChat/components/MicrophoneContextMenu.qml
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
@@ -185,6 +188,11 @@ target_link_libraries(openchat-call-check PRIVATE
 )
 
 enable_testing()
+
+add_executable(tst_voiceeffects tests/tst_voiceeffects.cpp src/media/VoiceEffects.cpp)
+target_include_directories(tst_voiceeffects PRIVATE src)
+set_target_properties(tst_voiceeffects PROPERTIES AUTOMOC OFF)
+add_test(NAME tst_voiceeffects COMMAND tst_voiceeffects)
 
 add_executable(tst_appmetadata tests/tst_appmetadata.cpp)
 target_include_directories(tst_appmetadata PRIVATE src)
@@ -311,6 +319,7 @@ add_library(openchat_media STATIC
     src/media/JitterBuffer.cpp
     src/media/SpeechLevelMeter.cpp
     src/media/MicrophoneProcessor.cpp
+    src/media/VoiceEffects.cpp
 )
 target_include_directories(openchat_media PUBLIC src)
 target_link_libraries(openchat_media

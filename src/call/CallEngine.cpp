@@ -498,6 +498,7 @@ void CallEngine::setMuted(bool muted)
     if (m_muted == muted)
         return;
     m_muted = muted;
+    m_microphone.reset();
     if (m_session)
         m_session->setMuted(muted);
     if (m_group)
@@ -1512,7 +1513,7 @@ void CallEngine::onCapturedFrame(const AudioFrame &captured)
         return;
     // Gain and gate once, here, so every session below encodes the same
     // frame and a closed gate sends real silence to the whole mesh.
-    const AudioFrame frame = m_microphone.process(captured);
+    const AudioFrame frame = m_muted ? silentAudioFrame() : m_microphone.process(captured);
     if (m_group) {
         // The same frame, sealed separately for each member: every pair has its
         // own key, and nobody's audio is ever forwarded by a third device.

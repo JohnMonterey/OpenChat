@@ -8,6 +8,9 @@ AeroTextField 1.0 components/AeroTextField.qml
 AeroButton 1.0 components/AeroButton.qml
 AeroSwitch 1.0 components/AeroSwitch.qml
 AeroSlider 1.0 components/AeroSlider.qml
+AeroMenu 1.0 components/AeroMenu.qml
+AeroMenuItem 1.0 components/AeroMenuItem.qml
+MicrophoneContextMenu 1.0 components/MicrophoneContextMenu.qml
 MicrophoneSettingsPanel 1.0 components/MicrophoneSettingsPanel.qml
 ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml

@@ -229,7 +229,7 @@ public:
     void hangUp();
 
     void setMuted(bool muted);
-    // Replaces the gain and gate settings; applies from the next captured
+    // Replaces gain, gate, enhancement and effects; applies from the next captured
     // frame, in or out of a call.
     void setMicrophone(const MicrophoneProcessor::Config &config);
     [[nodiscard]] const MicrophoneProcessor::Config &microphone() const noexcept

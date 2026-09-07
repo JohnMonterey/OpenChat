@@ -305,17 +305,33 @@ Item {
             onClicked: callHeader.controller.declineCall()
         }
         CallActionButton {
+            id: muteButton
             objectName: "muteCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: callHeader.controller.muted ? "Unmute" : "Mute"
             accent: "neutral"
+            square: true
+            microphoneIcon: true
+            checked: callHeader.controller.muted
+            contextMenuEnabled: true
+            contextMenuExpanded: microphoneMenu.visible
+            tooltip: label + " · Right-click for microphone settings"
             onClicked: callHeader.controller.toggleMute()
+            // Anchor to the control, independent of the pointer's position.
+            onContextMenuRequested: microphoneMenu.popup(muteButton, 0, muteButton.height + 6)
+
+            MicrophoneContextMenu {
+                id: microphoneMenu
+            }
+            onVisibleChanged: if (!visible) microphoneMenu.dismiss()
         }
         CallActionButton {
             objectName: "cameraCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
             label: callHeader.controller.cameraEnabled ? "Camera off" : "Camera on"
             cameraIcon: true
+            square: true
+            tooltip: label
             checked: callHeader.controller.cameraEnabled
             onClicked: callHeader.controller.toggleCamera()
         }
@@ -336,8 +352,11 @@ Item {
         CallActionButton {
             objectName: "endCallButton"
             visible: !callHeader.controller.isRinging && !callHeader.controller.callEnded
-            label: "End call"
+            label: callHeader.isGroupCall ? "Leave call" : "End call"
             accent: "end"
+            square: true
+            hangupIcon: true
+            tooltip: label
             onClicked: callHeader.controller.hangUp()
         }
         // The call we just left is still going: the way back in is right

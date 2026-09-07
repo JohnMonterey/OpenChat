@@ -14,6 +14,20 @@ constexpr auto keyInputDevice = "Audio/inputDevice";
 constexpr auto keyGain = "Audio/inputGain";
 constexpr auto keyGateEnabled = "Audio/noiseGate";
 constexpr auto keyGateThresholdDb = "Audio/noiseGateThresholdDb";
+constexpr auto keyVoiceEffect = "Audio/voiceEffect";
+constexpr auto keyEffectIntensity = "Audio/effectIntensity";
+constexpr auto keyStudio = "Audio/studioVoice";
+constexpr auto keyNoiseReduction = "Audio/noiseReduction";
+constexpr auto keyAutomaticGain = "Audio/automaticGain";
+constexpr auto keyCompressor = "Audio/compressor";
+struct EffectEntry { const char *id; const char *name; };
+// Stable persisted ids, in VoiceEffects::Effect order.
+constexpr EffectEntry effects[] = {
+    {"none", "None"}, {"radio", "Radio"}, {"walkie-talkie", "Walkie-Talkie"},
+    {"telephone", "Telephone"}, {"deep", "Deep Voice"}, {"tiny", "Tiny Voice"},
+    {"robot", "Robot"}, {"intercom", "Intercom"}, {"cave", "Cave"},
+    {"bathroom", "Bathroom"}, {"megaphone", "Megaphone"}, {"anonymous", "Anonymous"}
+};
 
 constexpr double maxGain = 2.0;
 
@@ -61,6 +75,16 @@ void MicrophoneSettings::load()
                           .toDouble();
     m_processing.gateThreshold = dbToLinear(std::clamp(db, minThresholdDb(), maxThresholdDb()));
     m_processing.gateHoldFrames = defaults.gateHoldFrames;
+    const auto effectId = settings.value(QLatin1String(keyVoiceEffect)).toString();
+    for (int i = 0; i < int(std::size(effects)); ++i)
+        if (effectId == QLatin1String(effects[i].id))
+            m_processing.voice.effect = static_cast<VoiceEffects::Effect>(i);
+    const double intensity = settings.value(QLatin1String(keyEffectIntensity), 0.5).toDouble();
+    m_processing.voice.intensity = std::clamp(std::isfinite(intensity) ? intensity : 0.5, 0.0, 1.0);
+    m_processing.voice.studio = settings.value(QLatin1String(keyStudio), false).toBool();
+    m_processing.voice.noiseReduction = settings.value(QLatin1String(keyNoiseReduction), false).toBool();
+    m_processing.voice.automaticGain = settings.value(QLatin1String(keyAutomaticGain), false).toBool();
+    m_processing.voice.compressor = settings.value(QLatin1String(keyCompressor), false).toBool();
     m_monitor.setConfig(m_processing);
 }
 
@@ -74,6 +98,12 @@ void MicrophoneSettings::save() const
     settings.setValue(QLatin1String(keyGain), m_processing.gain);
     settings.setValue(QLatin1String(keyGateEnabled), m_processing.gateEnabled);
     settings.setValue(QLatin1String(keyGateThresholdDb), noiseGateThresholdDb());
+    settings.setValue(QLatin1String(keyVoiceEffect), voiceEffect());
+    settings.setValue(QLatin1String(keyEffectIntensity), effectIntensity());
+    settings.setValue(QLatin1String(keyStudio), studioVoice());
+    settings.setValue(QLatin1String(keyNoiseReduction), noiseReduction());
+    settings.setValue(QLatin1String(keyAutomaticGain), automaticGain());
+    settings.setValue(QLatin1String(keyCompressor), compressor());
     settings.sync();
 }
 
@@ -227,6 +257,82 @@ void MicrophoneSettings::resetToDefaults()
     setGain(defaults.gain);
     setNoiseGateEnabled(defaults.gateEnabled);
     setNoiseGateThresholdDb(linearToDb(defaults.gateThreshold));
+    setVoiceEffect(QStringLiteral("none"));
+    setEffectIntensity(0.5);
+    setStudioVoice(false);
+    setNoiseReduction(false);
+    setAutomaticGain(false);
+    setCompressor(false);
+}
+
+QVariantList MicrophoneSettings::voiceEffects() const
+{
+    QVariantList list;
+    for (const auto &effect : effects)
+        list.append(QVariantMap{{QStringLiteral("id"), QString::fromLatin1(effect.id)},
+                                {QStringLiteral("name"), QString::fromLatin1(effect.name)}});
+    return list;
+}
+
+QString MicrophoneSettings::voiceEffect() const
+{
+    return QString::fromLatin1(effects[int(m_processing.voice.effect)].id);
+}
+
+void MicrophoneSettings::processingUpdated()
+{
+    m_monitor.setConfig(m_processing);
+    save();
+    emit processingChanged();
+}
+
+void MicrophoneSettings::setVoiceEffect(const QString &id)
+{
+    for (int i = 0; i < int(std::size(effects)); ++i) {
+        if (id != QLatin1String(effects[i].id))
+            continue;
+        if (int(m_processing.voice.effect) == i)
+            return;
+        m_processing.voice.effect = static_cast<VoiceEffects::Effect>(i);
+        processingUpdated();
+        return;
+    }
+}
+
+void MicrophoneSettings::setEffectIntensity(double intensity)
+{
+    intensity = std::clamp(std::isfinite(intensity) ? intensity : 0.5, 0.0, 1.0);
+    if (qFuzzyCompare(m_processing.voice.intensity, intensity)) return;
+    m_processing.voice.intensity = intensity;
+    processingUpdated();
+}
+
+void MicrophoneSettings::setStudioVoice(bool enabled)
+{
+    if (m_processing.voice.studio == enabled) return;
+    m_processing.voice.studio = enabled;
+    processingUpdated();
+}
+
+void MicrophoneSettings::setNoiseReduction(bool enabled)
+{
+    if (m_processing.voice.noiseReduction == enabled) return;
+    m_processing.voice.noiseReduction = enabled;
+    processingUpdated();
+}
+
+void MicrophoneSettings::setAutomaticGain(bool enabled)
+{
+    if (m_processing.voice.automaticGain == enabled) return;
+    m_processing.voice.automaticGain = enabled;
+    processingUpdated();
+}
+
+void MicrophoneSettings::setCompressor(bool enabled)
+{
+    if (m_processing.voice.compressor == enabled) return;
+    m_processing.voice.compressor = enabled;
+    processingUpdated();
 }
 
 void MicrophoneSettings::onTestFrame(const AudioFrame &frame)

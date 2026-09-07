@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHostInfo>
 #include <QIcon>
 #include <QPainter>
 #include <QQmlApplicationEngine>
@@ -461,14 +462,32 @@ private:
         m_udpCallMediaPath = std::make_unique<OpenChat::UdpCallMediaPath>(localDevice);
         m_udpCallMediaPath->setRelayClient(m_relay.get());
         m_udpCallMediaPath->setSettings(m_transportSettings.get());
-        const QString relayHost = m_endpoints.live.host().isEmpty()
-            ? QStringLiteral("127.0.0.1")
-            : m_endpoints.live.host();
+        const QString envMediaHost = qEnvironmentVariable("OPENCHAT_RELAY_MEDIA_HOST");
+        QString relayHost = !envMediaHost.isEmpty()
+            ? envMediaHost
+            : (m_endpoints.live.host().isEmpty()
+                ? QStringLiteral("127.0.0.1")
+                : m_endpoints.live.host());
+        // If connected to chat.rigidstudios.de without an explicit UDP host override,
+        // send UDP packets directly to the origin server IP since Cloudflare Tunnel
+        // only proxies HTTP/WebSocket over TCP.
+        if (envMediaHost.isEmpty() && relayHost == QStringLiteral("chat.rigidstudios.de")) {
+            relayHost = QStringLiteral("2.29.10.226");
+        }
+        QHostAddress relayAddress(relayHost);
+        if (relayAddress.isNull()) {
+            const auto hostInfo = QHostInfo::fromName(relayHost);
+            if (!hostInfo.addresses().isEmpty()) {
+                relayAddress = hostInfo.addresses().first();
+            } else {
+                relayAddress = QHostAddress(QStringLiteral("127.0.0.1"));
+            }
+        }
         const quint16 mediaPort = static_cast<quint16>(
             qEnvironmentVariableIntValue("OPENCHAT_RELAY_MEDIA_PORT") > 0
                 ? qEnvironmentVariableIntValue("OPENCHAT_RELAY_MEDIA_PORT")
                 : 8444);
-        m_udpCallMediaPath->setRelayEndpoint(QHostAddress(relayHost), mediaPort);
+        m_udpCallMediaPath->setRelayEndpoint(relayAddress, mediaPort);
 
         // Voice calls ride the same engine: signalling as durable MLS control
         // messages, media as unreliable datagrams. The transport tracks the live

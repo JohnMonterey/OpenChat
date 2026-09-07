@@ -21,6 +21,7 @@
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
+#include "controllers/VoiceDebugController.h"
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
@@ -2493,6 +2494,30 @@ private slots:
                  "the call ended but kept the whole window");
         QVERIFY(sidebar->isVisible());
     }
+
+    void voiceDebugWindowLoadsAndBindsController()
+    {
+        OpenChat::VoiceDebugController controller;
+        controller.enableForPreview();
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("debugController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "VoiceDebugWindow");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QVERIFY(root);
+        QCOMPARE(root->objectName(), QStringLiteral("voiceDebugWindow"));
+        QCOMPARE(root->property("title").toString(),
+                 QStringLiteral("[VOICE DEBUG OVERLAY] OpenChat Latency, Jitter & Transport Diagnostics"));
+
+        // Simulate a lag spike and verify properties update
+        controller.simulateSpike(210.5);
+        QVERIFY(controller.lagSpikeCount() > 0);
+        QVERIFY(controller.isSpikeActive());
+        QCOMPARE(controller.currentRtt(), 210.5);
+    }
 };
 
 int main(int argc, char **argv)
@@ -2528,6 +2553,9 @@ int main(int argc, char **argv)
     qmlRegisterUncreatableType<OpenChat::ContactController>(
         "OpenChat.Native", 1, 0, "ContactController",
         QStringLiteral("ContactController is provided by the application"));
+    qmlRegisterUncreatableType<OpenChat::VoiceDebugController>(
+        "OpenChat.Native", 1, 0, "VoiceDebugController",
+        QStringLiteral("VoiceDebugController is provided by the application"));
     QmlLoadTest test;
     return QTest::qExec(&test, argc, argv);
 }

@@ -204,6 +204,32 @@ qint64 CallEngine::activeDurationMs() const
     return QDateTime::currentMSecsSinceEpoch() - m_activeSinceMs;
 }
 
+std::optional<CallSession::Stats> CallEngine::sessionStats() const
+{
+    if (m_session)
+        return m_session->stats();
+    if (m_group) {
+        for (const Member &member : m_group->members) {
+            if (member.session)
+                return member.session->stats();
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<JitterBufferStats> CallEngine::jitterStats() const
+{
+    if (m_session)
+        return m_session->jitterStats();
+    if (m_group) {
+        for (const Member &member : m_group->members) {
+            if (member.session)
+                return member.session->jitterStats();
+        }
+    }
+    return std::nullopt;
+}
+
 double CallEngine::localLevel() const
 {
     if (m_session)

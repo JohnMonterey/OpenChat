@@ -38,6 +38,7 @@ qt_add_executable(OpenChat
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
+    src/controllers/VoiceDebugController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/CallParticipantModel.cpp
@@ -70,6 +71,7 @@ qt_add_qml_module(OpenChat
     QML_FILES
         qml/OpenChat/Main.qml
         qml/OpenChat/Onboarding.qml
+        qml/OpenChat/VoiceDebugWindow.qml
         qml/OpenChat/Theme.qml
         qml/OpenChat/components/PresenceBead.qml
         qml/OpenChat/components/Avatar.qml
@@ -885,6 +887,7 @@ add_executable(tst_qmlload
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
+    src/controllers/VoiceDebugController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/CallParticipantModel.cpp

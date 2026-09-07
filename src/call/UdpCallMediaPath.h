@@ -28,6 +28,28 @@ enum class UdpPeerState {
     Suspended,
 };
 
+struct UdpPeerTelemetry final {
+    DeviceId peer = DeviceId::generate();
+    UdpPeerState state = UdpPeerState::Probing;
+    double rttMs = 0.0;
+    double lastRawRttMs = 0.0;
+    double minRttMs = 0.0;
+    double maxRttMs = 0.0;
+    quint64 pingsSent = 0;
+    quint64 pongsReceived = 0;
+    quint64 unackedPings = 0;
+    quint64 mediaPacketsSent = 0;
+    quint64 mediaPacketsReceived = 0;
+    quint64 bytesSent = 0;
+    quint64 bytesReceived = 0;
+    qint64 lastPacketReceivedMs = 0;
+    qint64 silenceMs = 0;
+    quint32 lagSpikeCount = 0;
+
+    UdpPeerTelemetry() = default;
+    explicit UdpPeerTelemetry(DeviceId id) : peer(std::move(id)) {}
+};
+
 // Main-thread UDP media transport for real-time voice calls with automatic WebSocket fallback.
 //
 // Lifecycle & Failover:
@@ -78,6 +100,14 @@ public:
     [[nodiscard]] double rttMs(const DeviceId &peer) const;
     [[nodiscard]] QString mediaPathText(const DeviceId &peer) const;
 
+    // Telemetry and diagnostics inspection
+    [[nodiscard]] std::optional<DeviceId> firstPeer() const;
+    [[nodiscard]] QList<DeviceId> allPeers() const;
+    [[nodiscard]] std::optional<UdpPeerTelemetry> peerTelemetry(const DeviceId &peer) const;
+    void triggerPing(const DeviceId &peer);
+    [[nodiscard]] quint64 totalBytesSent() const { return m_totalBytesSent; }
+    [[nodiscard]] quint64 totalBytesReceived() const { return m_totalBytesReceived; }
+
     // Injectable clock for testing.
     void setClock(std::function<qint64()> clock) { m_clock = std::move(clock); }
     [[nodiscard]] qint64 nowMs() const;
@@ -93,6 +123,8 @@ signals:
     void mediaReceived(const DeviceId &sender, const QByteArray &packet);
     void peerStateChanged(const DeviceId &peer, UdpPeerState state);
     void rttChanged(const DeviceId &peer, double rttMs);
+    void lagSpikeDetected(const DeviceId &peer, double sampleMs, double avgMs);
+    void diagnosticEventLogged(const QString &category, const QString &message, const QString &severity);
 
 private slots:
     void onReadyRead();
@@ -108,9 +140,19 @@ private:
         qint64 lastProbeSentMs = 0;
         qint64 lastPingSentMs = 0;
         double rttMs = 0.0;
+        double lastRawRttMs = 0.0;
+        double minRttMs = 0.0;
+        double maxRttMs = 0.0;
         bool rttInitialized = false;
         bool helloSent = false;
         bool waitingForToken = false;
+        quint64 pingsSent = 0;
+        quint64 pongsReceived = 0;
+        quint64 mediaPacketsSent = 0;
+        quint64 mediaPacketsReceived = 0;
+        quint64 bytesSent = 0;
+        quint64 bytesReceived = 0;
+        quint32 lagSpikeCount = 0;
 
         PeerInfo(DeviceId id) : peerDevice(std::move(id)) {}
     };
@@ -133,6 +175,8 @@ private:
 
     QHash<DeviceId, PeerInfo> m_peers;
     QByteArray m_lastToken;
+    quint64 m_totalBytesSent = 0;
+    quint64 m_totalBytesReceived = 0;
 };
 
 } // namespace OpenChat

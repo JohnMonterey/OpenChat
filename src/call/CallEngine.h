@@ -295,6 +295,11 @@ public:
     [[nodiscard]] class UdpCallMediaPath *udpMediaPath() const { return m_udpPath; }
     void receiveDirectMedia(const DeviceId &sender, const QByteArray &packet);
 
+    [[nodiscard]] std::optional<CallId> currentCallId() const noexcept { return m_callId; }
+    [[nodiscard]] AudioCodecKind currentCodec() const noexcept { return m_codec; }
+    [[nodiscard]] std::optional<CallSession::Stats> sessionStats() const;
+    [[nodiscard]] std::optional<JitterBufferStats> jitterStats() const;
+
 signals:
     void stateChanged();
     void mutedChanged();

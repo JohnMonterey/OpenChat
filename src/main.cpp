@@ -37,6 +37,7 @@
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
+#include "controllers/VoiceDebugController.h"
 #include "domain/Identifiers.h"
 #include "network/RelayClient.h"
 #include "notify/NotificationBackend.h"
@@ -103,6 +104,9 @@ void registerQmlTypes()
     qmlRegisterUncreatableType<OpenChat::CallParticipantModel>(
         "OpenChat.Native", 1, 0, "CallParticipantModel",
         QStringLiteral("CallParticipantModel is provided by the CallController"));
+    qmlRegisterUncreatableType<OpenChat::VoiceDebugController>(
+        "OpenChat.Native", 1, 0, "VoiceDebugController",
+        QStringLiteral("VoiceDebugController is provided by the application"));
 }
 
 // Applies an optional --width/--height override to a window, honouring the app's
@@ -218,13 +222,15 @@ class AppRuntime final
 public:
     AppRuntime(QString profilesRoot, OpenChat::RelayEndpoints endpoints,
                std::optional<QSslConfiguration> tls, int keyPackageCount,
-               std::optional<int> width, std::optional<int> height)
+               std::optional<int> width, std::optional<int> height,
+               bool uglyVoiceDebug = false)
         : m_profilesRoot(std::move(profilesRoot))
         , m_endpoints(std::move(endpoints))
         , m_tls(std::move(tls))
         , m_keyPackageCount(keyPackageCount)
         , m_width(width)
         , m_height(height)
+        , m_uglyVoiceDebug(uglyVoiceDebug)
     {
     }
 
@@ -332,6 +338,22 @@ private:
         if (auto *window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().constFirst())) {
             configureWindow(window);
             enableNotifications(window);
+        }
+
+        if (m_uglyVoiceDebug) {
+            m_voiceDebugController = std::make_unique<OpenChat::VoiceDebugController>();
+            m_voiceDebugController->setLiveSources(
+                m_callEngine.get(), m_udpCallMediaPath.get(),
+                m_transportSettings.get(), m_microphoneSettings.get());
+            m_debugEngine = std::make_unique<QQmlApplicationEngine>();
+            m_debugEngine->setInitialProperties(
+                {{QStringLiteral("debugController"), QVariant::fromValue(m_voiceDebugController.get())}});
+            m_debugEngine->loadFromModule("OpenChat", "VoiceDebugWindow");
+            if (!m_debugEngine->rootObjects().isEmpty()) {
+                if (auto *debugWindow = qobject_cast<QQuickWindow *>(m_debugEngine->rootObjects().constFirst())) {
+                    debugWindow->show();
+                }
+            }
         }
     }
 
@@ -685,6 +707,9 @@ private:
     // anything the application still has showing on the desktop.
     std::unique_ptr<OpenChat::NotificationService> m_notifications;
     std::unique_ptr<QQmlApplicationEngine> m_engine;
+    bool m_uglyVoiceDebug = false;
+    std::unique_ptr<OpenChat::VoiceDebugController> m_voiceDebugController;
+    std::unique_ptr<QQmlApplicationEngine> m_debugEngine;
 };
 
 // Loads the chat window with a mock ChatController and runs the event loop. This
@@ -845,7 +870,8 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
                   const QCommandLineOption &captureOption,
                   const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
                   const QCommandLineOption &heightOption, bool incoming, bool video, bool group,
-                  bool screenShare, bool sourcePicker, bool fullscreen, bool zoom)
+                  bool screenShare, bool sourcePicker, bool fullscreen, bool zoom,
+                  bool uglyVoiceDebug = false)
 {
     OpenChat::ChatController chatController;
     chatController.setLocalUserName(QStringLiteral("Developer"));
@@ -946,6 +972,23 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         }
     }
     scheduleCaptureIfRequested(parser, window, captureOption, delayOption);
+
+    std::unique_ptr<OpenChat::VoiceDebugController> debugController;
+    std::unique_ptr<QQmlApplicationEngine> debugEngine;
+    if (uglyVoiceDebug) {
+        debugController = std::make_unique<OpenChat::VoiceDebugController>();
+        debugController->enableForPreview(&callController);
+        debugEngine = std::make_unique<QQmlApplicationEngine>();
+        debugEngine->setInitialProperties(
+            {{QStringLiteral("debugController"), QVariant::fromValue(debugController.get())}});
+        debugEngine->loadFromModule("OpenChat", "VoiceDebugWindow");
+        if (!debugEngine->rootObjects().isEmpty()) {
+            if (auto *dbgWin = qobject_cast<QQuickWindow *>(debugEngine->rootObjects().constFirst())) {
+                dbgWin->show();
+            }
+        }
+    }
+
     return application.exec();
 }
 
@@ -1015,13 +1058,18 @@ int main(int argc, char *argv[])
         QStringLiteral("call-zoom"),
         QStringLiteral("Preview the far end's share or camera enlarged over the window "
                        "(combine with --call-video or --call-screen)."));
+    const QCommandLineOption uglyVoiceDebugOption(
+        {QStringLiteral("ugly-voice-debug"), QStringLiteral("voice-debug")},
+        QStringLiteral("Launch verbose voice diagnostics & lag spike pinpointing overlay in a second window."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, addContactOption, verifyOption, callOption,
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
-                       callPickerOption, callFullscreenOption, callZoomOption});
+                       callPickerOption, callFullscreenOption, callZoomOption, uglyVoiceDebugOption});
     parser.process(application);
 
     registerQmlTypes();
+
+    const bool uglyVoiceDebug = parser.isSet(uglyVoiceDebugOption);
 
     // Onboarding preview: launch the screens directly with no real services.
     const bool previewRecovery = parser.isSet(onboardingRecoveryOption);
@@ -1052,7 +1100,7 @@ int main(int argc, char *argv[])
                              heightOption, previewIncomingCall, parser.isSet(callVideoOption),
                              parser.isSet(callGroupOption), parser.isSet(callScreenOption),
                              parser.isSet(callPickerOption), parser.isSet(callFullscreenOption),
-                             parser.isSet(callZoomOption));
+                             parser.isSet(callZoomOption), uglyVoiceDebug);
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))
@@ -1079,7 +1127,8 @@ int main(int argc, char *argv[])
                        buildDevCaTls(devCaPath),
                        OpenChat::AccountBootstrap::defaultKeyPackageCount,
                        widthValid ? std::optional<int>(requestedWidth) : std::nullopt,
-                       heightValid ? std::optional<int>(requestedHeight) : std::nullopt);
+                       heightValid ? std::optional<int>(requestedHeight) : std::nullopt,
+                       uglyVoiceDebug);
     if (!runtime.start())
         return EXIT_FAILURE;
 

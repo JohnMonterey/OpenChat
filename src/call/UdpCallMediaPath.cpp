@@ -141,6 +141,14 @@ void UdpCallMediaPath::sendHello(const QByteArray &token)
     const auto encoded = hello.encode();
     if (!encoded.isEmpty()) {
         m_socket->writeDatagram(encoded, m_relayAddress, m_relayPort);
+        m_totalBytesSent += encoded.size();
+        emit diagnosticEventLogged(
+            QStringLiteral("UDP"),
+            QStringLiteral("Sent Hello to relay %1:%2 (token size %3 bytes)")
+                .arg(m_relayAddress.toString())
+                .arg(m_relayPort)
+                .arg(token.size()),
+            QStringLiteral("INFO"));
     }
 }
 
@@ -156,6 +164,9 @@ void UdpCallMediaPath::sendPing(PeerInfo &peer)
     if (!encoded.isEmpty()) {
         m_socket->writeDatagram(encoded, m_relayAddress, m_relayPort);
         peer.lastPingSentMs = current;
+        peer.pingsSent++;
+        peer.bytesSent += encoded.size();
+        m_totalBytesSent += encoded.size();
     }
 }
 
@@ -168,6 +179,11 @@ void UdpCallMediaPath::sendBye(const DeviceId &peer)
     const auto encoded = bye.encode();
     if (!encoded.isEmpty()) {
         m_socket->writeDatagram(encoded, m_relayAddress, m_relayPort);
+        m_totalBytesSent += encoded.size();
+        emit diagnosticEventLogged(
+            QStringLiteral("CARRIER"),
+            QStringLiteral("Sent Bye for peer %1").arg(peer.toHex().left(8)),
+            QStringLiteral("INFO"));
     }
 }
 
@@ -183,7 +199,16 @@ bool UdpCallMediaPath::sendMedia(const DeviceId &recipient, const QByteArray &pa
         return false;
 
     const qint64 written = m_socket->writeDatagram(encoded, m_relayAddress, m_relayPort);
-    return written == encoded.size();
+    if (written == encoded.size()) {
+        auto it = m_peers.find(recipient);
+        if (it != m_peers.end()) {
+            it->mediaPacketsSent++;
+            it->bytesSent += written;
+        }
+        m_totalBytesSent += written;
+        return true;
+    }
+    return false;
 }
 
 bool UdpCallMediaPath::isPeerActive(const DeviceId &peer) const
@@ -225,6 +250,57 @@ QString UdpCallMediaPath::mediaPathText(const DeviceId &peer) const
     return QStringLiteral("Relay (TCP)");
 }
 
+std::optional<DeviceId> UdpCallMediaPath::firstPeer() const
+{
+    if (m_peers.isEmpty())
+        return std::nullopt;
+    return m_peers.constBegin().key();
+}
+
+QList<DeviceId> UdpCallMediaPath::allPeers() const
+{
+    return m_peers.keys();
+}
+
+std::optional<UdpPeerTelemetry> UdpCallMediaPath::peerTelemetry(const DeviceId &peer) const
+{
+    const auto it = m_peers.find(peer);
+    if (it == m_peers.end())
+        return std::nullopt;
+
+    const PeerInfo &p = it.value();
+    UdpPeerTelemetry t;
+    t.peer = p.peerDevice;
+    t.state = p.state;
+    t.rttMs = p.rttMs;
+    t.lastRawRttMs = p.lastRawRttMs;
+    t.minRttMs = p.minRttMs;
+    t.maxRttMs = p.maxRttMs;
+    t.pingsSent = p.pingsSent;
+    t.pongsReceived = p.pongsReceived;
+    t.unackedPings = p.pingsSent > p.pongsReceived ? (p.pingsSent - p.pongsReceived) : 0;
+    t.mediaPacketsSent = p.mediaPacketsSent;
+    t.mediaPacketsReceived = p.mediaPacketsReceived;
+    t.bytesSent = p.bytesSent;
+    t.bytesReceived = p.bytesReceived;
+    t.lastPacketReceivedMs = p.lastPacketReceivedMs;
+    t.silenceMs = p.lastPacketReceivedMs > 0 ? (nowMs() - p.lastPacketReceivedMs) : 0;
+    t.lagSpikeCount = p.lagSpikeCount;
+    return t;
+}
+
+void UdpCallMediaPath::triggerPing(const DeviceId &peer)
+{
+    auto it = m_peers.find(peer);
+    if (it != m_peers.end()) {
+        sendPing(it.value());
+        emit diagnosticEventLogged(
+            QStringLiteral("PING"),
+            QStringLiteral("Manual ping triggered to peer %1").arg(peer.toHex().left(8)),
+            QStringLiteral("INFO"));
+    }
+}
+
 void UdpCallMediaPath::onTokenReceived(const QByteArray &token)
 {
     onRelayTokenReceived(token);
@@ -246,6 +322,10 @@ void UdpCallMediaPath::onRelayTokenReceived(const QByteArray &token)
 
 void UdpCallMediaPath::onRelayTokenFailed()
 {
+    emit diagnosticEventLogged(
+        QStringLiteral("AUTH"),
+        QStringLiteral("Relay rejected media token request"),
+        QStringLiteral("ERROR"));
     for (auto &peer : m_peers) {
         peer.waitingForToken = false;
     }
@@ -261,6 +341,12 @@ void UdpCallMediaPath::onTickerTimeout()
                 peer.state = UdpPeerState::Suspended;
                 peer.helloSent = false;
                 emit peerStateChanged(peer.peerDevice, UdpPeerState::Suspended);
+                emit diagnosticEventLogged(
+                    QStringLiteral("CARRIER"),
+                    QStringLiteral("UDP silence reached %1 ms >= %2 ms: Suspended -> Falling back to WS")
+                        .arg(current - peer.lastPacketReceivedMs)
+                        .arg(lossTimeoutMs),
+                    QStringLiteral("FAILOVER"));
                 qCDebug(mediaLog) << "UDP path to peer" << peer.peerDevice.toHex()
                                   << "suspended (silence >= 3s), falling back to WS";
             } else if (current - peer.lastPingSentMs >= pingIntervalMs) {
@@ -291,6 +377,8 @@ void UdpCallMediaPath::onReadyRead()
 
 void UdpCallMediaPath::handleDatagram(const QByteArray &datagram)
 {
+    m_totalBytesReceived += datagram.size();
+
     const auto decoded = UdpMediaFrame::decode(datagram);
     if (!decoded.has_value())
         return;
@@ -300,6 +388,10 @@ void UdpCallMediaPath::handleDatagram(const QByteArray &datagram)
 
     if (!senderId) {
         if (decoded->type == UdpMediaFrame::Type::HelloOk) {
+            emit diagnosticEventLogged(
+                QStringLiteral("UDP"),
+                QStringLiteral("Relay acknowledged Hello (HelloOk)"),
+                QStringLiteral("INFO"));
             for (auto &peer : m_peers) {
                 peer.helloSent = true;
                 sendPing(peer);
@@ -314,12 +406,19 @@ void UdpCallMediaPath::handleDatagram(const QByteArray &datagram)
 
     PeerInfo &peer = it.value();
     peer.lastPacketReceivedMs = current;
+    peer.bytesReceived += datagram.size();
 
     switch (decoded->type) {
     case UdpMediaFrame::Type::Media: {
+        peer.mediaPacketsReceived++;
         if (peer.state != UdpPeerState::Active) {
             peer.state = UdpPeerState::Active;
             emit peerStateChanged(*senderId, UdpPeerState::Active);
+            emit diagnosticEventLogged(
+                QStringLiteral("CARRIER"),
+                QStringLiteral("Peer %1 UDP carrier is now ACTIVE via Media arrival")
+                    .arg(senderId->toHex().left(8)),
+                QStringLiteral("INFO"));
             qCDebug(mediaLog) << "UDP path to peer" << senderId->toHex() << "became Active";
         }
         emit mediaReceived(*senderId, decoded->payload);
@@ -329,19 +428,32 @@ void UdpCallMediaPath::handleDatagram(const QByteArray &datagram)
         if (peer.state != UdpPeerState::Active) {
             peer.state = UdpPeerState::Active;
             emit peerStateChanged(*senderId, UdpPeerState::Active);
+            emit diagnosticEventLogged(
+                QStringLiteral("CARRIER"),
+                QStringLiteral("Peer %1 UDP carrier is now ACTIVE via Ping arrival")
+                    .arg(senderId->toHex().left(8)),
+                QStringLiteral("INFO"));
             qCDebug(mediaLog) << "UDP path to peer" << senderId->toHex() << "became Active";
         }
         // Reply with Pong carrying echoed payload
         const auto pong = UdpMediaFrame::makePong(m_localDeviceId, *senderId, decoded->payload);
         const auto encoded = pong.encode();
-        if (!encoded.isEmpty())
+        if (!encoded.isEmpty()) {
             m_socket->writeDatagram(encoded, m_relayAddress, m_relayPort);
+            m_totalBytesSent += encoded.size();
+        }
         return;
     }
     case UdpMediaFrame::Type::Pong: {
+        peer.pongsReceived++;
         if (peer.state != UdpPeerState::Active) {
             peer.state = UdpPeerState::Active;
             emit peerStateChanged(*senderId, UdpPeerState::Active);
+            emit diagnosticEventLogged(
+                QStringLiteral("CARRIER"),
+                QStringLiteral("Peer %1 UDP carrier is now ACTIVE via Pong reply")
+                    .arg(senderId->toHex().left(8)),
+                QStringLiteral("INFO"));
             qCDebug(mediaLog) << "UDP path to peer" << senderId->toHex() << "became Active";
         }
         if (decoded->payload.size() == sizeof(qint64)) {
@@ -349,12 +461,33 @@ void UdpCallMediaPath::handleDatagram(const QByteArray &datagram)
             std::memcpy(&sentMs, decoded->payload.constData(), sizeof(qint64));
             const qint64 sample = current - sentMs;
             if (sample >= 0) {
+                const double sampleMs = static_cast<double>(sample);
+                peer.lastRawRttMs = sampleMs;
                 constexpr double alpha = 0.125;
                 if (!peer.rttInitialized) {
-                    peer.rttMs = static_cast<double>(sample);
+                    peer.rttMs = sampleMs;
+                    peer.minRttMs = sampleMs;
+                    peer.maxRttMs = sampleMs;
                     peer.rttInitialized = true;
                 } else {
-                    peer.rttMs = (1.0 - alpha) * peer.rttMs + alpha * static_cast<double>(sample);
+                    peer.minRttMs = std::min(peer.minRttMs, sampleMs);
+                    peer.maxRttMs = std::max(peer.maxRttMs, sampleMs);
+
+                    // Lag spike detection:
+                    // If sample > 100ms AND (sample > 1.5 * baseline EMA or sample - baseline > 40ms)
+                    if (sampleMs > 100.0 && (sampleMs > 1.5 * peer.rttMs || (sampleMs - peer.rttMs) > 40.0)) {
+                        peer.lagSpikeCount++;
+                        emit lagSpikeDetected(*senderId, sampleMs, peer.rttMs);
+                        emit diagnosticEventLogged(
+                            QStringLiteral("SPIKE"),
+                            QStringLiteral("LATENCY SPIKE DETECTED: %1 ms (baseline: %2 ms, delta: +%3 ms)")
+                                .arg(sampleMs, 0, 'f', 1)
+                                .arg(peer.rttMs, 0, 'f', 1)
+                                .arg(sampleMs - peer.rttMs, 0, 'f', 1),
+                            QStringLiteral("SPIKE"));
+                    }
+
+                    peer.rttMs = (1.0 - alpha) * peer.rttMs + alpha * sampleMs;
                 }
                 emit rttChanged(*senderId, peer.rttMs);
             }
@@ -364,6 +497,10 @@ void UdpCallMediaPath::handleDatagram(const QByteArray &datagram)
     case UdpMediaFrame::Type::Bye: {
         peer.state = UdpPeerState::Suspended;
         emit peerStateChanged(*senderId, UdpPeerState::Suspended);
+        emit diagnosticEventLogged(
+            QStringLiteral("CARRIER"),
+            QStringLiteral("Peer %1 sent Bye; path suspended").arg(senderId->toHex().left(8)),
+            QStringLiteral("INFO"));
         return;
     }
     case UdpMediaFrame::Type::Hello:

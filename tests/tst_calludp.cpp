@@ -555,6 +555,105 @@ private slots:
 
         QVERIFY(mediaReceived);
     }
+
+    void telemetryTrackingAndSpikeDetection()
+    {
+        auto ctx = RelayTestContext::create();
+        QVERIFY(ctx->udpPort > 0);
+
+        const auto dev1 = DeviceId::generate();
+        const auto dev2 = DeviceId::generate();
+
+        UdpCallMediaPath path1(dev1);
+        UdpCallMediaPath path2(dev2);
+        path1.setRelayEndpoint(QHostAddress::LocalHost, ctx->udpPort);
+        path2.setRelayEndpoint(QHostAddress::LocalHost, ctx->udpPort);
+
+        QSignalSpy eventSpy(&path1, &UdpCallMediaPath::diagnosticEventLogged);
+
+        const auto tok1 = ctx->server->udpMediaService()->mintToken(dev1);
+        const auto tok2 = ctx->server->udpMediaService()->mintToken(dev2);
+
+        path1.onTokenReceived(tok1);
+        path2.onTokenReceived(tok2);
+
+        path1.startProbing(dev2);
+        path2.startProbing(dev1);
+
+        QTRY_VERIFY_WITH_TIMEOUT(path1.isPeerActive(dev2), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(path2.isPeerActive(dev1), 5000);
+
+        // Verify telemetry tracking
+        auto telem = path1.peerTelemetry(dev2);
+        QVERIFY(telem.has_value());
+        QCOMPARE(telem->state, UdpPeerState::Active);
+        QVERIFY(telem->pingsSent >= 1);
+        QVERIFY(telem->pongsReceived >= 1);
+        QVERIFY(telem->rttMs >= 0.0);
+        QVERIFY(path1.firstPeer().has_value());
+        QCOMPARE(*path1.firstPeer(), dev2);
+        QVERIFY(path1.totalBytesSent() > 0);
+        QVERIFY(path1.totalBytesReceived() > 0);
+
+        // Test manual triggerPing
+        const quint64 initialPings = telem->pingsSent;
+        path1.triggerPing(dev2);
+        auto updatedTelem = path1.peerTelemetry(dev2);
+        QVERIFY(updatedTelem.has_value());
+        QCOMPARE(updatedTelem->pingsSent, initialPings + 1);
+
+        // Verify diagnostic events were logged
+        QVERIFY(eventSpy.count() > 0);
+    }
+
+    void callEngineStatsAndCurrentCallId()
+    {
+        auto ctx = RelayTestContext::create();
+        const auto conv = ConversationId::generate();
+
+        TestEndpoint alice;
+        TestEndpoint bob;
+        alice.build(ctx->udpPort);
+        bob.build(ctx->udpPort);
+        alice.transport->peer = bob.transport.get();
+        bob.transport->peer = alice.transport.get();
+
+        const auto tok1 = ctx->server->udpMediaService()->mintToken(alice.deviceId);
+        const auto tok2 = ctx->server->udpMediaService()->mintToken(bob.deviceId);
+        alice.udpPath->onTokenReceived(tok1);
+        bob.udpPath->onTokenReceived(tok2);
+
+        // Alice places call
+        QVERIFY(alice.engine->placeCall(peerFor(conv, bob.deviceId, QStringLiteral("Bob"))));
+        QVERIFY(alice.engine->currentCallId().has_value());
+        bob.engine->acceptCall();
+
+        alice.udpPath->startProbing(bob.deviceId);
+        bob.udpPath->startProbing(alice.deviceId);
+        QTRY_VERIFY_WITH_TIMEOUT(alice.udpPath->isPeerActive(bob.deviceId), 5000);
+
+        // Exchange audio frames
+        const AudioFrame tone =
+            AudioConvert::toFrames(AudioTest::tone(20, 440.0, 0.5)).first();
+        alice.speak(tone);
+        QTRY_VERIFY(alice.transport->udpMediaSent > 0);
+        QTRY_COMPARE(bob.engine->state(), CallState::Active);
+
+        bob.speak(tone);
+        QTRY_VERIFY(bob.transport->udpMediaSent > 0);
+        QTRY_COMPARE(alice.engine->state(), CallState::Active);
+
+        // Check sessionStats and jitterStats
+        auto sStats = alice.engine->sessionStats();
+        QVERIFY(sStats.has_value());
+        QVERIFY(sStats->framesCaptured > 0);
+
+        auto jStats = bob.engine->jitterStats();
+        QVERIFY(jStats.has_value());
+        QVERIFY(jStats->targetDepth > 0);
+
+        alice.engine->hangUp();
+    }
 };
 
 QTEST_MAIN(CallUdpTest)

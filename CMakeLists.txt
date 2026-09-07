@@ -28,7 +28,7 @@ if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
     qt_policy(SET QTP0004 NEW)
 endif()
 
-set_source_files_properties(qml/OpenChat/Theme.qml PROPERTIES
+set_source_files_properties(qml/OpenChat/Theme.qml qml/OpenChat/VocalFx.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
 )
 
@@ -70,6 +70,10 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/Main.qml
         qml/OpenChat/Onboarding.qml
         qml/OpenChat/Theme.qml
+        qml/OpenChat/VocalFx.qml
+        qml/OpenChat/components/VocalFxPanel.qml
+        qml/OpenChat/components/VocalFxPicker.qml
+        qml/OpenChat/components/VoiceEffectsMenu.qml
         qml/OpenChat/components/PresenceBead.qml
         qml/OpenChat/components/Avatar.qml
         qml/OpenChat/components/AeroTextField.qml
@@ -78,6 +82,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/AeroSlider.qml
         qml/OpenChat/components/AeroMenu.qml
         qml/OpenChat/components/AeroMenuItem.qml
+        qml/OpenChat/components/AeroMenuSetting.qml
         qml/OpenChat/components/MicrophoneContextMenu.qml
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/ContactSidebar.qml

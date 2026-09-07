@@ -270,11 +270,9 @@ Window {
             }
         }
 
-        // Settings detail pane: the title and element rows of the category
-        // selected in the sidebar. Most element rows are still visual stubs —
-        // a label and a muted disclosure chevron — until their controls are
-        // wired to real preferences; Appearance → Theme and Audio & Video →
-        // Microphone are live.
+        // Settings overview rows navigate to dedicated subcategory pages.
+        // Theme and Input have live controls; Custom Vocal FX stores preset
+        // designs. Other leaf settings retain their existing placeholder rows.
         Item {
             id: settingsView
             objectName: "settingsView"
@@ -305,7 +303,7 @@ Window {
                     objectName: "settingsDetailTitle"
                     anchors.left: parent.left
                     anchors.right: parent.right
-                    text: root.chatController.currentSettingsCategoryName
+                    text: root.chatController.currentSettingsPageName
                     color: Theme.textPrimary
                     font.family: Theme.uiFont
                     font.pixelSize: 22
@@ -326,6 +324,7 @@ Window {
                 // Scrolls, because a category with a real panel in it (Audio &
                 // Video) is taller than the minimum window.
                 Flickable {
+                    id: settingsScroll
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: settingsTitleRule.bottom
@@ -334,6 +333,10 @@ Window {
                     contentHeight: settingsRows.height
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
+                    Connections {
+                        target: root.chatController
+                        function onCurrentSettingsCategoryChanged() { settingsScroll.contentY = 0; }
+                    }
 
                 Column {
                     id: settingsRows
@@ -344,16 +347,51 @@ Window {
 
                         Item {
                             id: settingsElementRow
+                            property int rowIndex: index
                             property string elementLabel: modelData
+                            readonly property bool navigationRow: root.chatController.currentSettingsSubcategory < 0
                             readonly property bool themeSetting:
-                                root.chatController.currentSettingsCategoryName === "Appearance"
+                                !navigationRow && root.chatController.currentSettingsCategoryName === "Appearance"
                                 && elementLabel === "Theme"
                             readonly property bool microphoneSetting:
-                                root.chatController.currentSettingsCategoryName === "Audio & Video"
-                                && elementLabel === "Microphone"
+                                !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
+                                && elementLabel === "Input"
+                            readonly property bool vocalFxSetting:
+                                !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
+                                && elementLabel === "Custom Vocal FX"
                             width: parent.width
                             height: microphoneSetting ? microphonePanel.height
-                                                      : (themeSetting ? 70 : 48)
+                                  : vocalFxSetting ? vocalFxPanel.height : (themeSetting ? 70 : 48)
+                            activeFocusOnTab: navigationRow
+                            Accessible.role: navigationRow ? Accessible.Button : Accessible.Pane
+                            Accessible.name: elementLabel
+                            Accessible.onPressAction: openPage()
+                            Keys.onReturnPressed: openPage()
+                            Keys.onSpacePressed: openPage()
+                            function openPage() {
+                                if (!navigationRow) return;
+                                if (root.chatController.currentSettingsCategory < 0)
+                                    root.chatController.setCurrentSettingsCategory(rowIndex);
+                                else
+                                    root.chatController.setCurrentSettingsSubcategory(rowIndex);
+                            }
+
+                            Rectangle {
+                                anchors.fill: parent
+                                visible: settingsElementRow.navigationRow
+                                         && (settingsRowMouse.containsMouse || settingsElementRow.activeFocus)
+                                color: Theme.navSelected
+                                radius: 4
+                            }
+
+                            Loader {
+                                id: vocalFxPanel
+                                active: settingsElementRow.vocalFxSetting
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: item ? item.implicitHeight : 0
+                                sourceComponent: VocalFxPanel {}
+                            }
 
                             // Built only on its own row: the panel is the one
                             // settings control with a device behind it.
@@ -367,7 +405,7 @@ Window {
                             }
 
                             Text {
-                                visible: !settingsElementRow.microphoneSetting
+                                visible: !settingsElementRow.microphoneSetting && !settingsElementRow.vocalFxSetting
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.verticalCenterOffset: settingsElementRow.themeSetting ? -10 : 0
@@ -403,6 +441,7 @@ Window {
                             Item {
                                 visible: !settingsElementRow.themeSetting
                                          && !settingsElementRow.microphoneSetting
+                                         && !settingsElementRow.vocalFxSetting
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 14
@@ -425,6 +464,14 @@ Window {
                                 anchors.bottom: parent.bottom
                                 height: 1
                                 color: Theme.softRule
+                            }
+                            MouseArea {
+                                id: settingsRowMouse
+                                anchors.fill: parent
+                                enabled: settingsElementRow.navigationRow
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: settingsElementRow.openPage()
                             }
                         }
                     }

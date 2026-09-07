@@ -77,34 +77,40 @@ AeroMenu {
         onMoved: position => micMenu.settings.gain = position * 2
     }
     AeroMenu {
+        id: enhancementMenu
         title: "Mic Enhancement"
         objectName: "micEnhancementMenu"
-        AeroMenuItem {
+        AeroMenuSetting {
+            settingsMenu: enhancementMenu
             objectName: "callStudioVoice"
             text: "Studio Voice"
             checkable: true
             checked: micMenu.settings.studioVoice
             onTriggered: micMenu.settings.studioVoice = checked
         }
-        AeroMenuItem {
+        AeroMenuSetting {
+            settingsMenu: enhancementMenu
             text: "Noise reduction"
             checkable: true
             checked: micMenu.settings.noiseReduction
             onTriggered: micMenu.settings.noiseReduction = checked
         }
-        AeroMenuItem {
+        AeroMenuSetting {
+            settingsMenu: enhancementMenu
             text: "Automatic gain"
             checkable: true
             checked: micMenu.settings.automaticGain
             onTriggered: micMenu.settings.automaticGain = checked
         }
-        AeroMenuItem {
+        AeroMenuSetting {
+            settingsMenu: enhancementMenu
             text: "Compressor"
             checkable: true
             checked: micMenu.settings.compressor
             onTriggered: micMenu.settings.compressor = checked
         }
-        AeroMenuItem {
+        AeroMenuSetting {
+            settingsMenu: enhancementMenu
             objectName: "callNoiseGate"
             text: "Noise gate"
             checkable: true
@@ -125,26 +131,7 @@ AeroMenu {
         padding: 4
         contentItem: Rectangle { implicitHeight: 1; color: Theme.rule }
     }
-    AeroMenu {
-        id: effectsMenu
-        objectName: "voiceEffectsMenu"
-        title: "Voice effects"
-        width: 180
-        Instantiator {
-            model: micMenu.settings.voiceEffects
-            delegate: AeroMenuItem {
-                required property var modelData
-                objectName: "voiceEffect_" + modelData.id
-                text: modelData.name
-                checkable: true
-                autoExclusive: true
-                checked: micMenu.settings.voiceEffect === modelData.id
-                onTriggered: micMenu.settings.voiceEffect = modelData.id
-            }
-            onObjectAdded: (index, object) => effectsMenu.insertItem(index, object)
-            onObjectRemoved: (index, object) => effectsMenu.removeItem(object)
-        }
-    }
+    VoiceEffectsMenu {}
     SettingSlider {
         objectName: "callEffectIntensity"
         label: "Effect intensity"

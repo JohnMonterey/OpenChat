@@ -84,7 +84,7 @@ QStringList settingsElementsForCategory(int index)
         return {QStringLiteral("Message notifications"), QStringLiteral("Call notifications"),
                 QStringLiteral("Notification sounds"), QStringLiteral("Do not disturb")};
     case 4:
-        return {QStringLiteral("Microphone"), QStringLiteral("Speakers"),
+        return {QStringLiteral("Input"), QStringLiteral("Output"), QStringLiteral("Custom Vocal FX"),
                 QStringLiteral("Camera"), QStringLiteral("Ringtone")};
     case 5:
         return {QStringLiteral("Theme"), QStringLiteral("Chat font size"),
@@ -825,7 +825,26 @@ QString ChatController::currentSettingsCategoryName() const
 
 QStringList ChatController::currentSettingsElements() const
 {
+    if (m_currentSettingsCategory < 0)
+        return settingsCategoryNames();
+    const auto elements = settingsSubcategories();
+    if (m_currentSettingsSubcategory >= 0)
+        return {elements.value(m_currentSettingsSubcategory)};
+    return elements;
+}
+
+QStringList ChatController::settingsSubcategories() const
+{
     return settingsElementsForCategory(m_currentSettingsCategory);
+}
+
+QString ChatController::currentSettingsPageName() const
+{
+    if (m_currentSettingsCategory < 0)
+        return QStringLiteral("Settings");
+    if (m_currentSettingsSubcategory >= 0)
+        return settingsSubcategories().value(m_currentSettingsSubcategory);
+    return currentSettingsCategoryName();
 }
 
 void ChatController::setCurrentSettingsCategory(int index)
@@ -834,10 +853,29 @@ void ChatController::setCurrentSettingsCategory(int index)
     // valid; only a genuine change notifies.
     if (index < 0 || index >= settingsCategoryNames().size())
         return;
-    if (index == m_currentSettingsCategory)
+    if (index == m_currentSettingsCategory && m_currentSettingsSubcategory == -1)
         return;
 
     m_currentSettingsCategory = index;
+    m_currentSettingsSubcategory = -1;
+    emit currentSettingsCategoryChanged();
+}
+
+void ChatController::setCurrentSettingsSubcategory(int index)
+{
+    if (index < 0 || index >= settingsSubcategories().size()
+        || index == m_currentSettingsSubcategory)
+        return;
+    m_currentSettingsSubcategory = index;
+    emit currentSettingsCategoryChanged();
+}
+
+void ChatController::showSettingsCategories()
+{
+    if (m_currentSettingsCategory == -1)
+        return;
+    m_currentSettingsCategory = -1;
+    m_currentSettingsSubcategory = -1;
     emit currentSettingsCategoryChanged();
 }
 

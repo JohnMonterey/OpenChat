@@ -48,6 +48,7 @@ qt_add_executable(OpenChat
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
     src/app/MicrophoneSettings.cpp
+    src/app/VoiceEffectHost.cpp
 )
 
 if(APPLE)
@@ -436,7 +437,8 @@ add_library(openchat_call STATIC
 )
 target_include_directories(openchat_call PUBLIC src)
 target_link_libraries(openchat_call
-    PUBLIC openchat_media openchat_network openchat_domain Qt6::Core Qt6::Gui Qt6::Multimedia
+    PUBLIC openchat_media openchat_network openchat_domain openchat_effects
+           Qt6::Core Qt6::Gui Qt6::Multimedia
     PRIVATE OpenSSL::Crypto
 )
 qt_add_resources(openchat_call "openchat_call_sounds"
@@ -885,6 +887,7 @@ add_executable(tst_qmlload
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
     src/app/MicrophoneSettings.cpp
+    src/app/VoiceEffectHost.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE

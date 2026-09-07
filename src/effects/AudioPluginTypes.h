@@ -156,6 +156,13 @@ struct AudioPluginDescriptor final {
 struct VoiceEffectStage final {
     AudioPluginId id;
     bool enabled = true;
+    // How much of this stage's output survives, 0 dry to 1 wet, blended
+    // against what went into it.
+    //
+    // Per stage rather than once for the chain, because the useful setting
+    // differs per effect in the same rack: a gate is meaningless at anything
+    // but fully wet, while the reverb after it is unusable anywhere near it.
+    double mix = 1.0;
     QByteArray state;
     QString stateVersion;
     QHash<quint32, double> parameters;

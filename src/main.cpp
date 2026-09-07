@@ -46,6 +46,7 @@
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
 #include "app/MicrophoneSettings.h"
+#include "app/VoiceEffectHost.h"
 #include "call/ScreenCanvas.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
@@ -73,6 +74,18 @@ void registerQmlTypes()
                 return shared;
             }
             return new OpenChat::MicrophoneSettings;
+        });
+    // The plugin host, on the same terms as the microphone settings: shared
+    // with the call engine when main() has made one, and its own object only
+    // for a bare QML load.
+    qmlRegisterSingletonType<OpenChat::VoiceEffectHost>(
+        "OpenChat.Native", 1, 0, "VoiceEffectHost",
+        [](QQmlEngine *, QJSEngine *) -> QObject * {
+            if (auto *shared = OpenChat::VoiceEffectHost::instance()) {
+                QQmlEngine::setObjectOwnership(shared, QQmlEngine::CppOwnership);
+                return shared;
+            }
+            return new OpenChat::VoiceEffectHost;
         });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
@@ -451,6 +464,14 @@ private:
                              m_callEngine.get(), [this] {
                                  m_callEngine->setMicrophone(m_microphoneSettings->processing());
                              });
+            // The custom vocal FX chain, on the same footing: the engine
+            // follows what the editor has applied, and builds it per call.
+            m_callEngine->setVoiceEffectFactory(m_voiceEffects->factory());
+            QObject::connect(m_voiceEffects.get(),
+                             &OpenChat::VoiceEffectHost::factoryChanged,
+                             m_callEngine.get(), [this] {
+                                 m_callEngine->setVoiceEffectFactory(m_voiceEffects->factory());
+                             });
         } else {
             qWarning().noquote() << QStringLiteral(
                 "OpenChat: no usable audio input/output was found; voice calls are "
@@ -633,6 +654,11 @@ private:
     // must outlive any engine.
     std::unique_ptr<OpenChat::MicrophoneSettings> m_microphoneSettings =
         std::make_unique<OpenChat::MicrophoneSettings>();
+    // The scanned plugin inventory, the user's consents, and the chain they
+    // have applied. Declared beside the microphone settings and ahead of the
+    // engine for the same reason: the engine reads it when a call starts.
+    std::unique_ptr<OpenChat::VoiceEffectHost> m_voiceEffects =
+        std::make_unique<OpenChat::VoiceEffectHost>();
     // The voice-call stack. Declared after the engine/relay they borrow, so both
     // are torn down while the SyncEngine and RelayClient are still alive; the
     // engine is destroyed before the transport it holds a reference to.

@@ -97,6 +97,9 @@ private:
     struct LiveStage final {
         std::shared_ptr<AudioPluginModule> module;
         std::unique_ptr<AudioPluginInstance> instance;
+        // Wet/dry for this stage alone, already clamped at build time so the
+        // frame path never validates it.
+        double mix = 1.0;
     };
 
     std::vector<LiveStage> m_stages;
@@ -105,6 +108,9 @@ private:
     // One scratch buffer for the whole chain: each stage reads and writes it in
     // place, so N plugins cost one conversion in and one out rather than N.
     std::vector<float> m_scratch;
+    // One stage's input, kept only while a stage is partly dry and needs
+    // something to blend against. Empty when every stage is fully wet.
+    std::vector<float> m_dry;
 
     int m_latencySamples = 0;
     quint64 m_missedFrames = 0;

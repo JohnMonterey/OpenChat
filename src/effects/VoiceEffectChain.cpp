@@ -104,8 +104,18 @@ bool VoiceEffectChain::build(const VoiceEffectChainConfig &config,
         status.latencySamples = instance->latencySamples();
         m_latencySamples += status.latencySamples;
         m_stageStatus.append(status);
-        m_stages.push_back(LiveStage{std::move(module), std::move(instance)});
+        m_stages.push_back(LiveStage{std::move(module), std::move(instance),
+                                     std::clamp(stage.mix, 0.0, 1.0)});
     }
+    // Only allocated when some stage is actually partly dry, because the blend
+    // is the only thing that needs a copy of a stage's input.
+    const bool anyBlended =
+        std::any_of(m_stages.begin(), m_stages.end(),
+                    [](const LiveStage &stage) { return stage.mix < 1.0; });
+    if (anyBlended)
+        m_dry.assign(CallAudioFormat::samplesPerFrame, 0.0f);
+    else
+        m_dry.clear();
 
     m_running = !m_stages.empty();
     if (!m_running && !m_stageStatus.isEmpty()) {
@@ -129,6 +139,7 @@ void VoiceEffectChain::clear() noexcept
         it->instance.reset();
     m_stages.clear();
     m_stageStatus.clear();
+    m_dry.clear();
     m_latencySamples = 0;
     m_missedFrames = 0;
     m_consecutiveOverruns = 0;
@@ -156,8 +167,22 @@ void VoiceEffectChain::process(const AudioFrame &in, AudioFrame &out) noexcept
 
     QElapsedTimer timer;
     timer.start();
-    for (LiveStage &stage : m_stages)
+    for (LiveStage &stage : m_stages) {
+        // A fully wet stage is the common case and processes in place. Anything
+        // less keeps the stage's input to blend back against its output, so a
+        // reverb can sit behind the voice rather than replacing it.
+        const bool blended = stage.mix < 1.0 && !m_dry.empty();
+        if (blended)
+            std::copy(m_scratch.begin(), m_scratch.end(), m_dry.begin());
         stage.instance->processMono(m_scratch.data());
+        if (!blended)
+            continue;
+        const float wet = static_cast<float>(stage.mix);
+        const float dry = 1.0f - wet;
+        for (int i = 0; i < CallAudioFormat::samplesPerFrame; ++i)
+            m_scratch[static_cast<size_t>(i)] =
+                m_scratch[static_cast<size_t>(i)] * wet + m_dry[static_cast<size_t>(i)] * dry;
+    }
     const qint64 elapsedUs = timer.nsecsElapsed() / 1000;
 
     // NaN checked once, on the chain's output, rather than after every stage:

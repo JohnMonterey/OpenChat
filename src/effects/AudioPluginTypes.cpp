@@ -164,6 +164,7 @@ QJsonObject VoiceEffectStage::toJson() const
     QJsonObject object{
         {QStringLiteral("id"), id.toString()},
         {QStringLiteral("enabled"), enabled},
+        {QStringLiteral("mix"), mix},
         {QStringLiteral("parameters"), parameterObject},
     };
     if (!state.isEmpty()) {
@@ -178,6 +179,11 @@ VoiceEffectStage VoiceEffectStage::fromJson(const QJsonObject &object)
     VoiceEffectStage stage;
     stage.id = AudioPluginId::fromString(object.value(QStringLiteral("id")).toString());
     stage.enabled = object.value(QStringLiteral("enabled")).toBool(true);
+    // Clamped rather than rejected: a mix outside the range is a stored
+    // document somebody hand-edited, and the nearest legal value is what they
+    // were reaching for.
+    const double storedMix = object.value(QStringLiteral("mix")).toDouble(1.0);
+    stage.mix = std::isfinite(storedMix) ? std::clamp(storedMix, 0.0, 1.0) : 1.0;
     stage.stateVersion = object.value(QStringLiteral("stateVersion")).toString();
 
     const QByteArray encoded = object.value(QStringLiteral("state")).toString().toLatin1();

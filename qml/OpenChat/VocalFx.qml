@@ -4,12 +4,17 @@ import QtQuick
 import QtCore
 import OpenChat.Native
 
-// UI-owned preset documents. Native hosting can attach a backend without
-// changing the editor or importing the VST branch into this design pass.
+// UI-owned preset documents, hosted by the native VoiceEffectHost.
+//
+// The documents stay here and everything that touches a file stays there: the
+// editor is allowed to be optimistic about a preset, and the host is not.
 QtObject {
     id: fx
     readonly property int slotCount: 10
-    property var backend: null
+    // The native host, when this build has one. A bare QML load without the
+    // application registers no singleton, and the editor still works on
+    // built-in FX with plugin scanning reporting itself as unavailable.
+    property var backend: typeof VoiceEffectHost !== "undefined" ? VoiceEffectHost : null
     property var presets: []
     property string selectedPresetId: ""
     property string activePresetId: ""

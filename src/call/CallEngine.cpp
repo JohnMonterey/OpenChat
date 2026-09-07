@@ -493,6 +493,20 @@ void CallEngine::setMicrophone(const MicrophoneProcessor::Config &config)
     m_microphone.setConfig(config);
 }
 
+void CallEngine::setVoiceEffectFactory(VoiceEffectFactory factory)
+{
+    // Only the factory is replaced. A chain already built for a running call
+    // keeps running: tearing one down mid-frame would dlclose a library the
+    // stack is inside, and rebuilding one costs however long a plugin takes to
+    // activate — neither belongs in the middle of a conversation.
+    m_voiceEffectFactory = std::move(factory);
+}
+
+VoiceEffectStatus CallEngine::voiceEffectStatus() const
+{
+    return m_voiceEffect ? m_voiceEffect->status() : VoiceEffectStatus{};
+}
+
 void CallEngine::setMuted(bool muted)
 {
     if (m_muted == muted)
@@ -1334,6 +1348,15 @@ bool CallEngine::startCapture()
     // A fresh device means a fresh gate: nothing from the last call's tail
     // should decide whether this call's first words get through.
     m_microphone.reset();
+    // The plugin chain is built here, once, rather than per frame: activating a
+    // plugin can take milliseconds and allocate, and neither is survivable on
+    // the path a captured frame takes. A chain that will not prepare is dropped
+    // and the call goes out dry, which is the same outcome as no chain at all.
+    if (m_voiceEffectFactory) {
+        m_voiceEffect = m_voiceEffectFactory();
+        if (m_voiceEffect && !m_voiceEffect->prepare())
+            m_voiceEffect.reset();
+    }
     m_capture->onFrame = [this](const AudioFrame &frame) { onCapturedFrame(frame); };
     if (!m_capture->start()) {
         m_capture->onFrame = nullptr;
@@ -1471,6 +1494,10 @@ void CallEngine::stopCapture()
         m_capture->stop();
         m_capture.reset();
     }
+    // Only once the device can no longer deliver a frame: the chain is what
+    // that frame would be handed to, and unloading a plugin while a frame is
+    // inside it unloads the code the stack is running.
+    m_voiceEffect.reset();
     m_videoTimeout->stop();
     m_videoSession.reset();
     emit remoteVideoFrame(QImage());
@@ -1512,8 +1539,13 @@ void CallEngine::onCapturedFrame(const AudioFrame &captured)
     if (m_state != CallState::Connecting && m_state != CallState::Active)
         return;
     // Gain and gate once, here, so every session below encodes the same
-    // frame and a closed gate sends real silence to the whole mesh.
-    const AudioFrame frame = m_muted ? silentAudioFrame() : m_microphone.process(captured);
+    // frame and a closed gate sends real silence to the whole mesh. The plugin
+    // chain runs last, on the gated frame: a gate that fed an effect its own
+    // reverb tail would keep retriggering on it, and a muted microphone must
+    // stay silent whatever the chain would otherwise make of the silence.
+    AudioFrame frame = m_muted ? silentAudioFrame() : m_microphone.process(captured);
+    if (!m_muted && m_voiceEffect)
+        frame = m_voiceEffect->process(frame);
     if (m_group) {
         // The same frame, sealed separately for each member: every pair has its
         // own key, and nobody's audio is ever forwarded by a third device.

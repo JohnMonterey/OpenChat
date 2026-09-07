@@ -9,6 +9,7 @@
 #include "call/CallTransport.h"
 #include "call/CallTypes.h"
 #include "domain/Identifiers.h"
+#include "effects/VoiceEffect.h"
 #include "media/MicrophoneProcessor.h"
 
 #include <QObject>
@@ -239,6 +240,21 @@ public:
     // Whether the gate is currently letting the microphone through. True
     // outside a call and whenever the gate is off.
     [[nodiscard]] bool isMicrophoneGateOpen() const noexcept { return m_microphone.isGateOpen(); }
+
+    // The plugin chain the outgoing voice runs through, after gain, gate and
+    // the built-in effects.
+    //
+    // A factory rather than an effect, because each call builds its own: a
+    // plugin that failed in one call does not carry that failure into the next,
+    // and a chain edited while a call is running does not mutate under it. Pass
+    // an empty factory (the default) to send the microphone unprocessed.
+    //
+    // Applies from the next call, not the current one — swapping a plugin chain
+    // under a live conversation is how a call gets a burst of silence.
+    void setVoiceEffectFactory(VoiceEffectFactory factory);
+    // What the running chain is doing, for a settings panel to report. Idle
+    // outside a call and whenever no factory is set.
+    [[nodiscard]] VoiceEffectStatus voiceEffectStatus() const;
     void sendVideoFrame(const QImage &image);
 
     // --- Screen sharing ----------------------------------------------------
@@ -476,6 +492,10 @@ private:
     // Gain and gate, applied on the owning thread in onCapturedFrame() before
     // the frame reaches any session — one gate for the whole mesh.
     MicrophoneProcessor m_microphone;
+    // The plugin chain, built when capture starts and destroyed when it stops,
+    // so somebody else's code is loaded only for as long as a call needs it.
+    VoiceEffectFactory m_voiceEffectFactory;
+    std::unique_ptr<VoiceEffect> m_voiceEffect;
     std::unique_ptr<AudioPlaybackSink> m_playback;
     CallSoundBoard m_sounds;
 

@@ -25,6 +25,7 @@
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
 #include "app/MicrophoneSettings.h"
+#include "app/VoiceEffectHost.h"
 #include <QQmlExpression>
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
@@ -2451,6 +2452,9 @@ int main(int argc, char **argv)
     qmlRegisterSingletonType<OpenChat::MicrophoneSettings>(
         "OpenChat.Native", 1, 0, "MicrophoneSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MicrophoneSettings; });
+    qmlRegisterSingletonType<OpenChat::VoiceEffectHost>(
+        "OpenChat.Native", 1, 0, "VoiceEffectHost",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::VoiceEffectHost; });
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");

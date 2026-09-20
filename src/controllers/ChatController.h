@@ -106,6 +106,9 @@ public:
         Quarantined,
         DeviceChanged,
         StorageFull,
+        // The relay no longer accepts this device: the account was signed in to
+        // on another device, or it no longer exists there.
+        SignedOut,
     };
     Q_ENUM(SessionState)
 

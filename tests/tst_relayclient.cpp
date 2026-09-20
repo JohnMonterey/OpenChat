@@ -32,6 +32,7 @@ using namespace std::chrono;
 // so those signal payloads are captured through lambdas instead of QSignalSpy.
 Q_DECLARE_METATYPE(OpenChat::RelayTransportError)
 Q_DECLARE_METATYPE(OpenChat::RelayRegistrationError)
+Q_DECLARE_METATYPE(OpenChat::RelayLoginError)
 Q_DECLARE_METATYPE(OpenChat::RelayDirectoryError)
 Q_DECLARE_METATYPE(OpenChat::RelayClaimError)
 Q_DECLARE_METATYPE(OpenChat::RelaySession)
@@ -219,6 +220,10 @@ private slots:
 
     void registerAccountSucceeds();
     void registerAccountHandleTakenFails();
+    void loginAccountSendsKeyAndReportsAccount();
+    void loginAccountMapsFailures_data();
+    void loginAccountMapsFailures();
+    void loginAccountRefusesInsecureEndpoint();
     void publishKeyPackageSucceeds();
     void keyPackageSupplyHintIsValidated();
     void keyPackageCountRejectsMalformedResponses();
@@ -287,6 +292,7 @@ void RelayClientTest::initTestCase()
 {
     qRegisterMetaType<RelayTransportError>();
     qRegisterMetaType<RelayRegistrationError>();
+    qRegisterMetaType<RelayLoginError>();
     qRegisterMetaType<RelayDirectoryError>();
     qRegisterMetaType<RelayClaimError>();
     qRegisterMetaType<RelaySession>();
@@ -885,8 +891,9 @@ void RelayClientTest::registerAccountSucceeds()
     const QString handle = QStringLiteral("alice");
     const QByteArray signingKey(32, '\x11');
     const QByteArray credential("mls-credential-bytes");
+    const QByteArray passwordKey(32, '\x33');
 
-    client.registerAccount(account, device, handle, signingKey, credential);
+    client.registerAccount(account, device, handle, signingKey, credential, passwordKey);
 
     QTRY_COMPARE(registered.count(), 1);
     QCOMPARE(failed.count(), 0);
@@ -912,6 +919,13 @@ void RelayClientTest::registerAccountSucceeds()
     QCOMPARE(map.value(QLatin1StringView("signing_key")).toByteArray(), signingKey);
     QVERIFY(map.value(QLatin1StringView("credential")).isByteArray());
     QCOMPARE(map.value(QLatin1StringView("credential")).toByteArray(), credential);
+    // The account is protected by the stretched key (as bytes, tagged with the
+    // stretch version) -- and by nothing resembling a password field.
+    QVERIFY(map.value(QLatin1StringView("password_key")).isByteArray());
+    QCOMPARE(map.value(QLatin1StringView("password_key")).toByteArray(), passwordKey);
+    QCOMPARE(map.value(QLatin1StringView("password_kdf")).toInteger(), 1);
+    QVERIFY(!map.contains(QLatin1StringView("password")));
+    QCOMPARE(map.size(), 7);
 }
 
 void RelayClientTest::registerAccountHandleTakenFails()
@@ -935,12 +949,156 @@ void RelayClientTest::registerAccountHandleTakenFails()
     QSignalSpy failed(&client, &RelayClient::accountRegistrationFailed);
 
     client.registerAccount(AccountId::generate(), DeviceId::generate(), QStringLiteral("taken"),
-                           QByteArray(32, '\x22'), QByteArray("cred"));
+                           QByteArray(32, '\x22'), QByteArray("cred"), QByteArray(32, '\x33'));
 
     QTRY_COMPARE(failed.count(), 1);
     QCOMPARE(failed.first().at(0).value<RelayRegistrationError>(),
              RelayRegistrationError::HandleUnavailable);
     QCOMPARE(registered.count(), 0);
+}
+
+void RelayClientTest::loginAccountSendsKeyAndReportsAccount()
+{
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+
+    const AccountId resolved = AccountId::generate();
+    QCborMap reply;
+    reply.insert(QLatin1StringView("account_id"), resolved.bytes());
+    reply.insert(QLatin1StringView("handle"), QStringLiteral("alice"));
+    server.enqueue(QStringLiteral("/v1/auth/login"), {200, reply.toCborValue().toCbor()});
+
+    RelayEndpoints endpoints;
+    endpoints.authLogin = server.url(QStringLiteral("/v1/auth/login"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+
+    // As with registration, a configured access token must never ride along on
+    // this unauthenticated call.
+    const AccountId provisional = AccountId::generate();
+    RelayClient client(DeviceId::generate(), provisional, endpoints,
+                       fixedCredentials("access-token", "refresh-token"), RelayLimits{},
+                       slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    std::optional<AccountId> reportedAccount;
+    QString reportedHandle;
+    connect(&client, &RelayClient::accountLoggedIn, this,
+            [&](const AccountId &account, const QString &handle) {
+                reportedAccount = account;
+                reportedHandle = handle;
+            });
+    QSignalSpy failed(&client, &RelayClient::accountLoginFailed);
+
+    const DeviceId device = DeviceId::generate();
+    const QByteArray passwordKey(32, '\x33');
+    const QByteArray signingKey(32, '\x11');
+    const QByteArray credential("mls-credential-bytes");
+    client.loginAccount(QStringLiteral("alice"), passwordKey, device, signingKey, credential);
+
+    QTRY_VERIFY(reportedAccount.has_value());
+    QCOMPARE(*reportedAccount, resolved);
+    QCOMPARE(reportedHandle, QStringLiteral("alice"));
+    QCOMPARE(failed.count(), 0);
+    QVERIFY(server.lastAuthorization(QStringLiteral("/v1/auth/login")).isEmpty());
+
+    QCborParserError err{};
+    const QCborValue value =
+        QCborValue::fromCbor(server.lastBody(QStringLiteral("/v1/auth/login")), &err);
+    QCOMPARE(err.error, QCborError::NoError);
+    const QCborMap map = value.toMap();
+    QCOMPARE(map.value(QLatin1StringView("handle")).toString(), QStringLiteral("alice"));
+    QCOMPARE(map.value(QLatin1StringView("password_key")).toByteArray(), passwordKey);
+    QCOMPARE(map.value(QLatin1StringView("password_kdf")).toInteger(), 1);
+    QCOMPARE(map.value(QLatin1StringView("device_id")).toByteArray(), device.bytes());
+    QCOMPARE(map.value(QLatin1StringView("signing_key")).toByteArray(), signingKey);
+    QCOMPARE(map.value(QLatin1StringView("credential")).toByteArray(), credential);
+    // The account is named by the relay, never asserted by the caller.
+    QVERIFY(!map.contains(QLatin1StringView("account_id")));
+    QVERIFY(!map.contains(QLatin1StringView("password")));
+    QCOMPARE(map.size(), 6);
+}
+
+void RelayClientTest::loginAccountMapsFailures_data()
+{
+    QTest::addColumn<int>("status");
+    QTest::addColumn<QByteArray>("body");
+    QTest::addColumn<RelayLoginError>("expected");
+
+    QCborMap noAccount;
+    noAccount.insert(QLatin1StringView("handle"), QStringLiteral("alice"));
+    QCborMap shortAccount;
+    shortAccount.insert(QLatin1StringView("account_id"), QByteArray(15, 'a'));
+    shortAccount.insert(QLatin1StringView("handle"), QStringLiteral("alice"));
+    QCborMap badHandle;
+    badHandle.insert(QLatin1StringView("account_id"), AccountId::generate().bytes());
+    badHandle.insert(QLatin1StringView("handle"), QStringLiteral("not a handle"));
+
+    QTest::newRow("401 wrong username or password")
+        << 401 << QByteArray() << RelayLoginError::InvalidCredentials;
+    QTest::newRow("429 throttled") << 429 << QByteArray() << RelayLoginError::RateLimited;
+    QTest::newRow("400 malformed request") << 400 << QByteArray() << RelayLoginError::InvalidRequest;
+    QTest::newRow("409 device id refused") << 409 << QByteArray() << RelayLoginError::InvalidRequest;
+    QTest::newRow("500") << 500 << QByteArray() << RelayLoginError::Transport;
+    QTest::newRow("200 not cbor") << 200 << QByteArray("<html>") << RelayLoginError::Malformed;
+    QTest::newRow("200 no account") << 200 << noAccount.toCborValue().toCbor()
+                                    << RelayLoginError::Malformed;
+    QTest::newRow("200 short account id") << 200 << shortAccount.toCborValue().toCbor()
+                                          << RelayLoginError::Malformed;
+    QTest::newRow("200 non-canonical handle") << 200 << badHandle.toCborValue().toCbor()
+                                              << RelayLoginError::Malformed;
+}
+
+void RelayClientTest::loginAccountMapsFailures()
+{
+    QFETCH(int, status);
+    QFETCH(QByteArray, body);
+    QFETCH(RelayLoginError, expected);
+
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+    QVERIFY(server.isListening());
+    server.enqueue(QStringLiteral("/v1/auth/login"), {status, body});
+
+    RelayEndpoints endpoints;
+    endpoints.authLogin = server.url(QStringLiteral("/v1/auth/login"));
+    endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints,
+                       fixedCredentials(QByteArray(), QByteArray()), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+    bool loggedIn = false;
+    connect(&client, &RelayClient::accountLoggedIn, this,
+            [&](const AccountId &, const QString &) { loggedIn = true; });
+    QSignalSpy failed(&client, &RelayClient::accountLoginFailed);
+
+    client.loginAccount(QStringLiteral("alice"), QByteArray(32, '\x33'), DeviceId::generate(),
+                        QByteArray(32, '\x11'), QByteArray("cred"));
+
+    QTRY_COMPARE(failed.count(), 1);
+    QCOMPARE(failed.first().at(0).value<RelayLoginError>(), expected);
+    QVERIFY(!loggedIn);
+}
+
+void RelayClientTest::loginAccountRefusesInsecureEndpoint()
+{
+    // A password key must never be posted over plaintext, however the endpoints
+    // came to be misconfigured.
+    RelayEndpoints endpoints;
+    endpoints.authLogin = QUrl(QStringLiteral("http://localhost:1/v1/auth/login"));
+    RelayClient client(DeviceId::generate(), AccountId::generate(), endpoints, {});
+
+    QSignalSpy failed(&client, &RelayClient::accountLoginFailed);
+    QSignalSpy errors(&client, &RelayClient::transportError);
+
+    client.loginAccount(QStringLiteral("alice"), QByteArray(32, '\x33'), DeviceId::generate(),
+                        QByteArray(32, '\x11'), QByteArray("cred"));
+
+    QCOMPARE(failed.count(), 1);
+    QCOMPARE(failed.first().at(0).value<RelayLoginError>(), RelayLoginError::Transport);
+    QCOMPARE(errors.count(), 1);
+    QCOMPARE(errors.first().at(0).value<RelayTransportError>(),
+             RelayTransportError::InsecureEndpoint);
 }
 
 void RelayClientTest::keyPackageSupplyHintIsValidated()

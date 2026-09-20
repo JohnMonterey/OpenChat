@@ -24,6 +24,7 @@ enum class RelayTransportError;
 //   start(AlreadyLive)          -> maintain key package supply until authExpired
 //   authExpired (any time)      -> re-authenticate with backoff, reconnect live
 //   transportError while authenticating -> retry with backoff
+//   deviceRejected while authenticating -> rejected(), then retry only rarely
 //
 // The socket's own reconnect policy handles ordinary link drops; this only
 // steps in when the relay no longer accepts the device's bearer tokens or when
@@ -47,12 +48,22 @@ public:
     void start(Start mode);
 
     [[nodiscard]] bool isAuthenticated() const noexcept { return m_authenticated; }
+    [[nodiscard]] bool isRejected() const noexcept { return m_rejected; }
+
+    static constexpr int rejectedRetryMs = 5 * 60'000;
 
 signals:
     // The device holds valid tokens and the live stream has been requested.
     void linked();
     // An authentication attempt failed; a retry is scheduled.
     void authenticationFailed();
+    // The relay no longer accepts this device (it was retired by a login
+    // elsewhere, or the account is unknown). Retrying cannot fix that, so the
+    // link stops its quick backoff and only re-checks every rejectedRetryMs --
+    // often enough to recover by itself if the cause was a transient
+    // misconfiguration in front of the relay, rare enough not to hammer it.
+    // linked() follows if a later attempt succeeds after all.
+    void rejected();
 
 private:
     void authenticate();
@@ -60,6 +71,7 @@ private:
     void onAuthenticated(const RelaySession &session);
     void onAuthExpired();
     void onTransportError(RelayTransportError error);
+    void onDeviceRejected();
 
     ProfileSession &m_session;
     RelayClient &m_relay;
@@ -67,6 +79,7 @@ private:
     QByteArray m_deviceCredential;
     bool m_authenticating = false;
     bool m_authenticated = false;
+    bool m_rejected = false;
     int m_retryDelayMs = 2'000;
     QList<QMetaObject::Connection> m_connections;
 };

@@ -1,5 +1,7 @@
 #include "diagnostics/Logging.h"
+#include "domain/Handle.h"
 #include "network/RelayClient.h"
+#include "security/PasswordKey.h"
 
 #include <QAbstractSocket>
 #include <QCborArray>
@@ -123,6 +125,7 @@ RelayEndpoints RelayEndpoints::fromBaseUrl(const QString &base)
 {
     RelayEndpoints endpoints;
     endpoints.accounts = QUrl(base + QStringLiteral("/accounts"));
+    endpoints.authLogin = QUrl(base + QStringLiteral("/auth/login"));
     endpoints.authChallenge = QUrl(base + QStringLiteral("/auth/challenge"));
     endpoints.authComplete = QUrl(base + QStringLiteral("/auth/complete"));
     endpoints.authRefresh = QUrl(base + QStringLiteral("/auth/refresh"));
@@ -147,7 +150,8 @@ bool RelayEndpoints::isSecure() const
     // Every field, not just the auth/sync core: an endpoint that is missing here
     // fails at its first use with InsecureEndpoint, far from the configuration
     // that omitted it.
-    return isHttps(accounts) && isHttps(authChallenge) && isHttps(authComplete)
+    return isHttps(accounts) && isHttps(authLogin) && isHttps(authChallenge)
+        && isHttps(authComplete)
         && isHttps(authRefresh) && isHttps(sync) && isHttps(keyPackages)
         && isHttps(keyPackagesClaim) && isHttps(directory) && isHttps(directoryAccount)
         && isHttps(invites) && isHttps(invitesRedeem) && isWss(live);
@@ -270,6 +274,12 @@ public:
     // TLS verification failures on the HTTPS paths arrive as a reply error, not
     // an sslErrors callback; surface them with the terminal Tls diagnostic
     // rather than a generic HTTP status.
+    [[nodiscard]] static bool isDeviceRejection(QNetworkReply *reply)
+    {
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        return status == 403 || status == 404;
+    }
+
     [[nodiscard]] static RelayTransportError httpFailureKind(QNetworkReply *reply)
     {
         if (reply->error() == QNetworkReply::SslHandshakeFailedError)
@@ -842,6 +852,8 @@ void RelayClient::authenticateDevice(const QByteArray &deviceCredential,
             [this, reply, signer, context] {
                 reply->deleteLater();
                 if (reply->error() != QNetworkReply::NoError || !d->bodyWithinBounds(reply)) {
+                    if (Private::isDeviceRejection(reply))
+                        emit deviceRejected();
                     emit transportError(Private::httpFailureKind(reply));
                     return;
                 }
@@ -1000,7 +1012,7 @@ void RelayClient::fetchSince(quint64 watermark)
 
 void RelayClient::registerAccount(const AccountId &account, const DeviceId &device,
                                   const QString &handle, const QByteArray &signingKey,
-                                  const QByteArray &credential)
+                                  const QByteArray &credential, const QByteArray &passwordKey)
 {
     if (!isHttps(d->endpoints.accounts)) {
         emit transportError(RelayTransportError::InsecureEndpoint);
@@ -1013,6 +1025,8 @@ void RelayClient::registerAccount(const AccountId &account, const DeviceId &devi
     body.insert(QLatin1StringView("handle"), handle);
     body.insert(QLatin1StringView("signing_key"), signingKey);
     body.insert(QLatin1StringView("credential"), credential);
+    body.insert(QLatin1StringView("password_key"), passwordKey);
+    body.insert(QLatin1StringView("password_kdf"), passwordKeyVersion);
 
     // Bootstrap registration is unauthenticated: issue the request through the
     // hardened path that attaches NO bearer token, so no access token ever leaks
@@ -1041,6 +1055,79 @@ void RelayClient::registerAccount(const AccountId &account, const DeviceId &devi
         }
         emit accountRegistered();
     });
+}
+
+void RelayClient::loginAccount(const QString &handle, const QByteArray &passwordKey,
+                               const DeviceId &device, const QByteArray &signingKey,
+                               const QByteArray &credential)
+{
+    if (!isHttps(d->endpoints.authLogin)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        emit accountLoginFailed(RelayLoginError::Transport);
+        return;
+    }
+
+    QCborMap body;
+    body.insert(QLatin1StringView("handle"), handle);
+    body.insert(QLatin1StringView("password_key"), passwordKey);
+    body.insert(QLatin1StringView("password_kdf"), passwordKeyVersion);
+    body.insert(QLatin1StringView("device_id"), device.bytes());
+    body.insert(QLatin1StringView("signing_key"), signingKey);
+    body.insert(QLatin1StringView("credential"), credential);
+
+    // Unauthenticated, like registration: no bearer token rides along.
+    QNetworkRequest request = d->hardenedRequest(d->endpoints.authLogin);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+    QNetworkReply *reply = d->network->post(request, body.toCborValue().toCbor());
+    d->guardReply(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        reply->deleteLater();
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (status == 401) {
+            emit accountLoginFailed(RelayLoginError::InvalidCredentials);
+            return;
+        }
+        if (status == 429) {
+            emit accountLoginFailed(RelayLoginError::RateLimited);
+            return;
+        }
+        if (status == 400 || status == 409) {
+            emit accountLoginFailed(RelayLoginError::InvalidRequest);
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            emit accountLoginFailed(RelayLoginError::Transport);
+            return;
+        }
+        const QByteArray payload = reply->readAll();
+        QCborParserError parseError{};
+        const QCborValue value = QCborValue::fromCbor(payload, &parseError);
+        if (parseError.error != QCborError::NoError || parseError.offset != payload.size()
+            || !value.isMap()) {
+            emit accountLoginFailed(RelayLoginError::Malformed);
+            return;
+        }
+        const QCborMap map = value.toMap();
+        const QCborValue accountValue = map.value(QLatin1StringView("account_id"));
+        const std::optional<AccountId> account = accountValue.isByteArray()
+            ? AccountId::fromBytes(accountValue.toByteArray())
+            : std::nullopt;
+        const std::optional<QString> canonical =
+            normalizeHandle(map.value(QLatin1StringView("handle")).toString());
+        if (!account || !canonical) {
+            emit accountLoginFailed(RelayLoginError::Malformed);
+            return;
+        }
+        emit accountLoggedIn(*account, *canonical);
+    });
+}
+
+void RelayClient::setLocalAccount(const AccountId &account)
+{
+    d->localAccountId = account;
 }
 
 void RelayClient::publishKeyPackage(const QByteArray &keyPackage)
@@ -1495,6 +1582,8 @@ void RelayClient::completeAuthentication(const QByteArray &challenge, const Chal
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError || !d->bodyWithinBounds(reply)) {
+            if (Private::isDeviceRejection(reply))
+                emit deviceRejected();
             emit transportError(Private::httpFailureKind(reply));
             return;
         }

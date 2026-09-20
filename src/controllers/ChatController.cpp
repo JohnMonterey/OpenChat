@@ -512,6 +512,8 @@ QString ChatController::sessionStateText() const
         return QStringLiteral("This contact's device changed — verification required");
     case SessionState::StorageFull:
         return QStringLiteral("Storage full — free space to send messages");
+    case SessionState::SignedOut:
+        return QStringLiteral("Signed out — the server no longer accepts this device");
     }
     return {};
 }
@@ -535,6 +537,7 @@ QString ChatController::securityNoticeText() const
     case SessionState::Offline:
     case SessionState::Reconnecting:
     case SessionState::StorageFull:
+    case SessionState::SignedOut:
         return {};
     }
     return {};
@@ -1406,6 +1409,7 @@ bool ChatController::statePermitsPlaintext(SessionState state)
     case SessionState::Offline:
     case SessionState::Reconnecting:
     case SessionState::StorageFull:
+    case SessionState::SignedOut:
         return true;
     }
     return false;

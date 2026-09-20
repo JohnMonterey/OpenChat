@@ -376,6 +376,20 @@ QString ProfileSession::displayName() const {
 }
 
 Result<void, ProfileSessionError>
+ProfileSession::adoptAccountId(const AccountId &accountId) {
+  if (!m_unlocked || !m_database || m_syncEngine)
+    return Result<void, ProfileSessionError>::failure(
+        ProfileSessionError::NotUnlocked);
+  if (m_accountId && *m_accountId == accountId)
+    return Result<void, ProfileSessionError>::success();
+  if (!m_database->replaceAccountId(m_profileId, accountId).hasValue())
+    return Result<void, ProfileSessionError>::failure(
+        ProfileSessionError::DatabaseFailure);
+  m_accountId = accountId;
+  return Result<void, ProfileSessionError>::success();
+}
+
+Result<void, ProfileSessionError>
 ProfileSession::setDisplayName(const QString &displayName) {
   if (!m_unlocked || !m_database)
     return Result<void, ProfileSessionError>::failure(ProfileSessionError::NotUnlocked);

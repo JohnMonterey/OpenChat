@@ -151,6 +151,14 @@ private slots:
     void directoryResolvesAccountToHandle();
     void inviteRedeemsOnceAndReturnsInviter();
     void inviteExpiryRejectsRedemption();
+    void registrationRequiresPasswordKey();
+    void handlesAreCanonicalAndUnique();
+    void passwordIsStoredOnlyAsSaltedHash();
+    void passwordLoginEnrollsDeviceAndRetiresOthers();
+    void passwordLoginFailuresAreIndistinguishable();
+    void passwordLoginIsThrottledPerHandle();
+    void passwordLoginDeviceIdRules();
+    void passwordHashCostIsUpgradedOnLogin();
 
 private:
     struct Registered {
@@ -161,6 +169,14 @@ private:
     };
 
     Registered registerDevice(const QString &handle);
+
+    // Stands in for the client's locally stretched password key: any 32 bytes,
+    // deterministic per handle so a test can present the right or a wrong one.
+    static QByteArray passwordKeyFor(const QString &handle)
+    {
+        return QCryptographicHash::hash("test password key:" + handle.toUtf8(),
+                                        QCryptographicHash::Sha256);
+    }
 
     bool m_available = false;
     QString m_testDb = QStringLiteral("oc_relay_svctest");
@@ -208,7 +224,8 @@ void RelayServicesTest::initTestCase()
                                  QStringLiteral(":/relay/002_tokens_keypackages.sql"),
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
                                  QStringLiteral(":/relay/004_invites.sql"),
-                                 QStringLiteral(":/relay/005_envelope_acceptances.sql")};
+                                 QStringLiteral(":/relay/005_envelope_acceptances.sql"),
+                                 QStringLiteral(":/relay/006_account_passwords.sql")};
     QVERIFY2(m_store->applyMigrations(migrations, &error), qPrintable(error));
     m_available = true;
 }
@@ -236,7 +253,8 @@ RelayServicesTest::Registered RelayServicesTest::registerDevice(const QString &h
     reg.key = generateDeviceKey();
     AuthService auth(*m_store);
     const auto registered = auth.registerAccount(reg.account, handle, reg.device, reg.key.publicKey,
-                                                 QByteArray("mls-credential-blob"));
+                                                 QByteArray("mls-credential-blob"),
+                                                 passwordKeyFor(handle));
     Q_ASSERT(registered.hasValue());
 
     const auto challenge = auth.issueChallenge(reg.account, reg.device, 1);
@@ -284,7 +302,7 @@ void RelayServicesTest::challengeReplayRejected()
     reg.key = generateDeviceKey();
     AuthService auth(*m_store);
     QVERIFY(auth.registerAccount(reg.account, QStringLiteral("bob"), reg.device, reg.key.publicKey,
-                                 QByteArray("cred"))
+                                 QByteArray("cred"), passwordKeyFor(QStringLiteral("bob")))
                 .hasValue());
     const auto challenge = auth.issueChallenge(reg.account, reg.device, 1);
     QVERIFY(challenge.hasValue());
@@ -307,7 +325,8 @@ void RelayServicesTest::challengeExpiryRejected()
     reg.key = generateDeviceKey();
     AuthService auth(*m_store);
     QVERIFY(auth.registerAccount(reg.account, QStringLiteral("carol"), reg.device,
-                                 reg.key.publicKey, QByteArray("cred"))
+                                 reg.key.publicKey, QByteArray("cred"),
+                                 passwordKeyFor(QStringLiteral("carol")))
                 .hasValue());
     const auto challenge = auth.issueChallenge(reg.account, reg.device, 1);
     QVERIFY(challenge.hasValue());
@@ -1015,6 +1034,350 @@ void RelayServicesTest::directoryResolvesAccountToHandle()
     const auto after = directory.resolveAccount(frank.account);
     QVERIFY(!after.hasValue());
     QCOMPARE(after.error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::registrationRequiresPasswordKey()
+{
+    AuthService auth(*m_store);
+    const DeviceKey key = generateDeviceKey();
+    const QByteArray good = passwordKeyFor(QStringLiteral("paula"));
+
+    // A pre-password client sends no key at all; a truncated or oversized key and
+    // an unknown client-side stretch version are refused the same way.
+    const QList<QByteArray> badKeys{QByteArray(), good.left(31), good + QByteArray(1, 'x')};
+    for (const QByteArray &bad : badKeys) {
+        const auto result = auth.registerAccount(AccountId::generate(), QStringLiteral("paula"),
+                                                 DeviceId::generate(), key.publicKey,
+                                                 QByteArray("cred"), bad);
+        QVERIFY(!result.hasValue());
+        QCOMPARE(result.error(), RelayError::InvalidRequest);
+    }
+    const auto wrongVersion =
+        auth.registerAccount(AccountId::generate(), QStringLiteral("paula"), DeviceId::generate(),
+                             key.publicKey, QByteArray("cred"), good,
+                             AuthService::supportedPasswordKdf + 1);
+    QVERIFY(!wrongVersion.hasValue());
+    QCOMPARE(wrongVersion.error(), RelayError::InvalidRequest);
+
+    // None of the refusals reserved the handle.
+    QVERIFY(auth.registerAccount(AccountId::generate(), QStringLiteral("paula"),
+                                 DeviceId::generate(), key.publicKey, QByteArray("cred"), good)
+                .hasValue());
+}
+
+void RelayServicesTest::handlesAreCanonicalAndUnique()
+{
+    AuthService auth(*m_store);
+    DirectoryService directory(*m_store);
+    const DeviceKey key = generateDeviceKey();
+    const auto attempt = [&](const QString &handle) {
+        return auth.registerAccount(AccountId::generate(), handle, DeviceId::generate(),
+                                    key.publicKey, QByteArray("cred"), passwordKeyFor(handle));
+    };
+
+    // Input is canonicalized before it is stored...
+    QVERIFY(attempt(QStringLiteral("  @Victor.V-1 ")).hasValue());
+    QSqlQuery stored(m_store->database());
+    QVERIFY(stored.exec(QStringLiteral("SELECT handle FROM accounts")));
+    QVERIFY(stored.next());
+    QCOMPARE(stored.value(0).toString(), QStringLiteral("victor.v-1"));
+
+    // ...so every spelling of a taken handle is a conflict.
+    for (const QString &again : {QStringLiteral("victor.v-1"), QStringLiteral("VICTOR.V-1"),
+                                 QStringLiteral("@Victor.v-1")}) {
+        const auto clash = attempt(again);
+        QVERIFY(!clash.hasValue());
+        QCOMPARE(clash.error(), RelayError::Conflict);
+    }
+
+    // Anything outside the ASCII handle alphabet is refused outright, which is
+    // what makes two distinct handles impossible to confuse visually.
+    for (const QString &invalid :
+         {QStringLiteral("ab"), QStringLiteral("has space"), QStringLiteral("-leading"),
+          QStringLiteral(".leading"), QString::fromUtf8("j\xC3\xB6hn"),
+          QString::fromUtf8("v\xD1\x96" "ctor"), // Cyrillic look-alike of "victor"
+          QString(33, QLatin1Char('a')), QStringLiteral("semi;colon")}) {
+        const auto refused = attempt(invalid);
+        QVERIFY2(!refused.hasValue(), qPrintable(invalid));
+        QCOMPARE(refused.error(), RelayError::InvalidRequest);
+    }
+
+    // Lookups canonicalize the same way.
+    QVERIFY(directory.resolveHandle(QStringLiteral("@VICTOR.V-1")).hasValue());
+
+    // A mixed-case handle from before handles were canonical still reserves its
+    // lowercase form, and can still be resolved.
+    QSqlQuery legacy(m_store->database());
+    legacy.prepare(QStringLiteral(
+        "INSERT INTO accounts (account_id, handle, created_at_ms) VALUES (?, 'OldZed', 1)"));
+    const AccountId legacyAccount = AccountId::generate();
+    legacy.addBindValue(legacyAccount.bytes());
+    QVERIFY(legacy.exec());
+    const auto shadowed = attempt(QStringLiteral("oldzed"));
+    QVERIFY(!shadowed.hasValue());
+    QCOMPARE(shadowed.error(), RelayError::Conflict);
+}
+
+void RelayServicesTest::passwordIsStoredOnlyAsSaltedHash()
+{
+    const QByteArray key = passwordKeyFor(QStringLiteral("hashed1"));
+    const auto first = registerDevice(QStringLiteral("hashed1"));
+    Q_UNUSED(first);
+
+    // A second account that happens to use the very same password key.
+    AuthService auth(*m_store);
+    const DeviceKey otherKey = generateDeviceKey();
+    QVERIFY(auth.registerAccount(AccountId::generate(), QStringLiteral("hashed2"),
+                                 DeviceId::generate(), otherKey.publicKey, QByteArray("cred"), key)
+                .hasValue());
+
+    QSqlQuery rows(m_store->database());
+    QVERIFY(rows.exec(QStringLiteral(
+        "SELECT password_hash, password_salt, password_params, password_kdf FROM accounts "
+        "ORDER BY handle")));
+    QList<QByteArray> hashes;
+    QList<QByteArray> salts;
+    while (rows.next()) {
+        hashes.append(rows.value(0).toByteArray());
+        salts.append(rows.value(1).toByteArray());
+        QCOMPARE(rows.value(2).toString(),
+                 QString::fromLatin1(PasswordHashParams{}.serialize()));
+        QCOMPARE(rows.value(3).toInt(), AuthService::supportedPasswordKdf);
+    }
+    QCOMPARE(hashes.size(), 2);
+    // The key itself is never at rest, and equal keys do not produce equal rows.
+    QVERIFY(!hashes.contains(key));
+    QVERIFY(hashes.at(0) != hashes.at(1));
+    QVERIFY(salts.at(0) != salts.at(1));
+    QCOMPARE(hashes.at(0).size(), 32);
+    QCOMPARE(salts.at(0).size(), 16);
+}
+
+void RelayServicesTest::passwordLoginEnrollsDeviceAndRetiresOthers()
+{
+    const QString handle = QStringLiteral("wendy");
+    const auto original = registerDevice(handle);
+    AuthService auth(*m_store);
+    DirectoryService directory(*m_store);
+    QVERIFY(auth.authenticate(original.tokens.accessToken).has_value());
+
+    // A fresh installation: new device key, no tokens, only handle + password.
+    const DeviceKey newKey = generateDeviceKey();
+    const DeviceId newDevice = DeviceId::generate();
+    const auto login = auth.loginWithPassword(QStringLiteral("@Wendy"), passwordKeyFor(handle),
+                                              AuthService::supportedPasswordKdf, newDevice,
+                                              newKey.publicKey, QByteArray("new-credential"));
+    QVERIFY(login.hasValue());
+    QCOMPARE(login.value().accountId, original.account);
+    QCOMPARE(login.value().handle, handle);
+    QCOMPARE(login.value().retiredDevices.size(), 1);
+    QCOMPARE(login.value().retiredDevices.first(), original.device);
+
+    // The login alone grants nothing: tokens still require the signed challenge,
+    // which the new device can pass and the retired one no longer can.
+    const auto challenge = auth.issueChallenge(original.account, newDevice, 1);
+    QVERIFY(challenge.hasValue());
+    const QByteArray context("account-device-bind");
+    const auto tokens = auth.completeChallenge(
+        original.account, newDevice, challenge.value(),
+        signWith(newKey.pkey, challengeSigningMessage(challenge.value(), context)), context);
+    QVERIFY(tokens.hasValue());
+    QVERIFY(auth.authenticate(tokens.value().accessToken).has_value());
+
+    QVERIFY(!auth.authenticate(original.tokens.accessToken).has_value());
+    const auto retiredRefresh = auth.refresh(original.tokens.refreshToken);
+    QVERIFY(!retiredRefresh.hasValue());
+    const auto retiredChallenge = auth.issueChallenge(original.account, original.device, 1);
+    QVERIFY(!retiredChallenge.hasValue());
+    QCOMPARE(retiredChallenge.error(), RelayError::Revoked);
+
+    // Contacts resolving the handle now see exactly the new device.
+    const auto resolved = directory.resolveHandle(handle);
+    QVERIFY(resolved.hasValue());
+    QCOMPARE(resolved.value().devices.size(), 1);
+    QCOMPARE(resolved.value().devices.first().deviceId, newDevice);
+}
+
+void RelayServicesTest::passwordLoginFailuresAreIndistinguishable()
+{
+    const auto real = registerDevice(QStringLiteral("xavier"));
+    AuthService auth(*m_store);
+    const DeviceKey key = generateDeviceKey();
+
+    // An account from before passwords existed: it has a handle but no hash.
+    QSqlQuery legacy(m_store->database());
+    legacy.prepare(QStringLiteral(
+        "INSERT INTO accounts (account_id, handle, created_at_ms) VALUES (?, 'legacyuser', 1)"));
+    legacy.addBindValue(AccountId::generate().bytes());
+    QVERIFY(legacy.exec());
+
+    struct Case {
+        QString handle;
+        QByteArray key;
+        int kdf;
+    };
+    const QList<Case> cases{
+        {QStringLiteral("xavier"), passwordKeyFor(QStringLiteral("not-xavier")), 1}, // wrong key
+        {QStringLiteral("nobody-here"), passwordKeyFor(QStringLiteral("xavier")), 1}, // unknown
+        {QStringLiteral("legacyuser"), passwordKeyFor(QStringLiteral("legacyuser")), 1},
+        {QStringLiteral("xavier"), passwordKeyFor(QStringLiteral("xavier")), 2}, // other stretch
+        {QString::fromUtf8("x\xC3\xA4vier"), passwordKeyFor(QStringLiteral("xavier")), 1},
+    };
+    for (const Case &c : cases) {
+        const auto result = auth.loginWithPassword(c.handle, c.key, c.kdf, DeviceId::generate(),
+                                                   key.publicKey, QByteArray("cred"));
+        QVERIFY2(!result.hasValue(), qPrintable(c.handle));
+        QCOMPARE(result.error(), RelayError::Unauthorized);
+    }
+
+    // No failed attempt enrolled a device or disturbed the real one.
+    QSqlQuery count(m_store->database());
+    QVERIFY(count.exec(QStringLiteral("SELECT count(*) FROM devices")));
+    QVERIFY(count.next());
+    QCOMPARE(count.value(0).toInt(), 1);
+    QVERIFY(auth.authenticate(real.tokens.accessToken).has_value());
+
+    // Malformed material is a caller bug, not a credential failure.
+    const auto malformed = auth.loginWithPassword(
+        QStringLiteral("xavier"), QByteArray(31, 'k'), 1, DeviceId::generate(), key.publicKey,
+        QByteArray("cred"));
+    QVERIFY(!malformed.hasValue());
+    QCOMPARE(malformed.error(), RelayError::InvalidRequest);
+}
+
+void RelayServicesTest::passwordLoginIsThrottledPerHandle()
+{
+    const QString handle = QStringLiteral("yolanda");
+    const auto reg = registerDevice(handle);
+    Q_UNUSED(reg);
+    const auto bystander = registerDevice(QStringLiteral("zachary"));
+    Q_UNUSED(bystander);
+
+    AuthService::Policy policy;
+    policy.maxLoginFailures = 3;
+    AuthService auth(*m_store, policy);
+    const DeviceKey key = generateDeviceKey();
+    const auto tryLogin = [&](const QString &who, const QByteArray &passwordKey) {
+        return auth.loginWithPassword(who, passwordKey, 1, DeviceId::generate(), key.publicKey,
+                                      QByteArray("cred"));
+    };
+
+    for (int i = 0; i < policy.maxLoginFailures; ++i) {
+        const auto wrong = tryLogin(handle, passwordKeyFor(QStringLiteral("guess")));
+        QCOMPARE(wrong.error(), RelayError::Unauthorized);
+    }
+    // The budget is spent: even the correct password is not evaluated any more.
+    const auto locked = tryLogin(handle, passwordKeyFor(handle));
+    QVERIFY(!locked.hasValue());
+    QCOMPARE(locked.error(), RelayError::RateLimited);
+
+    // The throttle is per handle; another account is unaffected.
+    QVERIFY(tryLogin(QStringLiteral("zachary"), passwordKeyFor(QStringLiteral("zachary")))
+                .hasValue());
+
+    // Guessing at an unknown handle is budgeted identically, so the throttle is
+    // not itself an oracle for which handles exist.
+    for (int i = 0; i < policy.maxLoginFailures; ++i)
+        QCOMPARE(tryLogin(QStringLiteral("ghost-user"), passwordKeyFor(handle)).error(),
+                 RelayError::Unauthorized);
+    QCOMPARE(tryLogin(QStringLiteral("ghost-user"), passwordKeyFor(handle)).error(),
+             RelayError::RateLimited);
+
+    // The table never names the handles that were tried.
+    QSqlQuery subjects(m_store->database());
+    QVERIFY(subjects.exec(QStringLiteral("SELECT subject FROM rate_limits")));
+    while (subjects.next()) {
+        QCOMPARE(subjects.value(0).toByteArray().size(), 32);
+        QVERIFY(!subjects.value(0).toByteArray().contains("yolanda"));
+    }
+
+    // A new window restores the budget, and a success clears the count.
+    m_now += policy.loginWindowMs;
+    QVERIFY(tryLogin(handle, passwordKeyFor(handle)).hasValue());
+    QSqlQuery remaining(m_store->database());
+    remaining.prepare(QStringLiteral("SELECT count(*) FROM rate_limits WHERE subject = ?"));
+    remaining.addBindValue(QCryptographicHash::hash("openchat login v1:yolanda",
+                                                    QCryptographicHash::Sha256));
+    QVERIFY(remaining.exec());
+    QVERIFY(remaining.next());
+    QCOMPARE(remaining.value(0).toInt(), 0);
+}
+
+void RelayServicesTest::passwordLoginDeviceIdRules()
+{
+    const QString handle = QStringLiteral("ursula");
+    const auto reg = registerDevice(handle);
+    Q_UNUSED(reg);
+    const auto other = registerDevice(QStringLiteral("umberto"));
+    AuthService auth(*m_store);
+
+    const DeviceKey key = generateDeviceKey();
+    const DeviceId device = DeviceId::generate();
+    const auto first = auth.loginWithPassword(handle, passwordKeyFor(handle), 1, device,
+                                              key.publicKey, QByteArray("cred"));
+    QVERIFY(first.hasValue());
+
+    // A retry after a lost response presents the same device: accepted, and it
+    // must not retire the device it just enrolled.
+    const auto retry = auth.loginWithPassword(handle, passwordKeyFor(handle), 1, device,
+                                              key.publicKey, QByteArray("cred"));
+    QVERIFY(retry.hasValue());
+    QVERIFY(retry.value().retiredDevices.isEmpty());
+    QVERIFY(!auth.isDeviceRevoked(device));
+
+    // The same device id under a different key, or a device id that belongs to
+    // another account, is a conflict -- and must leave both accounts untouched.
+    const DeviceKey impostor = generateDeviceKey();
+    const auto rekeyed = auth.loginWithPassword(handle, passwordKeyFor(handle), 1, device,
+                                                impostor.publicKey, QByteArray("cred"));
+    QVERIFY(!rekeyed.hasValue());
+    QCOMPARE(rekeyed.error(), RelayError::Conflict);
+    const auto stolen = auth.loginWithPassword(handle, passwordKeyFor(handle), 1, other.device,
+                                               key.publicKey, QByteArray("cred"));
+    QVERIFY(!stolen.hasValue());
+    QCOMPARE(stolen.error(), RelayError::Conflict);
+    QVERIFY(!auth.isDeviceRevoked(device));
+    QVERIFY(!auth.isDeviceRevoked(other.device));
+}
+
+void RelayServicesTest::passwordHashCostIsUpgradedOnLogin()
+{
+    const QString handle = QStringLiteral("tobias");
+    AuthService::Policy cheap;
+    cheap.passwordParams.memoryKiB = 8 * 1024;
+    cheap.passwordParams.iterations = 1;
+    const DeviceKey key = generateDeviceKey();
+    {
+        AuthService old(*m_store, cheap);
+        QVERIFY(old.registerAccount(AccountId::generate(), handle, DeviceId::generate(),
+                                    key.publicKey, QByteArray("cred"), passwordKeyFor(handle))
+                    .hasValue());
+    }
+    const auto paramsNow = [&] {
+        QSqlQuery row(m_store->database());
+        row.exec(QStringLiteral("SELECT password_params FROM accounts WHERE handle = 'tobias'"));
+        row.next();
+        return row.value(0).toString();
+    };
+    QCOMPARE(paramsNow(), QString::fromLatin1(cheap.passwordParams.serialize()));
+
+    // A relay running today's cost verifies against the row's own cost, then
+    // re-hashes at the current one; the password keeps working afterwards.
+    AuthService current(*m_store);
+    const DeviceKey newKey = generateDeviceKey();
+    QVERIFY(current.loginWithPassword(handle, passwordKeyFor(handle), 1, DeviceId::generate(),
+                                      newKey.publicKey, QByteArray("cred"))
+                .hasValue());
+    QCOMPARE(paramsNow(), QString::fromLatin1(PasswordHashParams{}.serialize()));
+    QVERIFY(current.loginWithPassword(handle, passwordKeyFor(handle), 1, DeviceId::generate(),
+                                      newKey.publicKey, QByteArray("cred"))
+                .hasValue());
+
+    // Stored parameters are bounded, so a corrupted row cannot demand an
+    // unbounded allocation from the relay.
+    QVERIFY(!PasswordHashParams::parse("argon2id$m=99999999,t=2").has_value());
+    QVERIFY(!PasswordHashParams::parse("argon2id$m=19456,t=0").has_value());
+    QVERIFY(!PasswordHashParams::parse("scrypt$n=1").has_value());
 }
 
 QTEST_GUILESS_MAIN(RelayServicesTest)

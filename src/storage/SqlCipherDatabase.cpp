@@ -542,6 +542,29 @@ SqlCipherDatabase::storeAccountId(const ProfileId &profileId,
   return Result<void, StorageError>::success();
 }
 
+Result<void, StorageError>
+SqlCipherDatabase::replaceAccountId(const ProfileId &profileId,
+                                   const AccountId &accountId) {
+  if (!m_database)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql =
+      "UPDATE local_account_identity SET account_id = ?2 WHERE profile_id = ?1";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  const auto accountBytes = accountId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 2, accountBytes.constData(),
+                    static_cast<int>(accountBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  sqlite3_finalize(statement);
+  if (step != SQLITE_DONE || sqlite3_changes(m_database) != 1)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  return Result<void, StorageError>::success();
+}
+
 Result<AccountId, StorageError>
 SqlCipherDatabase::loadAccountId(const ProfileId &profileId) {
   if (!m_database)

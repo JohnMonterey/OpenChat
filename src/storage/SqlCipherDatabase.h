@@ -76,6 +76,11 @@ public:
   storeAccountId(const ProfileId &profileId, const AccountId &accountId);
   [[nodiscard]] Result<AccountId, StorageError>
   loadAccountId(const ProfileId &profileId);
+  // Replaces the stored account id. Used once, when a password login resolves
+  // the username to the account this new profile belongs to; fails unless
+  // exactly one existing row was updated.
+  [[nodiscard]] Result<void, StorageError>
+  replaceAccountId(const ProfileId &profileId, const AccountId &accountId);
   [[nodiscard]] Result<void, StorageError>
   storeProfileDisplayName(const ProfileId &profileId, const QString &displayName);
   [[nodiscard]] Result<QString, StorageError>

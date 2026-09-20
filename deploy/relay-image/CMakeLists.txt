@@ -27,6 +27,7 @@ enable_testing()
 # Mirrors the openchat_domain target in the top-level CMakeLists.txt.
 add_library(openchat_domain STATIC
     src/domain/Identifiers.cpp
+    src/domain/Handle.cpp
 )
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)

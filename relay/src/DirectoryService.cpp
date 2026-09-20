@@ -1,6 +1,7 @@
 #include "DirectoryService.h"
 
 #include "RelayCrypto.h"
+#include "domain/Handle.h"
 
 #include <QSqlQuery>
 #include <QVariant>
@@ -61,9 +62,17 @@ Result<AccountDirectoryEntry, RelayError> DirectoryService::resolveHandle(const 
     if (handle.isEmpty() || handle.size() > 64)
         return fail<AccountDirectoryEntry>(RelayError::NotFound);
 
+    // Handles are canonical (domain/Handle.h), so "@John" and "john" name the same
+    // account. Accounts that predate canonical handles may be stored in mixed
+    // case, hence lower(); an input that cannot be canonicalized can only ever
+    // name such an old account, and only verbatim.
+    const std::optional<QString> canonical = normalizeHandle(handle);
     QSqlQuery account(m_store.database());
-    account.prepare(QStringLiteral("SELECT account_id FROM accounts WHERE handle = ?"));
-    account.addBindValue(handle);
+    account.prepare(canonical
+                        ? QStringLiteral("SELECT account_id FROM accounts WHERE lower(handle) = ? "
+                                         "ORDER BY created_at_ms LIMIT 1")
+                        : QStringLiteral("SELECT account_id FROM accounts WHERE handle = ?"));
+    account.addBindValue(canonical ? *canonical : handle);
     if (!account.exec())
         return fail<AccountDirectoryEntry>(RelayError::Internal);
     if (!account.next())

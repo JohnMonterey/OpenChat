@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QList>
+#include <QString>
 
 namespace OpenChat::Relay {
 
@@ -36,6 +37,14 @@ struct AuthTokens final {
 struct AuthenticatedDevice final {
     AccountId accountId;
     DeviceId deviceId;
+};
+
+// Outcome of a successful password login: the account the handle resolved to,
+// its canonical handle, and the devices the login retired.
+struct PasswordLogin final {
+    AccountId accountId;
+    QString handle;
+    QList<DeviceId> retiredDevices;
 };
 
 // A single active device of an account as surfaced by directory discovery:

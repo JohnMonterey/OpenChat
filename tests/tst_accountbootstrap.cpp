@@ -177,8 +177,11 @@ void AccountBootstrapIntegrationTest::bootstrapRegistersAuthenticatesAndPublishe
     RelayTransport transport(client);
 
     const int keyPackageCount = 4;
-    const QString handle =
-        QStringLiteral("alice-") + QUuid::createUuid().toString(QUuid::Id128).toLower();
+    // Unique per run, and within the 32-character handle limit.
+    const QString handle = QStringLiteral("alice-")
+        + QUuid::createUuid().toString(QUuid::Id128).left(16).toLower();
+    // Stands in for the locally stretched password key (any 32 bytes).
+    const QByteArray passwordKey(32, 'k');
 
     AccountBootstrap bootstrap(*session, client, transport);
     bool succeeded = false;
@@ -187,7 +190,7 @@ void AccountBootstrapIntegrationTest::bootstrapRegistersAuthenticatesAndPublishe
     connect(&bootstrap, &AccountBootstrap::failed, this,
             [&](AccountBootstrap::Error error) { failure = error; });
 
-    bootstrap.start(handle, keyPackageCount);
+    bootstrap.start(handle, passwordKey, keyPackageCount);
 
     // Drive the event loop until a terminal signal. TLS + three HTTPS round trips
     // plus N publishes should complete well under the timeout.

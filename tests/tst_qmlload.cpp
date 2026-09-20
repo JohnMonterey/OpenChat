@@ -835,13 +835,18 @@ private slots:
     void onboardingScreensDriveController()
     {
         // An async Starter that reports success with a fixed code, so the screen
-        // surfaces exactly what account creation produced, independent of any real
+        // surfaces exactly what the flow produced, independent of any real
         // ProfileSession. The controller pointer is bound after construction; the
-        // Starter is only invoked later, when the Create button is clicked.
+        // Starter is only invoked later, when the submit button is clicked.
         OpenChat::OnboardingController *controllerPtr = nullptr;
+        QString submittedHandle;
+        QString submittedPassword;
         OpenChat::OnboardingController controller(
-            [&controllerPtr](const QString &, const QString &) {
-                controllerPtr->onCreationSucceeded(QStringLiteral("TEST-CODE-1234-5678"));
+            [&](OpenChat::OnboardingController::Mode, const QString &handle,
+                const QString &password) {
+                submittedHandle = handle;
+                submittedPassword = QString(password.constData(), password.size());
+                controllerPtr->onSubmitSucceeded(QStringLiteral("TEST-CODE-1234-5678"));
             });
         controllerPtr = &controller;
 
@@ -855,49 +860,101 @@ private slots:
             {{QStringLiteral("controller"), QVariant::fromValue(&controller)}}));
         QVERIFY(root);
 
-        QObject *createView =
-            root->findChild<QObject *>(QStringLiteral("onboardingCreateView"));
-        QObject *recoveryView =
-            root->findChild<QObject *>(QStringLiteral("onboardingRecoveryView"));
-        QObject *displayNameField =
-            root->findChild<QObject *>(QStringLiteral("displayNameField"));
-        QObject *handleField =
-            root->findChild<QObject *>(QStringLiteral("handleField"));
-        QObject *createButton =
-            root->findChild<QObject *>(QStringLiteral("createButton"));
-        QObject *savedButton =
-            root->findChild<QObject *>(QStringLiteral("savedButton"));
-        QObject *recoveryCodeText =
-            root->findChild<QObject *>(QStringLiteral("recoveryCodeText"));
-        QVERIFY(createView);
-        QVERIFY(recoveryView);
-        QVERIFY(displayNameField);
-        QVERIFY(handleField);
-        QVERIFY(createButton);
-        QVERIFY(savedButton);
-        QVERIFY(recoveryCodeText);
+        const auto child = [&root](const char *name) {
+            return root->findChild<QObject *>(QString::fromLatin1(name));
+        };
+        QObject *credentialsView = child("onboardingCredentialsView");
+        QObject *recoveryView = child("onboardingRecoveryView");
+        QObject *title = child("onboardingTitle");
+        QObject *notice = child("onboardingNotice");
+        QObject *handleField = child("handleField");
+        QObject *passwordField = child("passwordField");
+        QObject *passwordConfirmField = child("passwordConfirmField");
+        QObject *passwordReveal = child("passwordFieldReveal");
+        QObject *passwordHint = child("passwordHint");
+        QObject *strengthMeter = child("passwordStrengthMeter");
+        QObject *submitButton = child("submitButton");
+        QObject *modeSwitch = child("modeSwitch");
+        QObject *savedButton = child("savedButton");
+        QObject *recoveryCodeText = child("recoveryCodeText");
+        for (QObject *object :
+             {credentialsView, recoveryView, title, notice, handleField, passwordField,
+              passwordConfirmField, passwordReveal, passwordHint, strengthMeter, submitButton,
+              modeSwitch, savedButton, recoveryCodeText})
+            QVERIFY(object);
 
-        // Create is shown first; the button is disabled until both fields are set.
-        QVERIFY(createView->property("visible").toBool());
+        // The sign-up form is shown first, with nothing to submit yet.
+        QVERIFY(credentialsView->property("visible").toBool());
         QVERIFY(!recoveryView->property("visible").toBool());
-        QCOMPARE(createButton->property("enabled").toBool(), false);
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Create your account"));
+        QCOMPARE(submitButton->property("enabled").toBool(), false);
+        QVERIFY(!notice->property("visible").toBool());
 
-        QVERIFY(displayNameField->setProperty("text", QStringLiteral("Ada Lovelace")));
+        // A startup notice appears above the form when there is one.
+        controller.setNotice(QStringLiteral("Old account data was erased."));
         QCoreApplication::processEvents();
-        QCOMPARE(createButton->property("enabled").toBool(), false);
-        QVERIFY(handleField->setProperty("text", QStringLiteral("ada")));
+        QVERIFY(notice->property("visible").toBool());
+
+        // Passwords are masked, and only ever shown on request. (TextInput.Normal
+        // and TextInput.Password, per the documented EchoMode values.)
+        constexpr int echoNormal = 0;
+        constexpr int echoPassword = 2;
+        QCOMPARE(passwordField->property("echoMode").toInt(), echoPassword);
+        QCOMPARE(passwordConfirmField->property("echoMode").toInt(),
+                 echoPassword);
+
+        // Switching to log-in hides the confirmation and the new-password guidance.
+        QVERIFY(QMetaObject::invokeMethod(modeSwitch, "clicked"));
         QCoreApplication::processEvents();
-        QCOMPARE(controller.displayName(), QStringLiteral("Ada Lovelace"));
-        QCOMPARE(controller.handle(), QStringLiteral("ada"));
-        QCOMPARE(createButton->property("enabled").toBool(), true);
+        QCOMPARE(controller.mode(), OpenChat::OnboardingController::Mode::LogIn);
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Welcome back"));
+        QVERIFY(!passwordConfirmField->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(modeSwitch, "clicked"));
+        QCoreApplication::processEvents();
+        QCOMPARE(controller.mode(), OpenChat::OnboardingController::Mode::SignUp);
+        QVERIFY(passwordConfirmField->property("visible").toBool());
+
+        // Typing flows into the controller, and its guidance back onto the screen.
+        QVERIFY(handleField->setProperty("text", QStringLiteral("Ada")));
+        QVERIFY(passwordField->setProperty("text", QStringLiteral("short")));
+        QCoreApplication::processEvents();
+        QCOMPARE(controller.handle(), QStringLiteral("Ada"));
+        QVERIFY(passwordHint->property("visible").toBool());
+        QVERIFY(strengthMeter->property("visible").toBool());
+        QCOMPARE(submitButton->property("enabled").toBool(), false);
+
+        const QString password = QStringLiteral("correct horse battery");
+        QVERIFY(passwordField->setProperty("text", password));
+        QCoreApplication::processEvents();
+        QVERIFY(!passwordHint->property("visible").toBool());
+        QCOMPARE(submitButton->property("enabled").toBool(), false); // unconfirmed
+        QVERIFY(passwordConfirmField->setProperty("text", password));
+        QCoreApplication::processEvents();
+        QCOMPARE(submitButton->property("enabled").toBool(), true);
+
+        // The Show toggle reveals the password on request...
+        QVERIFY(passwordReveal->property("visible").toBool());
+        QObject *passwordFrame = qvariant_cast<QObject *>(passwordField->property("parent"));
+        QVERIFY(passwordFrame);
+        QVERIFY(passwordFrame->setProperty("revealed", true));
+        QCoreApplication::processEvents();
+        QCOMPARE(passwordField->property("echoMode").toInt(), echoNormal);
 
         QSignalSpy completedSpy(&controller, &OpenChat::OnboardingController::completed);
 
-        // Create advances to the recovery view, which reveals the returned code.
-        QVERIFY(QMetaObject::invokeMethod(createButton, "clicked"));
+        // Submitting hands over the canonical username and the password, empties
+        // both password fields on screen, and re-masks the revealed one.
+        QVERIFY(QMetaObject::invokeMethod(submitButton, "clicked"));
         QCoreApplication::processEvents();
+        QCOMPARE(submittedHandle, QStringLiteral("ada"));
+        QCOMPARE(submittedPassword, password);
+        QCOMPARE(passwordField->property("text").toString(), QString());
+        QCOMPARE(passwordConfirmField->property("text").toString(), QString());
+        QCOMPARE(passwordField->property("echoMode").toInt(), echoPassword);
+
+        // A new account then reveals the returned recovery code.
         QCOMPARE(controller.step(), OpenChat::OnboardingController::Step::Recovery);
-        QVERIFY(!createView->property("visible").toBool());
+        QVERIFY(!credentialsView->property("visible").toBool());
         QVERIFY(recoveryView->property("visible").toBool());
         QCOMPARE(recoveryCodeText->property("text").toString(),
                  QStringLiteral("TEST-CODE-1234-5678"));

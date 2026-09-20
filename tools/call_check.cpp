@@ -39,6 +39,7 @@
 #include "network/RelayClient.h"
 #include "network/RelayTransport.h"
 #include "security/KeyVault.h"
+#include "security/SecureBuffer.h"
 #include "storage/SqlCipherContactRepository.h"
 
 #include <QImage>
@@ -768,7 +769,10 @@ int main(int argc, char *argv[])
                          say(QStringLiteral("transport error %1").arg(static_cast<int>(error)));
                      });
 
-    bootstrap.start(handle, AccountBootstrap::defaultKeyPackageCount);
+    // The account is thrown away after the run, so nobody ever logs in to it
+    // again: a random password key stands in for a stretched password.
+    bootstrap.start(handle, SecureBuffer::random(32).view().toByteArray(),
+                    AccountBootstrap::defaultKeyPackageCount);
 
     const int waitSeconds = std::max(10, parser.value(waitOption).toInt());
     QTimer::singleShot(waitSeconds * 1000, &application, [&] {

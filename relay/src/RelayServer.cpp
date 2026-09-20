@@ -198,13 +198,58 @@ void RelayServer::registerRoutes()
                 map->value(QLatin1StringView("signing_key")).toByteArray();
             const QByteArray credential =
                 map->value(QLatin1StringView("credential")).toByteArray();
+            // The locally stretched password key; never the password itself. A
+            // request without one (a pre-password client) is refused below.
+            const QByteArray passwordKey =
+                map->value(QLatin1StringView("password_key")).toByteArray();
+            const int passwordKdf =
+                static_cast<int>(map->value(QLatin1StringView("password_kdf")).toInteger(0));
             if (!account || !device || handle.isEmpty())
                 return QHttpServerResponse(StatusCode::BadRequest);
-            const auto result =
-                m_auth.registerAccount(*account, handle, *device, signingKey, credential);
+            const auto result = m_auth.registerAccount(*account, handle, *device, signingKey,
+                                                       credential, passwordKey, passwordKdf);
             if (!result.hasValue())
                 return errorResponse(result.error());
             return QHttpServerResponse(StatusCode::Ok);
+        });
+
+    // Password login: enrolls the caller's device into an existing account. Like
+    // registration it is unauthenticated by bearer token -- the password key is
+    // the credential -- and it only ever yields the account id; the caller still
+    // has to pass the signed device challenge to obtain tokens.
+    m_http.route(
+        QStringLiteral("/v1/auth/login"), QHttpServerRequest::Method::Post,
+        [this](const QHttpServerRequest &request) -> QHttpServerResponse {
+            const auto map = boundedCborMap(request, m_limits.maxRequestBytes);
+            if (!map)
+                return QHttpServerResponse(StatusCode::BadRequest);
+            const auto device = idField<DeviceId>(*map, QLatin1StringView("device_id"));
+            const QString handle = map->value(QLatin1StringView("handle")).toString();
+            const QByteArray passwordKey =
+                map->value(QLatin1StringView("password_key")).toByteArray();
+            const int passwordKdf =
+                static_cast<int>(map->value(QLatin1StringView("password_kdf")).toInteger(0));
+            const QByteArray signingKey =
+                map->value(QLatin1StringView("signing_key")).toByteArray();
+            const QByteArray credential =
+                map->value(QLatin1StringView("credential")).toByteArray();
+            if (!device || handle.isEmpty())
+                return QHttpServerResponse(StatusCode::BadRequest);
+            const auto login = m_auth.loginWithPassword(handle, passwordKey, passwordKdf, *device,
+                                                        signingKey, credential);
+            if (!login.hasValue())
+                return errorResponse(login.error());
+            // The account now lives on the caller's device: drop the live stream
+            // of every device the login retired so it stops receiving at once.
+            for (const DeviceId &retired : login.value().retiredDevices) {
+                if (QWebSocket *socket = m_liveByDevice.value(retired.bytes().toHex()))
+                    socket->close(QWebSocketProtocol::CloseCodePolicyViolated,
+                                  QStringLiteral("signed in elsewhere"));
+            }
+            QCborMap response;
+            response.insert(QLatin1StringView("account_id"), login.value().accountId.bytes());
+            response.insert(QLatin1StringView("handle"), login.value().handle);
+            return cbor(response.toCborValue());
         });
 
     m_http.route(

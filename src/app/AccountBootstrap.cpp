@@ -16,11 +16,8 @@ AccountBootstrap::AccountBootstrap(ProfileSession &session, RelayClient &relay,
 
 AccountBootstrap::~AccountBootstrap() { teardown(); }
 
-void AccountBootstrap::start(const QString &handle, int keyPackageCount)
+bool AccountBootstrap::prepare(const QString &handle, int keyPackageCount)
 {
-    if (m_state != State::Idle)
-        return;
-
     m_handle = handle;
     m_context = QByteArrayLiteral("account-device-bind");
     m_keyPackageCount = keyPackageCount > 0 ? keyPackageCount : defaultKeyPackageCount;
@@ -33,7 +30,7 @@ void AccountBootstrap::start(const QString &handle, int keyPackageCount)
     const auto credential = m_session.publicCredential();
     if (!account.hasValue() || !credential.hasValue() || m_session.mls() == nullptr) {
         fail(Error::Storage);
-        return;
+        return false;
     }
     m_deviceCredential = credential.value().serialize();
 
@@ -43,6 +40,10 @@ void AccountBootstrap::start(const QString &handle, int keyPackageCount)
                              &AccountBootstrap::onAccountRegistered);
     m_connections << connect(&m_relay, &RelayClient::accountRegistrationFailed, this,
                              &AccountBootstrap::onAccountRegistrationFailed);
+    m_connections << connect(&m_relay, &RelayClient::accountLoggedIn, this,
+                             &AccountBootstrap::onAccountLoggedIn);
+    m_connections << connect(&m_relay, &RelayClient::accountLoginFailed, this,
+                             &AccountBootstrap::onAccountLoginFailed);
     m_connections << connect(&m_relay, &RelayClient::authenticated, this,
                              &AccountBootstrap::onAuthenticated);
     m_connections << connect(&m_relay, &RelayClient::authExpired, this,
@@ -53,16 +54,42 @@ void AccountBootstrap::start(const QString &handle, int keyPackageCount)
                              &AccountBootstrap::onKeyPackagePublishFailed);
     m_connections << connect(&m_relay, &RelayClient::transportError, this,
                              &AccountBootstrap::onTransportError);
-
-    m_state = State::Registering;
-    m_relay.registerAccount(account.value(), credential.value().deviceId, m_handle,
-                            credential.value().signingPublicKey, m_deviceCredential);
+    return true;
 }
 
-void AccountBootstrap::onAccountRegistered()
+void AccountBootstrap::start(const QString &handle, const QByteArray &passwordKey,
+                             int keyPackageCount)
 {
-    if (m_state != State::Registering)
+    if (m_state != State::Idle)
         return;
+    if (!prepare(handle, keyPackageCount))
+        return;
+
+    const auto account = m_session.accountId();
+    const auto credential = m_session.publicCredential();
+    m_state = State::Registering;
+    m_relay.registerAccount(account.value(), credential.value().deviceId, m_handle,
+                            credential.value().signingPublicKey, m_deviceCredential, passwordKey);
+}
+
+void AccountBootstrap::startLogin(const QString &handle, const QByteArray &passwordKey,
+                                  int keyPackageCount)
+{
+    if (m_state != State::Idle)
+        return;
+    if (!prepare(handle, keyPackageCount))
+        return;
+
+    const auto credential = m_session.publicCredential();
+    m_state = State::LoggingIn;
+    m_relay.loginAccount(m_handle, passwordKey, credential.value().deviceId,
+                         credential.value().signingPublicKey, m_deviceCredential);
+}
+
+QString AccountBootstrap::handle() const { return m_handle; }
+
+void AccountBootstrap::authenticate()
+{
     m_state = State::Authenticating;
 
     // The signer keeps the device private key inside the session and returns the
@@ -75,6 +102,48 @@ void AccountBootstrap::onAccountRegistered()
         return signature.hasValue() ? signature.value() : QByteArray();
     };
     m_relay.authenticateDevice(m_deviceCredential, signer, m_context);
+}
+
+void AccountBootstrap::onAccountRegistered()
+{
+    if (m_state != State::Registering)
+        return;
+    authenticate();
+}
+
+void AccountBootstrap::onAccountLoggedIn(const AccountId &account, const QString &handle)
+{
+    if (m_state != State::LoggingIn)
+        return;
+    // The profile was created with a provisional account id. Adopt the real one
+    // durably BEFORE asking for tokens, so a crash can never leave a profile that
+    // holds tokens for an account it does not believe it is.
+    if (!m_session.adoptAccountId(account).hasValue()) {
+        fail(Error::Storage);
+        return;
+    }
+    m_relay.setLocalAccount(account);
+    m_handle = handle;
+    authenticate();
+}
+
+void AccountBootstrap::onAccountLoginFailed(RelayLoginError error)
+{
+    if (m_state != State::LoggingIn)
+        return;
+    switch (error) {
+    case RelayLoginError::InvalidCredentials:
+        fail(Error::InvalidCredentials);
+        return;
+    case RelayLoginError::RateLimited:
+        fail(Error::RateLimited);
+        return;
+    case RelayLoginError::InvalidRequest:
+    case RelayLoginError::Malformed:
+    case RelayLoginError::Transport:
+        break;
+    }
+    fail(Error::Transport);
 }
 
 void AccountBootstrap::onAccountRegistrationFailed(RelayRegistrationError error)
@@ -154,8 +223,8 @@ void AccountBootstrap::onTransportError(RelayTransportError error)
     // the auth exchange). Treat those as terminal for the bootstrap. Once we are
     // Connecting the live stream owns its own reconnect policy, so its transport
     // errors must NOT fail an account that is already registered and provisioned.
-    if (m_state == State::Registering || m_state == State::Authenticating
-        || m_state == State::Publishing)
+    if (m_state == State::Registering || m_state == State::LoggingIn
+        || m_state == State::Authenticating || m_state == State::Publishing)
         fail(Error::Transport);
 }
 

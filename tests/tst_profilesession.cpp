@@ -135,6 +135,7 @@ private slots:
   void removalRequiresExactProfileAndPathConfirmation();
   void recoveryCodeIsRevealedAndConsumedOnce();
   void createPersistsAStableAccountId();
+  void adoptedAccountIdIsDurableAndFrozenOnceNetworking();
   void profileDisplayNameSurvivesUnlock();
   void publishedProfileSurvivesUnlock();
   void persistMlsStateMakesKeyPackageMaterialDurable();
@@ -189,6 +190,43 @@ void ProfileSessionTest::createThenUnlockRestoresTheSameDevice() {
       reopened.value()->signChallenge("server-challenge", "openchat-auth-v1");
   QVERIFY(secondSignature.hasValue());
   QCOMPARE(secondSignature.value(), firstSignature.value());
+}
+
+void ProfileSessionTest::adoptedAccountIdIsDurableAndFrozenOnceNetworking() {
+  QTemporaryDir directory;
+  SessionVault vault;
+  const auto profileId = ProfileId::generate();
+  const auto paths = ProfilePaths::forProfile(directory.path(), profileId);
+
+  auto created = ProfileSession::create(profileId, vault, paths);
+  QVERIFY(created.hasValue());
+  auto session = std::move(created).value();
+  const AccountId provisional = session->accountId().value();
+
+  // A password login resolves the username to the account this profile really
+  // belongs to; the profile takes that id over, durably.
+  const AccountId resolved = AccountId::generate();
+  QVERIFY(resolved != provisional);
+  QVERIFY(session->adoptAccountId(resolved).hasValue());
+  QCOMPARE(session->accountId().value(), resolved);
+  QVERIFY(session->adoptAccountId(resolved).hasValue()); // idempotent
+
+  session->lock();
+  // A locked session has no identity to change.
+  QVERIFY(!session->adoptAccountId(AccountId::generate()).hasValue());
+
+  auto unlocked = ProfileSession::unlock(profileId, vault, paths);
+  QVERIFY(unlocked.hasValue());
+  session = std::move(unlocked).value();
+  QCOMPARE(session->accountId().value(), resolved);
+
+  // Once the sync engine addresses the relay under this account, it is fixed.
+  DisconnectedTransport transport;
+  QVERIFY(session->startNetworking(transport).hasValue());
+  const auto late = session->adoptAccountId(AccountId::generate());
+  QVERIFY(!late.hasValue());
+  QCOMPARE(session->accountId().value(), resolved);
+  session->lock();
 }
 
 void ProfileSessionTest::profileDisplayNameSurvivesUnlock() {

@@ -209,6 +209,7 @@ add_test(NAME tst_appmetadata COMMAND tst_appmetadata)
 add_library(openchat_domain STATIC
     src/diagnostics/Logging.cpp
     src/domain/Identifiers.cpp
+    src/domain/Handle.cpp
     src/domain/ProfileUpdate.cpp
     src/domain/GroupUpdate.cpp
 )
@@ -374,6 +375,7 @@ add_library(openchat_security STATIC
     src/security/QtKeychainVault.cpp
     src/security/DeviceIdentity.cpp
     src/security/RecoveryCode.cpp
+    src/security/PasswordKey.cpp
     src/security/SafetyNumber.cpp
 )
 
@@ -456,6 +458,7 @@ qt_add_resources(openchat_call "openchat_call_sounds"
 add_library(openchat_app STATIC
     src/app/ProfileSession.cpp
     src/app/AccountBootstrap.cpp
+    src/app/LocalDataReset.cpp
     src/app/AddContactService.cpp
     src/app/ContactRequestService.cpp
     src/app/GroupService.cpp
@@ -585,6 +588,38 @@ add_executable(tst_profilesession tests/tst_profilesession.cpp)
 target_include_directories(tst_profilesession PRIVATE src)
 target_link_libraries(tst_profilesession PRIVATE openchat_app Qt6::Core Qt6::Test)
 add_test(NAME tst_profilesession COMMAND tst_profilesession)
+
+# Erasing a profile from before usernames and passwords (and everything cached
+# beside it), and telling such a profile apart without unlocking it.
+add_executable(tst_localdatareset tests/tst_localdatareset.cpp)
+target_include_directories(tst_localdatareset PRIVATE src)
+target_link_libraries(tst_localdatareset PRIVATE openchat_app Qt6::Core Qt6::Test)
+add_test(NAME tst_localdatareset COMMAND tst_localdatareset)
+
+# The canonical form of a username, and the local password stretch whose output
+# is the only thing the relay ever receives (pinned by a known-answer vector).
+add_executable(tst_accountcredentials tests/tst_accountcredentials.cpp)
+target_include_directories(tst_accountcredentials PRIVATE src)
+target_link_libraries(tst_accountcredentials PRIVATE openchat_security openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_accountcredentials COMMAND tst_accountcredentials)
+
+# A device the relay refuses (retired by a login elsewhere, or unknown) must be
+# reported and re-checked slowly, never retried in a tight loop.
+add_executable(tst_devicelink
+    tests/tst_devicelink.cpp
+    tests/relay/RelayTestSupport.cpp
+)
+target_include_directories(tst_devicelink PRIVATE src tests relay/src)
+target_link_libraries(tst_devicelink PRIVATE
+    openchat_app
+    openchat_network
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test
+    OpenSSL::Crypto
+)
+add_test(NAME tst_devicelink COMMAND tst_devicelink)
 
 # Live end-to-end account bootstrap against the Compose relay stack over TLS.
 # Labelled "integration": it QSKIPs cleanly when the stack is not reachable, so a
@@ -796,7 +831,7 @@ add_executable(tst_onboardingcontroller
     src/controllers/OnboardingController.cpp
 )
 target_include_directories(tst_onboardingcontroller PRIVATE src)
-target_link_libraries(tst_onboardingcontroller PRIVATE Qt6::Core Qt6::Test)
+target_link_libraries(tst_onboardingcontroller PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_onboardingcontroller COMMAND tst_onboardingcontroller)
 
 add_executable(tst_videocall tests/tst_videocall.cpp)

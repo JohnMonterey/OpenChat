@@ -24,6 +24,7 @@ qt_add_resources(openchat_relay_core "openchat_relay_migrations"
         migrations/003_inboxes_attachments.sql
         migrations/004_invites.sql
         migrations/005_envelope_acceptances.sql
+        migrations/006_account_passwords.sql
 )
 
 add_library(openchat_relay_server STATIC

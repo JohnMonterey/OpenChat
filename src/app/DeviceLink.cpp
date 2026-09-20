@@ -26,6 +26,8 @@ DeviceLink::DeviceLink(ProfileSession &session, RelayClient &relay, QObject *par
                              &DeviceLink::onAuthExpired);
     m_connections << connect(&m_relay, &RelayClient::transportError, this,
                              &DeviceLink::onTransportError);
+    m_connections << connect(&m_relay, &RelayClient::deviceRejected, this,
+                             &DeviceLink::onDeviceRejected);
 }
 
 DeviceLink::~DeviceLink()
@@ -72,7 +74,9 @@ void DeviceLink::authenticate()
 
 void DeviceLink::scheduleRetry()
 {
-    const int delay = m_retryDelayMs;
+    // A rejected device is re-checked at a fixed, slow pace; everything else
+    // backs off from quick to a minute.
+    const int delay = m_rejected ? rejectedRetryMs : m_retryDelayMs;
     m_retryDelayMs = std::min(maximumRetryMs, m_retryDelayMs * 2);
     QTimer::singleShot(delay, this, [this] {
         if (!m_authenticated)
@@ -86,6 +90,7 @@ void DeviceLink::onAuthenticated(const RelaySession &session)
         return; // bootstrap's own authentication; it installs the tokens itself
     m_authenticating = false;
     m_authenticated = true;
+    m_rejected = false;
     m_retryDelayMs = initialRetryMs;
     m_relay.setTokens(session.accessToken, session.refreshToken);
     m_supply.start(session.availableKeyPackages);
@@ -104,6 +109,17 @@ void DeviceLink::onAuthExpired()
     m_authenticated = false;
     emit authenticationFailed();
     scheduleRetry();
+}
+
+void DeviceLink::onDeviceRejected()
+{
+    // Arrives just before the transportError for the same reply, which then
+    // schedules the (now slow) retry. Report the transition once, not on every
+    // re-check.
+    if (!m_authenticating || m_rejected)
+        return;
+    m_rejected = true;
+    emit rejected();
 }
 
 void DeviceLink::onTransportError(RelayTransportError error)

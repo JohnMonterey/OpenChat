@@ -37,6 +37,7 @@
 #include "network/RelayTransport.h"
 #include "network/SyncEngine.h"
 #include "security/KeyVault.h"
+#include "security/PasswordKey.h"
 #include "security/SafetyNumber.h"
 #include "security/SecureBuffer.h"
 #include "storage/SqlCipherChatRepository.h"
@@ -294,6 +295,7 @@ struct ClientStack final {
     DeviceId deviceId = DeviceId::generate();
     QByteArray signingPublicKey;
     QString handle;
+    QByteArray passwordKey; // the locally stretched key the account was created with
 
     ClientStack() = default;
     ClientStack(const ClientStack &) = delete;
@@ -320,11 +322,17 @@ private slots:
 
     void pipelineDeliversMessagesOverRealTls();
     void relockedProfileRelinksWithoutTokens();
+    void passwordLoginFromAFreshInstallTakesOverTheAccount();
     void callCarriesAudioVideoAndAScreenOverRealTls();
     void groupChatAndGroupCallOverRealTls();
 
 private:
     void bootstrapClient(ClientStack &stack, const QString &handlePrefix);
+    // Creates a fresh local profile in `stack` and logs it in to an existing
+    // account by username + password key. Returns the bootstrap error, if any.
+    std::optional<AccountBootstrap::Error> loginClient(ClientStack &stack, const QString &handle,
+                                                       const QByteArray &passwordKey);
+    static QString testPassword() { return QStringLiteral("correct horse battery staple"); }
     // Makes `requester` and `acceptor` mutual contacts through the relay, each
     // side driven by its own long-lived request service.
     void becomeContacts(ClientStack &requester, ContactRequestService &requesterRequests,
@@ -390,7 +398,8 @@ void EndToEndTest::initTestCase()
                                  QStringLiteral(":/relay/002_tokens_keypackages.sql"),
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
                                  QStringLiteral(":/relay/004_invites.sql"),
-                                 QStringLiteral(":/relay/005_envelope_acceptances.sql")};
+                                 QStringLiteral(":/relay/005_envelope_acceptances.sql"),
+                                 QStringLiteral(":/relay/006_account_passwords.sql")};
     QVERIFY2(m_store->applyMigrations(migrations, &error), qPrintable(error));
 
     // Service + server wiring order mirrors relay/src/main.cpp.
@@ -440,6 +449,7 @@ RelayEndpoints EndToEndTest::proxyEndpoints() const
     const QString base = QStringLiteral("https://localhost:%1/v1").arg(m_proxyPort);
     RelayEndpoints endpoints;
     endpoints.accounts = QUrl(base + QStringLiteral("/accounts"));
+    endpoints.authLogin = QUrl(base + QStringLiteral("/auth/login"));
     endpoints.authChallenge = QUrl(base + QStringLiteral("/auth/challenge"));
     endpoints.authComplete = QUrl(base + QStringLiteral("/auth/complete"));
     endpoints.authRefresh = QUrl(base + QStringLiteral("/auth/refresh"));
@@ -477,8 +487,13 @@ void EndToEndTest::bootstrapClient(ClientStack &stack, const QString &handlePref
     stack.client->setTlsConfiguration(RelayTest::clientConfigTrusting(m_ca->caCertPem()));
     stack.transport = std::make_unique<RelayTransport>(*stack.client);
 
-    stack.handle =
-        handlePrefix + QStringLiteral("-") + QUuid::createUuid().toString(QUuid::Id128).toLower();
+    // Unique per run, and within the 32-character handle limit.
+    stack.handle = handlePrefix + QStringLiteral("-")
+        + QUuid::createUuid().toString(QUuid::Id128).left(12).toLower();
+    // The real client-side stretch, so the whole password path is exercised.
+    auto derived = derivePasswordKey(stack.handle, testPassword());
+    QVERIFY(derived.hasValue());
+    stack.passwordKey = derived.value().view().toByteArray();
 
     AccountBootstrap bootstrap(*stack.session, *stack.client, *stack.transport);
     bool succeeded = false;
@@ -487,7 +502,7 @@ void EndToEndTest::bootstrapClient(ClientStack &stack, const QString &handlePref
     connect(&bootstrap, &AccountBootstrap::failed, this,
             [&](AccountBootstrap::Error error) { failure = error; });
 
-    bootstrap.start(stack.handle, 4);
+    bootstrap.start(stack.handle, stack.passwordKey, 4);
     QTRY_VERIFY_WITH_TIMEOUT(succeeded || failure.has_value(), 30000);
     if (failure.has_value())
         QFAIL(qPrintable(
@@ -741,6 +756,140 @@ void EndToEndTest::pipelineDeliversMessagesOverRealTls()
     bob.client->disconnect();
     alice.session->lock();
     bob.session->lock();
+}
+
+std::optional<AccountBootstrap::Error>
+EndToEndTest::loginClient(ClientStack &stack, const QString &handle, const QByteArray &passwordKey)
+{
+    const auto profileId = ProfileId::generate();
+    const auto paths = ProfilePaths::forProfile(stack.dir.path(), profileId);
+    auto created = ProfileSession::create(profileId, stack.vault, paths);
+    if (!created.hasValue())
+        return AccountBootstrap::Error::Storage;
+    stack.session = std::move(created).value();
+    const auto provisional = stack.session->accountId();
+    const auto credential = stack.session->publicCredential();
+    if (!provisional.hasValue() || !credential.hasValue())
+        return AccountBootstrap::Error::Storage;
+    stack.deviceId = credential.value().deviceId;
+    stack.signingPublicKey = credential.value().signingPublicKey;
+    stack.handle = handle;
+
+    stack.client = std::make_unique<RelayClient>(stack.deviceId, provisional.value(),
+                                                 proxyEndpoints(), RelayCredentials{});
+    stack.client->setTlsConfiguration(RelayTest::clientConfigTrusting(m_ca->caCertPem()));
+    stack.transport = std::make_unique<RelayTransport>(*stack.client);
+
+    AccountBootstrap bootstrap(*stack.session, *stack.client, *stack.transport);
+    bool succeeded = false;
+    std::optional<AccountBootstrap::Error> failure;
+    connect(&bootstrap, &AccountBootstrap::succeeded, this, [&] { succeeded = true; });
+    connect(&bootstrap, &AccountBootstrap::failed, this,
+            [&](AccountBootstrap::Error error) { failure = error; });
+    bootstrap.startLogin(handle, passwordKey, 4);
+    if (!QTest::qWaitFor([&] { return succeeded || failure.has_value(); }, 30000))
+        return AccountBootstrap::Error::Transport;
+    if (succeeded)
+        stack.account = stack.session->accountId().value();
+    return failure;
+}
+
+void EndToEndTest::passwordLoginFromAFreshInstallTakesOverTheAccount()
+{
+    if (!m_available)
+        QSKIP("PostgreSQL not available for the E2E test");
+
+    // An account created on one installation, online.
+    ClientStack original;
+    bootstrapClient(original, QStringLiteral("erin"));
+    if (QTest::currentTestFailed())
+        return;
+    QTRY_VERIFY_WITH_TIMEOUT(original.client->isConnected(), 30000);
+
+    // A wrong password gets nowhere, and does not disturb the real device.
+    {
+        ClientStack intruder;
+        auto wrongKey = derivePasswordKey(original.handle, QStringLiteral("not the password!"));
+        QVERIFY(wrongKey.hasValue());
+        const auto failure = loginClient(intruder, original.handle,
+                                         wrongKey.value().view().toByteArray());
+        QVERIFY(failure.has_value());
+        QCOMPARE(*failure, AccountBootstrap::Error::InvalidCredentials);
+        QVERIFY(!intruder.client->isConnected());
+    }
+    QVERIFY(original.client->isConnected());
+
+    // The right password under somebody else's username is just as wrong: the
+    // key is bound to the handle it was derived for.
+    {
+        ClientStack other;
+        bootstrapClient(other, QStringLiteral("eve"));
+        if (QTest::currentTestFailed())
+            return;
+        ClientStack intruder;
+        const auto failure = loginClient(intruder, other.handle, original.passwordKey);
+        QVERIFY(failure.has_value());
+        QCOMPARE(*failure, AccountBootstrap::Error::InvalidCredentials);
+    }
+
+    // Now the real owner on a fresh installation: only the username (typed with
+    // capitals and an @) and the password -- no keys, no tokens, no account id.
+    int originalDisconnects = 0;
+    connect(original.client.get(), &RelayClient::disconnected, this,
+            [&] { ++originalDisconnects; });
+
+    ClientStack fresh;
+    auto retyped = derivePasswordKey(QStringLiteral("@") + original.handle.toUpper(),
+                                     testPassword());
+    QVERIFY(retyped.hasValue());
+    QCOMPARE(retyped.value().view().toByteArray(), original.passwordKey);
+    const auto failure =
+        loginClient(fresh, QStringLiteral("@") + original.handle.toUpper(),
+                    retyped.value().view().toByteArray());
+    if (failure.has_value())
+        QFAIL(qPrintable(QStringLiteral("login failed with error %1").arg(int(*failure))));
+
+    // The new profile IS the account, under a device key of its own, and online.
+    QCOMPARE(fresh.account, original.account);
+    QVERIFY(fresh.deviceId != original.deviceId);
+    QTRY_VERIFY_WITH_TIMEOUT(fresh.client->isConnected(), 30000);
+
+    // The relay dropped the retired installation's live stream at once, and its
+    // stored identity can no longer authenticate.
+    QTRY_VERIFY_WITH_TIMEOUT(originalDisconnects >= 1, 30000);
+    original.client->disconnect();
+    DeviceLink retiredLink(*original.session, *original.client);
+    int relinked = 0;
+    int refused = 0;
+    connect(&retiredLink, &DeviceLink::linked, this, [&] { ++relinked; });
+    connect(&retiredLink, &DeviceLink::authenticationFailed, this, [&] { ++refused; });
+    retiredLink.start(DeviceLink::Start::NeedsAuthentication);
+    QTRY_VERIFY_WITH_TIMEOUT(refused >= 1, 30000);
+    QCOMPARE(relinked, 0);
+
+    // Anyone resolving the username is pointed at the new device only.
+    std::optional<RelayDirectoryEntry> entry;
+    connect(fresh.client.get(), &RelayClient::handleResolved, this,
+            [&](const RelayDirectoryEntry &resolved) { entry = resolved; });
+    fresh.client->resolveHandle(original.handle);
+    QTRY_VERIFY_WITH_TIMEOUT(entry.has_value(), 30000);
+    QCOMPARE(entry->accountId, original.account);
+    QCOMPARE(entry->devices.size(), 1);
+    QCOMPARE(entry->devices.first().deviceId, fresh.deviceId);
+
+    // The adopted account id is durable: it survives a lock and unlock.
+    const auto profileId = ProfileId::fromBytes(
+        QByteArray::fromHex(QDir(fresh.dir.path()).entryList(QDir::Dirs | QDir::NoDotAndDotDot)
+                                .constFirst()
+                                .toLatin1()));
+    QVERIFY(profileId.has_value());
+    fresh.client->disconnect();
+    fresh.session->lock();
+    auto reopened = ProfileSession::unlock(*profileId, fresh.vault,
+                                           ProfilePaths::forProfile(fresh.dir.path(), *profileId));
+    QVERIFY(reopened.hasValue());
+    QCOMPARE(reopened.value()->accountId().value(), original.account);
+    fresh.session = std::move(reopened).value();
 }
 
 void EndToEndTest::relockedProfileRelinksWithoutTokens()

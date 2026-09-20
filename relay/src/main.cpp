@@ -53,10 +53,22 @@ int main(int argc, char **argv)
                                  QStringLiteral(":/relay/002_tokens_keypackages.sql"),
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
                                  QStringLiteral(":/relay/004_invites.sql"),
-                                 QStringLiteral(":/relay/005_envelope_acceptances.sql")};
+                                 QStringLiteral(":/relay/005_envelope_acceptances.sql"),
+                                 QStringLiteral(":/relay/006_account_passwords.sql")};
     if (!store->applyMigrations(migrations, &error)) {
         qCritical("migration failed");
         return 4;
+    }
+
+    // Account passwords depend on OpenSSL's Argon2id (3.2+). Prove it works before
+    // accepting traffic, so a build against an older library stops here instead
+    // of failing every sign-up and login at request time.
+    if (hashPasswordKey(QByteArray(passwordKeyBytes, 'k'), QByteArray(passwordSaltBytes, 's'),
+                        PasswordHashParams{})
+            .size()
+        != passwordHashBytes) {
+        qCritical("Argon2id is unavailable in the linked OpenSSL; cannot protect passwords");
+        return 6;
     }
 
     AuthService auth(*store);

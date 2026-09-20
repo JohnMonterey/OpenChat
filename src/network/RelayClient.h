@@ -33,7 +33,10 @@ inline constexpr char relaySubprotocol[] = "openchat.ciphertext.v1";
 // Explicit endpoint configuration. Production requires https/wss for every URL;
 // isSecure() gates that and the client refuses to operate insecurely.
 struct RelayEndpoints final {
-    QUrl accounts;      // POST { account_id, device_id, handle, signing_key, credential } (unauth)
+    QUrl accounts;      // POST { account_id, device_id, handle, signing_key, credential,
+                        //        password_key, password_kdf } (unauth)
+    QUrl authLogin;     // POST { handle, password_key, password_kdf, device_id, signing_key,
+                        //        credential } -> CBOR { account_id, handle } (unauth)
     QUrl authChallenge; // POST { account_id, device_id } -> canonical CBOR { challenge }
     QUrl authComplete;  // POST { account_id, device_id, challenge, signature, context } -> tokens
     QUrl authRefresh;   // POST { refresh } -> rotated tokens
@@ -116,6 +119,20 @@ enum class RelayTransportError {
 enum class RelayRegistrationError {
     HandleUnavailable,
     InvalidRequest,
+    Transport,
+};
+
+// Outcome of a password login attempt, reported through accountLoginFailed().
+// InvalidCredentials maps the relay's 401, which deliberately does not say
+// whether the username or the password was wrong; RateLimited maps its 429 (too
+// many failed attempts for that username); InvalidRequest a 400 or a 409 (a
+// device id the relay will not enroll); Malformed a 2xx whose body is not a
+// well-formed { account_id, handle }; Transport everything else.
+enum class RelayLoginError {
+    InvalidCredentials,
+    RateLimited,
+    InvalidRequest,
+    Malformed,
     Transport,
 };
 
@@ -256,11 +273,28 @@ public:
 
     // Registers a new account+device over HTTPS. This is the unauthenticated
     // bootstrap call, so it carries no bearer token even when one is available.
-    // Emits accountRegistered() on a 2xx; a taken handle (relay 409) emits
+    // `passwordKey` is the locally stretched key from security/PasswordKey.h --
+    // never the password -- and is not retained past the request. Emits
+    // accountRegistered() on a 2xx; a taken handle (relay 409) emits
     // accountRegistrationFailed(HandleUnavailable), a 400 InvalidRequest, and any
     // other failure Transport.
     void registerAccount(const AccountId &account, const DeviceId &device, const QString &handle,
-                         const QByteArray &signingKey, const QByteArray &credential);
+                         const QByteArray &signingKey, const QByteArray &credential,
+                         const QByteArray &passwordKey);
+
+    // Logs in to an existing account by username and password key, enrolling
+    // `device` as the account's device (the relay retires the account's previous
+    // device). Unauthenticated like registerAccount, and likewise sends only the
+    // stretched key. Emits accountLoggedIn(account, handle) with the account the
+    // username resolved to, or accountLoginFailed() with a typed reason. It
+    // yields no tokens: follow it with setLocalAccount() + authenticateDevice().
+    void loginAccount(const QString &handle, const QByteArray &passwordKey, const DeviceId &device,
+                      const QByteArray &signingKey, const QByteArray &credential);
+
+    // Adopts the account id a password login resolved to. A freshly created local
+    // profile only has a provisional account id until then; every later call that
+    // names the account (the device challenge) must use the relay's.
+    void setLocalAccount(const AccountId &account);
 
     // Publishes one MLS KeyPackage for this device to the authenticated HTTPS
     // endpoint (bearer access token attached). Emits keyPackagePublished() on a
@@ -335,11 +369,22 @@ signals:
     // tokens; RelayClient itself does not store them.
     void tokensRotated(const RelaySession &session);
     void authExpired();
+    // The relay answered the device challenge with 403 (the device was retired,
+    // for example because the account was signed in to elsewhere) or 404 (it does
+    // not know the device or account). Emitted just before the accompanying
+    // transportError(HttpStatus), so a listener can tell "not accepted" from
+    // "could not reach". It is a report, not a verdict: a misconfigured proxy can
+    // produce the same statuses, so callers should slow down rather than give up.
+    void deviceRejected();
     void transportError(RelayTransportError error);
     void catchUpComplete(quint64 newWatermark);
     // Account bootstrap: registration succeeded / failed with a typed reason.
     void accountRegistered();
     void accountRegistrationFailed(RelayRegistrationError error);
+    // Password login: the account the username resolved to plus its canonical
+    // handle, or a typed failure.
+    void accountLoggedIn(const OpenChat::AccountId &account, const QString &handle);
+    void accountLoginFailed(RelayLoginError error);
     // KeyPackage publish succeeded / failed (non-auth failure; a rejected token
     // surfaces through authExpired() after the single refresh-and-retry).
     void keyPackagePublished();

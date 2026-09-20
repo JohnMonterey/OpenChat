@@ -1,6 +1,7 @@
 #include "AuthService.h"
 
 #include "RelayCrypto.h"
+#include "domain/Handle.h"
 
 #include <QSqlError>
 #include <QSqlQuery>
@@ -26,6 +27,23 @@ bool isUniqueViolation(const QSqlQuery &query)
     return query.lastError().nativeErrorCode() == QLatin1String("23505");
 }
 
+QString loginFailureBucket()
+{
+    return QStringLiteral("login-fail");
+}
+
+// Throttle rows are keyed by a hash so the table never holds a list of the
+// handles people tried to log in as.
+QByteArray loginSubject(const QString &canonicalHandle)
+{
+    return sha256(QByteArrayLiteral("openchat login v1:") + canonicalHandle.toUtf8());
+}
+
+bool credentialIsPlausible(QByteArrayView signingKey, QByteArrayView credential)
+{
+    return signingKey.size() == 32 && !credential.isEmpty() && credential.size() <= 65536;
+}
+
 } // namespace
 
 AuthService::AuthService(PostgresStore &store)
@@ -43,22 +61,50 @@ Result<void, RelayError> AuthService::registerAccount(const AccountId &accountId
                                                       const QString &handle,
                                                       const DeviceId &deviceId,
                                                       QByteArrayView signingKey,
-                                                      QByteArrayView credential)
+                                                      QByteArrayView credential,
+                                                      QByteArrayView passwordKey,
+                                                      int passwordKdf)
 {
-    if (handle.trimmed().isEmpty() || handle.size() > 64 || signingKey.size() != 32
-        || credential.isEmpty() || credential.size() > 65536)
+    const std::optional<QString> canonical = normalizeHandle(handle);
+    if (!canonical || !credentialIsPlausible(signingKey, credential)
+        || passwordKey.size() != passwordKeyBytes || passwordKdf != supportedPasswordKdf)
         return fail<void>(RelayError::InvalidRequest);
+
+    const QByteArray salt = randomBytes(passwordSaltBytes);
+    const QByteArray hash = hashPasswordKey(passwordKey, salt, m_policy.passwordParams);
+    if (salt.size() != passwordSaltBytes || hash.size() != passwordHashBytes)
+        return fail<void>(RelayError::Internal);
 
     QSqlDatabase &db = m_store.database();
     if (!db.transaction())
         return fail<void>(RelayError::Internal);
 
+    // Accounts created before handles were canonical may hold mixed-case handles
+    // that the UNIQUE(handle) constraint would not see as a clash with the new
+    // lowercase form. They are never inserted any more, so a read is race-free.
+    QSqlQuery clash(db);
+    clash.prepare(QStringLiteral("SELECT 1 FROM accounts WHERE lower(handle) = ? LIMIT 1"));
+    clash.addBindValue(*canonical);
+    if (!clash.exec()) {
+        db.rollback();
+        return fail<void>(RelayError::Internal);
+    }
+    if (clash.next()) {
+        db.rollback();
+        return fail<void>(RelayError::Conflict);
+    }
+
     QSqlQuery account(db);
     account.prepare(QStringLiteral(
-        "INSERT INTO accounts (account_id, handle, created_at_ms) VALUES (?, ?, ?)"));
+        "INSERT INTO accounts (account_id, handle, created_at_ms, password_hash, password_salt, "
+        "password_params, password_kdf) VALUES (?, ?, ?, ?, ?, ?, ?)"));
     account.addBindValue(accountId.bytes());
-    account.addBindValue(handle);
+    account.addBindValue(*canonical);
     account.addBindValue(m_store.nowMs());
+    account.addBindValue(hash);
+    account.addBindValue(salt);
+    account.addBindValue(QString::fromLatin1(m_policy.passwordParams.serialize()));
+    account.addBindValue(passwordKdf);
     if (!account.exec()) {
         const bool conflict = isUniqueViolation(account);
         db.rollback();
@@ -85,6 +131,206 @@ Result<void, RelayError> AuthService::registerAccount(const AccountId &accountId
         return fail<void>(RelayError::Internal);
     }
     return Result<void, RelayError>::success();
+}
+
+bool AuthService::loginIsThrottled(const QByteArray &subject)
+{
+    const qint64 window = (m_store.nowMs() / m_policy.loginWindowMs) * m_policy.loginWindowMs;
+    QSqlQuery row(m_store.database());
+    row.prepare(QStringLiteral(
+        "SELECT counter FROM rate_limits WHERE subject = ? AND bucket = ? AND window_start_ms = ?"));
+    row.addBindValue(subject);
+    row.addBindValue(loginFailureBucket());
+    row.addBindValue(window);
+    // Fail closed: if the budget cannot be read, no password gets evaluated.
+    if (!row.exec())
+        return true;
+    return row.next() && row.value(0).toInt() >= m_policy.maxLoginFailures;
+}
+
+void AuthService::recordLoginFailure(const QByteArray &subject)
+{
+    QSqlDatabase &db = m_store.database();
+    const qint64 now = m_store.nowMs();
+    const qint64 window = (now / m_policy.loginWindowMs) * m_policy.loginWindowMs;
+
+    QSqlQuery bump(db);
+    bump.prepare(QStringLiteral(
+        "INSERT INTO rate_limits (subject, bucket, window_start_ms, counter) VALUES (?, ?, ?, 1) "
+        "ON CONFLICT (subject, bucket, window_start_ms) "
+        "DO UPDATE SET counter = rate_limits.counter + 1"));
+    bump.addBindValue(subject);
+    bump.addBindValue(loginFailureBucket());
+    bump.addBindValue(window);
+    bump.exec();
+
+    // Opportunistic sweep so spent windows do not accumulate.
+    QSqlQuery sweep(db);
+    sweep.prepare(QStringLiteral(
+        "DELETE FROM rate_limits WHERE bucket = ? AND window_start_ms < ?"));
+    sweep.addBindValue(loginFailureBucket());
+    sweep.addBindValue(window - m_policy.loginWindowMs);
+    sweep.exec();
+}
+
+Result<PasswordLogin, RelayError>
+AuthService::loginWithPassword(const QString &handle, QByteArrayView passwordKey, int passwordKdf,
+                               const DeviceId &deviceId, QByteArrayView signingKey,
+                               QByteArrayView credential)
+{
+    if (passwordKey.size() != passwordKeyBytes || !credentialIsPlausible(signingKey, credential))
+        return fail<PasswordLogin>(RelayError::InvalidRequest);
+
+    // What makes a handle well-formed is public, so rejecting a malformed one
+    // early reveals nothing; it cannot name an account that has a password.
+    const std::optional<QString> canonical = normalizeHandle(handle);
+    if (!canonical)
+        return fail<PasswordLogin>(RelayError::Unauthorized);
+
+    const QByteArray subject = loginSubject(*canonical);
+    if (loginIsThrottled(subject))
+        return fail<PasswordLogin>(RelayError::RateLimited);
+
+    QSqlDatabase &db = m_store.database();
+    QSqlQuery row(db);
+    row.prepare(QStringLiteral(
+        "SELECT account_id, password_hash, password_salt, password_params, password_kdf "
+        "FROM accounts WHERE handle = ?"));
+    row.addBindValue(*canonical);
+    if (!row.exec())
+        return fail<PasswordLogin>(RelayError::Internal);
+
+    std::optional<AccountId> accountId;
+    QByteArray storedHash;
+    QByteArray salt;
+    std::optional<PasswordHashParams> params;
+    int storedKdf = 0;
+    if (row.next() && !row.value(1).isNull()) {
+        accountId = AccountId::fromBytes(row.value(0).toByteArray());
+        storedHash = row.value(1).toByteArray();
+        salt = row.value(2).toByteArray();
+        params = PasswordHashParams::parse(row.value(3).toString().toLatin1());
+        storedKdf = row.value(4).toInt();
+    }
+
+    // Always spend one hash, against a fixed salt when there is nothing real to
+    // check, so response time does not reveal whether the handle exists.
+    const bool checkable = accountId && params && salt.size() == passwordSaltBytes;
+    const QByteArray computed =
+        hashPasswordKey(passwordKey, checkable ? salt : QByteArray(passwordSaltBytes, '\0'),
+                        checkable ? *params : m_policy.passwordParams);
+    if (computed.size() != passwordHashBytes)
+        return fail<PasswordLogin>(RelayError::Internal);
+
+    if (!checkable || storedKdf != passwordKdf || !constantTimeEquals(computed, storedHash)) {
+        recordLoginFailure(subject);
+        return fail<PasswordLogin>(RelayError::Unauthorized);
+    }
+
+    if (!db.transaction())
+        return fail<PasswordLogin>(RelayError::Internal);
+    const qint64 now = m_store.nowMs();
+
+    // Retire every other device of the account first, remembering which, so the
+    // directory never lists a key the owner can no longer use.
+    PasswordLogin login{*accountId, *canonical, {}};
+    QSqlQuery retire(db);
+    retire.prepare(QStringLiteral(
+        "UPDATE devices SET revoked_at_ms = ? "
+        "WHERE account_id = ? AND device_id <> ? AND revoked_at_ms IS NULL RETURNING device_id"));
+    retire.addBindValue(now);
+    retire.addBindValue(accountId->bytes());
+    retire.addBindValue(deviceId.bytes());
+    if (!retire.exec()) {
+        db.rollback();
+        return fail<PasswordLogin>(RelayError::Internal);
+    }
+    while (retire.next()) {
+        if (const auto retired = DeviceId::fromBytes(retire.value(0).toByteArray()))
+            login.retiredDevices.append(*retired);
+    }
+
+    QSqlQuery families(db);
+    families.prepare(QStringLiteral(
+        "UPDATE token_families SET revoked = TRUE WHERE account_id = ? AND device_id <> ?"));
+    families.addBindValue(accountId->bytes());
+    families.addBindValue(deviceId.bytes());
+    if (!families.exec()) {
+        db.rollback();
+        return fail<PasswordLogin>(RelayError::Internal);
+    }
+
+    // Enroll this installation's device. A retried login whose first response
+    // was lost presents the same device again: accept it when it is already this
+    // account's active device under the same key, and refuse any other reuse of
+    // a device id.
+    QSqlQuery existing(db);
+    existing.prepare(QStringLiteral(
+        "SELECT account_id, signing_key, revoked_at_ms FROM devices WHERE device_id = ?"));
+    existing.addBindValue(deviceId.bytes());
+    if (!existing.exec()) {
+        db.rollback();
+        return fail<PasswordLogin>(RelayError::Internal);
+    }
+    if (existing.next()) {
+        const bool sameDevice = existing.value(0).toByteArray() == accountId->bytes()
+            && existing.value(1).toByteArray() == signingKey.toByteArray()
+            && existing.value(2).isNull();
+        if (!sameDevice) {
+            db.rollback();
+            return fail<PasswordLogin>(RelayError::Conflict);
+        }
+    } else {
+        QSqlQuery device(db);
+        device.prepare(QStringLiteral(
+            "INSERT INTO devices (device_id, account_id, signing_key, credential, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?)"));
+        device.addBindValue(deviceId.bytes());
+        device.addBindValue(accountId->bytes());
+        device.addBindValue(signingKey.toByteArray());
+        device.addBindValue(credential.toByteArray());
+        device.addBindValue(now);
+        if (!device.exec()) {
+            const bool conflict = isUniqueViolation(device);
+            db.rollback();
+            return fail<PasswordLogin>(conflict ? RelayError::Conflict : RelayError::Internal);
+        }
+    }
+
+    // The key is in hand, so a row hashed at an older cost is upgraded for free.
+    if (params->serialize() != m_policy.passwordParams.serialize()) {
+        const QByteArray newSalt = randomBytes(passwordSaltBytes);
+        const QByteArray newHash = hashPasswordKey(passwordKey, newSalt, m_policy.passwordParams);
+        if (newSalt.size() == passwordSaltBytes && newHash.size() == passwordHashBytes) {
+            QSqlQuery rehash(db);
+            rehash.prepare(QStringLiteral(
+                "UPDATE accounts SET password_hash = ?, password_salt = ?, password_params = ? "
+                "WHERE account_id = ?"));
+            rehash.addBindValue(newHash);
+            rehash.addBindValue(newSalt);
+            rehash.addBindValue(QString::fromLatin1(m_policy.passwordParams.serialize()));
+            rehash.addBindValue(accountId->bytes());
+            if (!rehash.exec()) {
+                db.rollback();
+                return fail<PasswordLogin>(RelayError::Internal);
+            }
+        }
+    }
+
+    QSqlQuery forgive(db);
+    forgive.prepare(QStringLiteral("DELETE FROM rate_limits WHERE subject = ? AND bucket = ?"));
+    forgive.addBindValue(subject);
+    forgive.addBindValue(loginFailureBucket());
+    if (!forgive.exec()) {
+        db.rollback();
+        return fail<PasswordLogin>(RelayError::Internal);
+    }
+
+    if (!db.commit()) {
+        db.rollback();
+        return fail<PasswordLogin>(RelayError::Internal);
+    }
+    return Result<PasswordLogin, RelayError>::success(login);
 }
 
 Result<QByteArray, RelayError> AuthService::issueChallenge(const AccountId &accountId,

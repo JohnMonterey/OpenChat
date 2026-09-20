@@ -6,6 +6,7 @@
 #include <QGuiApplication>
 #include <QIcon>
 #include <QPainter>
+#include <QPointer>
 #include <QQmlApplicationEngine>
 #include <QQuickView>
 #include <QQuickItem>
@@ -14,6 +15,7 @@
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QStandardPaths>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
@@ -24,6 +26,7 @@
 #include <optional>
 
 #include "app/AccountBootstrap.h"
+#include "app/LocalDataReset.h"
 #include "diagnostics/Logging.h"
 #include "app/AppMetadata.h"
 #include "app/ContactRequestService.h"
@@ -51,6 +54,7 @@
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
+#include "security/PasswordKey.h"
 #include "security/QtKeychainVault.h"
 #include "security/RecoveryCode.h"
 
@@ -168,7 +172,9 @@ std::optional<QSslConfiguration> buildDevCaTls(const QString &devCaPath)
 
 // Finds a single already-created local profile under `profilesRoot`. Profile
 // directories are named by the profile id's lowercase hex; a directory qualifies
-// only when the name round-trips to a valid ProfileId and holds a profile.sqlite3.
+// only when the name round-trips to a valid ProfileId, holds a profile.sqlite3
+// and is stamped with the current account layout (see app/LocalDataReset.h), so
+// a profile left over from before usernames and passwords is never opened.
 std::optional<OpenChat::ProfileId> findExistingProfile(const QString &profilesRoot)
 {
     QDir root(profilesRoot);
@@ -183,17 +189,33 @@ std::optional<OpenChat::ProfileId> findExistingProfile(const QString &profilesRo
             continue;
         const OpenChat::ProfilePaths paths =
             OpenChat::ProfilePaths::forProfile(profilesRoot, *id);
-        if (QFileInfo(paths.database).isFile())
+        if (QFileInfo(paths.database).isFile() && OpenChat::profileHasCurrentAccountLayout(paths))
             return id;
     }
     return std::nullopt;
+}
+
+// Overwrites a byte array's contents before releasing it (key material that had
+// to be copied out of a SecureBuffer to be sent).
+void scrubBytes(QByteArray &bytes)
+{
+    volatile char *data = bytes.data();
+    for (qsizetype i = 0; i < bytes.size(); ++i)
+        data[i] = '\0';
+    bytes.clear();
 }
 
 QString messageForBootstrapError(OpenChat::AccountBootstrap::Error error)
 {
     switch (error) {
     case OpenChat::AccountBootstrap::Error::HandleUnavailable:
-        return QStringLiteral("That handle is unavailable. Please choose another.");
+        return QStringLiteral(
+            "That username is taken. Choose another, or log in if it's yours.");
+    case OpenChat::AccountBootstrap::Error::InvalidCredentials:
+        return QStringLiteral("Wrong username or password.");
+    case OpenChat::AccountBootstrap::Error::RateLimited:
+        return QStringLiteral(
+            "Too many failed attempts for that username. Wait 15 minutes and try again.");
     case OpenChat::AccountBootstrap::Error::Auth:
         return QStringLiteral("Couldn't verify this device. Please try again.");
     case OpenChat::AccountBootstrap::Error::Publish:
@@ -202,7 +224,7 @@ QString messageForBootstrapError(OpenChat::AccountBootstrap::Error error)
     case OpenChat::AccountBootstrap::Error::Transport:
         return QStringLiteral("Couldn't reach OpenChat. Check your connection and try again.");
     }
-    return QStringLiteral("Couldn't create your profile. Please try again.");
+    return QStringLiteral("Something went wrong. Please try again.");
 }
 
 // Owns the interactive application: the keychain-backed vault, the profile
@@ -245,6 +267,25 @@ public:
             return false;
         }
         QDir().mkpath(m_profilesRoot);
+
+        // An account from before usernames and passwords cannot be signed in to
+        // any more. Erase it, and everything cached alongside it, straight away
+        // and fall through to onboarding.
+        if (OpenChat::hasOutdatedProfiles(m_profilesRoot)) {
+            const OpenChat::LocalDataResetReport report = OpenChat::eraseOutdatedLocalData(
+                m_vault, OpenChat::LocalDataLocations::standard(m_profilesRoot));
+            qWarning().noquote()
+                << QStringLiteral("OpenChat: erased %1 outdated local profile(s)%2.")
+                       .arg(report.profilesErased)
+                       .arg(report.complete()
+                                ? QString()
+                                : QStringLiteral("; %1 item(s) could not be removed and "
+                                                 "will be retried on the next start")
+                                      .arg(report.failures.size()));
+            m_onboardingNotice = QStringLiteral(
+                "OpenChat now signs you in with a username and password. The old account "
+                "data on this computer has been erased. Create your account to continue.");
+        }
 
         if (const std::optional<OpenChat::ProfileId> existing =
                 findExistingProfile(m_profilesRoot)) {
@@ -317,6 +358,23 @@ private:
                              });
             if (m_callEngine)
                 m_callController->setLiveEngine(m_callEngine.get(), m_chatController.get());
+        }
+        // Say so when the relay stops accepting this device (logging in to the
+        // account elsewhere retires it) instead of sitting silently offline, and
+        // clear the banner again if a later re-check is accepted after all.
+        if (m_deviceLink) {
+            using SessionState = OpenChat::ChatController::SessionState;
+            QObject::connect(m_deviceLink.get(), &OpenChat::DeviceLink::rejected,
+                             m_chatController.get(), [this] {
+                                 m_chatController->setSessionState(SessionState::SignedOut);
+                             });
+            QObject::connect(m_deviceLink.get(), &OpenChat::DeviceLink::linked,
+                             m_chatController.get(), [this] {
+                                 if (m_chatController->sessionState() == SessionState::SignedOut)
+                                     m_chatController->setSessionState(SessionState::Ready);
+                             });
+            if (m_deviceLink->isRejected())
+                m_chatController->setSessionState(SessionState::SignedOut);
         }
         m_engine = std::make_unique<QQmlApplicationEngine>();
         QObject::connect(
@@ -482,9 +540,9 @@ private:
     void startOnboarding()
     {
         m_onboardingController = std::make_unique<OpenChat::OnboardingController>(
-            [this](const QString &displayName, const QString &handle) {
-                beginAccountCreation(displayName, handle);
-            });
+            [this](OpenChat::OnboardingController::Mode mode, const QString &handle,
+                   const QString &password) { derivePasswordKeyThenBegin(mode, handle, password); });
+        m_onboardingController->setNotice(m_onboardingNotice);
         // Defer the swap so it never runs inside the QML button callback that
         // emitted completed().
         QObject::connect(
@@ -508,25 +566,64 @@ private:
         m_onboardingView->show();
     }
 
-    // The real onboarding Starter: creates the profile, reveals its one-time
-    // recovery code, and drives an AccountBootstrap. Its outcome is forwarded to
-    // the controller through onCreationSucceeded()/onCreationFailed().
-    void beginAccountCreation(const QString &displayName, const QString &handle)
+    // The real onboarding Starter, part one. Stretching the password costs a few
+    // hundred milliseconds and 64 MiB, so it runs on a pool thread; the UI keeps
+    // painting its busy state meanwhile. Only the resulting key comes back to
+    // this thread -- the password copy is overwritten on the worker as soon as the
+    // key exists. The controller is the context object of the hand-back, so an
+    // onboarding surface that is gone by then simply drops the result.
+    void derivePasswordKeyThenBegin(OpenChat::OnboardingController::Mode mode,
+                                    const QString &handle, const QString &password)
     {
+        QPointer<OpenChat::OnboardingController> controller = m_onboardingController.get();
+        QThreadPool::globalInstance()->start([this, controller, mode, handle,
+                                              secret = password]() mutable {
+            auto derived = OpenChat::derivePasswordKey(handle, secret);
+            secret.fill(QChar(u'\0'));
+            secret.clear();
+            auto key = std::make_shared<std::optional<OpenChat::SecureBuffer>>();
+            if (derived.hasValue())
+                key->emplace(std::move(derived).value());
+            if (!controller)
+                return;
+            QMetaObject::invokeMethod(
+                controller.data(),
+                [this, mode, handle, key] {
+                    if (!key->has_value()) {
+                        reportFailure(QStringLiteral(
+                            "Couldn't prepare your password on this device. Please try again."));
+                        return;
+                    }
+                    beginAccountFlow(mode, handle, **key);
+                },
+                Qt::QueuedConnection);
+        });
+    }
+
+    // Part two: creates the local profile, reveals its one-time recovery code,
+    // and drives an AccountBootstrap that either registers the new account or
+    // logs in to the existing one. The outcome is forwarded to the controller
+    // through onSubmitSucceeded()/onSubmitFailed().
+    void beginAccountFlow(OpenChat::OnboardingController::Mode mode, const QString &handle,
+                          const OpenChat::SecureBuffer &passwordKey)
+    {
+        const bool signingUp = mode == OpenChat::OnboardingController::Mode::SignUp;
         const OpenChat::ProfileId profileId = OpenChat::ProfileId::generate();
         const OpenChat::ProfilePaths paths =
             OpenChat::ProfilePaths::forProfile(m_profilesRoot, profileId);
 
         auto created = OpenChat::ProfileSession::create(profileId, m_vault, paths);
         if (!created.hasValue()) {
-            reportFailure(QStringLiteral("Couldn't create your profile. Please try again."));
+            reportFailure(QStringLiteral("Couldn't set up OpenChat on this device. Please try again."));
             return;
         }
         m_session = std::move(created).value();
         m_pendingProfileId = profileId;
-        if (!m_session->setDisplayName(displayName).hasValue()) {
+        // The username doubles as the initial display name; it can be changed
+        // from the profile menu afterwards.
+        if (!m_session->setDisplayName(handle).hasValue()) {
             rollbackPendingProfile();
-            reportFailure(QStringLiteral("Couldn't create your profile. Please try again."));
+            reportFailure(QStringLiteral("Couldn't set up OpenChat on this device. Please try again."));
             return;
         }
 
@@ -542,7 +639,7 @@ private:
         const auto credential = m_session->publicCredential();
         if (!account.hasValue() || !credential.hasValue()) {
             rollbackPendingProfile();
-            reportFailure(QStringLiteral("Couldn't create your profile. Please try again."));
+            reportFailure(QStringLiteral("Couldn't set up OpenChat on this device. Please try again."));
             return;
         }
 
@@ -555,12 +652,30 @@ private:
         m_bootstrap = std::make_unique<OpenChat::AccountBootstrap>(*m_session, *m_relay,
                                                                    *m_transport);
 
-        QObject::connect(m_bootstrap.get(), &OpenChat::AccountBootstrap::succeeded,
-                         m_bootstrap.get(), [this, recoveryCode] {
-                             m_pendingProfileId.reset(); // committed and live
-                             if (m_onboardingController)
-                                 m_onboardingController->onCreationSucceeded(recoveryCode);
-                         });
+        // Queued, like failed below: a storage problem here tears the bootstrap
+        // down, which must not happen on its own emit stack.
+        QObject::connect(
+            m_bootstrap.get(), &OpenChat::AccountBootstrap::succeeded, m_bootstrap.get(),
+            [this, paths, recoveryCode] {
+                // Stamp the profile as a username + password account only now
+                // that the relay holds it as one. A profile that never gets this
+                // far has no stamp and is erased on the next start, so a crash
+                // mid-flow cannot strand a half-registered profile; the account
+                // itself stays reachable by logging in.
+                if (!OpenChat::markProfileAccountLayoutCurrent(paths)) {
+                    rollbackFailedCreation(QStringLiteral(
+                        "Your account is ready, but it couldn't be saved on this device. "
+                        "Log in with your username and password to try again."));
+                    return;
+                }
+                // A login confirms the canonical username; keep the name in step.
+                if (m_bootstrap && m_session)
+                    (void)m_session->setDisplayName(m_bootstrap->handle());
+                m_pendingProfileId.reset(); // committed and live
+                if (m_onboardingController)
+                    m_onboardingController->onSubmitSucceeded(recoveryCode);
+            },
+            Qt::QueuedConnection);
         // Queued: the failed handler tears down the networking objects, including
         // the bootstrap that emitted the signal, so it must run off the emit stack.
         QObject::connect(
@@ -570,7 +685,14 @@ private:
             },
             Qt::QueuedConnection);
 
-        m_bootstrap->start(handle, m_keyPackageCount);
+        // The relay call needs plain bytes; they are overwritten as soon as the
+        // request has been handed to the network stack.
+        QByteArray keyBytes = passwordKey.view().toByteArray();
+        if (signingUp)
+            m_bootstrap->start(handle, keyBytes, m_keyPackageCount);
+        else
+            m_bootstrap->startLogin(handle, keyBytes, m_keyPackageCount);
+        scrubBytes(keyBytes);
     }
 
     // Tears down the in-flight bootstrap networking and the just-created local
@@ -607,7 +729,7 @@ private:
     void reportFailure(const QString &message)
     {
         if (m_onboardingController)
-            m_onboardingController->onCreationFailed(message);
+            m_onboardingController->onSubmitFailed(message);
     }
 
     // Recovery acknowledged: bring up the chat window and retire the onboarding
@@ -626,6 +748,7 @@ private:
 
     OpenChat::QtKeychainVault m_vault;
     QString m_profilesRoot;
+    QString m_onboardingNotice;
     OpenChat::RelayEndpoints m_endpoints;
     std::optional<QSslConfiguration> m_tls;
     int m_keyPackageCount;
@@ -717,13 +840,27 @@ int runOnboardingPreview(QGuiApplication &application, QCommandLineParser &parse
                          const QCommandLineOption &captureOption,
                          const QCommandLineOption &delayOption,
                          const QCommandLineOption &widthOption,
-                         const QCommandLineOption &heightOption, bool startAtRecovery)
+                         const QCommandLineOption &heightOption, bool startAtRecovery,
+                         bool startAtLogin, bool startFilled)
 {
     OpenChat::OnboardingController controller;
-    if (startAtRecovery) {
-        controller.setDisplayName(QStringLiteral("Ada Lovelace"));
+    if (startAtLogin)
+        controller.setMode(OpenChat::OnboardingController::Mode::LogIn);
+    if (startFilled) {
+        // The busiest the form gets: the startup notice, a strength reading and
+        // a field hint all showing at once.
+        controller.setNotice(QStringLiteral(
+            "OpenChat now signs you in with a username and password. The old account "
+            "data on this computer has been erased. Create your account to continue."));
         controller.setHandle(QStringLiteral("ada"));
-        controller.createProfile(); // placeholder Starter succeeds -> Recovery
+        controller.setPassword(QStringLiteral("analytical engine no. 1"));
+        controller.setPasswordConfirm(QStringLiteral("analytical engine"));
+    }
+    if (startAtRecovery) {
+        controller.setHandle(QStringLiteral("ada"));
+        controller.setPassword(QStringLiteral("analytical engine no. 1"));
+        controller.setPasswordConfirm(QStringLiteral("analytical engine no. 1"));
+        controller.submit(); // placeholder Starter succeeds -> Recovery
     }
 
     QQuickView view;
@@ -980,6 +1117,12 @@ int main(int argc, char *argv[])
     const QCommandLineOption onboardingRecoveryOption(
         QStringLiteral("onboarding-recovery"),
         QStringLiteral("Preview the onboarding recovery-code screen."));
+    const QCommandLineOption onboardingLoginOption(
+        QStringLiteral("onboarding-login"),
+        QStringLiteral("Preview the onboarding surface in log-in mode."));
+    const QCommandLineOption onboardingFilledOption(
+        QStringLiteral("onboarding-filled"),
+        QStringLiteral("Preview the onboarding sign-up form filled in, with its notice and hints."));
     const QCommandLineOption addContactOption(
         QStringLiteral("add-contact"),
         QStringLiteral("Preview the add-contact surface (dialog + requests)."));
@@ -1010,7 +1153,8 @@ int main(int argc, char *argv[])
         QStringLiteral("Preview the far end's share or camera enlarged over the window "
                        "(combine with --call-video or --call-screen)."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
-                       onboardingRecoveryOption, addContactOption, verifyOption, callOption,
+                       onboardingRecoveryOption, onboardingLoginOption,
+                       onboardingFilledOption, addContactOption, verifyOption, callOption,
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
                        callPickerOption, callFullscreenOption, callZoomOption});
     parser.process(application);
@@ -1019,9 +1163,11 @@ int main(int argc, char *argv[])
 
     // Onboarding preview: launch the screens directly with no real services.
     const bool previewRecovery = parser.isSet(onboardingRecoveryOption);
-    if (parser.isSet(onboardingOption) || previewRecovery)
+    const bool previewLogin = parser.isSet(onboardingLoginOption);
+    const bool previewFilled = parser.isSet(onboardingFilledOption);
+    if (parser.isSet(onboardingOption) || previewRecovery || previewLogin || previewFilled)
         return runOnboardingPreview(application, parser, captureOption, delayOption, widthOption,
-                                    heightOption, previewRecovery);
+                                    heightOption, previewRecovery, previewLogin, previewFilled);
 
     // Add-contact preview: render the add-contact surface with a mock controller,
     // checked before the plain capture path so --add-contact --capture routes here.

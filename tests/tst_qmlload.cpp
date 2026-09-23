@@ -1312,6 +1312,76 @@ private slots:
         QVERIFY(!requestsPanel->property("visible").toBool());
     }
 
+    void categoriesFoldToTheirHeaderOnClick()
+    {
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        contactController.addMockRequest(QStringLiteral("@dave"), QStringLiteral("wants to chat"));
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        const auto centre = [](QQuickItem *item) {
+            return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+        };
+
+        auto *chats = window->findChild<QQuickItem *>(QStringLiteral("contactsCategory"));
+        auto *requestsPanel = window->findChild<QQuickItem *>(QStringLiteral("requestsPanel"));
+        QVERIFY(chats && requestsPanel);
+        QTRY_VERIFY(requestsPanel->height() > 40.0);
+        auto *chatsHeader = findVisualItem(chats, QStringLiteral("categoryHeaderArea"));
+        auto *alex = findVisualItem(chats, QStringLiteral("contactRow_alex"));
+        auto *requestsHeader = findVisualItem(requestsPanel, QStringLiteral("requestsHeaderArea"));
+        auto *badge = findVisualItem(requestsPanel, QStringLiteral("requestsBadge"));
+        OpenChat::RequestListModel *model = contactController.requests();
+        const QString requestId =
+            model->data(model->index(0), OpenChat::RequestListModel::IdRole).toString();
+        auto *requestRow = findVisualItem(requestsPanel, QStringLiteral("requestRow_") + requestId);
+        QVERIFY(chatsHeader && alex && requestsHeader && badge && requestRow);
+        const qreal chatsOpenHeight = chats->height();
+        const qreal requestsOpenHeight = requestsPanel->height();
+        const qreal chatsOpenY = chats->y();
+        QVERIFY(chatsOpenHeight > 40.0);
+        QVERIFY(alex->isVisible() && requestRow->isVisible());
+
+        // Friend requests folds to its header, keeping its count badge, and
+        // the category below moves up into the freed space.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(requestsHeader));
+        QVERIFY(requestsPanel->property("collapsed").toBool());
+        QCOMPARE(requestsPanel->height(), 39.0); // its bottom rule meets the next header's
+        QVERIFY(!requestRow->isVisible());
+        QVERIFY(badge->isVisible());
+        QTRY_COMPARE(chats->y(), chatsOpenY - (requestsOpenHeight - 39.0));
+
+        // Chats folds the same way and its rows stop being drawn.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(chatsHeader));
+        QVERIFY(chats->property("collapsed").toBool());
+        QCOMPARE(chats->height(), 39.0);
+        QVERIFY(!alex->isVisible());
+        const QString capture = qEnvironmentVariable("OPENCHAT_CATEGORY_FOLD_CAPTURE");
+        if (!capture.isEmpty())
+            QVERIFY(window->grabWindow().save(capture));
+
+        // A second click on each brings the rows back where they were.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(chatsHeader));
+        QVERIFY(!chats->property("collapsed").toBool());
+        QCOMPARE(chats->height(), chatsOpenHeight);
+        QVERIFY(alex->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(requestsHeader));
+        QVERIFY(!requestsPanel->property("collapsed").toBool());
+        QCOMPARE(requestsPanel->height(), requestsOpenHeight);
+        QVERIFY(requestRow->isVisible());
+        QTRY_COMPARE(chats->y(), chatsOpenY);
+    }
+
     void searchAndFindRowSendsFriendRequest()
     {
         OpenChat::ChatController chatController;

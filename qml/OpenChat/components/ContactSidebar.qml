@@ -594,8 +594,12 @@ Item {
                     sidebar.contactController && sidebar.contactController.requests.count > 0
                 visible: sidebar.contactController && sidebar.contactController.enabled
                          && hasRequests
-                height: visible ? requestsHeader.height + requestsColumn.height : 0
-                clip: true
+                // Folds to its header like the categories below, its bottom rule
+                // sharing a row with the next header's; the badge keeps the count
+                // in view while the rows are hidden.
+                property bool collapsed: false
+                height: visible ? (collapsed ? requestsHeader.height - 1
+                                             : requestsHeader.height + requestsColumn.height) : 0
 
                 Rectangle {
                     id: requestsHeader
@@ -617,10 +621,24 @@ Item {
                         renderType: Text.NativeRendering
                     }
 
+                    Text {
+                        id: requestsChevron
+                        objectName: "requestsChevron"
+                        anchors.right: parent.right
+                        anchors.rightMargin: 20
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "⌃"
+                        rotation: requestsPanel.collapsed ? 180 : 0
+                        color: Theme.categoryChevron
+                        font.family: Theme.uiFont
+                        font.bold: true
+                        font.pixelSize: 15
+                    }
+
                     Rectangle {
                         objectName: "requestsBadge"
-                        anchors.right: parent.right
-                        anchors.rightMargin: 16
+                        anchors.right: requestsChevron.left
+                        anchors.rightMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
                         height: 18
                         width: Math.max(18, requestsBadgeLabel.implicitWidth + 10)
@@ -638,12 +656,20 @@ Item {
                             font.bold: true
                         }
                     }
+
+                    MouseArea {
+                        objectName: "requestsHeaderArea"
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: requestsPanel.collapsed = !requestsPanel.collapsed
+                    }
                 }
 
                 Column {
                     id: requestsColumn
                     anchors.top: requestsHeader.bottom
                     width: parent.width
+                    visible: !requestsPanel.collapsed
 
                     Repeater {
                         objectName: "requestsList"

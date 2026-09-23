@@ -12,7 +12,11 @@
 #include <QCborMap>
 #include <QCborValue>
 #include <QCryptographicHash>
+#include <QScopeGuard>
+#include <QSemaphore>
 #include <QSignalSpy>
+#include <QThread>
+#include <QTimer>
 #include <QSslCertificate>
 #include <QSslConfiguration>
 #include <QSslKey>
@@ -212,6 +216,7 @@ private slots:
     void sendEnvelopeIsAcknowledged();
     void sendEnvelopeBeforeConnectFails();
     void sendDatagramUsesTheUnreliableFrame();
+    void aCongestedTlsLinkShowsItsBacklogAndDropsMedia();
     void deliveredDatagramIsSurfaced();
     void badDatagramsAreDroppedNotTerminal();
 
@@ -646,6 +651,71 @@ void RelayClientTest::sendDatagramUsesTheUnreliableFrame()
     QCOMPARE(carried.value(), envelope);
     // No acceptance is expected: nothing was stored, so there is nothing to ack.
     QCOMPARE(observer.acceptedIds.count(), 0);
+}
+
+// Over TLS a write is encrypted at once and then waits in the TLS socket's own
+// buffer, which QWebSocket::bytesToWrite() does not count. The media pacer and
+// the datagram drop gate both have to see that backlog, or a congested link
+// queues seconds of stale video in front of the call's voice.
+void RelayClientTest::aCongestedTlsLinkShowsItsBacklogAndDropsMedia()
+{
+    RelayTest::CertAuthority ca;
+    const QSslConfiguration serverConfig = RelayTest::serverConfig(ca.localhostLeaf());
+    // The relay runs on a thread of its own and stops servicing the connection
+    // once the handshake is done, as a relay behind a saturated link would:
+    // nothing is taken off the connection any more, so the client's writes
+    // pile up behind the kernel's buffers.
+    QThread relayThread;
+    relayThread.start();
+    QObject anchor;
+    anchor.moveToThread(&relayThread);
+    std::unique_ptr<RelayTest::FakeWssServer> server;
+    QUrl url;
+    QSemaphore stalled;
+    QSemaphore resume;
+    QMetaObject::invokeMethod(
+        &anchor,
+        [&] {
+            server = std::make_unique<RelayTest::FakeWssServer>(
+                serverConfig, QStringList{QString::fromLatin1(relaySubprotocol)});
+            server->onConnected = [&](QWebSocket *) {
+                QTimer::singleShot(50, [&] {
+                    stalled.release();
+                    resume.acquire();
+                });
+            };
+            url = server->liveUrl("localhost");
+        },
+        Qt::BlockingQueuedConnection);
+    const auto cleanup = qScopeGuard([&] {
+        resume.release();
+        QMetaObject::invokeMethod(&anchor, [&] { server.reset(); }, Qt::BlockingQueuedConnection);
+        relayThread.quit();
+        relayThread.wait();
+    });
+
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(url),
+                       fixedCredentials("a", "r"), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    Observer observer(&client);
+    client.connectLive(0);
+    QTRY_COMPARE(observer.connects.count(), 1);
+    QVERIFY(stalled.tryAcquire(1, 5000));
+
+    // Far more than any kernel buffers, sent the way media is: a frame at a
+    // time, with the event loop turning in between.
+    const CiphertextEnvelopeV1 frame = makeEnvelope(DeviceId::generate(), QByteArray(48 * 1024, 'v'));
+    for (int index = 0; index < 600; ++index) {
+        QVERIFY(client.sendDatagram(frame).hasValue());
+        QCoreApplication::processEvents();
+    }
+    QTest::qWait(200);
+    const qint64 backlog = client.pendingSendBytes();
+    // The backlog is visible (blind, it would read as next to nothing)...
+    QVERIFY2(backlog > 64 * 1024, qPrintable(QString::number(backlog)));
+    // ...and bounded: once it passed the gate, further media was dropped
+    // rather than queued behind it.
+    QVERIFY2(backlog < 512 * 1024, qPrintable(QString::number(backlog)));
 }
 
 void RelayClientTest::deliveredDatagramIsSurfaced()

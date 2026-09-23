@@ -52,6 +52,10 @@ class CallController final : public QObject
     Q_PROPERTY(bool screenShareAvailable READ screenShareAvailable NOTIFY screenShareChanged)
     Q_PROPERTY(bool screenShareEnabled READ screenShareEnabled NOTIFY screenShareChanged)
     Q_PROPERTY(QString screenShareError READ screenShareError NOTIFY screenShareChanged)
+    // True while the error above is the operating system refusing access
+    // (macOS Screen Recording), so the view can offer the settings page.
+    Q_PROPERTY(bool screenSharePermissionNeeded READ screenSharePermissionNeeded
+                   NOTIFY screenShareChanged)
     // What is being shared, for the caption on the local preview.
     Q_PROPERTY(QString screenShareSourceName READ screenShareSourceName NOTIFY screenShareChanged)
     // True while the peer (or anyone in a group) is sharing a screen with us.
@@ -181,6 +185,8 @@ public:
     Q_INVOKABLE QVariantList screenShareSources();
     Q_INVOKABLE void startScreenShare(int sourceIndex);
     Q_INVOKABLE void stopScreenShare();
+    // Opens the system settings page where screen capture is allowed.
+    Q_INVOKABLE void openScreenSharePermissionSettings();
     // How large an incoming share is actually being displayed. Reported back to
     // the sender, which stops encoding more than this. A zero size means the
     // view is closed and the sender can idle.
@@ -195,6 +201,10 @@ public:
     [[nodiscard]] bool screenShareAvailable() const noexcept;
     [[nodiscard]] bool screenShareEnabled() const noexcept { return m_screenShareEnabled; }
     [[nodiscard]] QString screenShareError() const { return m_screenShareError; }
+    [[nodiscard]] bool screenSharePermissionNeeded() const noexcept
+    {
+        return m_screenSharePermissionNeeded;
+    }
     [[nodiscard]] QString screenShareSourceName() const { return m_screenShareSourceName; }
     [[nodiscard]] bool remoteScreenShareActive() const;
     [[nodiscard]] QVariant remoteScreenCanvas() const { return QVariant::fromValue(m_remoteScreen); }
@@ -295,6 +305,7 @@ private:
     QVector<ScreenShareSource> m_screenSources;
     bool m_screenShareEnabled = false;
     bool m_screenShareUnsupported = false;
+    bool m_screenSharePermissionNeeded = false;
     QString m_screenShareError;
     QString m_screenShareSourceName;
     ScreenCanvasPtr m_remoteScreen;

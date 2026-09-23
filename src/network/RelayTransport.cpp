@@ -58,6 +58,11 @@ void RelayTransport::sendEnvelope(const CiphertextEnvelopeV1 &envelope)
     (void)m_relay.sendEnvelope(envelope);
 }
 
+qint64 RelayTransport::pendingSendBytes() const
+{
+    return m_relay.pendingSendBytes();
+}
+
 void RelayTransport::sendDatagram(const CiphertextEnvelopeV1 &envelope)
 {
     // Nothing to swallow but the synchronous failure: an unreachable peer or a

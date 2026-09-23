@@ -19,6 +19,7 @@ find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 include(cmake/dependencies/AudioPlugins.cmake)
 include(cmake/dependencies/Opus.cmake)
+include(cmake/dependencies/Vpx.cmake)
 include(cmake/dependencies/QtKeychain.cmake)
 include(cmake/dependencies/SqlCipher.cmake)
 include(cmake/OpenChatRust.cmake)
@@ -39,6 +40,7 @@ qt_add_executable(OpenChat
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
+    src/controllers/CrashReportController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/CallParticipantModel.cpp
@@ -71,6 +73,7 @@ qt_add_qml_module(OpenChat
     QML_FILES
         qml/OpenChat/Main.qml
         qml/OpenChat/Onboarding.qml
+        qml/OpenChat/CrashNotice.qml
         qml/OpenChat/Theme.qml
         qml/OpenChat/VocalFx.qml
         qml/OpenChat/components/VocalFxPanel.qml
@@ -129,6 +132,7 @@ target_link_libraries(OpenChat PRIVATE
     openchat_app
     openchat_avatar
     openchat_call
+    openchat_crash
     openchat_notify
     Qt6::Core
     Qt6::Gui
@@ -175,6 +179,13 @@ target_link_libraries(openchat-render-call-sounds PRIVATE
     Qt6::Core
 )
 
+# What a screen-share viewer actually sees, tile encoder against VP9, on
+# synthetic desktops. Not part of the application: it is how a change to either
+# encoder is measured rather than guessed at.
+add_executable(openchat-screen-bench tools/screen_share_bench.cpp)
+target_include_directories(openchat-screen-bench PRIVATE src)
+target_link_libraries(openchat-screen-bench PRIVATE openchat_call Qt6::Core Qt6::Gui)
+
 # Runs one side of a real call against a real relay, so the two-machine question
 # can be answered by actually doing it rather than by inference.
 add_executable(openchat-call-check tools/call_check.cpp)
@@ -208,6 +219,7 @@ add_test(NAME tst_appmetadata COMMAND tst_appmetadata)
 
 add_library(openchat_domain STATIC
     src/diagnostics/Logging.cpp
+    src/diagnostics/BlackBox.cpp
     src/domain/Identifiers.cpp
     src/domain/Handle.cpp
     src/domain/ProfileUpdate.cpp
@@ -285,6 +297,38 @@ elseif(WIN32)
 elseif(UNIX)
     target_link_libraries(openchat_notify PUBLIC Qt6::DBus)
 endif()
+
+# Crash reporting: fatal-signal and structured-exception handlers, reports
+# written without allocating, the freeze detector, and the post-mortem of a
+# session that died without any handler running. See src/diagnostics/CrashReporter.h.
+add_library(openchat_crash STATIC
+    src/diagnostics/CrashReporter.cpp
+    src/diagnostics/CrashWriter.cpp
+)
+if(WIN32)
+    target_sources(openchat_crash PRIVATE src/diagnostics/CrashHandlerWin.cpp)
+    target_link_libraries(openchat_crash PRIVATE psapi)
+else()
+    target_sources(openchat_crash PRIVATE src/diagnostics/CrashHandlerPosix.cpp)
+    target_link_libraries(openchat_crash PRIVATE ${CMAKE_DL_LIBS})
+endif()
+target_include_directories(openchat_crash PUBLIC src)
+target_link_libraries(openchat_crash PUBLIC openchat_domain Qt6::Core Qt6::Gui)
+# Which build a report came from. The revision is taken at configure time; the
+# link timestamp every Windows report lists per module is the exact match.
+find_package(Git QUIET)
+set(OPENCHAT_BUILD_ID "unknown revision")
+if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} describe --always --dirty
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE openchat_git_describe OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET RESULT_VARIABLE openchat_git_result)
+    if(openchat_git_result EQUAL 0 AND openchat_git_describe)
+        set(OPENCHAT_BUILD_ID "${openchat_git_describe}")
+    endif()
+endif()
+set_source_files_properties(src/diagnostics/CrashReporter.cpp PROPERTIES COMPILE_DEFINITIONS
+    "OPENCHAT_VERSION=\"${PROJECT_VERSION}\";OPENCHAT_BUILD_ID=\"${OPENCHAT_BUILD_ID}\"")
 
 add_library(openchat_protocol STATIC
     src/protocol/CiphertextEnvelope.cpp
@@ -434,6 +478,7 @@ add_library(openchat_call STATIC
     src/call/QtAudioIo.cpp
     src/call/CallVideoSession.cpp
     src/call/CallScreenSession.cpp
+    src/call/ScreenVideoCodec.cpp
     src/call/QtVideoCapture.cpp
     src/call/QtScreenCapture.cpp
     src/call/VideoFrameCopy.cpp
@@ -442,8 +487,45 @@ target_include_directories(openchat_call PUBLIC src)
 target_link_libraries(openchat_call
     PUBLIC openchat_media openchat_network openchat_domain openchat_effects
            Qt6::Core Qt6::Gui Qt6::Multimedia
-    PRIVATE OpenSSL::Crypto
+    PRIVATE OpenSSL::Crypto openchat_vpx
 )
+
+# Screen capture through the operating system's own API where Qt's cannot be
+# relied on: the Windows Qt ships no FFmpeg backend (so no QScreenCapture at
+# all) and Homebrew's macOS Qt switches it off. See src/call/NativeScreenCapture.h.
+# Turning this off falls back to Qt Multimedia everywhere, which is how Linux
+# always captures.
+option(OPENCHAT_NATIVE_SCREEN_CAPTURE
+    "Capture screens with DXGI/Windows.Graphics.Capture and ScreenCaptureKit" ON)
+if(OPENCHAT_NATIVE_SCREEN_CAPTURE AND WIN32)
+    target_sources(openchat_call PRIVATE src/call/NativeScreenCaptureWin.cpp)
+    target_link_libraries(openchat_call PRIVATE d3d11 dxgi dwmapi gdi32 user32)
+    # Windows.Graphics.Capture, for single windows, is reached through
+    # C++/WinRT; without it only whole screens can be shared.
+    include(CheckIncludeFileCXX)
+    check_include_file_cxx("winrt/Windows.Graphics.Capture.h" OPENCHAT_HAVE_CPPWINRT_CAPTURE)
+    if(OPENCHAT_HAVE_CPPWINRT_CAPTURE)
+        target_link_libraries(openchat_call PRIVATE runtimeobject windowsapp)
+    else()
+        message(STATUS "OpenChat: no C++/WinRT; single windows cannot be screen-shared.")
+    endif()
+elseif(OPENCHAT_NATIVE_SCREEN_CAPTURE AND APPLE)
+    target_sources(openchat_call PRIVATE src/call/NativeScreenCaptureMac.mm)
+    set_source_files_properties(src/call/NativeScreenCaptureMac.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    # Weak, so the application still starts on macOS older than 12.3; the code
+    # checks @available before touching ScreenCaptureKit and uses Qt's path
+    # there instead.
+    target_link_libraries(openchat_call PRIVATE
+        "-weak_framework ScreenCaptureKit"
+        "-framework CoreGraphics"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework Foundation"
+        "-framework AppKit")
+else()
+    target_sources(openchat_call PRIVATE src/call/NativeScreenCaptureNone.cpp)
+endif()
 qt_add_resources(openchat_call "openchat_call_sounds"
     PREFIX "/openchat/sounds"
     BASE "assets/sounds"
@@ -839,6 +921,19 @@ add_executable(tst_videocall tests/tst_videocall.cpp)
 target_link_libraries(tst_videocall PRIVATE openchat_call Qt6::Test)
 add_test(NAME tst_videocall COMMAND tst_videocall)
 
+add_executable(tst_crashreport tests/tst_crashreport.cpp)
+target_include_directories(tst_crashreport PRIVATE src)
+target_compile_definitions(tst_crashreport PRIVATE
+    OPENCHAT_EXECUTABLE="$<TARGET_FILE:OpenChat>")
+target_link_libraries(tst_crashreport PRIVATE openchat_crash openchat_domain Qt6::Core Qt6::Test)
+# The end-to-end cases crash the real application on purpose.
+add_dependencies(tst_crashreport OpenChat)
+add_test(NAME tst_crashreport COMMAND tst_crashreport)
+
+add_executable(tst_screenvideo tests/tst_screenvideo.cpp)
+target_link_libraries(tst_screenvideo PRIVATE openchat_call Qt6::Gui Qt6::Test)
+add_test(NAME tst_screenvideo COMMAND tst_screenvideo)
+
 add_executable(tst_screenshare tests/tst_screenshare.cpp)
 target_link_libraries(tst_screenshare PRIVATE openchat_call Qt6::Gui Qt6::Test)
 add_test(NAME tst_screenshare COMMAND tst_screenshare)
@@ -924,6 +1019,7 @@ add_executable(tst_qmlload
     src/app/AppearanceSettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
+    src/controllers/CrashReportController.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE
@@ -933,6 +1029,7 @@ target_link_libraries(tst_qmlload PRIVATE
     openchat_app
     openchat_avatar
     openchat_call
+    openchat_crash
     openchat_network
     openchat_crypto
     openchat_storage

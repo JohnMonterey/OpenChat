@@ -1,7 +1,10 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDebug>
+#include <QColor>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QIcon>
@@ -15,6 +18,8 @@
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QStandardPaths>
+#include <QSysInfo>
+#include <QTextStream>
 #include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
@@ -22,6 +27,7 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <optional>
 
@@ -34,11 +40,16 @@
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
 #include "call/CallEngine.h"
+#include "call/NativeScreenCapture.h"
+#include "call/ScreenVideoCodec.h"
 #include "call/QtAudioIo.h"
 #include "call/SyncCallTransport.h"
 #include "controllers/CallController.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
+#include "controllers/CrashReportController.h"
+#include "diagnostics/BlackBox.h"
+#include "diagnostics/CrashReporter.h"
 #include "controllers/OnboardingController.h"
 #include "domain/Identifiers.h"
 #include "network/RelayClient.h"
@@ -1080,13 +1091,209 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
     return application.exec();
 }
 
+// Decided before the application object exists, from the raw arguments: the
+// crash handlers are installed first thing and need to know whether this is
+// the report viewer. The path itself is read later through Qt, which decodes
+// the command line properly on Windows.
+bool isCrashReportViewer(int argc, char *argv[])
+{
+    for (int index = 1; index < argc; ++index) {
+        if (std::strcmp(argv[index], "--crash-report") == 0
+            || std::strncmp(argv[index], "--crash-report=", 15) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A crash report in its own window. `canRestart` is for the viewer launched
+// straight after a crash, where OpenChat is not otherwise running.
+std::unique_ptr<QQmlApplicationEngine> showCrashReport(const QString &path, bool canRestart)
+{
+    auto engine = std::make_unique<QQmlApplicationEngine>();
+    auto *report = new OpenChat::CrashReportController(path, canRestart, engine.get());
+    engine->setInitialProperties({{QStringLiteral("report"), QVariant::fromValue(report)}});
+    engine->loadFromModule("OpenChat", "CrashNotice");
+    return engine;
+}
+
+// `OpenChat --screen-share-check`: what a tester runs when sharing does not
+// work, and sends back what it printed. It enumerates what the picker would
+// offer, captures every screen (and one window) for a few seconds through the
+// same path a call uses, and saves the first frame of each so a wrong
+// orientation, a missing pointer or a black picture can be seen, not guessed.
+// Window titles are never printed: they are the user's content.
+int runScreenShareCheck(QGuiApplication &application)
+{
+    Q_UNUSED(application);
+    QTextStream out(stdout);
+    out << "OpenChat screen share check\n"
+        << "  capture path: " << OpenChat::QtScreenCapture::backendName() << '\n'
+        << "  system:       " << QSysInfo::prettyProductName() << ", "
+        << QSysInfo::currentCpuArchitecture() << '\n'
+        << "  Qt:           " << qVersion() << '\n';
+    const bool permitted = OpenChat::NativeScreenCapturePlatform::access(false)
+        == OpenChat::ScreenCaptureAccess::Granted;
+    out << "  permission:   "
+        << (permitted ? QStringLiteral("granted")
+                      : QStringLiteral("DENIED: ")
+                            + OpenChat::NativeScreenCapturePlatform::accessDeniedMessage())
+        << '\n';
+    out.flush();
+
+    const QVector<OpenChat::ScreenShareSource> sources =
+        OpenChat::QtScreenCapture::availableSources();
+    int windows = 0;
+    for (const OpenChat::ScreenShareSource &source : sources) {
+        if (source.kind == OpenChat::ScreenShareSource::Kind::Window)
+            ++windows;
+    }
+    out << "  sources:      " << (sources.size() - windows) << " screen(s), " << windows
+        << " window(s)\n\n";
+
+    const QString folder = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                               .filePath(QStringLiteral("openchat-screen-check"));
+    QDir().mkpath(folder);
+    int failures = 0;
+    bool triedWindow = false;
+    int ordinal = 0;
+    for (const OpenChat::ScreenShareSource &source : sources) {
+        const bool screen = source.kind == OpenChat::ScreenShareSource::Kind::Screen;
+        if (!screen && triedWindow)
+            continue;
+        triedWindow = triedWindow || !screen;
+        ++ordinal;
+        out << (screen ? QStringLiteral("  screen \"%1\"").arg(source.name)
+                       : QStringLiteral("  the first window in the list (%1x%2)")
+                             .arg(source.size.width())
+                             .arg(source.size.height()))
+            << '\n';
+        out.flush();
+
+        OpenChat::QtScreenCapture capture;
+        int frames = 0;
+        QImage first;
+        QString failure;
+        QEventLoop loop;
+        // The frames also go through the same VP9 encoder and decoder a call
+        // uses, so the report says whether this machine can keep up.
+        QObject codecContext;
+        OpenChat::ScreenVideoEncoder encoder(&codecContext);
+        OpenChat::ScreenVideoDecoder decoder(&codecContext);
+        int encoded = 0;
+        int decoded = 0;
+        qint64 encodedBytes = 0;
+        qint64 encodeUsTotal = 0;
+        encoder.setOnEncoded([&](const OpenChat::EncodedScreenFrame &frame) {
+            ++encoded;
+            encodedBytes += frame.data.size();
+            encodeUsTotal += encoder.stats().lastEncodeUs;
+            decoder.submit(frame.data, frame.keyframe);
+        });
+        decoder.setOnPicture([&](QImage) { ++decoded; });
+        QElapsedTimer codecClock;
+        codecClock.start();
+        const bool video = OpenChat::ScreenVideoEncoder::isAvailable();
+        capture.onFrame = [&](const OpenChat::ScreenFrameView &view) {
+            ++frames;
+            if (first.isNull()) {
+                first = QImage(view.bits, view.width, view.height, view.bytesPerLine, view.format)
+                            .copy();
+            }
+            if (video)
+                (void)encoder.submit(view, 1000 + codecClock.elapsed());
+        };
+        QObject::connect(&capture, &OpenChat::QtScreenCapture::failed, &loop,
+                         [&](const QString &message, bool) {
+                             failure = message;
+                             loop.quit();
+                         });
+        QElapsedTimer clock;
+        clock.start();
+        capture.setTargetFps(30);
+        capture.start(source);
+        QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+        if (failure.isEmpty())
+            loop.exec();
+        capture.stop();
+
+        if (!failure.isEmpty()) {
+            ++failures;
+            out << "    FAILED after " << clock.elapsed() << " ms: " << failure << "\n\n";
+        } else if (frames == 0) {
+            ++failures;
+            out << "    FAILED: no frame in 3 s\n\n";
+        } else {
+            const QString picture = QDir(folder).filePath(QStringLiteral("capture-%1.png").arg(ordinal));
+            const bool saved = first.save(picture);
+            // One colour everywhere is what a refused capture usually looks
+            // like: protected content, a missing permission, a GPU mismatch.
+            bool uniform = true;
+            const QRgb corner = first.pixel(0, 0);
+            for (int y = 0; uniform && y < first.height(); y += 16) {
+                for (int x = 0; x < first.width(); x += 16) {
+                    if (first.pixel(x, y) != corner) {
+                        uniform = false;
+                        break;
+                    }
+                }
+            }
+            out << "    ok: " << frames << " frames delivered in 3 s, first frame "
+                << first.width() << 'x' << first.height() << '\n';
+            if (!video) {
+                out << "    VP9: not in this build (tile encoder only)\n";
+            } else {
+                // Let the last frames finish encoding and decoding.
+                QElapsedTimer settle;
+                settle.start();
+                while (settle.elapsed() < 500)
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                out << "    VP9: " << encoded << " frames encoded (" << encoder.stats().outputSize.width()
+                    << 'x' << encoder.stats().outputSize.height() << "), average "
+                    << (encoded > 0 ? QString::number(double(encodeUsTotal) / encoded / 1000.0, 'f', 1)
+                                    : QStringLiteral("-"))
+                    << " ms per frame, " << (encodedBytes * 8 / 3000) << " kbit/s, " << decoded
+                    << " pictures decoded\n";
+                const OpenChat::ScreenShareStats codecStats = encoder.stats();
+                out << "    VP9 encoder: speed " << codecStats.encoderSpeed << ", busy "
+                    << codecStats.encoderLoadPercent << "% of each frame's time"
+                    << (codecStats.cpuLimited ? ", lowered to a smaller rung for this CPU" : "") << '\n';
+                if (encoded > 0 && double(encodeUsTotal) / encoded > 30000.0) {
+                    out << "    WARNING: encoding takes longer than a frame at 30 fps; shares from "
+                           "this machine will run at a lower frame rate.\n";
+                }
+            }
+            out << "    picture: " << (saved ? QDir::toNativeSeparators(picture)
+                                             : QStringLiteral("(could not be saved)"))
+                << '\n';
+            if (uniform) {
+                out << "    WARNING: the picture is a single colour (" << QColor(corner).name()
+                    << "). The system may be refusing the capture even though frames arrive.\n";
+            }
+            out << '\n';
+        }
+        out.flush();
+    }
+    out << (failures == 0 ? "Everything captured.\n" : "Some captures failed; see above.\n");
+    return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
-    QGuiApplication application(argc, argv);
+    // Crash reporting goes in before anything that could crash, the
+    // application object included: a missing platform plugin is a fatal error
+    // inside its constructor, and exactly the kind a tester cannot explain.
+    // The names come first because they decide where reports are kept.
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
+    OpenChat::CrashReporter::Options crashOptions;
+    crashOptions.viewer = isCrashReportViewer(argc, argv);
+    OpenChat::CrashReporter::install(crashOptions);
+
+    QGuiApplication application(argc, argv);
+    OpenChat::CrashReporter::attachToApplication();
     OpenChat::installFileLogging();
     // How the freedesktop desktops attribute this process: the basename of the
     // installed .desktop file. Wayland compositors use it as the app id, and
@@ -1152,14 +1359,54 @@ int main(int argc, char *argv[])
         QStringLiteral("call-zoom"),
         QStringLiteral("Preview the far end's share or camera enlarged over the window "
                        "(combine with --call-video or --call-screen)."));
+    const QCommandLineOption crashReportOption(
+        QStringLiteral("crash-report"),
+        QStringLiteral("Show a crash report (OpenChat relaunches itself with this after a crash)."),
+        QStringLiteral("path"));
+    const QCommandLineOption crashTestOption(
+        QStringLiteral("crash-test"),
+        QStringLiteral("Fail on purpose, to see what a crash report looks like: segv, abort, "
+                       "throw, qfatal, stack-overflow, hang, or screen-frame (crashes inside the "
+                       "next screen-share frame)."),
+        QStringLiteral("kind"));
+    const QCommandLineOption screenCheckOption(
+        QStringLiteral("screen-share-check"),
+        QStringLiteral("List what can be screen-shared on this machine, capture each screen for "
+                       "a few seconds, save a picture of each, and print what happened."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, onboardingLoginOption,
                        onboardingFilledOption, addContactOption, verifyOption, callOption,
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
-                       callPickerOption, callFullscreenOption, callZoomOption});
+                       callPickerOption, callFullscreenOption, callZoomOption, crashReportOption,
+                       crashTestOption, screenCheckOption});
     parser.process(application);
 
     registerQmlTypes();
+
+    // The viewer a crashed OpenChat relaunches: nothing else runs in it.
+    if (parser.isSet(crashReportOption)) {
+        const std::unique_ptr<QQmlApplicationEngine> viewer =
+            showCrashReport(parser.value(crashReportOption), true);
+        if (!viewer || viewer->rootObjects().isEmpty())
+            return EXIT_FAILURE;
+        return application.exec();
+    }
+
+    const QString crashTest = parser.value(crashTestOption).trimmed().toLower();
+    if (!crashTest.isEmpty() && !OpenChat::CrashReporter::isSelfTestKind(crashTest)) {
+        qWarning().noquote() << QStringLiteral("Unknown --crash-test kind: %1").arg(crashTest);
+        return EXIT_FAILURE;
+    }
+
+    if (parser.isSet(screenCheckOption)) {
+        // --crash-test screen-frame here proves a crash inside the capture
+        // path is reported as one, without needing a call to share into.
+        if (crashTest == QStringLiteral("screen-frame")) {
+            OpenChat::CrashReporter::startSession();
+            OpenChat::QtScreenCapture::crashOnNextFrameForTesting();
+        }
+        return runScreenShareCheck(application);
+    }
 
     // Onboarding preview: launch the screens directly with no real services.
     const bool previewRecovery = parser.isSet(onboardingRecoveryOption);
@@ -1201,6 +1448,10 @@ int main(int argc, char *argv[])
 
     // Normal interactive launch: unlock an existing profile straight into chat, or
     // run first-run onboarding driving the real account bootstrap.
+    //
+    // Only this mode keeps the crash recorder on disk and relaunches after a
+    // crash; the previews above run unattended, often several at once.
+    OpenChat::CrashReporter::startSession();
     const QString base = [] {
         const QString value = QString::fromUtf8(qgetenv("OPENCHAT_RELAY_BASE_URL")).trimmed();
         return value.isEmpty() ? QStringLiteral("https://chat.rigidstudios.de/v1") : value;
@@ -1222,6 +1473,21 @@ int main(int argc, char *argv[])
                        heightValid ? std::optional<int>(requestedHeight) : std::nullopt);
     if (!runtime.start())
         return EXIT_FAILURE;
+
+    // How the last session ended, if it did not end well and nobody has seen
+    // the report yet: its own window, on top of whatever just opened.
+    std::unique_ptr<QQmlApplicationEngine> crashNotice;
+    const OpenChat::CrashReporter::PendingReport pending = OpenChat::CrashReporter::pendingReport();
+    if (pending.kind != OpenChat::CrashReporter::PendingReport::Kind::None)
+        crashNotice = showCrashReport(pending.path, false);
+
+    if (crashTest == QStringLiteral("screen-frame")) {
+        OpenChat::QtScreenCapture::crashOnNextFrameForTesting();
+        OpenChat::CrashReporter::runSelfTest(crashTest);
+    } else if (!crashTest.isEmpty()) {
+        // Once the window is up and the recorder has something to show.
+        QTimer::singleShot(1500, qApp, [crashTest] { OpenChat::CrashReporter::runSelfTest(crashTest); });
+    }
 
     return application.exec();
 }

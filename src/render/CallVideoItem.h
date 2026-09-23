@@ -2,7 +2,7 @@
 #include "call/ScreenCanvas.h"
 
 #include <QImage>
-#include <QQuickPaintedItem>
+#include <QQuickItem>
 #include <QRect>
 #include <QVariant>
 
@@ -11,16 +11,20 @@ namespace OpenChat {
 // The one media view on the call screen, for both video sources.
 //
 // A camera arrives as whole frames and is set through `frame`. A screen arrives
-// as tiles written into a surface that outlives any one packet, and is set
-// through `canvas` — the shared ScreenCanvas itself, not a copy of its pixels,
-// because copying a desktop into a QImage property would cost several megabytes
-// on every update for a change that is usually one small rectangle.
+// on a ScreenCanvas — the shared surface itself, not a copy of its pixels — set
+// through `canvas`.
 //
-// Setting a canvas repaints only the rectangle that actually changed, and the
-// scene graph re-uploads only that part of the texture. The texture is the size
-// of THIS ITEM, not of the far end's display: a 4K share in a 400 px panel costs
-// 400 px worth of video memory.
-class CallVideoItem : public QQuickPaintedItem
+// Each new picture is uploaded to the GPU once, as a texture, and the GPU
+// scales it into the item: scaling a 1080p desktop into a panel on the CPU
+// thirty times a second is exactly the work a screen share cannot afford. A
+// share shown much smaller than it is gets mipmaps, so text shrinks smoothly
+// instead of shimmering. Nothing is uploaded for a picture that has not
+// changed, a paused view, or one that is not visible.
+//
+// The rounded corners are geometry, not a clip. On Qt's software renderer
+// (headless tests, machines without a usable GPU) the view falls back to a
+// plain image node with square corners.
+class CallVideoItem : public QQuickItem
 {
     Q_OBJECT
     Q_PROPERTY(QImage frame READ frame WRITE setFrame NOTIFY frameChanged)
@@ -32,10 +36,10 @@ class CallVideoItem : public QQuickPaintedItem
     Q_PROPERTY(double sourceAspect READ sourceAspect NOTIFY sourceAspectChanged)
     // True while a screen share is still filling in its first sweep.
     Q_PROPERTY(bool canvasComplete READ canvasComplete NOTIFY canvasChanged)
-    // A paused view keeps its source bound but stops repainting for it: the
+    // A paused view keeps its source bound but stops uploading for it: the
     // tile an enlarged copy was opened from sits under the scrim, where nobody
     // can see it move, so it costs nothing while the copy does the moving. It
-    // repaints itself whole the moment it is resumed.
+    // catches up the moment it is resumed.
     Q_PROPERTY(bool paused READ paused WRITE setPaused NOTIFY pausedChanged)
     // Another view to show the same thing as. A copy follows its source's
     // frame, canvas and mirroring in C++, straight from signal to setter, so
@@ -60,8 +64,6 @@ public:
     [[nodiscard]] CallVideoItem *source() const { return m_source; }
     void setSource(CallVideoItem *source);
 
-    void paint(QPainter *painter) override;
-
 signals:
     void frameChanged();
     void canvasChanged();
@@ -70,11 +72,13 @@ signals:
     void pausedChanged();
     void sourceChanged();
 
+protected:
+    QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
+    void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+
 private:
     void applyCanvas(ScreenCanvasPtr next);
-    // The item-space rectangle a canvas-space rectangle lands in, inflated by a
-    // pixel so smooth scaling cannot leave a seam at the edge of the repaint.
-    [[nodiscard]] QRect mapFromSource(const QRect &rect) const;
+    void requestRepaint();
     [[nodiscard]] QRectF targetRect(QSize sourceSize) const;
     [[nodiscard]] const QImage *sourceImage() const;
 
@@ -84,6 +88,15 @@ private:
     bool m_mirrored = false;
     bool m_paused = false;
     CallVideoItem *m_source = nullptr;
+
+    // What the node's texture currently shows, so an unchanged picture is
+    // never uploaded again. Touched only in updatePaintNode, on the render
+    // thread, while the GUI thread is blocked.
+    // A canvas revision is unique across canvases, so it alone says which
+    // picture of which canvas is on the GPU; 0 means a camera frame, or nothing.
+    quint64 m_uploadedRevision = 0;
+    qint64 m_uploadedFrameKey = 0;
+    bool m_uploadedMipmaps = false;
 };
 
 } // namespace OpenChat

@@ -47,6 +47,28 @@ surfaces instead. `OPENCHAT_WINE_HEADLESS=1` uses Qt's offscreen platform;
 it goes on the command line because Wine drops all `QT_*` environment
 variables before starting a Windows process.
 
+## Crash reports and screen capture on testers' machines
+
+`deploy.sh` keeps the unstripped `OpenChat.exe` of every package as
+`build-win/symbols/OpenChat-<link stamp>.exe`; keep that folder for as long as
+testers run the package. A tester's crash report (in
+`%LOCALAPPDATA%\OpenChat\OpenChat\crashes`, and shown by OpenChat itself right
+after the crash) is resolved with:
+
+```sh
+tools/windows/rootless-toolchain.sh run tools/windows/symbolize-crash.sh crash-….txt
+```
+
+If screen sharing misbehaves on a tester's machine, have them run
+`OpenChat.exe --screen-share-check` from a console in the unpacked folder and
+send what it prints plus the PNGs it saves. See `docs/crash-reports.md` and the
+"Capture on each platform" section of `docs/screen-sharing.md`.
+
+Under Wine, `OpenChat.exe --screen-share-check` exercises the GDI fallback
+(Wine implements neither Desktop Duplication nor Windows.Graphics.Capture), and
+`OPENCHAT_CRASH_UNATTENDED=1 wine OpenChat.exe -platform offscreen --crash-test
+segv` checks the crash handler end to end without a window.
+
 ## Pitfalls met along the way
 
 - Never keep a Wine prefix inside the checkout (`wine-check.sh` now puts its

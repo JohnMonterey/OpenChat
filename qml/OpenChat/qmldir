@@ -1,6 +1,7 @@
 module OpenChat
 Main 1.0 Main.qml
 Onboarding 1.0 Onboarding.qml
+CrashNotice 1.0 CrashNotice.qml
 singleton Theme 1.0 Theme.qml
 singleton VocalFx 1.0 VocalFx.qml
 VocalFxPanel 1.0 components/VocalFxPanel.qml

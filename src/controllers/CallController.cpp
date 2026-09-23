@@ -1,6 +1,8 @@
 #include "controllers/CallController.h"
 
+#include "call/NativeScreenCapture.h"
 #include "controllers/ChatController.h"
+#include "diagnostics/BlackBox.h"
 
 #include <QDateTime>
 #include <QSet>
@@ -394,6 +396,20 @@ void CallController::toggleScreenShare()
     }
     if (!inCall() || isRinging() || callEnded() || !screenShareAvailable())
         return;
+    // Asked before the picker, not after: without access macOS lists windows
+    // without their titles and captures only the wallpaper, so the picker
+    // would offer a choice that cannot work.
+    if (NativeScreenCapturePlatform::access(false) != ScreenCaptureAccess::Granted) {
+        // Puts up the system's own prompt the first time. The answer only
+        // takes effect after a relaunch, so this press still fails either way.
+        (void)NativeScreenCapturePlatform::access(true);
+        BlackBox::record("screen share", "refused: the operating system denied screen capture");
+        m_screenSharePermissionNeeded = true;
+        m_screenShareError = NativeScreenCapturePlatform::accessDeniedMessage();
+        emit screenShareChanged();
+        return;
+    }
+    m_screenSharePermissionNeeded = false;
     m_screenShareError.clear();
     emit screenShareChanged();
     // Which screen or window goes out is the user's decision, always: the view
@@ -433,6 +449,13 @@ void CallController::startScreenShare(int sourceIndex)
         return;
     }
     const ScreenShareSource source = m_screenSources.at(sourceIndex);
+    BlackBox::record("screen share",
+                     QStringLiteral("user chose a %1 through %2")
+                         .arg(source.kind == ScreenShareSource::Kind::Screen
+                                  ? QStringLiteral("screen")
+                                  : QStringLiteral("window"),
+                              QtScreenCapture::backendName()));
+    m_screenSharePermissionNeeded = false;
     m_screenShareError.clear();
     m_screenShareEnabled = true;
     m_screenShareSourceName = source.name;
@@ -458,6 +481,12 @@ void CallController::stopScreenShare()
         emit localScreenChanged();
         emit screenShareChanged();
     }
+}
+
+void CallController::openScreenSharePermissionSettings()
+{
+    if (!NativeScreenCapturePlatform::openAccessSettings())
+        qWarning("OpenChat: could not open the screen capture permission settings");
 }
 
 void CallController::onScreenFrameCaptured(const ScreenFrameView &view)
@@ -571,6 +600,33 @@ QString CallController::screenShareDiagnostics() const
     if (m_engine == nullptr)
         return {};
     const ScreenShareStats stats = m_engine->screenShareStats();
+    if (stats.video) {
+        return QStringLiteral("VP9 %1x%2 L%3%4 %5fps %6 kbit/s (link cap %7) | %8 B in %9 us, "
+                              "speed %10, load %11% | sent %12 kf %13 idle %14 held %15 queued %16 B | "
+                              "loss %17% rtt %18 ms | view %19x%20 | rx %21 frames, %22 rejected")
+            .arg(stats.outputSize.width())
+            .arg(stats.outputSize.height())
+            .arg(stats.level)
+            .arg(stats.cpuLimited ? QStringLiteral(" cpu") : QString())
+            .arg(stats.targetFps)
+            .arg(stats.bitrateKbps)
+            .arg(stats.linkCapKbps)
+            .arg(stats.lastPayloadBytes)
+            .arg(stats.lastEncodeUs)
+            .arg(stats.encoderSpeed)
+            .arg(stats.encoderLoadPercent)
+            .arg(stats.framesSent)
+            .arg(stats.keyframes)
+            .arg(stats.framesIdle)
+            .arg(stats.framesHeldBack)
+            .arg(stats.queuedBytes)
+            .arg(stats.lossRatio * 100.0, 0, 'f', 1)
+            .arg(stats.rttMs)
+            .arg(stats.remoteViewSize.width())
+            .arg(stats.remoteViewSize.height())
+            .arg(stats.framesReceived)
+            .arg(stats.framesRejected);
+    }
     return QStringLiteral("%1x%2 L%3 %4fps q%5%6 | tiles %7/%8 | %9 B in %10 us | "
                           "sent %11 idle %12 paced %13 | loss %14% rtt %15 ms | view %16x%17 | "
                           "rx %18 frames, %19 tiles, %20 rejected")
@@ -708,6 +764,15 @@ void CallController::syncFromEngine()
 
     const CallEngine::CallPeer &peer = m_engine->peer();
     m_isGroupCall = m_engine->isGroupCall();
+    // For crash reports: what kind of call was running, never with whom.
+    BlackBox::setContext("call", m_state == CallState::Idle
+                                     ? QString()
+                                     : QStringLiteral("%1 %2 call%3")
+                                           .arg(callStateName(m_state),
+                                                m_isGroupCall ? QStringLiteral("group")
+                                                              : QStringLiteral("one-to-one"),
+                                                m_cameraEnabled ? QStringLiteral(", camera on")
+                                                                : QString()));
     m_callChatId = m_state == CallState::Idle ? QString() : m_chats->chatIdFor(peer.conversation);
     if (m_callChatId.isEmpty() && m_state != CallState::Idle && !m_isGroupCall)
         m_callChatId = peer.contactId;

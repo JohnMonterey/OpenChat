@@ -1,7 +1,10 @@
 #include "call/QtScreenCapture.h"
 
+#include "call/NativeScreenCapture.h"
 #include "call/VideoFrameCopy.h"
+#include "diagnostics/BlackBox.h"
 
+#include <QDateTime>
 #include <QGuiApplication>
 #include <QPainter>
 #include <QScopeGuard>
@@ -10,6 +13,9 @@
 #include <QWindowCapture>
 
 #include <algorithm>
+#include <atomic>
+#include <exception>
+#include <new>
 
 namespace OpenChat {
 
@@ -20,6 +26,39 @@ namespace {
 // a closed window or an unplugged monitor is noticed while the user still
 // remembers doing it.
 constexpr int firstFrameTimeoutMs = 8000;
+
+// How often a still screen's last frame is handed to the encoder again. The
+// encoder heartbeats once a second and answers a viewer's resend request only
+// when it is given a frame, so this bounds how long a repair waits on a
+// motionless desktop, at the cost of one hash of an unchanged frame.
+constexpr qint64 redeliverIntervalMs = 200;
+
+constexpr const char *area = "screen share";
+
+std::atomic<bool> g_crashOnNextFrame{false};
+
+// For the crash-reporting self test: a genuine invalid write, from inside the
+// capture path, so the report shows exactly what a real one would.
+[[noreturn]] void crashForTesting()
+{
+    BlackBox::record(area, "crash self-test: writing through a null pointer on purpose");
+    volatile int *nowhere = nullptr;
+    *nowhere = 0x0badf00d;
+    std::abort();
+}
+
+[[nodiscard]] QString describeSource(const ScreenShareSource &source)
+{
+    // What a report may say about the source: its kind and size, never its
+    // title — a window title is the user's content.
+    if (source.kind == ScreenShareSource::Kind::Screen) {
+        return QStringLiteral("screen %1 (%2x%3)")
+            .arg(source.native ? source.nativeName : source.id)
+            .arg(source.size.width())
+            .arg(source.size.height());
+    }
+    return QStringLiteral("a window");
+}
 
 [[nodiscard]] bool isDirectlyReadable(QImage::Format format) noexcept
 {
@@ -40,11 +79,30 @@ constexpr int firstFrameTimeoutMs = 8000;
 
 bool ScreenShareSource::isValid() const
 {
+    if (native)
+        return kind == Kind::Screen ? (nativeId != 0 || !nativeName.isEmpty()) : nativeId != 0;
     return kind == Kind::Screen ? !screen.isNull() : window.isValid();
+}
+
+QString QtScreenCapture::backendName()
+{
+    if (NativeScreenCapturePlatform::isAvailable())
+        return NativeScreenCapturePlatform::name();
+    return QStringLiteral("Qt Multimedia");
+}
+
+void QtScreenCapture::crashOnNextFrameForTesting()
+{
+    g_crashOnNextFrame.store(true);
 }
 
 QVector<ScreenShareSource> QtScreenCapture::availableSources()
 {
+    if (NativeScreenCapturePlatform::isAvailable()) {
+        BlackBox::Activity activity(area, "listing screens and windows (native)");
+        return NativeScreenCapturePlatform::sources();
+    }
+    BlackBox::Activity activity(area, "listing screens and windows (Qt Multimedia)");
     QVector<ScreenShareSource> sources;
     const QList<QScreen *> screens = QGuiApplication::screens();
     sources.reserve(screens.size() + 8);
@@ -86,6 +144,15 @@ QtScreenCapture::QtScreenCapture(QObject *parent)
     connect(&m_timer, &QTimer::timeout, this, &QtScreenCapture::pullFrame);
     m_watchdog.setSingleShot(true);
     connect(&m_watchdog, &QTimer::timeout, this, [this] {
+        if (m_framesDelivered == 0) {
+            // Started without complaint and then produced nothing at all: the
+            // signature of a capture API that is present but not working here.
+            // Named, so a tester's report says which one.
+            fail(QStringLiteral("Screen capture started but never produced a picture (%1). "
+                                "Try sharing a different screen or window.")
+                     .arg(m_native ? m_native->describe() : QStringLiteral("Qt Multimedia")));
+            return;
+        }
         fail(QStringLiteral("The screen capture stopped producing frames. "
                             "The window or display may have gone away."));
     });
@@ -99,6 +166,10 @@ QtScreenCapture::QtScreenCapture(QObject *parent)
         return;
     connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen *screen) {
         if (!m_requested || m_source.kind != ScreenShareSource::Kind::Screen)
+            return;
+        // A native screen Qt never matched is watched by its own API, which
+        // reports the output going away; any other monitor leaving is not ours.
+        if (m_source.native && !m_screenMatched)
             return;
         if (m_source.screen.isNull() || m_source.screen == screen)
             fail(QStringLiteral("The display being shared was disconnected."));
@@ -130,7 +201,50 @@ void QtScreenCapture::start(const ScreenShareSource &source)
     m_requested = true;
     const quint64 generation = ++m_generation;
     m_source = source;
+    m_startedMs = QDateTime::currentMSecsSinceEpoch();
+    m_framesDelivered = 0;
+    m_lastDeliveryMs = 0;
+    m_nativeHadFrame = false;
+    m_screenMatched = !source.screen.isNull();
 
+    if (source.native) {
+        BlackBox::Activity activity(area, "starting the native capture");
+        m_native = NativeScreenCapturePlatform::create(source);
+        if (!m_native) {
+            fail(QStringLiteral("Screen sharing is not available on this system."), true);
+            return;
+        }
+        const QString described = m_native->describe();
+        BlackBox::setContext(area, described);
+        BlackBox::record(area, QStringLiteral("starting: ") + described);
+        NativeScreenCapture::Failure failure;
+        bool started = false;
+        // Nothing thrown in a capture API may reach Qt's event loop, which
+        // cannot unwind: it would end the process instead of the share.
+        try {
+            started = m_native->start(failure);
+        } catch (const std::exception &error) {
+            failure.message = QStringLiteral("Screen capture failed to start: %1")
+                                  .arg(QString::fromLocal8Bit(error.what()));
+        } catch (...) {
+            failure.message = QStringLiteral("Screen capture failed to start (unknown error).");
+        }
+        if (!started) {
+            BlackBox::record(area, QStringLiteral("could not start: ") + failure.message);
+            fail(failure.message, failure.permanent);
+            return;
+        }
+        // Now that it is open, the description can name the adapter, the
+        // resolution and any fallback that was taken.
+        BlackBox::setContext(area, m_native->describe());
+        m_watchdog.start(firstFrameTimeoutMs);
+        m_timer.start();
+        return;
+    }
+
+    BlackBox::setContext(area, QStringLiteral("Qt Multimedia, ") + describeSource(source));
+    BlackBox::record(area, QStringLiteral("starting Qt Multimedia capture of ")
+                               + describeSource(source));
     if (source.kind == ScreenShareSource::Kind::Screen) {
         m_screenCapture = std::make_unique<QScreenCapture>();
         m_screenCapture->setScreen(source.screen);
@@ -167,10 +281,84 @@ void QtScreenCapture::start(const ScreenShareSource &source)
     m_timer.start();
 }
 
+void QtScreenCapture::deliver(const ScreenFrameView &view)
+{
+    if (Q_UNLIKELY(g_crashOnNextFrame.exchange(false)))
+        crashForTesting();
+    if (m_framesDelivered == 0) {
+        BlackBox::record(area, QStringLiteral("first frame: %1x%2, %3 bytes per line, format %4")
+                                   .arg(view.width)
+                                   .arg(view.height)
+                                   .arg(view.bytesPerLine)
+                                   .arg(int(view.format)));
+    }
+    ++m_framesDelivered;
+    m_lastDeliveryMs = QDateTime::currentMSecsSinceEpoch();
+    BlackBox::Activity activity(area, "encoding and sending a frame");
+    onFrame(view);
+}
+
+void QtScreenCapture::pullNativeFrame()
+{
+    BlackBox::Activity activity(area, "pulling a frame from the native capture");
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool redeliver = m_nativeHadFrame && now - m_lastDeliveryMs >= redeliverIntervalMs;
+    // The sink may end the share (a failure in the encoder, a stop from the
+    // UI), which destroys the capture it is being called from; the generation
+    // says whether it is still this share afterwards.
+    const quint64 generation = m_generation;
+    NativeScreenCapture::Failure failure;
+    NativeScreenCapture::Pull result = NativeScreenCapture::Pull::Failed;
+    // A stop requested from inside the sink must not destroy the capture while
+    // its pull() is still on the stack; teardown() parks it here instead.
+    m_pulling = true;
+    try {
+        result = m_native->pull(
+            redeliver,
+            [this, generation](const ScreenFrameView &view) {
+                if (generation == m_generation && view.isValid())
+                    deliver(view);
+            },
+            failure);
+    } catch (const std::bad_alloc &) {
+        failure.message = QStringLiteral("Screen sharing ran out of memory and was stopped.");
+    } catch (const std::exception &error) {
+        failure.message = QStringLiteral("Screen capture failed: %1")
+                              .arg(QString::fromLocal8Bit(error.what()));
+    } catch (...) {
+        failure.message = QStringLiteral("Screen capture failed (unknown error).");
+    }
+    m_pulling = false;
+    m_retiredNative.clear();
+    if (generation != m_generation)
+        return;
+    switch (result) {
+    case NativeScreenCapture::Pull::Delivered:
+        m_nativeHadFrame = true;
+        m_watchdog.start(firstFrameTimeoutMs);
+        break;
+    case NativeScreenCapture::Pull::Unchanged:
+        // Before the first frame, "nothing new" is not evidence of life: a
+        // capture that never produces anything must still be noticed.
+        if (m_nativeHadFrame)
+            m_watchdog.start(firstFrameTimeoutMs);
+        break;
+    case NativeScreenCapture::Pull::Failed:
+        BlackBox::record(area, QStringLiteral("capture failed: ") + failure.message);
+        fail(failure.message, failure.permanent);
+        break;
+    }
+}
+
 void QtScreenCapture::pullFrame()
 {
     if (!m_requested || !onFrame)
         return;
+    if (m_native) {
+        pullNativeFrame();
+        return;
+    }
+    BlackBox::Activity activity(area, "pulling a frame (Qt Multimedia)");
     const QVideoFrame frame = m_sink.videoFrame();
     if (!frame.isValid())
         return;
@@ -210,7 +398,7 @@ void QtScreenCapture::pullFrame()
         if (view.isValid()) {
             // The whole point of the direct path: the encoder reads the
             // compositor's own buffer and nothing is copied at all.
-            onFrame(view);
+            deliver(view);
             return;
         }
         // An unusably aligned buffer falls through to the conversion below
@@ -236,12 +424,15 @@ void QtScreenCapture::pullFrame()
     }
     const ScreenFrameView view = ScreenFrameView::fromImage(m_conversion);
     if (view.isValid())
-        onFrame(view);
+        deliver(view);
 }
 
 void QtScreenCapture::fail(const QString &message, bool permanent)
 {
     const bool wasRequested = m_requested;
+    BlackBox::record(area, QStringLiteral("share ended by failure%1: %2")
+                               .arg(permanent ? QStringLiteral(" (permanent)") : QString())
+                               .arg(message));
     teardown();
     if (wasRequested || permanent)
         emit failed(message, permanent);
@@ -254,10 +445,23 @@ void QtScreenCapture::stop()
 
 void QtScreenCapture::teardown()
 {
+    if (m_requested) {
+        BlackBox::record(area, QStringLiteral("stopped after %1 s, %2 frames delivered")
+                                   .arg((QDateTime::currentMSecsSinceEpoch() - m_startedMs) / 1000)
+                                   .arg(m_framesDelivered));
+    }
     m_requested = false;
     ++m_generation;
     m_timer.stop();
     m_watchdog.stop();
+    if (m_native) {
+        BlackBox::Activity activity(area, "stopping the native capture");
+        if (m_pulling)
+            m_retiredNative.push_back(std::move(m_native));
+        else
+            m_native.reset();
+    }
+    BlackBox::setContext(area, QString());
     // Order matters: the capture object goes down before the session that holds
     // it, and the sink is emptied last so nothing is left holding a frame.
     if (m_screenCapture) {

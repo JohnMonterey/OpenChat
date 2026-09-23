@@ -31,6 +31,7 @@ public:
     [[nodiscard]] bool isConnected() const override;
     void sendEnvelope(const CiphertextEnvelopeV1 &envelope) override;
     void sendDatagram(const CiphertextEnvelopeV1 &envelope) override;
+    [[nodiscard]] qint64 pendingSendBytes() const override;
     void acknowledge(const EnvelopeId &envelopeId, quint64 watermark) override;
 
 private:

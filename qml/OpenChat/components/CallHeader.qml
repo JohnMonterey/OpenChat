@@ -418,6 +418,32 @@ Item {
             font.family: Theme.uiFont
             font.pixelSize: 12
         }
+
+        // macOS refuses capture until the user allows it in System Settings;
+        // the way there is offered right under the reason.
+        Text {
+            id: screenSharePermissionLink
+            objectName: "screenSharePermissionLink"
+            width: parent.width
+            visible: screenShareErrorText.visible
+                     && callHeader.controller.screenSharePermissionNeeded === true
+            text: "Open System Settings"
+            horizontalAlignment: Text.AlignHCenter
+            color: Theme.categoryText
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+            font.underline: permissionLinkArea.containsMouse
+
+            MouseArea {
+                id: permissionLinkArea
+                anchors.centerIn: parent
+                width: parent.contentWidth
+                height: parent.height
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: callHeader.controller.openScreenSharePermissionSettings()
+            }
+        }
     }
 
     // The corner of the call surface: fill the window with it, or give the

@@ -902,6 +902,29 @@ Result<void, RelayCallError> RelayClient::sendEnvelope(const CiphertextEnvelopeV
     return Result<void, RelayCallError>::success();
 }
 
+namespace {
+
+// Everything written to the relay that has not reached the kernel yet. Over
+// TLS, QWebSocket::bytesToWrite() counts only what is still waiting to be
+// encrypted, which is almost nothing: a write is encrypted at once and then
+// waits, invisible to it, in the TLS socket's own buffer. That buffer — the
+// socket QWebSocket creates as its child — is where a congested link's backlog
+// actually sits.
+qint64 unsentBytes(QWebSocket *socket)
+{
+    qint64 bytes = socket->bytesToWrite();
+    if (const auto *tls = socket->findChild<QSslSocket *>(Qt::FindDirectChildrenOnly))
+        bytes += tls->encryptedBytesToWrite();
+    return bytes;
+}
+
+} // namespace
+
+qint64 RelayClient::pendingSendBytes() const
+{
+    return d->socket ? unsentBytes(d->socket) : -1;
+}
+
 Result<void, RelayCallError> RelayClient::sendDatagram(const CiphertextEnvelopeV1 &envelope)
 {
     if (!d->socket || !d->subprotocolVerified)
@@ -910,7 +933,7 @@ Result<void, RelayCallError> RelayClient::sendDatagram(const CiphertextEnvelopeV
     // Bound stale media on a slow socket. Durable messages use sendEnvelope;
     // dropping a disposable frame here prevents video from accumulating seconds
     // of latency and unbounded memory behind a congested connection.
-    if (d->socket->bytesToWrite() > 128 * 1024)
+    if (unsentBytes(d->socket) > 128 * 1024)
         return Result<void, RelayCallError>::success();
 
     const QByteArray encoded = encodeCanonical(envelope);

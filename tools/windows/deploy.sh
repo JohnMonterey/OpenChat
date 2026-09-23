@@ -20,6 +20,17 @@ mkdir -p "$dist/plugins" "$dist/qml"
 cp "$build_dir/OpenChat.exe" "$dist/"
 # The sysroot's DLLs arrive stripped; the freshly linked executable does not.
 x86_64-w64-mingw32-strip "$dist/OpenChat.exe"
+# Keep the unstripped executable, named by the link stamp of the stripped one
+# (strip rewrites it), which is what every crash report lists for OpenChat.exe.
+# tools/windows/symbolize-crash.sh finds it by that stamp to name the frames.
+pe_offset=$(od -An -tu4 -j60 -N4 "$dist/OpenChat.exe" | tr -d ' ')
+link_stamp=$(od -An -tx4 -j$((pe_offset + 8)) -N4 "$dist/OpenChat.exe" | tr -d ' ')
+mkdir -p "$build_dir/symbols"
+cp "$build_dir/OpenChat.exe" "$build_dir/symbols/OpenChat-$link_stamp.exe"
+echo "Symbols kept as $build_dir/symbols/OpenChat-$link_stamp.exe"
+
+# What a tester needs to know: crash reports and the screen-share check.
+cp "$source_dir/tools/windows/tester-readme.txt" "$dist/README.txt"
 
 cat > "$dist/qt.conf" <<'CONF'
 [Paths]

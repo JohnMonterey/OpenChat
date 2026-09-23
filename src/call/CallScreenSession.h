@@ -10,11 +10,20 @@
 #include <QSize>
 
 #include <array>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
 
+QT_BEGIN_NAMESPACE
+class QObject;
+QT_END_NAMESPACE
+
 namespace OpenChat {
+
+struct EncodedScreenFrame;
+class ScreenVideoDecoder;
 
 // Off unless the usual QT_LOGGING_RULES turn it on, so a shipped build says
 // nothing about a running share.
@@ -106,6 +115,16 @@ struct ScreenShareLevel final {
 // (a handful of counters updated per frame) and never logged unless asked for.
 struct ScreenShareStats final {
     // Sending half, from the encoder.
+    // True when the share is a VP9 stream rather than tiles.
+    bool video = false;
+    int bitrateKbps = 0;
+    quint64 keyframes = 0;
+    // VP9 only: libvpx's speed setting, encoding time as a share of the frame
+    // interval, and whether the rung is lower than the link allows because
+    // this machine could not encode it in time.
+    int encoderSpeed = 0;
+    int encoderLoadPercent = 0;
+    bool cpuLimited = false;
     QSize outputSize;
     int level = 0;
     int targetFps = 0;
@@ -130,6 +149,43 @@ struct ScreenShareStats final {
     quint64 tilesApplied = 0;
     quint64 bytesReceived = 0;
     quint64 framesRejected = 0;
+
+    // The engine's pacer: what is waiting for the socket, the link's measured
+    // ceiling (0 = none found), and frames not encoded because the link was
+    // still busy with earlier ones.
+    qint64 queuedBytes = 0;
+    int linkCapKbps = 0;
+    quint64 framesHeldBack = 0;
+};
+
+// What a per-peer CallScreenSession and the engine's policy need from whichever
+// encoder is producing the share: the tile encoder below (wire version 3) or
+// the VP9 ScreenVideoEncoder (wire version 4). One encoder serves every peer in
+// a call.
+class ScreenEncoderControl
+{
+public:
+    virtual ~ScreenEncoderControl() = default;
+
+    // A peer lost its picture: the tile encoder sends every tile again, the
+    // video encoder sends a keyframe.
+    virtual void requestFullResend() = 0;
+    // The rung of this encoder's own quality ladder; 0 is the best.
+    virtual void setLevel(int level) = 0;
+    [[nodiscard]] virtual int level() const noexcept = 0;
+    [[nodiscard]] virtual int levelCount() const noexcept = 0;
+    // A rung's byte ceiling, which decides whether a clean report proves
+    // anything: only a link that was actually being pushed earns a rung back.
+    [[nodiscard]] virtual int bytesPerSecondAt(int level) const noexcept = 0;
+    // The largest the share is being displayed anywhere, and whether anyone is
+    // displaying it at all. Caps the resolution worth encoding.
+    virtual void setRemoteView(QSize largestView, bool anyoneWatching) = 0;
+    [[nodiscard]] virtual int targetFps() const noexcept = 0;
+    [[nodiscard]] virtual bool remoteViewHidden() const noexcept = 0;
+    [[nodiscard]] virtual ScreenShareStats stats() const = 0;
+    // Drops every buffer and forgets the geometry. Called the moment sharing
+    // stops, so nothing desktop-sized is held for a share that is over.
+    virtual void reset() = 0;
 };
 
 // The picture half of screen sharing: everything about turning a desktop into
@@ -147,7 +203,7 @@ struct ScreenShareStats final {
 // It is a separate object from the per-peer session for the group case: a mesh
 // call has one screen and several peers, so the desktop is hashed once and the
 // tiles encoded once, and only the cheap AES seal is repeated per peer.
-class ScreenTileEncoder final
+class ScreenTileEncoder final : public ScreenEncoderControl
 {
 public:
     static constexpr int updateHeaderBytes = 8;
@@ -171,22 +227,18 @@ public:
     [[nodiscard]] QByteArrayView buildUpdate(const ScreenFrameView &frame, qint64 nowMs);
 
     // Every tile goes again. Used when a peer says it lost its canvas.
-    void requestFullResend();
+    void requestFullResend() override;
     // The rung to encode at. In a mesh this is the worst peer's rung, because
     // one payload serves all of them.
-    void setLevel(int level);
-    [[nodiscard]] int level() const noexcept { return m_level; }
-    // The largest the share is being displayed anywhere, and whether anyone is
-    // displaying it at all. Caps the resolution worth encoding.
-    void setRemoteView(QSize largestView, bool anyoneWatching);
-    [[nodiscard]] int targetFps() const noexcept;
-    [[nodiscard]] bool remoteViewHidden() const noexcept { return !m_anyoneWatching; }
-
-    // Drops every buffer and forgets the geometry. Called the moment sharing
-    // stops, so nothing desktop-sized is held for a share that is over.
-    void reset();
-
-    [[nodiscard]] const ScreenShareStats &stats() const noexcept { return m_stats; }
+    void setLevel(int level) override;
+    [[nodiscard]] int level() const noexcept override { return m_level; }
+    [[nodiscard]] int levelCount() const noexcept override;
+    [[nodiscard]] int bytesPerSecondAt(int level) const noexcept override;
+    void setRemoteView(QSize largestView, bool anyoneWatching) override;
+    [[nodiscard]] int targetFps() const noexcept override;
+    [[nodiscard]] bool remoteViewHidden() const noexcept override { return !m_anyoneWatching; }
+    void reset() override;
+    [[nodiscard]] ScreenShareStats stats() const override { return m_stats; }
 
 private:
     void reconfigure(int sourceWidth, int sourceHeight, qint64 nowMs);
@@ -236,6 +288,13 @@ class CallScreenSession final
 {
 public:
     static constexpr quint8 wireVersion = 3;
+    // The same session carrying a VP9 stream instead of tiles: each encoded
+    // frame split into fragments small enough that a voice packet never waits
+    // behind more than one of them. Reports and the stop notice stay version 3.
+    static constexpr quint8 videoWireVersion = 4;
+    static constexpr int videoFragmentHeaderBytes = 18;
+    static constexpr int maxVideoFragmentBytes = 24 * 1024;
+    static constexpr int maxVideoFragments = 2048;
     // Payload present. Absent means "the share stopped".
     static constexpr quint8 flagContent = 0x01;
     // A receiver-to-sender report rather than picture data. Sealed under its
@@ -246,7 +305,9 @@ public:
     // What arrived. `canvas` is the surface the share now lives in; it changes
     // identity only when the sender's geometry changes.
     struct Update final {
-        enum class Kind { Frame, Stopped, Feedback };
+        // Pending: a video fragment was accepted; its picture arrives later,
+        // decoded off the GUI thread, through the async update handler.
+        enum class Kind { Frame, Stopped, Feedback, Pending };
         Kind kind = Kind::Frame;
         ScreenCanvasPtr canvas;
         QRect dirty;
@@ -257,12 +318,15 @@ public:
     // desktop is hashed and encoded once however many people are watching.
     [[nodiscard]] static std::unique_ptr<CallScreenSession>
     create(const CallId &id, CallDirection direction, QByteArrayView secret,
-           std::shared_ptr<ScreenTileEncoder> encoder, ScreenShareTuning tuning = {});
+           std::shared_ptr<ScreenEncoderControl> encoder, ScreenShareTuning tuning = {});
 
     // --- Sending -----------------------------------------------------------
 
     // Seals an update the shared encoder has already built. Empty in, empty out.
     [[nodiscard]] QByteArray sealUpdate(QByteArrayView payload, qint64 nowMs);
+    // Seals one encoded video frame as the fragments that carry it, in order.
+    [[nodiscard]] std::vector<QByteArray> sealVideoFrame(const EncodedScreenFrame &frame,
+                                                         qint64 nowMs);
     // Tells this peer the share is over, so its view closes at once rather than
     // waiting for the staleness timer.
     [[nodiscard]] QByteArray encodeStop();
@@ -271,6 +335,9 @@ public:
     [[nodiscard]] int desiredLevel() const noexcept { return m_desiredLevel; }
     [[nodiscard]] QSize remoteViewSize() const noexcept { return m_remoteView; }
     [[nodiscard]] bool remoteViewHidden() const noexcept { return m_remoteViewHidden; }
+    // Points the session at a different encoder (the tile fallback, when the
+    // video encoder fails mid-call).
+    void setEncoder(std::shared_ptr<ScreenEncoderControl> encoder) { m_encoder = std::move(encoder); }
     // Forgets what this peer was told, so a restarted share begins cleanly.
     void resetSendState();
 
@@ -285,25 +352,37 @@ public:
     void setViewSize(QSize size);
     // Forgets the received canvas and asks the next report for a full resend.
     void resetReceiver();
+    // Where decoded video pictures are delivered: on `context`'s thread (the
+    // engine's), as a Frame update, some time after decode() said Pending.
+    void setAsyncUpdateHandler(QObject *context, std::function<void(const Update &)> handler);
     [[nodiscard]] bool isReceiving() const noexcept { return m_receiving; }
     [[nodiscard]] const ScreenCanvasPtr &canvas() const noexcept { return m_canvas; }
 
     // The encoder's counters merged with this peer's link and receive counters.
     [[nodiscard]] ScreenShareStats stats() const;
 
+    ~CallScreenSession();
+    CallScreenSession(const CallScreenSession &) = delete;
+    CallScreenSession &operator=(const CallScreenSession &) = delete;
+
 private:
     CallScreenSession(CallId id, ScreenShareTuning tuning,
-                      std::shared_ptr<ScreenTileEncoder> encoder, CallMediaKeys frameSend,
+                      std::shared_ptr<ScreenEncoderControl> encoder, CallMediaKeys frameSend,
                       CallMediaKeys frameReceive, CallMediaKeys feedbackSend,
                       CallMediaKeys feedbackReceive);
 
     void applyFeedback(QByteArrayView payload, qint64 nowMs);
-    void adapt(double lossRatio, bool starved);
+    void adapt(double lossRatio, bool starved, bool delayed, bool calm);
     [[nodiscard]] std::optional<Update> decodeFrame(quint32 sequence, QByteArrayView payload);
+    [[nodiscard]] std::optional<Update> decodeVideoFragment(QByteArrayView payload, qint64 nowMs);
+    // The video stream can no longer be decoded as it stands: drop what is
+    // half-assembled, wait for a keyframe, and ask for one now.
+    void breakVideoStream();
+    void applyVideoPicture(QImage picture);
 
     CallId m_id;
     ScreenShareTuning m_tuning;
-    std::shared_ptr<ScreenTileEncoder> m_encoder;
+    std::shared_ptr<ScreenEncoderControl> m_encoder;
     CallMediaSealer m_frameSealer;
     CallMediaOpener m_frameOpener;
     CallMediaSealer m_feedbackSealer;
@@ -324,8 +403,14 @@ private:
     int m_rttMs = -1;
     // Enough recent (sequence, sent-at) pairs to close the round trip against
     // whichever frame the far end last reported.
-    static constexpr int rttRingSize = 64;
+    static constexpr int rttRingSize = 256;
     std::array<std::pair<quint32, qint64>, rttRingSize> m_sentAt{};
+    // Recent round trips, whose minimum is the uncongested baseline: time
+    // above it is time spent queued somewhere between here and the viewer —
+    // our uplink, the relay, or the viewer's downlink — none of which drops
+    // anything, so delay is the only sign that the share is outrunning them.
+    std::deque<int> m_recentRtts;
+    int m_baseRttMs = -1;
 
     // --- receiving state, per peer ---
     ScreenCanvasPtr m_canvas;
@@ -337,16 +422,37 @@ private:
     QImage m_decodeScratch;
     QSize m_viewSize;
     bool m_resyncNeeded = true;
+    // When a report last asked for a resend (a keyframe, on the video path).
+    qint64 m_lastResyncAskMs = 0;
     quint64 m_feedbackSequence = 0;
     qint64 m_lastReportMs = 0;
     quint32 m_windowFramesApplied = 0;
     quint32 m_windowBytesReceived = 0;
     quint32 m_highestSequenceSeen = 0;
+    qint64 m_highestSeenAtMs = 0;
     bool m_receiving = false;
     quint64 m_framesReceived = 0;
     quint64 m_tilesApplied = 0;
     quint64 m_bytesReceived = 0;
     quint64 m_framesRejected = 0;
+
+    // --- receiving video (wire version 4) ---
+    struct Assembly {
+        bool active = false;
+        quint32 number = 0;
+        int count = 0;
+        int received = 0;
+        qsizetype bytes = 0;
+        bool keyframe = false;
+        std::vector<QByteArray> parts;
+    };
+    Assembly m_assembly;
+    QObject *m_context = nullptr;
+    std::function<void(const Update &)> m_asyncHandler;
+    std::unique_ptr<ScreenVideoDecoder> m_videoDecoder;
+    // A keyframe request goes out at once rather than with the next periodic
+    // report: until it arrives the viewer's picture is frozen.
+    bool m_urgentFeedback = false;
 };
 
 } // namespace OpenChat

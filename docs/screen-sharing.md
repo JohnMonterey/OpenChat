@@ -16,7 +16,117 @@ incoming share appears by itself on a stage below the participants, in the same
 `CallVideoItem` the camera tiles use, and disappears the moment it stops. In a
 group, one member's share holds the stage until they stop; the next takes it.
 
-## Why not the camera codec
+## A video stream, not re-sent squares
+
+Screen sharing is a VP9 video stream (`src/call/ScreenVideoCodec`), in libvpx's
+real-time screen-content mode, encoded and decoded off the GUI thread. It
+replaced the tile encoder described further down as the default, because the
+tile design cannot follow anything that moves.
+
+A scrolled page or a playing video changes every tile on every frame, and the
+tile budget covers a handful of them per frame. So the viewer sees the picture
+fill in over a second or more, always behind. A video codec encodes motion as
+motion: a scroll is a few motion vectors rather than a hundred re-sent squares.
+`openchat-screen-bench` measures what the viewer actually sees, as PSNR of their
+picture against the sharer's screen at that moment (above ~35 dB is current):
+
+| 1080p, 30 fps | tiles, starting rung | tiles, best rung | VP9, starting rate |
+|---|---|---|---|
+| scrolling a page | 12.3 dB at 3.3 Mbit/s | 12.4 dB at 8.1 Mbit/s | **35.3 dB at 2.9 Mbit/s** |
+| a video playing | 17.4 dB at 3.4 Mbit/s | 18.0 dB at 8.4 Mbit/s | **36.4 dB at 2.9 Mbit/s** |
+| typing | 32.3 dB at 1.9 Mbit/s | 41.8 dB at 3.2 Mbit/s | **36.8 dB at 1.0 Mbit/s** |
+
+VP9 encodes a 1080p frame in about 5 ms on four threads of a desktop CPU.
+`OpenChat --screen-share-check` reports the time on the machine it runs on, and
+warns when that is longer than a frame.
+
+A slower machine adapts on its own. The encoder thread keeps a smoothed
+measure of encoding time as a share of the time between frames (keyframes
+left out). Above 70% it moves libvpx from speed 8 to speed 9, which costs a
+little sharpness and saves about a third of the time. If it is still above 85%
+at speed 9, the encoder holds itself one rung lower (fewer pixels and frames)
+than the link allows. It tries a rung higher again after twenty calm seconds.
+The diagnostics line shows the speed, the load, and `cpu` when the rung is
+held down this way.
+
+**Sending.**
+
+- The capture's frame is converted to 4:2:0 (full-range BT.709, on up to four
+  threads) and handed to the encoder thread. A frame still waiting for a busy
+  encoder is replaced by the newer one, never queued behind it.
+- Encoding is constant-bitrate with no look-ahead. Keyframes are sent only at
+  the start, on a new size, or when a viewer asks for one, and are capped at
+  three frames' worth: they arrive in well under a second, slightly soft, and
+  the following frames sharpen them.
+- A still screen keeps being encoded for three seconds after its last change,
+  while the codec sharpens it, then once a second as a heartbeat. After that it
+  costs a few hundred bytes a second.
+- Each encoded frame is sealed per peer as fragments of at most 24 KiB.
+
+**The pacer.** The relay connection is one TCP socket shared with the call's
+voice.
+
+- `RelayClient` silently drops any media datagram offered while 128 KB is
+  already waiting on that socket. "Waiting" includes the TLS socket's encrypted
+  buffer. Over `wss://` a write is encrypted at once and then waits there, and
+  `QWebSocket::bytesToWrite()` does not count it: measured against a stalled
+  relay, it read 0 with 23 MB queued. Both this gate and the pacer below read
+  `RelayClient::pendingSendBytes()`, which adds `encryptedBytesToWrite()`. Under the old design that meant a share
+  outrunning the uplink lost packets, including voice. Every gap made the viewer
+  ask for everything again, which flooded the link further.
+- Now screen packets wait in the engine's own queue (`CallEngine`'s pacer).
+  They reach the socket only while less than 32 KB is waiting there, so a voice
+  packet, which bypasses the pacer, never sits behind more than that plus one
+  fragment.
+- A new frame is encoded only while the queue holds less than 150 ms of the
+  stream per peer (in a group call each frame is queued once per member). When
+  the link is the bottleneck the share loses frames, not timeliness.
+- When the queue has been backed up for most of a second, the rate it actually
+  drained becomes a cap on the encoder's bitrate. The cap is raised again after
+  three calm seconds.
+
+**Congestion further along** (the relay, or the viewer's downlink) shows up as
+delay, not loss, since everything is TCP. The viewer's report now also says how
+long it held the newest packet before reporting, so the sender measures a true
+round trip. More than 350 ms above the lowest of the last half minute costs a
+rung; staying within 120 ms of it for three seconds of saturated sending earns
+one back.
+
+**Receiving.** Fragments are reassembled on the GUI thread, which is cheap. A
+missing or out-of-order fragment breaks the stream: the decoder waits for a
+keyframe and the report asking for one goes out at once, not with the next
+periodic report.
+
+- A loss breaks the stream once. The rest of that frame is dropped quietly,
+  and a new frame starts only with its first fragment.
+- A request that goes unanswered (the report, or the keyframe answering it, was
+  dropped on the way) is asked again after 1.5 s if frames keep arriving that
+  cannot be decoded. Without that, the share would stay frozen while still
+  looking alive.
+- A frame the decoder rejects restarts the decoder. A keyframe already queued
+  behind the bad frame is kept, so the stream recovers without asking.
+- A decoder that falls 45 frames behind drops its queue and asks for a keyframe.
+  If the frame arriving then is itself a keyframe, it starts from that instead.
+
+- Decoding and conversion back to RGB run on a decoder thread, and only the
+  newest picture is handed to the view. A decoder that stays a frame behind
+  still shows a picture at least every 100 ms.
+- The picture replaces the canvas's contents whole, with no copy.
+- `CallVideoItem` uploads it to the GPU once and lets the GPU scale it, with
+  mipmaps when it is shown much smaller. The old view scaled the whole desktop
+  with QPainter on every update.
+
+**Fallbacks.** The tile encoder below still exists:
+
+- A build without libvpx uses it (CMake warns loudly). Linux uses the
+  distribution's libvpx, Windows `mingw-w64-libvpx` (in the rootless
+  toolchain), macOS `brew install libvpx`.
+- The engine switches to it mid-share if the VP9 encoder fails on a machine.
+- `OPENCHAT_SCREEN_CODEC=tiles` forces it.
+- Receivers decode both wire versions. A client from before this change
+  receives nothing from a VP9 sender; both ends need this build.
+
+## The tile encoder
 
 A desktop is not a face. It is mostly still, it is full of flat colour and sharp
 text, and re-encoding a whole 1080p display thirty times a second to resend
@@ -30,35 +140,112 @@ goes out as JPEG. A motionless desktop costs an eight-byte heartbeat per second.
 ## The path a frame takes
 
 ```
-QScreenCapture / QWindowCapture
+Windows: DXGI Desktop Duplication / Windows.Graphics.Capture
+macOS:   ScreenCaptureKit
+Linux:   QScreenCapture / QWindowCapture
         │  mapped read-only, never copied
         ▼
-ScreenTileEncoder     hash → changed tiles → PNG / JPEG / solid
-        │  one payload, however many peers
+ScreenVideoEncoder    → I420 (parallel) → VP9 on its own thread
+  (or ScreenTileEncoder: hash → changed tiles → PNG / JPEG / solid)
+        │  one stream, however many peers
         ▼
-CallScreenSession     AES-256-GCM per peer, per direction
+CallScreenSession     ≤24 KiB fragments, AES-256-GCM per peer, per direction
+        │
+        ▼
+CallEngine pacer      waits for room in the socket; voice goes around it
         │
         ▼
 SyncEngine datagram → relay → SyncEngine datagram
         │
         ▼
-CallScreenSession     authenticate → decode tiles → blit
+CallScreenSession     authenticate → reassemble (or decode tiles → blit)
         │
         ▼
-ScreenCanvas          one shared surface, written in place
-        │  dirty rectangle only
+ScreenVideoDecoder    VP9 → RGB on its own thread, newest picture only
+        │
         ▼
-CallVideoItem
+ScreenCanvas          one shared surface
+        │
+        ▼
+CallVideoItem         uploaded once as a texture, scaled by the GPU
 ```
 
-Capture is the platform's own, through `QScreenCapture` and `QWindowCapture`;
-nothing here takes screenshots in a loop. Frames are **pulled** on a timer at the
+Capture is the platform's own (see the next section); nothing here takes
+screenshots in a loop except as the last Windows fallback. Frames are **pulled** on a timer at the
 encoder's chosen rate rather than pushed, so a 240 Hz display produces a 30 fps
 share and nothing queues behind a busy encoder — what goes out is always the
 newest picture, never the oldest stale one. The frame is mapped read-only and the
 encoder reads the tiles it needs straight out of the compositor's buffer: at 1:1
 there is no copy of a captured pixel anywhere in the sending path. Only the
 downscaling path allocates, and only one tile-sized scratch, once per geometry.
+
+## Capture on each platform
+
+Qt Multimedia captures a desktop only through its FFmpeg backend, and the Qt
+builds this application ships on do not all have it. The Windows package's Qt
+carries the Media Foundation backend alone, and Homebrew's macOS Qt is
+configured with `-DQT_FEATURE_ffmpeg=OFF`. On both, `QScreenCapture::start()`
+is accepted and then **nothing happens: no frame and no error**. That is why
+screen sharing did not work on Windows at all. So `QtScreenCapture` (which
+still owns pacing, failure reporting and lifetime) hands Windows and macOS to
+`NativeScreenCapture`, and keeps Qt's own path only for Linux, where the
+distributions' Qt ships the FFmpeg backend.
+
+**Windows** (`src/call/NativeScreenCaptureWin.cpp`):
+
+- Screens use **DXGI Desktop Duplication** on a Direct3D 11 device created on
+  the adapter that drives the display. Duplication is refused from any other
+  adapter, which is what bites hybrid-GPU laptops. `DuplicateOutput1` asks for
+  8-bit BGRA, so HDR and wide-colour desktops are converted by Windows.
+  `AcquireNextFrame(0)` never blocks, which fits the pull model exactly. Desktop
+  Duplication reports the mouse pointer beside the image rather than in it, so
+  the pointer is drawn in (colour, monochrome and masked-colour shapes) and the
+  pixels under it are put back afterwards. Rotated (portrait) displays are
+  turned upright.
+- When the lock screen, a UAC prompt, a mode change or a full-screen program
+  takes the output, the duplication is lost. It is reopened every 250 ms, the
+  last picture keeps going out in the meantime, and the share ends only if the
+  loss lasts 20 s.
+- If Desktop Duplication refuses a display outright, capture falls back first
+  to **Windows.Graphics.Capture** for the same monitor, then to a **GDI screen
+  copy**. That covers a display on another GPU, HDR on older Windows, virtual
+  machines, some remote sessions and Wine. The report and the log say which
+  fallback was taken and why.
+- Single windows use **Windows.Graphics.Capture** (Windows 10 1903 or later)
+  through C++/WinRT. The yellow capture border is turned off where Windows 11
+  allows it. Windows are listed with `EnumWindows`: visible, not minimised, not
+  cloaked, not owned, not tool windows, not OpenChat's own.
+
+**macOS** (`src/call/NativeScreenCaptureMac.mm`): **ScreenCaptureKit** (12.3 or
+later) for displays and windows, scaled on the GPU to the encoder's 1920-pixel
+ceiling, with the pointer included. Before the picker opens, the controller
+checks Screen Recording permission (`CGPreflightScreenCaptureAccess`). Without
+it macOS lists windows without titles and captures only the wallpaper. On the
+first refusal the controller asks macOS to show its own prompt, puts the reason
+under the call controls, and offers **Open System Settings**. macOS applies the
+grant only after a relaunch, and an unbundled binary started from Terminal
+needs the permission granted to Terminal. Older macOS falls back to Qt's path.
+*This file has not yet been compiled on a Mac;* configure with
+`-DOPENCHAT_NATIVE_SCREEN_CAPTURE=OFF` to build without it.
+
+These native APIs deliver a frame only when something changed, but the encoder
+heartbeats and answers resend requests only when it is handed a frame. So
+`QtScreenCapture` hands a still screen's last frame over again every 200 ms. A
+native capture is trusted to report its own liveness once it has produced a
+first frame; until then the 8-second watchdog applies, and a capture that
+starts but never produces a picture is reported by name.
+
+`OPENCHAT_SCREEN_CAPTURE` overrides the choice for diagnosis: `qt` (Qt
+Multimedia everywhere), and on Windows `wgc` (Windows.Graphics.Capture for
+screens too) or `gdi` (the GDI copy).
+
+**When sharing does not work on a tester's machine**, ask them to run
+`OpenChat --screen-share-check` (on Windows, `OpenChat.exe` from the unpacked
+folder in a console). It prints the capture path, the permission state, and
+what the picker would offer. Then it captures every screen and one window for
+three seconds each and saves the first frame of each as a PNG in the temp
+folder, so a sideways, black or pointer-less picture can be seen rather than
+guessed. Window titles are never printed.
 
 The relay's part is unchanged and deliberately minimal: media rides the existing
 signed `EnvelopeMessageKind::CallMedia` datagram route, which is never stored,
@@ -68,7 +255,21 @@ read, let alone re-encode, a single pixel.
 
 ## Wire format
 
-Version byte `3` on the existing 22-byte media header, beside audio's `1` and the
+A VP9 share uses version byte `4` on the same header, with the same keys and
+sequence numbers as version 3, content flag only. Each fragment's payload is:
+
+- kind `1`, flags (bit 0: keyframe);
+- width and height;
+- frame number;
+- capture time;
+- fragment index and count;
+- then the fragment's bytes.
+
+Reports and the stop notice stay version 3. A report carries two extra bytes
+after the original twenty: how long the receiver held the newest packet.
+Older senders read the first twenty and stop.
+
+A tile share uses version byte `3` on the existing 22-byte media header, beside audio's `1` and the
 camera's `2`, so older clients ignore a share and keep carrying voice. Flag `1`
 carries picture, flag `2` a receiver's report, and no flags at all means the
 share stopped. The payload is `width`, `height`, tile shift, a generation counter
@@ -135,10 +336,14 @@ the one buffer. Its geometry never changes — a resolution change produces a *n
 canvas — so a view still painting the old one can never be left pointing at freed
 pixels.
 
-The view's texture is the size of the *item*, not of the far end's display, so a
-4K share in a 400-pixel panel costs 400 pixels of video memory. Only the changed
-rectangle is repainted and re-uploaded, a heartbeat from a still desktop costs
-nothing at all, and an item that is not visible is not painted.
+The view uploads each new picture once, as a texture the size of the picture,
+and the GPU scales it into the item, with mipmaps when it is drawn much smaller.
+Scaling on the CPU, as the view used to, cost more than decoding at 30 fps.
+A picture that has not changed is never uploaded again, so a heartbeat from a
+still desktop costs nothing, and an item that is not visible is not drawn. A
+VP9 share replaces the canvas's contents whole each frame rather than writing
+into them, so the picture is handed from decoder to canvas to texture without
+a copy.
 
 Stopping a share, ending a call, a peer leaving, or the app changing calls
 releases all of it: hashes, scratches, canvas, encoder, capture session and
@@ -188,12 +393,34 @@ chip it closes up and leans left instead.
 `CallController::screenShareDiagnostics()` reports resolution, rung, frame rate,
 quality, tiles sent against total, bytes and microseconds for the last update,
 frames sent, idle and paced out, measured loss, round-trip time, the viewer's
-window size, and what has been received. The `openchat.screenshare` logging
+window size, and what has been received. For a VP9 share it reports the
+bitrate and link cap, libvpx's speed and encoder load, keyframes, frames held
+back by the pacer, and the bytes queued. The `openchat.screenshare` logging
 category is off unless `QT_LOGGING_RULES` turns it on, so a shipped build says
 nothing about a running share.
 
 ## Validation
 
+- `tst_screenvideo`: colour survives the trip through I420, and a larger source
+  is scaled into it. A scrolling desktop survives encode and decode (above
+  28 dB). The first frame is the only keyframe until one is asked for. The
+  decoder waits for a keyframe and asks for one when the stream breaks. A
+  keyframe spanning several fragments is reassembled, a tampered fragment is
+  refused, and a lost fragment gets its keyframe request out at once. A loss
+  mid-frame asks once, not twice. A viewer still waiting well after asking asks
+  again. A keyframe queued behind an undecodable frame still shows. RGBA8888
+  captures keep their colours, at 1:1 and scaled. A still screen stops costing
+  frames after it sharpens.
+- `tst_relayclient::aCongestedTlsLinkShowsItsBacklogAndDropsMedia`: against a
+  real TLS relay that stops reading, the backlog is visible to the pacer and
+  the datagram gate keeps it under 512 KB. Reading `bytesToWrite()` alone, it
+  shows 0 and the test fails.
+- `tst_callengine::screenDataWaitsForRoomWhileVoiceGoesStraightThrough`: with
+  the socket full, nothing screen-sized reaches it, frames are held back
+  instead of piling up, voice still goes out at once, and everything held
+  arrives intact once there is room. The engine and group-call share tests run
+  on both encoders.
+- `openchat-screen-bench`: the before/after table above.
 - `tst_screenshare`: reconstruction, delta efficiency, lossless text, flat-region
   cost, resolution capping at 1080p/1440p/4K/ultrawide, explicit frame pacing
   against a 240 Hz source, the packet ceiling, stop, restart, gap detection and
@@ -232,6 +459,10 @@ at full resolution, every lossless sample point exact, photographic drift 2/765,
 to a run with no share at all.
 
 The automated tests do not cover real capture hardware, OS capture-permission
-prompts, or Wayland portal flows. For a hardware check, run two clients, start a
+prompts, or Wayland portal flows. The Windows backend is cross-compiled and runs
+under Wine, but Wine implements neither Desktop Duplication (`E_NOTIMPL`) nor
+Windows.Graphics.Capture. There it proves enumeration, the refusal path and the
+GDI fallback end to end, not real pixels. The macOS backend has not been
+compiled on a Mac yet. For a hardware check, run two clients, start a
 call, share a display and then a window, unplug a monitor mid-share, close the
 shared window, and confirm the button returns to **Share screen** each time.

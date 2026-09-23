@@ -3,6 +3,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -20,6 +21,7 @@
 #include "controllers/CallController.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
+#include "controllers/CrashReportController.h"
 #include "controllers/OnboardingController.h"
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
@@ -2490,6 +2492,77 @@ private slots:
         QVERIFY2(!root->property("callFullscreen").toBool(),
                  "the call ended but kept the whole window");
         QVERIFY(sidebar->isVisible());
+    }
+
+    // The window a crash relaunches into: it must say in plain words what
+    // happened and what OpenChat was doing, before anybody opens the details.
+    void aCrashReportWindowSaysWhatHappenedAndWhatOpenChatWasDoing()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(QStringLiteral("crash-20260923-120513-4242.txt"));
+        {
+            QFile report(path);
+            QVERIFY(report.open(QIODevice::WriteOnly));
+            report.write("OpenChat crash report\n"
+                         "=====================\n"
+                         "\n"
+                         "What happened:  The program tried to read memory at 0x10, which is not "
+                         "valid: a null pointer.\n"
+                         "Where:          nvwgf2umx.dll+0x1a2b3c\n"
+                         "Thread:         main (id 4312)\n"
+                         "Doing:          screen share: copying the desktop image on the GPU\n"
+                         "Hint:           The crash happened inside the NVIDIA graphics driver.\n"
+                         "\n"
+                         "Application:    OpenChat 0.1.0\n"
+                         "Stack of the crashed thread\n");
+        }
+        OpenChat::CrashReportController report(path, true);
+        QCOMPARE(report.headline(), QStringLiteral("OpenChat crashed"));
+        QCOMPARE(report.doing(), QStringLiteral("screen share: copying the desktop image on the GPU"));
+        QCOMPARE(report.where(), QStringLiteral("nvwgf2umx.dll+0x1a2b3c"));
+        QVERIFY(report.hint().contains(QStringLiteral("NVIDIA")));
+        // Nothing after the summary block leaks into it.
+        QVERIFY(!report.whatHappened().contains(QStringLiteral("Application")));
+
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine, QUrl::fromLocalFile(
+            QStringLiteral(OPENCHAT_SOURCE_DIR "/qml/OpenChat/CrashNotice.qml")));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties(
+            {{QStringLiteral("report"), QVariant::fromValue(&report)}}));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QCOMPARE(window->title(), QStringLiteral("OpenChat crashed"));
+        auto textOf = [&](const char *name) {
+            QObject *item = window->findChild<QObject *>(QString::fromLatin1(name));
+            return item ? item->property("text").toString() : QString();
+        };
+        QVERIFY(textOf("crashWhatHappened").contains(QStringLiteral("null pointer")));
+        QCOMPARE(textOf("crashDoing"), report.doing());
+        QVERIFY(textOf("crashReportPath").contains(path));
+        auto *restart = window->findChild<QQuickItem *>(QStringLiteral("crashRestartButton"));
+        QVERIFY(restart && restart->isVisible());
+        auto *details = window->findChild<QQuickItem *>(QStringLiteral("crashDetails"));
+        QVERIFY(details && !details->isVisible());
+        auto *toggle = window->findChild<QQuickItem *>(QStringLiteral("crashDetailsButton"));
+        QVERIFY(toggle);
+        clickItem(window, toggle);
+        QTRY_VERIFY(details->isVisible());
+        if (qEnvironmentVariableIsSet("OPENCHAT_CAPTURE_CRASH_NOTICE"))
+            window->grabWindow().save(qEnvironmentVariable("OPENCHAT_CAPTURE_CRASH_NOTICE"));
+
+        // Closing marks the report seen, so the next launch does not show it
+        // again, and closes the window exactly once.
+        QSignalSpy finished(&report, &OpenChat::CrashReportController::finished);
+        auto *close = window->findChild<QQuickItem *>(QStringLiteral("crashCloseButton"));
+        QVERIFY(close);
+        clickItem(window, close);
+        QTRY_COMPARE(finished.count(), 1);
+        QVERIFY(QFileInfo::exists(path + QStringLiteral(".seen")));
+        report.dismiss();
+        QCOMPARE(finished.count(), 1);
     }
 };
 

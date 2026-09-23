@@ -258,6 +258,8 @@ public:
     // asynchronous acceptance to wait for and no retry if the peer is offline.
     // Intended for real-time media, where a redelivered frame is already stale.
     [[nodiscard]] Result<void, RelayCallError> sendDatagram(const CiphertextEnvelopeV1 &envelope);
+    // Bytes queued on the socket and not yet written, or -1 without a socket.
+    [[nodiscard]] qint64 pendingSendBytes() const;
 
     // Sends a plaintext-free acknowledgement control frame (envelope id +
     // advanced watermark) over the live stream.

@@ -4,6 +4,7 @@
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
 #include "call/CallScreenSession.h"
+#include "call/ScreenVideoCodec.h"
 #include "call/CallSignal.h"
 #include "call/CallTransport.h"
 #include "media/AudioConvert.h"
@@ -852,8 +853,38 @@ private slots:
         QCOMPARE(m_bob.engine->state(), CallState::Active);
     }
 
+    // Both encoders, as in tst_callengine: tiles exactly, VP9 within a
+    // tolerance, decoded on its own thread and so given a moment to arrive.
+    static void screenCodecs()
+    {
+        QTest::addColumn<QString>("codec");
+        QTest::newRow("tiles") << QStringLiteral("tiles");
+        QTest::newRow("vp9") << QStringLiteral("vp9");
+    }
+    [[nodiscard]] static int useScreenCodec()
+    {
+        QFETCH(QString, codec);
+        if (codec == QStringLiteral("vp9") && !ScreenVideoEncoder::isAvailable())
+            return -1;
+        qputenv("OPENCHAT_SCREEN_CODEC", codec.toUtf8());
+        return codec == QStringLiteral("tiles") ? 0 : 12;
+    }
+    static bool nearly(QRgb a, QRgb b, int tolerance)
+    {
+        return qAbs(qRed(a) - qRed(b)) <= tolerance && qAbs(qGreen(a) - qGreen(b)) <= tolerance
+            && qAbs(qBlue(a) - qBlue(b)) <= tolerance;
+    }
+
+    void oneSharedScreenIsEncodedOnceAndSealedForEveryMember_data()
+    {
+        screenCodecs();
+    }
+
     void oneSharedScreenIsEncodedOnceAndSealedForEveryMember()
     {
+        const int tolerance = useScreenCodec();
+        if (tolerance < 0)
+            QSKIP("this build has no VP9");
         connectEndpoints();
         QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
         m_bob.engine->acceptCall();
@@ -877,8 +908,13 @@ private slots:
         for (int i = 0; i < 400; ++i) {
             m_alice.nowMs += 200;
             m_alice.engine->sendScreenFrame(ScreenFrameView::fromImage(desktop));
+            QTest::qWait(tolerance > 0 ? 3 : 0);
             if (!bobScreen.isEmpty() && bobScreen.last().second
-                && bobScreen.last().second->isComplete())
+                && bobScreen.last().second->isComplete() && !carolScreen.isEmpty()
+                && nearly(bobScreen.last().second->image().pixel(500, 400),
+                          desktop.pixel(500, 400), tolerance)
+                && nearly(carolScreen.last().second->image().pixel(20, 22),
+                          desktop.pixel(20, 22), tolerance))
                 break;
         }
         QVERIFY(!bobScreen.isEmpty());
@@ -894,8 +930,8 @@ private slots:
         QVERIFY(bobCanvas != carolCanvas);
         QCOMPARE(bobCanvas->size(), desktop.size());
         QCOMPARE(carolCanvas->size(), desktop.size());
-        QCOMPARE(bobCanvas->image().pixel(500, 400), desktop.pixel(500, 400));
-        QCOMPARE(carolCanvas->image().pixel(20, 22), desktop.pixel(20, 22));
+        QVERIFY(nearly(bobCanvas->image().pixel(500, 400), desktop.pixel(500, 400), tolerance));
+        QVERIFY(nearly(carolCanvas->image().pixel(20, 22), desktop.pixel(20, 22), tolerance));
 
         // The desktop was hashed and encoded ONCE for the whole mesh, not once
         // per member: that is the entire point of the shared encoder. Every
@@ -921,8 +957,16 @@ private slots:
         QCOMPARE(m_carol.engine->state(), CallState::Active);
     }
 
+    void aMemberLeavingMidShareTakesTheirViewOfItWithThem_data()
+    {
+        screenCodecs();
+    }
+
     void aMemberLeavingMidShareTakesTheirViewOfItWithThem()
     {
+        const int tolerance = useScreenCodec();
+        if (tolerance < 0)
+            QSKIP("this build has no VP9");
         connectEndpoints();
         QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
         m_bob.engine->acceptCall();
@@ -947,7 +991,9 @@ private slots:
         for (int i = 0; i < 400; ++i) {
             m_bob.nowMs += 200;
             m_bob.engine->sendScreenFrame(ScreenFrameView::fromImage(desktop));
-            if (!carolScreen.isEmpty() && carolScreen.last() && carolScreen.last()->isComplete())
+            QTest::qWait(tolerance > 0 ? 3 : 0);
+            if (!carolScreen.isEmpty() && carolScreen.last() && carolScreen.last()->isComplete()
+                && !aliceScreen.isEmpty() && aliceScreen.last())
                 break;
         }
         QVERIFY(!carolScreen.isEmpty() && carolScreen.last());

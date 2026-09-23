@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 QT_BEGIN_NAMESPACE
 class QScreenCapture;
@@ -24,6 +25,8 @@ class QWindowCapture;
 QT_END_NAMESPACE
 
 namespace OpenChat {
+
+class NativeScreenCapture;
 
 // One thing the user can choose to share.
 struct ScreenShareSource final {
@@ -38,11 +41,27 @@ struct ScreenShareSource final {
     // weakly: a monitor can be unplugged while its row is still on screen.
     QPointer<QScreen> screen;
     QCapturableWindow window;
+    // Set when the source came from NativeScreenCapturePlatform::sources(),
+    // which then also captures it. `nativeId` is that API's own handle for the
+    // source (an HWND, a CGDirectDisplayID, a CGWindowID) and `nativeName` its
+    // device name where it has one (a DXGI output's "\\.\DISPLAY1"). `screen`
+    // is still filled in for a native screen when Qt knows the same display,
+    // so an unplugged monitor is noticed either way.
+    bool native = false;
+    quint64 nativeId = 0;
+    QString nativeName;
 
     [[nodiscard]] bool isValid() const;
 };
 
 // The desktop capture half of screen sharing.
+//
+// On Windows and macOS the capture is NativeScreenCapture (DXGI Desktop
+// Duplication and Windows.Graphics.Capture; ScreenCaptureKit), because the Qt
+// builds shipped there cannot capture a desktop at all. Elsewhere it is Qt
+// Multimedia's QScreenCapture and QWindowCapture. Either way this class owns
+// the pacing, the failure reporting and the lifetime, so nothing above it can
+// tell which one is running.
 //
 // Frames are taken from the platform's own capture path — the compositor's, not
 // a screenshot loop — and are handed on WITHOUT being copied: the frame is
@@ -71,6 +90,13 @@ public:
     // capturable window. Cheap enough to call each time the picker opens, which
     // is also the only way a closed window leaves the list.
     [[nodiscard]] static QVector<ScreenShareSource> availableSources();
+    // Which capture path this build uses on this machine, for diagnostics.
+    [[nodiscard]] static QString backendName();
+
+    // For the crash-reporting self test only: the next captured frame crashes
+    // the process from inside the capture path, so a tester can see exactly
+    // what a report of a screen-share crash looks like.
+    static void crashOnNextFrameForTesting();
 
     // Borrowed, valid only for the duration of the call. Invoked on the thread
     // this object lives on, synchronously from the pacing timer.
@@ -96,6 +122,8 @@ signals:
 
 private:
     void pullFrame();
+    void pullNativeFrame();
+    void deliver(const ScreenFrameView &view);
     void teardown();
     void fail(const QString &message, bool permanent = false);
 
@@ -110,6 +138,19 @@ private:
     QVideoSink m_sink;
     std::unique_ptr<QScreenCapture> m_screenCapture;
     std::unique_ptr<QWindowCapture> m_windowCapture;
+    std::unique_ptr<NativeScreenCapture> m_native;
+    // Captures stopped from inside a pull() that is still on the stack (a
+    // stop, a restart and another stop can all happen inside one sink call),
+    // kept alive until it has returned.
+    std::vector<std::unique_ptr<NativeScreenCapture>> m_retiredNative;
+    bool m_pulling = false;
+    // A native capture is trusted to report its own liveness only once it has
+    // produced a first frame; until then the watchdog decides.
+    bool m_nativeHadFrame = false;
+    bool m_screenMatched = false;
+    qint64 m_lastDeliveryMs = 0;
+    qint64 m_startedMs = 0;
+    quint64 m_framesDelivered = 0;
     QTimer m_timer;
     // Fires when the capture is up but no frame has arrived for long enough
     // that the source is gone rather than merely still.

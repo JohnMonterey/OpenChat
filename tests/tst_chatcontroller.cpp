@@ -528,6 +528,27 @@ private slots:
         QCOMPARE(countSpy.count(), 5);
     }
 
+    void composerTextStopsAtTheLengthLimit()
+    {
+        ChatController controller;
+        const int max = ChatController::maxComposerLength;
+        QCOMPARE(controller.composerMaxLength(), max);
+        QSignalSpy textSpy(&controller, &ChatController::composerTextChanged);
+
+        controller.setComposerText(QString(max + 100, QLatin1Char('a')));
+        QCOMPARE(controller.composerText(), QString(max, QLatin1Char('a')));
+        QCOMPARE(textSpy.count(), 1);
+        // Offered too much again, it keeps what it has but says so, so a field
+        // still showing the longer text takes the kept part back.
+        controller.setComposerText(QString(max + 5, QLatin1Char('a')));
+        QCOMPARE(controller.composerText().size(), max);
+        QCOMPARE(textSpy.count(), 2);
+
+        // A character made of two code units is dropped whole, not split.
+        controller.setComposerText(QString(max - 1, QLatin1Char('b')) + QStringLiteral("\U0001F600"));
+        QCOMPARE(controller.composerText(), QString(max - 1, QLatin1Char('b')));
+    }
+
     void settingsCategoriesDriveSelectionAndElements()
     {
         ChatController controller;

@@ -706,11 +706,24 @@ void ChatController::setProfileNotice(const QString &notice)
 
 void ChatController::setComposerText(const QString &text)
 {
-    if (m_composerText == text)
+    // Whatever the field let through, nothing past the limit is kept, and a
+    // character made of two code units is not split.
+    QString bounded = text;
+    if (bounded.size() > maxComposerLength) {
+        qsizetype cut = maxComposerLength;
+        if (bounded.at(cut - 1).isHighSurrogate())
+            --cut;
+        bounded.truncate(cut);
+    }
+    if (m_composerText == bounded) {
+        // The field still shows the longer text: have it take the kept part.
+        if (bounded.size() != text.size())
+            emit composerTextChanged();
         return;
+    }
 
     const bool wasSendable = canSend();
-    m_composerText = text;
+    m_composerText = bounded;
     emit composerTextChanged();
     updateCanSend(wasSendable);
 }

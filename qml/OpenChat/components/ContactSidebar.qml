@@ -846,7 +846,7 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: 64
+        height: Theme.bottomBarHeight
         color: Theme.contentBottom
 
         Row {

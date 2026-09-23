@@ -243,6 +243,9 @@ Window {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: implicitHeight
+                // A long message may take up to two fifths of the pane before
+                // it scrolls, leaving the conversation most of the room.
+                maxInputHeight: Math.max(112, Math.round(conversationPane.height * 0.4))
                 controller: root.chatController
                 visible: root.chatController.hasCurrentContact && !root.callFullscreen
                 onMessageSent: history.positionAtEnd()

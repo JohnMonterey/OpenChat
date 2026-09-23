@@ -49,6 +49,12 @@ variables before starting a Windows process.
 
 ## Pitfalls met along the way
 
+- Never keep a Wine prefix inside the checkout (`wine-check.sh` now puts its
+  throwaway one under `~/.cache/openchat/`). A prefix contains `dosdevices/z:`
+  pointing at `/`, and Qt's `qmlimportscanner` follows symlinks from the source
+  root on every native configure: the build then appears to hang right after
+  its first status line while the scanner walks the entire filesystem, and it
+  never returns if it meets an unresponsive FUSE mount.
 - Do not put `/usr/x86_64-w64-mingw32/bin` on `PATH`: it contains a MinGW `ld`,
   and SQLCipher's configure then cannot build its host-side helper tools.
 - SQLCipher's autosetup uses `CC_FOR_BUILD` (default `cc`) for those helpers;

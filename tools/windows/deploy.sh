@@ -78,6 +78,17 @@ copy_missing_imports() {
     done
     return $added
 }
+# Qt's OpenSSL TLS backend opens libssl and libcrypto by name at run time rather
+# than importing them, so the import walk below cannot see them. Without them the
+# backend fails to initialise and Qt falls back to SChannel; ship them so TLS
+# behaves the same as on the other platforms.
+if [ -e "$dist/plugins/tls/qopensslbackend.dll" ]; then
+    for ssl in "$sysroot"/bin/libssl-3*.dll "$sysroot"/bin/libcrypto-3*.dll; do
+        [ -e "$ssl" ] || continue
+        cp "$ssl" "$dist/$(basename "$ssl" | tr 'A-Z' 'a-z')"
+    done
+fi
+
 until copy_missing_imports; do :; done
 
 echo "Deployed to $dist:"

@@ -30,6 +30,7 @@
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
 #include "case/DailyCaseController.h"
+#include "cosmetics/CosmeticTypes.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 
@@ -46,6 +47,14 @@ QQuickItem *findVisualItem(QQuickItem *root, const QString &objectName)
             return match;
     }
     return nullptr;
+}
+
+void clearEquippedCosmetics()
+{
+    QSettings settings;
+    for (const char *key : {"Appearance/avatarFrame", "Appearance/presenceBead",
+                            "Appearance/nameFlair", "Appearance/profileScene"})
+        settings.remove(QLatin1String(key));
 }
 
 // Types `text` (ASCII) into whatever has focus in `window`, one key at a time.
@@ -216,6 +225,120 @@ private slots:
         QCoreApplication::processEvents();
         QVERIFY(sidebar->property("contactRowHeight").toDouble() >= 44.0);
         QVERIFY(sidebar->property("contactRowHeight").toDouble() <= 47.0);
+    }
+
+    // With nothing equipped the header is exactly the stock one: no cosmetic
+    // item is even created, and the name is inked by its own Text.
+    void profileCosmeticsAreAbsentByDefault()
+    {
+        clearEquippedCosmetics();
+        OpenChat::ChatController controller;
+        controller.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        for (const char *name : {"avatarFrame", "beadArt", "localNameFlair", "profileScene"})
+            QVERIFY2(!root->findChild<QObject *>(QLatin1String(name)), name);
+        QObject *localUserName = root->findChild<QObject *>(QStringLiteral("localUserName"));
+        QVERIFY(localUserName);
+        QCOMPARE(localUserName->property("color").value<QColor>(), QColor(QStringLiteral("#2b3b53")));
+    }
+
+    // Equipped through the saved settings, the local header wears every item,
+    // the name keeps its own geometry (so the bead does not move), and nobody
+    // else's picture is framed.
+    void equippedProfileCosmeticsDecorateOnlyTheLocalHeader()
+    {
+        const auto measure = [](QQmlApplicationEngine &engine, OpenChat::ChatController &controller) {
+            engine.setInitialProperties(
+                {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+            engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            engine.loadFromModule("OpenChat", "Main");
+            return engine.rootObjects().isEmpty() ? nullptr : engine.rootObjects().constFirst();
+        };
+        clearEquippedCosmetics();
+        OpenChat::ChatController plainController;
+        plainController.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine plainEngine;
+        QObject *plain = measure(plainEngine, plainController);
+        QVERIFY(plain);
+        auto *plainName = qobject_cast<QQuickItem *>(plain->findChild<QObject *>(QStringLiteral("localUserName")));
+        auto *plainBead = qobject_cast<QQuickItem *>(plain->findChild<QObject *>(QStringLiteral("localPresenceButton")));
+        QVERIFY(plainName && plainBead);
+
+        {
+            QSettings settings;
+            settings.setValue(QStringLiteral("Appearance/avatarFrame"), QStringLiteral("frame.gilded"));
+            settings.setValue(QStringLiteral("Appearance/presenceBead"), QStringLiteral("bead.gem"));
+            settings.setValue(QStringLiteral("Appearance/nameFlair"), QStringLiteral("flair.holo"));
+            settings.setValue(QStringLiteral("Appearance/profileScene"), QStringLiteral("scene.aurora"));
+        }
+        OpenChat::ChatController controller;
+        controller.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        QObject *root = measure(engine, controller);
+        QVERIFY(root);
+        QCoreApplication::processEvents();
+
+        const QList<QObject *> frames = root->findChildren<QObject *>(QStringLiteral("avatarFrame"));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.constFirst()->property("frameId").toString(), QStringLiteral("frame.gilded"));
+        QObject *bead = root->findChild<QObject *>(QStringLiteral("beadArt"));
+        QVERIFY(bead);
+        QCOMPARE(bead->property("styleId").toString(), QStringLiteral("bead.gem"));
+        QObject *flair = root->findChild<QObject *>(QStringLiteral("localNameFlair"));
+        QVERIFY(flair);
+        QCOMPARE(flair->property("text").toString(), QStringLiteral("Developer"));
+        QObject *scene = root->findChild<QObject *>(QStringLiteral("profileScene"));
+        QVERIFY(scene);
+        QCOMPARE(scene->property("sceneId").toString(), QStringLiteral("scene.aurora"));
+
+        auto *name = qobject_cast<QQuickItem *>(root->findChild<QObject *>(QStringLiteral("localUserName")));
+        auto *beadButton = qobject_cast<QQuickItem *>(root->findChild<QObject *>(QStringLiteral("localPresenceButton")));
+        QVERIFY(name && beadButton);
+        QCOMPARE(name->property("color").value<QColor>().alpha(), 0);
+        QCOMPARE(name->x(), plainName->x());
+        QCOMPARE(name->width(), plainName->width());
+        QCOMPARE(beadButton->x(), plainBead->x());
+
+        // Changing the choice at runtime follows through; clearing it removes the item.
+        QObject *appearance = engine.singletonInstance<QObject *>("OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QVERIFY(appearance->setProperty("avatarFrame", QStringLiteral("frame.neon")));
+        QTRY_COMPARE(root->findChild<QObject *>(QStringLiteral("avatarFrame"))->property("frameId").toString(),
+                     QStringLiteral("frame.neon"));
+        QVERIFY(appearance->setProperty("nameFlair", QString()));
+        QTRY_VERIFY(!root->findChild<QObject *>(QStringLiteral("localNameFlair")));
+        QCOMPARE(name->property("color").value<QColor>().alpha(), 255);
+        clearEquippedCosmetics();
+    }
+
+    void appearanceSettingsValidateAndPersistCosmetics()
+    {
+        clearEquippedCosmetics();
+        {
+            OpenChat::AppearanceSettings appearance;
+            QCOMPARE(appearance.avatarFrame(), QString());
+            appearance.setAvatarFrame(QStringLiteral("frame.pixel"));
+            appearance.setPresenceBead(QStringLiteral("bead.star"));
+            QCOMPARE(QSettings().value(QStringLiteral("Appearance/avatarFrame")).toString(),
+                     QStringLiteral("frame.pixel"));
+            // An id from another category, or one this build does not know, is none.
+            appearance.setNameFlair(QStringLiteral("bead.gem"));
+            QCOMPARE(appearance.nameFlair(), QString());
+            appearance.setPresenceBead(QStringLiteral("bead.unknown"));
+            QCOMPARE(appearance.presenceBead(), QString());
+            QVERIFY(!QSettings().contains(QStringLiteral("Appearance/presenceBead")));
+        }
+        QSettings().setValue(QStringLiteral("Appearance/profileScene"), QStringLiteral("scene.retired"));
+        OpenChat::AppearanceSettings reloaded;
+        QCOMPARE(reloaded.avatarFrame(), QStringLiteral("frame.pixel"));
+        QCOMPARE(reloaded.profileScene(), QString());
+        clearEquippedCosmetics();
     }
 
     void conversationStructureAndSending()
@@ -2714,6 +2837,7 @@ int main(int argc, char **argv)
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>(
         "OpenChat.Native", 1, 0, "AvatarArtwork");
+    OpenChat::registerCosmeticQmlTypes();
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
         QStringLiteral("ChatController is provided by the application"));

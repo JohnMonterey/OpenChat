@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Shapes
 import OpenChat
+import OpenChat.Native
 
 // The in-call surface. It occupies the top of the conversation pane in place of
 // the conversation header, so while a call is running the contact's name,
@@ -120,6 +121,7 @@ Item {
             name: callHeader.controller.localName.length > 0
                   ? callHeader.controller.localName : "You"
             avatarKey: callHeader.controller.localAvatarKey
+            frameId: AppearanceSettings.avatarFrame
             speaking: callHeader.controller.localSpeaking
             level: callHeader.controller.localLevel
             muted: callHeader.controller.muted
@@ -176,6 +178,7 @@ Item {
             name: callHeader.controller.localName.length > 0
                   ? callHeader.controller.localName : "You"
             avatarKey: callHeader.controller.localAvatarKey
+            frameId: AppearanceSettings.avatarFrame
             speaking: callHeader.controller.localSpeaking
             level: callHeader.controller.localLevel
             muted: callHeader.controller.muted

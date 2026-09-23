@@ -52,6 +52,7 @@
 #include "app/VoiceEffectHost.h"
 #include "call/ScreenCanvas.h"
 #include "case/DailyCaseController.h"
+#include "cosmetics/CosmeticTypes.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
@@ -96,6 +97,8 @@ void registerQmlTypes()
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
+    // Avatar frames, presence beads, name flair and profile scenes.
+    OpenChat::registerCosmeticQmlTypes();
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
         QStringLiteral("ChatController is provided by the application"));

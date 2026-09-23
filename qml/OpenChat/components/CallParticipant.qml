@@ -28,6 +28,10 @@ Item {
     // True for someone no longer (or not yet) in the call: the picture fades
     // so the people actually talking stand out.
     property bool dimmed: false
+    // An equipped avatar frame (the local user's own tile only). The rings
+    // move out past it so the speaking colour is never hidden under it.
+    property string frameId: ""
+    readonly property real frameReach: pictureAvatar.frameItem ? pictureAvatar.frameItem.insetLeft : 0
 
     property bool cameraEnabled: false
     property var videoFrame
@@ -43,7 +47,7 @@ Item {
     readonly property real pictureHeight: cameraEnabled ? pictureWidth / videoAspect : avatarSize
 
     implicitWidth: cameraEnabled ? Math.max(100, pictureWidth) : 132
-    implicitHeight: pictureHeight + 40 + (caption.length > 0 ? 16 : 0)
+    implicitHeight: pictureHeight + 40 + frameReach + (caption.length > 0 ? 16 : 0)
     width: implicitWidth
     height: implicitHeight
 
@@ -60,9 +64,9 @@ Item {
         Rectangle {
             objectName: "speakingGlow"
             anchors.centerIn: parent
-            width: parent.width + 22
-            height: parent.height + 22
-            radius: 10
+            width: parent.width + 22 + 2 * participant.frameReach
+            height: parent.height + 22 + 2 * participant.frameReach
+            radius: 10 + participant.frameReach
             color: "transparent"
             border.width: 6
             border.color: Theme.speakingGlow
@@ -77,9 +81,9 @@ Item {
         Rectangle {
             objectName: "speakingRing"
             anchors.centerIn: parent
-            width: parent.width + 8
-            height: parent.height + 8
-            radius: 8
+            width: parent.width + 8 + 2 * participant.frameReach
+            height: parent.height + 8 + 2 * participant.frameReach
+            radius: 8 + participant.frameReach
             color: "transparent"
             border.width: 3
             border.color: participant.speaking ? Theme.speakingRing : Theme.idleRing
@@ -87,11 +91,13 @@ Item {
         }
 
         Avatar {
+            id: pictureAvatar
             anchors.centerIn: parent
             width: participant.avatarSize
             height: participant.avatarSize
             cornerRadius: 6
             avatarKey: participant.avatarKey
+            frameId: participant.cameraEnabled ? "" : participant.frameId
         }
 
         CallVideoItem {
@@ -148,7 +154,7 @@ Item {
         id: nameText
         objectName: "participantName"
         anchors.top: avatarBlock.bottom
-        anchors.topMargin: 10
+        anchors.topMargin: 10 + participant.frameReach
         anchors.horizontalCenter: parent.horizontalCenter
         width: parent.width
         horizontalAlignment: Text.AlignHCenter

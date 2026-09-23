@@ -34,6 +34,22 @@ target_include_directories(openchat_case PUBLIC src)
 # CaseAudio decodes its bundled crate samples with the defensive WavFile reader.
 target_link_libraries(openchat_case PUBLIC Qt6::Core Qt6::Multimedia
     PRIVATE openchat_media)
+
+# Collectible profile cosmetics: avatar frames, presence beads, name flair and
+# profile scenes. All QPainter artwork, so it renders on the software scene
+# graph (which runs no shaders) exactly as on the hardware one.
+add_library(openchat_cosmetics STATIC
+    src/cosmetics/CosmeticCatalog.cpp
+    src/cosmetics/CosmeticPaint.cpp
+    src/cosmetics/CosmeticTypes.cpp
+    src/cosmetics/AvatarFrameItem.cpp
+    src/cosmetics/FramePainters.cpp
+    src/cosmetics/BeadArtItem.cpp
+    src/cosmetics/NameFlairItem.cpp
+    src/cosmetics/ProfileSceneItem.cpp
+)
+target_include_directories(openchat_cosmetics PUBLIC src)
+target_link_libraries(openchat_cosmetics PUBLIC Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
     qt_policy(SET QTP0004 NEW)
 endif()
@@ -143,6 +159,7 @@ qt_add_qml_module(OpenChat
 target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
     openchat_case
+    openchat_cosmetics
     openchat_app
     openchat_avatar
     openchat_call
@@ -927,6 +944,11 @@ target_include_directories(tst_bubblebackground PRIVATE src)
 target_link_libraries(tst_bubblebackground PRIVATE openchat_avatar Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
 add_test(NAME tst_bubblebackground COMMAND tst_bubblebackground)
 
+add_executable(tst_cosmetics tests/tst_cosmetics.cpp)
+target_link_libraries(tst_cosmetics PRIVATE openchat_cosmetics Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
+add_test(NAME tst_cosmetics COMMAND tst_cosmetics)
+set_tests_properties(tst_cosmetics PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp
     src/controllers/ChatController.cpp
@@ -950,6 +972,7 @@ target_compile_definitions(tst_qmlload PRIVATE
 )
 target_link_libraries(tst_qmlload PRIVATE
     openchat_case
+    openchat_cosmetics
     openchat_app
     openchat_avatar
     openchat_call
@@ -970,6 +993,61 @@ target_link_libraries(tst_qmlload PRIVATE
 add_test(NAME tst_qmlload COMMAND tst_qmlload)
 set_tests_properties(tst_qmlload PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
+)
+
+# Renders every profile cosmetic through the real QML components into labelled
+# PNG sheets (light and dark, 2x) under cosmetics-shots/. A design tool run by
+# hand, not part of the application; it loads the QML from the source tree.
+add_executable(openchat-profile-gallery
+    tools/profile_gallery/main.cpp
+    src/controllers/ChatController.cpp
+    src/controllers/ContactController.cpp
+    src/controllers/OnboardingController.cpp
+    src/controllers/CallController.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
+    src/models/RequestListModel.cpp
+    src/render/BubbleBackground.cpp
+    src/render/AvatarArtwork.cpp
+    src/render/CallVideoItem.cpp
+    src/app/AppearanceSettings.cpp
+    src/app/MicrophoneSettings.cpp
+    src/app/VoiceEffectHost.cpp
+)
+# The bundled contact photos, at the paths the avatar painter looks them up,
+# so frames are judged against real faces.
+qt_add_resources(openchat-profile-gallery gallery_photos
+    PREFIX /qt/qml/OpenChat
+    FILES
+        assets/Jessica.png
+        assets/alex.png
+        assets/michael.png
+        assets/ryan.png
+        assets/userpfp_none.png
+)
+target_include_directories(openchat-profile-gallery PRIVATE src)
+target_compile_definitions(openchat-profile-gallery PRIVATE
+    OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(openchat-profile-gallery PRIVATE
+    openchat_case
+    openchat_cosmetics
+    openchat_app
+    openchat_avatar
+    openchat_call
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Quick
+    Qt6::QuickControls2
+    Qt6::Network
+    Qt6::WebSockets
 )
 
 function(add_openchat_capture_test test_name capture_width capture_height)

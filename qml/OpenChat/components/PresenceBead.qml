@@ -1,12 +1,16 @@
 import QtQuick
 import OpenChat
+import OpenChat.Native
 
 // One presence, as a glossy Aero bead: green Available (0), amber Away (1),
-// grey Offline (2), red Busy (3).
+// grey Offline (2), red Busy (3). An equipped bead style (a catalogue id such
+// as "bead.gem") swaps the material but keeps the state colour.
 Item {
     id: bead
     property int presence: 0
     property int beadSize: 12
+    property string styleId: ""
+    readonly property bool styled: styleId.length > 0
 
     readonly property color rimColor: presence === 0 ? "#4e9f0f"
                                : presence === 1 ? "#d69a0c"
@@ -26,6 +30,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
+        visible: !bead.styled
         radius: width / 2
         border.width: 1
         border.color: bead.rimColor
@@ -37,11 +42,28 @@ Item {
     }
 
     Rectangle {
+        visible: !bead.styled
         x: 2
         y: 2
         width: Math.max(2, parent.width - 5)
         height: Math.max(1, parent.height / 3)
         radius: height / 2
         color: Theme.gloss
+    }
+
+    // Centred on the bead; glows and rings reach past it by the overhang.
+    Loader {
+        objectName: "beadArtLoader"
+        active: bead.styled
+        anchors.centerIn: parent
+        sourceComponent: BeadArt {
+            objectName: "beadArt"
+            styleId: bead.styleId
+            presence: bead.presence
+            beadSize: bead.beadSize
+            darkMode: Theme.darkMode
+            width: bead.beadSize + 2 * overhang
+            height: width
+        }
     }
 }

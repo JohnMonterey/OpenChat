@@ -44,12 +44,18 @@ namespace BubbleSkins {
 [[nodiscard]] bool isSkin(const QString &id);
 [[nodiscard]] QColor textColor(const QString &id);
 [[nodiscard]] QColor secondaryTextColor(const QString &id);
+// A 1 px shadow (or emboss) for the message text, for Text.Raised.
+[[nodiscard]] QColor textShadowColor(const QString &id);
 
 // Paints the skin's material, lighting and outline for the shape. The result
 // covers exactly the classic bubble's footprint: the fill is antialiased to the
 // path and the outline straddles it the way the classic 1 px border does.
 void paint(QPainter *painter, const QString &id, const BubbleShape &shape,
            qreal devicePixelRatio);
+
+// Starts generating the skin's texture on a worker thread, so the first bubble
+// that wears it does not wait for it. Cheap to repeat; ignores the classic id.
+void prepare(const QString &id);
 
 // The cached tile a skin repeats (generated on first use). Exposed for tests
 // and for the gallery's texture dump; null for the classic bubble.

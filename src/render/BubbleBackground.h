@@ -24,6 +24,7 @@ class BubbleBackground : public QQuickPaintedItem
     // The skin's own message and timestamp colours; invalid when not skinned.
     Q_PROPERTY(QColor skinTextColor READ skinTextColor NOTIFY skinChanged)
     Q_PROPERTY(QColor skinSecondaryTextColor READ skinSecondaryTextColor NOTIFY skinChanged)
+    Q_PROPERTY(QColor skinTextShadowColor READ skinTextShadowColor NOTIFY skinChanged)
 
 public:
     explicit BubbleBackground(QQuickItem *parent = nullptr);
@@ -47,6 +48,7 @@ public:
     [[nodiscard]] bool skinned() const;
     [[nodiscard]] QColor skinTextColor() const;
     [[nodiscard]] QColor skinSecondaryTextColor() const;
+    [[nodiscard]] QColor skinTextShadowColor() const;
 
     void paint(QPainter *painter) override;
 

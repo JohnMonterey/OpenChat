@@ -1,5 +1,7 @@
 #include "app/AppearanceSettings.h"
 
+#include "cosmetics/BubbleSkins.h"
+
 #include <QGuiApplication>
 #include <QPalette>
 #include <QSettings>
@@ -12,6 +14,7 @@ AppearanceSettings::AppearanceSettings(QObject *parent) : QObject(parent)
     const QSettings settings;
     m_darkMode = settings.value(QStringLiteral("Appearance/darkMode"), false).toBool();
     m_bubbleSkin = settings.value(QStringLiteral("Appearance/bubbleSkin")).toString();
+    BubbleSkins::prepare(m_bubbleSkin);
     applyPalette();
 }
 
@@ -23,6 +26,7 @@ void AppearanceSettings::setBubbleSkin(const QString &skin)
     QSettings settings;
     settings.setValue(QStringLiteral("Appearance/bubbleSkin"), skin);
     settings.sync();
+    BubbleSkins::prepare(skin);
     emit bubbleSkinChanged();
 }
 

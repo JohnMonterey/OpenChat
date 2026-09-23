@@ -203,6 +203,8 @@ Item {
                        bubble.width - delegateRoot.horizontalContentInset)
         text: delegateRoot.body
         color: bubble.skinned ? bubble.skinTextColor : Theme.textPrimary
+        style: bubble.skinned ? Text.Raised : Text.Normal
+        styleColor: bubble.skinned ? bubble.skinTextShadowColor : "transparent"
         font.family: Theme.uiFont
         font.pixelSize: delegateRoot.kind === 1 ? 22 : 16
         lineHeight: 1.18
@@ -225,6 +227,8 @@ Item {
             : bubble.width - delegateRoot.horizontalContentInset
         text: String(delegateRoot.timestamp)
         color: bubble.skinned ? bubble.skinSecondaryTextColor : Theme.timestampText
+        style: bubble.skinned ? Text.Raised : Text.Normal
+        styleColor: bubble.skinned ? bubble.skinTextShadowColor : "transparent"
         font.family: Theme.uiFont
         font.pixelSize: 12
         horizontalAlignment: Text.AlignRight

@@ -182,6 +182,11 @@ QColor BubbleBackground::skinSecondaryTextColor() const
     return BubbleSkins::secondaryTextColor(m_skin);
 }
 
+QColor BubbleBackground::skinTextShadowColor() const
+{
+    return BubbleSkins::textShadowColor(m_skin);
+}
+
 void BubbleBackground::paint(QPainter *painter)
 {
     if (BubbleSkins::isSkin(m_skin)) {

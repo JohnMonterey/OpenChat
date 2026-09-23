@@ -5,6 +5,7 @@
 #include <QLinearGradient>
 #include <QPainter>
 #include <QRadialGradient>
+#include <QThreadPool>
 #include <QtMath>
 
 #include <array>
@@ -113,7 +114,7 @@ void innerGlow(QPainter &painter, const QPainterPath &path, const QColor &color,
     painter.setBrush(Qt::NoBrush);
     for (int step = steps; step >= 1; --step) {
         QColor layer = color;
-        layer.setAlphaF(color.alphaF() / steps);
+        layer.setAlphaF(color.alphaF() / static_cast<float>(steps));
         QPen pen(layer, 2.0 * depth * step / steps);
         pen.setJoinStyle(Qt::RoundJoin);
         painter.setPen(pen);
@@ -289,9 +290,9 @@ void paintAero(QPainter &painter, const BubbleShape &shape, const QImage &tile, 
     const QRectF body = shape.body;
 
     QLinearGradient base(0.0, r.top(), 0.0, r.bottom());
-    base.setColorAt(0.0, argb(0xffd2f5ff));
-    base.setColorAt(0.42, argb(0xff8fdcf7));
-    base.setColorAt(1.0, argb(0xff3cb3e7));
+    base.setColorAt(0.0, argb(0xffc2efff));
+    base.setColorAt(0.45, argb(0xff6fcff4));
+    base.setColorAt(1.0, argb(0xff2ba9e5));
     painter.fillRect(r, base);
 
     drawTiled(painter, r, tile, tileOffset(dice));
@@ -315,7 +316,7 @@ void paintAero(QPainter &painter, const BubbleShape &shape, const QImage &tile, 
         const bool stray = dice.next() < 0.3f;
         const qreal along = stray ? dice.next() : 1.0 - std::pow(dice.next(), 1.8) * 0.45;
         const qreal side = shape.outgoing ? along : 1.0 - along;
-        const qreal radius = i == 0 ? dice.range(3.8, 5.2) : dice.range(1.2, 3.4);
+        const qreal radius = i == 0 ? dice.range(4.2, 5.6) : dice.range(1.4, 3.6);
         const QPointF centre(body.left() + 6.0 + side * (body.width() - 12.0),
                              body.top() + 5.0 + dice.next() * (body.height() - 10.0));
         drawAirBubble(painter, centre, radius);
@@ -323,9 +324,9 @@ void paintAero(QPainter &painter, const BubbleShape &shape, const QImage &tile, 
 
     const qreal depth = std::clamp(body.height() * 0.47, 12.0, 42.0);
     QLinearGradient gloss(0.0, body.top(), 0.0, body.top() + depth);
-    gloss.setColorAt(0.0, argb(0xf0ffffff));
-    gloss.setColorAt(0.6, argb(0x90ffffff));
-    gloss.setColorAt(1.0, argb(0x50ffffff));
+    gloss.setColorAt(0.0, argb(0xf4ffffff));
+    gloss.setColorAt(0.55, argb(0xa0ffffff));
+    gloss.setColorAt(1.0, argb(0x68ffffff));
     painter.fillPath(glossPath(body, shape.radius, depth, 1.4), gloss);
 
     QLinearGradient rimLight(0.0, r.top(), 0.0, r.bottom());
@@ -343,8 +344,9 @@ void finishAero(QPainter &painter, const BubbleShape &shape, Dice &)
 
 // -- Calacatta Gold ---------------------------------------------------------------
 //
-// Polished white marble: a cloudy warm-white ground, meandering grey veins with
-// soft halos, a web of hairlines, and a thin vein of gold, framed in a gilded rim.
+// Polished white marble: a warm-white crystalline ground, flowing grey veins with
+// soft halos, a web of hairlines, and a thin inlaid thread of gold, framed in a
+// gilded rim.
 
 // A scalar field sampled at a tile pixel and one pixel to its right and below,
 // which is enough to measure how far the pixel is from one of its contours.
@@ -386,7 +388,7 @@ QImage generateMarbleTile()
         const FieldSample bend = sampleField(flow, u, v);
         // Diagonal veins: zero crossings of a sine whose phase the flow bends.
         const auto veinAt = [&](float fu, float fv, float bent, float phase) {
-            return std::sin(tau * (fu + fv) + 4.6f * bent + phase);
+            return std::sin(tau * (fu + fv) + 4.0f * bent + phase);
         };
         const FieldSample vein = {veinAt(u, v, bend.centre, 0.0f),
                                   veinAt(u + step, v, bend.right, 0.0f),
@@ -397,6 +399,10 @@ QImage generateMarbleTile()
         const float cloud = fbm(u * 3.0f + bend.centre, v * 3.0f - bend.centre, 3, 3, 5, 14U);
         Rgb colour = mix(rgb(0xfcfbf8), rgb(0xebe6de), smoothstep(-0.2f, 0.45f, cloud));
         colour = mix(colour, rgb(0xdcd6cd), std::exp(-veinDistance / 34.0f) * 0.45f);
+        // Crystalline grain: a faint speckle, and the odd calcite glint.
+        colour = colour * (1.0f + 0.022f * fbm(u * 128.0f, v * 128.0f, 128, 128, 2, 23U));
+        if (unit(hash2(x, y, 24U)) > 0.9975f)
+            colour = mix(colour, rgb(0xffffff), 0.6f);
 
         // Main vein: a feathered band of varying breadth around a sharp core.
         const float breadth = clamp01(fbm(u * 4.0f, v * 4.0f, 4, 4, 3, 15U) * 2.2f + 0.5f);
@@ -419,15 +425,15 @@ QImage generateMarbleTile()
         const float hairLine = 1.0f - smoothstep(0.35f, 1.4f, contourDistance(hair, 0.0f));
         colour = mix(colour, rgb(0x9f978c), hairLine * hairMask * 0.45f);
 
-        // Gold: a vein of its own between the grey ones, tapering in and out.
+        // Gold: a thread of its own running beside the grey veins, tapering in and out.
         const auto goldWander = [](float fu, float fv) {
             return fbm(fu * 3.0f, fv * 3.0f, 3, 3, 3, 19U);
         };
         const FieldSample wander = sampleField(goldWander, u, v);
         const FieldSample goldField = {
-            veinAt(u, v, bend.centre + 0.25f * wander.centre, 2.3f),
-            veinAt(u + step, v, bend.right + 0.25f * wander.right, 2.3f),
-            veinAt(u, v + step, bend.below + 0.25f * wander.below, 2.3f)};
+            veinAt(u, v, bend.centre + 0.16f * wander.centre, 1.1f),
+            veinAt(u + step, v, bend.right + 0.16f * wander.right, 1.1f),
+            veinAt(u, v + step, bend.below + 0.16f * wander.below, 1.1f)};
         const float goldDistance = contourDistance(goldField, 0.0f);
         const float taper = smoothstep(-0.08f, 0.12f, fbm(u * 2.0f, v * 2.0f, 2, 2, 3, 20U));
         const float goldWidth = (0.9f + 1.5f * clamp01(fbm(u * 6.0f, v * 6.0f, 6, 6, 2, 21U) * 2.0f + 0.5f)) * taper;
@@ -469,7 +475,6 @@ void paintMarble(QPainter &painter, const BubbleShape &shape, const QImage &tile
     top.setColorAt(1.0, argb(0x00ffffff));
     painter.fillRect(r, top);
     QLinearGradient band(r.topLeft(), QPointF(r.left() + r.height() * 1.2, r.bottom()));
-    band.setSpread(QGradient::PadSpread);
     band.setColorAt(0.0, argb(0x00ffffff));
     band.setColorAt(0.45, argb(0x00ffffff));
     band.setColorAt(0.62, argb(0x4cffffff));
@@ -490,9 +495,9 @@ void finishMarble(QPainter &painter, const BubbleShape &shape, Dice &)
 
 // -- Nebula -------------------------------------------------------------------------
 //
-// A window onto deep space: doubly domain-warped gas in violet, magenta and cyan,
-// dark dust lanes, a dense starfield and a few bright stars with diffraction
-// spikes, behind a faint glass sheen.
+// A window onto deep space: doubly domain-warped gas glowing magenta and teal in
+// a violet haze, soft dust lanes, a starfield of widely varying brightness and a
+// few bright stars with diffraction spikes, behind a faint glass sheen.
 
 QImage generateNebulaTile()
 {
@@ -501,12 +506,13 @@ QImage generateNebulaTile()
         const float py = v * 2.0f;
         const float qx = fbm(px, py, 2, 2, 4, 21U);
         const float qy = fbm(px + 5.2f, py + 1.3f, 2, 2, 4, 22U);
-        const float rx = fbm(px + 1.7f * qx + 1.7f, py + 1.7f * qy + 9.2f, 2, 2, 4, 23U);
-        const float ry = fbm(px + 1.7f * qx + 8.3f, py + 1.7f * qy + 2.8f, 2, 2, 4, 24U);
+        const float rx = fbm(px + 1.5f * qx + 1.7f, py + 1.5f * qy + 9.2f, 2, 2, 4, 23U);
+        const float ry = fbm(px + 1.5f * qx + 8.3f, py + 1.5f * qy + 2.8f, 2, 2, 4, 24U);
         // Wispy detail: many octaves with a slow falloff.
-        const float f = fbm(px + 1.7f * rx, py + 1.7f * ry, 2, 2, 7, 25U, 0.56f);
+        const float f = fbm(px + 1.2f * rx, py + 1.2f * ry, 2, 2, 7, 25U, 0.54f);
         // Large bright regions and empty dark space between them.
-        const float envelope = smoothstep(-0.28f, 0.3f, fbm(px + 0.6f * qy, py + 0.6f * qx, 2, 2, 3, 20U));
+        const float cloud = fbm(px + 0.6f * qy, py + 0.6f * qx, 2, 2, 3, 20U);
+        const float envelope = smoothstep(-0.4f, 0.22f, cloud);
 
         // Two emission layers, as in narrowband photographs: hydrogen glowing
         // magenta-pink where the warped field is dense, oxygen glowing teal in
@@ -515,14 +521,16 @@ QImage generateNebulaTile()
         const float oxygen = smoothstep(-0.02f, 0.36f, rx * 0.7f + qy * 0.6f) * (0.35f + 0.65f * envelope);
         const float haze = smoothstep(-0.35f, 0.3f, f);
         // Dust lanes cut dark filaments through the brighter gas.
-        const float dust = ridged(px * 3.0f + 1.5f * qy, py * 3.0f + 1.5f * qx, 6, 6, 4, 26U);
-        const float lane = smoothstep(0.7f, 0.95f, dust) * 0.7f;
+        const float dust = ridged(px * 2.0f + 1.5f * qy, py * 2.0f + 1.5f * qx, 4, 4, 3, 26U);
+        const float lane = smoothstep(0.62f, 0.95f, dust) * 0.5f;
 
         Rgb colour = mix(rgb(0x04020c), rgb(0x0b0922), clamp01(0.5f + ry));
         colour = colour + rgb(0x34156a) * (haze * 0.5f);
-        colour = colour + rgb(0xd62f8c) * (std::pow(hydrogen, 1.6f) * 0.7f);
-        colour = colour + rgb(0x1a9cd6) * (std::pow(oxygen, 1.6f) * 0.45f);
-        colour = colour + rgb(0xffc2e6) * (smoothstep(0.26f, 0.55f, f) * envelope * 0.3f);
+        // A broad luminous glow the fine structure sits in.
+        colour = colour + rgb(0x7a2a9a) * (smoothstep(-0.15f, 0.35f, cloud) * 0.22f);
+        colour = colour + rgb(0xd62f8c) * (std::pow(hydrogen, 1.5f) * 0.72f);
+        colour = colour + rgb(0x16b0c8) * (std::pow(oxygen, 1.4f) * 0.5f * (1.0f - 0.6f * hydrogen));
+        colour = colour + rgb(0xffc2e6) * (smoothstep(0.24f, 0.52f, f) * envelope * 0.32f);
         colour = colour * (1.0f - lane);
 
         // Stars: a jittered grid, each lit with a tight Gaussian and a faint halo.
@@ -536,7 +544,7 @@ QImage generateNebulaTile()
             for (int i = -1; i <= 1; ++i) {
                 const std::uint32_t h = hash2(wrapIndex(cx + i, starCells),
                                               wrapIndex(cy + j, starCells), 27U);
-                if (unit(h) > 0.5f)
+                if (unit(h) > 0.46f)
                     continue;
                 const float ox = static_cast<float>(cx + i) + unit(hash32(h ^ 1U));
                 const float oy = static_cast<float>(cy + j) + unit(hash32(h ^ 2U));
@@ -544,9 +552,9 @@ QImage generateNebulaTile()
                 const float dx = (sx - ox) * (static_cast<float>(kTilePixels) / starCells);
                 const float dy = (sy - oy) * (static_cast<float>(kTilePixels) / starCells);
                 const float d2 = dx * dx + dy * dy;
-                const float magnitude = std::pow(unit(hash32(h ^ 3U)), 4.0f);
+                const float magnitude = std::pow(unit(hash32(h ^ 3U)), 5.0f);
                 const float sigma = 0.55f + 1.1f * magnitude;
-                const float light = (0.25f + 0.95f * magnitude)
+                const float light = (0.12f + 1.0f * magnitude)
                                     * (std::exp(-d2 / (2.0f * sigma * sigma))
                                        + 0.12f * magnitude * std::exp(-d2 / (2.0f * 36.0f)));
                 const Rgb tint = mix(rgb(0xbcd4ff), rgb(0xffe2c0), unit(hash32(h ^ 4U)));
@@ -640,6 +648,13 @@ QImage generateMagmaTile()
         crust = crust * (1.0f + 0.6f * lit);
         if (grain > 0.4f)
             crust = crust + rgb(0x2c2826) * smoothstep(0.4f, 0.6f, grain);
+        // A bevel along each plate's rim: lit where the rim faces the top left,
+        // in shadow where it faces away.
+        const float offsetLength = std::sqrt(plate.offsetX * plate.offsetX + plate.offsetY * plate.offsetY) + 1e-4f;
+        const float facing = -(plate.offsetX + plate.offsetY) * 0.7071f / offsetLength;
+        const float rim = std::exp(-edge / 5.0f);
+        crust = crust * (1.0f - 0.35f * rim * std::max(0.0f, -facing))
+                + rgb(0x4a3c36) * (rim * std::max(0.0f, facing) * 0.6f);
 
         // Some seams run hot, some have almost cooled.
         const float heat = smoothstep(-0.28f, 0.26f, fbm(u * 3.0f, v * 3.0f, 3, 3, 3, 36U));
@@ -778,11 +793,11 @@ void paintHolo(QPainter &painter, const BubbleShape &shape, const QImage &tile, 
     const qreal bandX = body.left() + body.width() * dice.range(0.25, 0.6);
     QLinearGradient band(QPointF(bandX - 30.0, r.top()), QPointF(bandX + 30.0 + slant * 0.5, r.bottom()));
     band.setColorAt(0.0, argb(0x00ffffff));
-    band.setColorAt(0.3, argb(0x20ffffff));
-    band.setColorAt(0.42, argb(0x88ffffff));
-    band.setColorAt(0.48, argb(0x30ffffff));
-    band.setColorAt(0.62, argb(0x40ffffff));
-    band.setColorAt(0.75, argb(0x00ffffff));
+    band.setColorAt(0.28, argb(0x18ffffff));
+    band.setColorAt(0.4, argb(0xa0ffffff));
+    band.setColorAt(0.46, argb(0x38ffffff));
+    band.setColorAt(0.58, argb(0x58ffffff));
+    band.setColorAt(0.72, argb(0x00ffffff));
     band.setColorAt(1.0, argb(0x00ffffff));
     painter.fillRect(r, band);
 
@@ -824,6 +839,9 @@ struct SkinDefinition
     const char *description;
     QRgb text;
     QRgb secondaryText;
+    // Drawn 1 px under the text: a drop shadow on the dark materials, a white
+    // emboss on the light ones, so glyphs hold up over veins, seams and glints.
+    QRgb textShadow;
     QImage (*generate)();
     void (*paint)(QPainter &, const BubbleShape &, const QImage &, Dice &);
     void (*finish)(QPainter &, const BubbleShape &, Dice &);
@@ -831,15 +849,15 @@ struct SkinDefinition
 
 const std::array<SkinDefinition, 5> kSkins = {{
     {"bubble.aero", "Aqua Aero", "Frutiger Aero glass with pool caustics and rising air bubbles.",
-     0xff0a3350, 0xff1f5a80, generateAeroTile, paintAero, finishAero},
+     0xff0a3350, 0xff1f5a80, 0x8cffffff, generateAeroTile, paintAero, finishAero},
     {"bubble.marble", "Calacatta Gold", "Polished white marble veined in grey and gold, in a gilded rim.",
-     0xff2a2622, 0xff76603f, generateMarbleTile, paintMarble, finishMarble},
+     0xff2a2622, 0xff76603f, 0xb4ffffff, generateMarbleTile, paintMarble, finishMarble},
     {"bubble.nebula", "Nebula", "Deep-space gas clouds, dust lanes and a starfield with bright flares.",
-     0xfff6f2ff, 0xffc4b8ef, generateNebulaTile, paintNebula, finishNebula},
+     0xfff6f2ff, 0xffc4b8ef, 0xc8050210, generateNebulaTile, paintNebula, finishNebula},
     {"bubble.magma", "Magma", "Cooling basalt plates over molten rock that glows through every seam.",
-     0xfffff5ea, 0xffffc89a, generateMagmaTile, paintMagma, finishMagma},
-    {"bubble.holo", "Prism Holo", "Holographic foil: thin-film rainbow, faceted prisms and glitter.",
-     0xff1d1838, 0xff4c4474, generateHoloTile, paintHolo, finishHolo},
+     0xfffff5ea, 0xffffc89a, 0xe0140604, generateMagmaTile, paintMagma, finishMagma},
+    {"bubble.holo", "Prism Holo", "Cracked-ice holographic foil: every shard catches its own rainbow, with glitter.",
+     0xff1d1838, 0xff4c4474, 0x9cffffff, generateHoloTile, paintHolo, finishHolo},
 }};
 
 int indexOf(const QString &id)
@@ -915,6 +933,28 @@ QColor BubbleSkins::secondaryTextColor(const QString &id)
     const int index = indexOf(id);
     return index < 0 ? QColor()
                      : QColor::fromRgba(kSkins[static_cast<std::size_t>(index)].secondaryText);
+}
+
+void BubbleSkins::prepare(const QString &id)
+{
+    const int index = indexOf(id);
+    if (index < 0)
+        return;
+    {
+        TileCache &cache = tileCache();
+        const std::lock_guard lock(cache.mutex);
+        if (!cache.full[static_cast<std::size_t>(index)].isNull())
+            return;
+    }
+    // A paint that arrives mid-generation waits on the cache lock, then reuses it.
+    QThreadPool::globalInstance()->start([index] { (void)tileFor(index, kTileScale); });
+}
+
+QColor BubbleSkins::textShadowColor(const QString &id)
+{
+    const int index = indexOf(id);
+    return index < 0 ? QColor()
+                     : QColor::fromRgba(kSkins[static_cast<std::size_t>(index)].textShadow);
 }
 
 QImage BubbleSkins::texture(const QString &id)

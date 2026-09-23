@@ -761,6 +761,7 @@ private slots:
         const QColor classicText = myBody->property("color").value<QColor>();
         const QColor classicTime = myTime->property("color").value<QColor>();
         QCOMPARE(classicText, QColor("#2b3b53"));
+        QCOMPARE(myBody->property("style").toInt(), 0); // Text.Normal
 
         const QString nebula = QStringLiteral("bubble.nebula");
         appearance->setBubbleSkin(nebula);
@@ -769,6 +770,9 @@ private slots:
         QCOMPARE(myBody->property("color").value<QColor>(), OpenChat::BubbleSkins::textColor(nebula));
         QCOMPARE(myTime->property("color").value<QColor>(),
                  OpenChat::BubbleSkins::secondaryTextColor(nebula));
+        QCOMPARE(myBody->property("style").toInt(), 2); // Text.Raised
+        QCOMPARE(myBody->property("styleColor").value<QColor>(),
+                 OpenChat::BubbleSkins::textShadowColor(nebula));
         // Skins are local only: other people's bubbles stay classic.
         QCOMPARE(theirBubble->property("skin").toString(), QString());
         QCOMPARE(theirBody->property("color").value<QColor>(), classicText);
@@ -784,6 +788,7 @@ private slots:
         QVERIFY(!myBubble->property("skinned").toBool());
         QCOMPARE(myBody->property("color").value<QColor>(), classicText);
         QCOMPARE(myTime->property("color").value<QColor>(), classicTime);
+        QCOMPARE(myBody->property("style").toInt(), 0);
         appearance->setBubbleSkin(QString());
     }
 

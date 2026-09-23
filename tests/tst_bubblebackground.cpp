@@ -127,6 +127,7 @@ private slots:
             QVERIFY(BubbleSkins::isSkin(skin.id));
             QVERIFY(BubbleSkins::textColor(skin.id).isValid());
             QVERIFY(BubbleSkins::secondaryTextColor(skin.id).isValid());
+            QVERIFY(BubbleSkins::textShadowColor(skin.id).isValid());
             ids.insert(skin.id);
         }
         QCOMPARE(ids.size(), skins.size());

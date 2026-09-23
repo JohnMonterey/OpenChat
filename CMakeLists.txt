@@ -47,6 +47,7 @@ qt_add_executable(OpenChat
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
+    src/app/MemorySettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
 )
@@ -87,6 +88,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/AeroMenuSetting.qml
         qml/OpenChat/components/MicrophoneContextMenu.qml
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
+        qml/OpenChat/components/LowMemoryPanel.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
@@ -924,6 +926,7 @@ add_executable(tst_qmlload
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
+    src/app/MemorySettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
 )

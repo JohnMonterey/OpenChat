@@ -24,6 +24,7 @@
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include "app/MemorySettings.h"
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
 #include <QQmlExpression>
@@ -412,6 +413,65 @@ private slots:
         settings->resetToDefaults();
         QCOMPARE(settings->gain(), 1.0);
         QVERIFY(qAbs(settings->processing().gateThreshold - 0.02) < 0.001);
+    }
+
+    void lowMemoryModeIsASwitchUnderGeneralThatAsksForARestart()
+    {
+        OpenChat::ChatController chats;
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        chats.setCurrentSettingsCategory(0);
+        const int page = chats.currentSettingsElements().indexOf(QStringLiteral("Low memory mode"));
+        QVERIFY(page >= 0);
+        chats.setCurrentSettingsSubcategory(page);
+        OpenChat::CallController calls;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *memory = engine.singletonInstance<OpenChat::MemorySettings *>("OpenChat.Native",
+                                                                           "MemorySettings");
+        QVERIFY(memory);
+        QVERIFY(!memory->lowMemoryMode());
+        auto *toggle = findVisualItem(window->contentItem(), QStringLiteral("lowMemorySwitch"));
+        auto *restart = findVisualItem(window->contentItem(), QStringLiteral("lowMemoryRestart"));
+        auto *restartButton =
+            findVisualItem(window->contentItem(), QStringLiteral("lowMemoryRestartButton"));
+        QVERIFY(toggle && toggle->isVisible());
+        QVERIFY(restart && restartButton);
+        // Nothing to finish while the running process has the saved choice.
+        QVERIFY(!restart->isVisible());
+
+        const QPoint switchCentre = toggle->mapToScene(QPointF(toggle->width() / 2,
+                                                               toggle->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, switchCentre);
+        QTRY_VERIFY(memory->lowMemoryMode());
+        QVERIFY(toggle->property("checked").toBool());
+        QVERIFY(QSettings().value(QStringLiteral("Performance/lowMemoryMode")).toBool());
+        // Drawing without the graphics card waits for a restart, which the page
+        // offers, but not in the middle of a call.
+        QVERIFY(memory->restartPending());
+        QVERIFY(restart->isVisible());
+        QVERIFY(restartButton->isEnabled());
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(!restartButton->isEnabled());
+        calls.enableForPreview(OpenChat::CallState::Idle, QString(), QString(), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(restartButton->isEnabled());
+
+        // Switching back before restarting leaves nothing to finish.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, switchCentre);
+        QTRY_VERIFY(!memory->lowMemoryMode());
+        QVERIFY(!memory->restartPending());
+        QVERIFY(!restart->isVisible());
+        QVERIFY(!QSettings().value(QStringLiteral("Performance/lowMemoryMode")).toBool());
     }
 
     void darkModeSwitchUpdatesTheAppAndRemembersTheChoice()
@@ -2635,6 +2695,9 @@ int main(int argc, char **argv)
     qmlRegisterSingletonType<OpenChat::VoiceEffectHost>(
         "OpenChat.Native", 1, 0, "VoiceEffectHost",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::VoiceEffectHost; });
+    qmlRegisterSingletonType<OpenChat::MemorySettings>(
+        "OpenChat.Native", 1, 0, "MemorySettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MemorySettings; });
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");

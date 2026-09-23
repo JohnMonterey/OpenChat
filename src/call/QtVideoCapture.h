@@ -30,8 +30,9 @@ private:
     bool m_requested = false;
     quint64 m_generation = 0;
     std::unique_ptr<QCamera> m_camera;
-    QMediaCaptureSession m_session;
-    QVideoSink m_sink;
+    // Both made when the first camera opens; see openCamera().
+    std::unique_ptr<QMediaCaptureSession> m_session;
+    std::unique_ptr<QVideoSink> m_sink;
     QVideoFrame m_lastFrame;
     QTimer m_timer;
     QTimer m_startTimeout;

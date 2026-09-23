@@ -359,9 +359,15 @@ Window {
                             readonly property bool vocalFxSetting:
                                 !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
                                 && elementLabel === "Custom Vocal FX"
+                            readonly property bool lowMemorySetting:
+                                !navigationRow && root.chatController.currentSettingsCategoryName === "General"
+                                && elementLabel === "Low memory mode"
+                            readonly property bool panelSetting:
+                                microphoneSetting || vocalFxSetting || lowMemorySetting
                             width: parent.width
                             height: microphoneSetting ? microphonePanel.height
-                                  : vocalFxSetting ? vocalFxPanel.height : (themeSetting ? 70 : 48)
+                                  : vocalFxSetting ? vocalFxPanel.height
+                                  : lowMemorySetting ? lowMemoryPanel.height : (themeSetting ? 70 : 48)
                             activeFocusOnTab: navigationRow
                             Accessible.role: navigationRow ? Accessible.Button : Accessible.Pane
                             Accessible.name: elementLabel
@@ -404,8 +410,19 @@ Window {
                                 sourceComponent: MicrophoneSettingsPanel {}
                             }
 
+                            Loader {
+                                id: lowMemoryPanel
+                                active: settingsElementRow.lowMemorySetting
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: item ? item.implicitHeight : 0
+                                sourceComponent: LowMemoryPanel {
+                                    restartAllowed: !root.inCall
+                                }
+                            }
+
                             Text {
-                                visible: !settingsElementRow.microphoneSetting && !settingsElementRow.vocalFxSetting
+                                visible: !settingsElementRow.panelSetting
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.verticalCenterOffset: settingsElementRow.themeSetting ? -10 : 0
@@ -440,8 +457,7 @@ Window {
 
                             Item {
                                 visible: !settingsElementRow.themeSetting
-                                         && !settingsElementRow.microphoneSetting
-                                         && !settingsElementRow.vocalFxSetting
+                                         && !settingsElementRow.panelSetting
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 14

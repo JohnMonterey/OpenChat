@@ -12,14 +12,13 @@ namespace OpenChat {
 
 QtVideoCapture::QtVideoCapture(QObject *parent) : QObject(parent)
 {
-    m_session.setVideoSink(&m_sink);
     // Pull the latest camera frame: no queue of full-resolution frames builds
     // up if capture is faster than encoding or the UI thread is occupied.
     m_timer.setInterval(67);
     connect(&m_timer, &QTimer::timeout, this, [this] {
-        if (!m_requested)
+        if (!m_requested || !m_sink)
             return;
-        const QVideoFrame frame = m_sink.videoFrame();
+        const QVideoFrame frame = m_sink->videoFrame();
         if (!frame.isValid() || frame == m_lastFrame)
             return;
         // toImage() may import native camera textures using a Metal cache that
@@ -92,6 +91,14 @@ void QtVideoCapture::openCamera()
         emit failed(QStringLiteral("No camera found. Connect a camera and try again."));
         return;
     }
+    // Made with the first camera rather than with the object: a capture
+    // session is what loads Qt Multimedia's backend, and a call controller
+    // owns one of these from startup whether or not a camera is ever used.
+    if (!m_session) {
+        m_session = std::make_unique<QMediaCaptureSession>();
+        m_sink = std::make_unique<QVideoSink>();
+        m_session->setVideoSink(m_sink.get());
+    }
     m_camera = std::make_unique<QCamera>(device);
     const quint64 generation = m_generation;
     connect(m_camera.get(), &QCamera::errorOccurred, this,
@@ -101,7 +108,7 @@ void QtVideoCapture::openCamera()
             stop();
             emit failed(message.isEmpty() ? QStringLiteral("The camera is unavailable.") : message);
         }, Qt::QueuedConnection);
-    m_session.setCamera(m_camera.get());
+    m_session->setCamera(m_camera.get());
     m_startTimeout.start(8000);
     m_timer.start();
     m_camera->start();
@@ -116,10 +123,11 @@ void QtVideoCapture::stop()
     m_lastFrame = QVideoFrame();
     if (m_camera) {
         m_camera->stop();
-        m_session.setCamera(nullptr);
+        m_session->setCamera(nullptr);
         m_camera.reset();
     }
-    m_sink.setVideoFrame(QVideoFrame());
+    if (m_sink)
+        m_sink->setVideoFrame(QVideoFrame());
 }
 
 } // namespace OpenChat

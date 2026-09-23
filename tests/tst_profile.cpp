@@ -265,6 +265,41 @@ private slots:
         store.clear();
         QVERIFY(!store.image(key).has_value());
     }
+
+    void storeCanKeepOnlyTheJpeg()
+    {
+        // Low memory mode: the decoded pictures go, and each is decoded again
+        // from its JPEG when asked for, under the same key, with the same pixels.
+        AvatarStore &store = AvatarStore::instance();
+        store.clear();
+        const QByteArray jpeg = smallJpeg();
+        const QString key = store.registerJpeg(jpeg);
+        QVERIFY(!key.isEmpty());
+        const auto kept = store.image(key);
+        QVERIFY(kept.has_value());
+
+        store.setKeepDecoded(false);
+        const auto decodedAgain = store.image(key);
+        QVERIFY(decodedAgain.has_value());
+        QCOMPARE(*decodedAgain, *kept);
+        // Registering while nothing decoded is kept still refuses what cannot
+        // be drawn, and still accepts what can.
+        QVERIFY(store.registerJpeg(QByteArray("not a jpeg")).isEmpty());
+        QImage other(24, 24, QImage::Format_RGB32);
+        other.fill(Qt::blue);
+        QByteArray otherBytes;
+        QBuffer buffer(&otherBytes);
+        buffer.open(QIODevice::WriteOnly);
+        other.save(&buffer, "JPEG", 80);
+        const QString otherKey = store.registerJpeg(otherBytes);
+        QVERIFY(!otherKey.isEmpty());
+        QCOMPARE(store.image(otherKey)->width(), 24);
+
+        store.setKeepDecoded(true);
+        QCOMPARE(*store.image(key), *kept);
+        store.clear();
+        QVERIFY(!store.image(otherKey).has_value());
+    }
 };
 
 QTEST_GUILESS_MAIN(ProfileTest)

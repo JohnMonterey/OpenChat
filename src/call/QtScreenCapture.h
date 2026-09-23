@@ -106,8 +106,9 @@ private:
     int m_targetFps = 30;
     ScreenShareSource m_source;
 
-    QMediaCaptureSession m_session;
-    QVideoSink m_sink;
+    // Both made when the first share starts; see start().
+    std::unique_ptr<QMediaCaptureSession> m_session;
+    std::unique_ptr<QVideoSink> m_sink;
     std::unique_ptr<QScreenCapture> m_screenCapture;
     std::unique_ptr<QWindowCapture> m_windowCapture;
     QTimer m_timer;

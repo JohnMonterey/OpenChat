@@ -82,7 +82,6 @@ QVector<ScreenShareSource> QtScreenCapture::availableSources()
 QtScreenCapture::QtScreenCapture(QObject *parent)
     : QObject(parent)
 {
-    m_session.setVideoSink(&m_sink);
     connect(&m_timer, &QTimer::timeout, this, &QtScreenCapture::pullFrame);
     m_watchdog.setSingleShot(true);
     connect(&m_watchdog, &QTimer::timeout, this, [this] {
@@ -130,6 +129,14 @@ void QtScreenCapture::start(const ScreenShareSource &source)
     m_requested = true;
     const quint64 generation = ++m_generation;
     m_source = source;
+    // Made with the first share rather than with the object: a capture
+    // session is what loads Qt Multimedia's backend, and a call controller
+    // owns one of these from startup whether or not anything is ever shared.
+    if (!m_session) {
+        m_session = std::make_unique<QMediaCaptureSession>();
+        m_sink = std::make_unique<QVideoSink>();
+        m_session->setVideoSink(m_sink.get());
+    }
 
     if (source.kind == ScreenShareSource::Kind::Screen) {
         m_screenCapture = std::make_unique<QScreenCapture>();
@@ -144,7 +151,7 @@ void QtScreenCapture::start(const ScreenShareSource &source)
                              : message,
                          permanent);
                 }, Qt::QueuedConnection);
-        m_session.setScreenCapture(m_screenCapture.get());
+        m_session->setScreenCapture(m_screenCapture.get());
         m_screenCapture->start();
     } else {
         m_windowCapture = std::make_unique<QWindowCapture>();
@@ -160,7 +167,7 @@ void QtScreenCapture::start(const ScreenShareSource &source)
                                     : message),
                          error == QWindowCapture::CapturingNotSupported);
                 }, Qt::QueuedConnection);
-        m_session.setWindowCapture(m_windowCapture.get());
+        m_session->setWindowCapture(m_windowCapture.get());
         m_windowCapture->start();
     }
     m_watchdog.start(firstFrameTimeoutMs);
@@ -169,9 +176,9 @@ void QtScreenCapture::start(const ScreenShareSource &source)
 
 void QtScreenCapture::pullFrame()
 {
-    if (!m_requested || !onFrame)
+    if (!m_requested || !onFrame || !m_sink)
         return;
-    const QVideoFrame frame = m_sink.videoFrame();
+    const QVideoFrame frame = m_sink->videoFrame();
     if (!frame.isValid())
         return;
     // A still desktop hands out the same frame over and over. Recognising it
@@ -262,15 +269,16 @@ void QtScreenCapture::teardown()
     // it, and the sink is emptied last so nothing is left holding a frame.
     if (m_screenCapture) {
         m_screenCapture->stop();
-        m_session.setScreenCapture(nullptr);
+        m_session->setScreenCapture(nullptr);
         m_screenCapture.reset();
     }
     if (m_windowCapture) {
         m_windowCapture->stop();
-        m_session.setWindowCapture(nullptr);
+        m_session->setWindowCapture(nullptr);
         m_windowCapture.reset();
     }
-    m_sink.setVideoFrame(QVideoFrame());
+    if (m_sink)
+        m_sink->setVideoFrame(QVideoFrame());
     m_lastFrameTime = -1;
     // The conversion buffer is a full desktop. It is released outright rather
     // than kept warm for a share that may never happen again.

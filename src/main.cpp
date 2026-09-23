@@ -7,6 +7,7 @@
 #include <QIcon>
 #include <QPainter>
 #include <QPointer>
+#include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQuickView>
 #include <QQuickItem>
@@ -22,6 +23,7 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <optional>
 
@@ -48,6 +50,7 @@
 #include "network/SyncEngine.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include "app/MemorySettings.h"
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
 #include "app/ComposerEditing.h"
@@ -94,6 +97,17 @@ void registerQmlTypes()
                 return shared;
             }
             return new OpenChat::VoiceEffectHost;
+        });
+    // Low memory mode, shared the same way: the application's instance is the
+    // one that trims the heap and tells the avatar store what to keep.
+    qmlRegisterSingletonType<OpenChat::MemorySettings>(
+        "OpenChat.Native", 1, 0, "MemorySettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * {
+            if (auto *shared = OpenChat::MemorySettings::instance()) {
+                QQmlEngine::setObjectOwnership(shared, QQmlEngine::CppOwnership);
+                return shared;
+            }
+            return new OpenChat::MemorySettings;
         });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
@@ -200,6 +214,15 @@ std::optional<OpenChat::ProfileId> findExistingProfile(const QString &profilesRo
             return id;
     }
     return std::nullopt;
+}
+
+// Once the interface has been built, hands back what building it freed: the
+// heap otherwise holds on to it for reuse that an idle chat window never
+// makes, around 1.5 MB of the settled process.
+void releaseFreedHeapLater(QObject *context)
+{
+    QTimer::singleShot(std::chrono::seconds(5), context,
+                       &OpenChat::MemorySettings::releaseFreedHeap);
 }
 
 // Overwrites a byte array's contents before releasing it (key material that had
@@ -402,6 +425,7 @@ private:
             configureWindow(window);
             enableNotifications(window);
         }
+        releaseFreedHeapLater(m_engine.get());
     }
 
     // Announces inbound messages on the desktop and brings the window back when
@@ -514,7 +538,11 @@ private:
         // A machine with no usable microphone or speaker cannot carry a call at
         // all. Leaving the engine null makes the UI report calls as unavailable
         // up front rather than letting one fail after it has started ringing.
-        if (OpenChat::hasUsableCallAudioDevices()) {
+        // Low memory mode skips the check: asking loads Qt Multimedia, which
+        // it keeps unloaded until a call needs it, so there a machine without
+        // audio finds out when a call starts instead.
+        if (OpenChat::MemorySettings::lowMemoryModeAtStartup()
+            || OpenChat::hasUsableCallAudioDevices()) {
             OpenChat::CallEngine::Config callConfig;
             // A group call keys each pair's media from both device ids.
             if (const auto credential = m_session->publicCredential(); credential.hasValue())
@@ -791,6 +819,9 @@ private:
     // engine for the same reason: the engine reads it when a call starts.
     std::unique_ptr<OpenChat::VoiceEffectHost> m_voiceEffects =
         std::make_unique<OpenChat::VoiceEffectHost>();
+    // Low memory mode, the instance the Settings page switches.
+    std::unique_ptr<OpenChat::MemorySettings> m_memorySettings =
+        std::make_unique<OpenChat::MemorySettings>();
     // The voice-call stack. Declared after the engine/relay they borrow, so both
     // are torn down while the SyncEngine and RelayClient are still alive; the
     // engine is destroyed before the transport it holds a reference to.
@@ -1089,10 +1120,29 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
     return application.exec();
 }
 
+// Keeps Qt Multimedia's FFmpeg backend from opening hardware codec devices.
+// OpenChat never decodes or encodes video through it -- calls carry Opus and
+// the application's own JPEG tiles, and the camera only hands over frames --
+// but the backend opens every device it can find (CUDA, VDPAU, VA-API, ...)
+// the first time an audio device is listed, which happens at startup. That
+// costs a driver thread and, measured on NVIDIA, around 11 MB for the life of
+// the process. An
+// empty device list turns it off; a lone comma is that list, and unlike an
+// empty value it survives qputenv on Windows. A value set by the user wins.
+void disableHardwareCodecProbing()
+{
+    for (const char *name :
+         {"QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"}) {
+        if (!qEnvironmentVariableIsSet(name))
+            qputenv(name, ",");
+    }
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
+    disableHardwareCodecProbing();
     QGuiApplication application(argc, argv);
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
@@ -1103,7 +1153,7 @@ int main(int argc, char *argv[])
     // for the notifications posted below.
     QGuiApplication::setDesktopFileName(OpenChat::AppMetadata::desktopEntry.toString());
     QGuiApplication::setWindowIcon(
-        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.png")));
+        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat-256.png")));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("OpenChat secure chat client"));
@@ -1224,13 +1274,29 @@ int main(int argc, char *argv[])
     const int requestedWidth = parser.value(widthOption).toInt(&widthValid);
     const int requestedHeight = parser.value(heightOption).toInt(&heightValid);
 
-    AppRuntime runtime(profilesRoot, OpenChat::RelayEndpoints::fromBaseUrl(base),
-                       buildDevCaTls(devCaPath),
-                       OpenChat::AccountBootstrap::defaultKeyPackageCount,
-                       widthValid ? std::optional<int>(requestedWidth) : std::nullopt,
-                       heightValid ? std::optional<int>(requestedHeight) : std::nullopt);
-    if (!runtime.start())
-        return EXIT_FAILURE;
+    // Low memory mode draws without the graphics card: the GPU driver's own
+    // heap and mappings are most of what the window costs. It can only be
+    // chosen before the first window exists, hence the restart to switch.
+    if (OpenChat::MemorySettings::lowMemoryModeAtStartup())
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
 
-    return application.exec();
+    int exitCode = EXIT_SUCCESS;
+    {
+        AppRuntime runtime(profilesRoot, OpenChat::RelayEndpoints::fromBaseUrl(base),
+                           buildDevCaTls(devCaPath),
+                           OpenChat::AccountBootstrap::defaultKeyPackageCount,
+                           widthValid ? std::optional<int>(requestedWidth) : std::nullopt,
+                           heightValid ? std::optional<int>(requestedHeight) : std::nullopt);
+        if (!runtime.start())
+            return EXIT_FAILURE;
+        exitCode = application.exec();
+    }
+
+    // Asked for from Settings to finish switching low memory mode. The profile
+    // is locked and the relay link closed by now, so the new process never
+    // runs alongside this one.
+    if (OpenChat::MemorySettings::restartRequested())
+        QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                QCoreApplication::arguments().mid(1));
+    return exitCode;
 }

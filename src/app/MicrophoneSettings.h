@@ -129,8 +129,10 @@ private:
     void save() const;
     void onTestFrame(const AudioFrame &frame);
     void processingUpdated();
+    void watchDevices() const;
 
     QMediaDevices m_devices;
+    mutable bool m_watchingDevices = false;
     QString m_inputDeviceId;
     MicrophoneProcessor::Config m_processing;
 

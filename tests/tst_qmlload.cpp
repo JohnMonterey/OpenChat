@@ -27,6 +27,7 @@
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
+#include "app/MemorySettings.h"
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
 #include "app/ComposerEditing.h"
@@ -1161,6 +1162,65 @@ private slots:
         settings->resetToDefaults();
         QCOMPARE(settings->gain(), 1.0);
         QVERIFY(qAbs(settings->processing().gateThreshold - 0.02) < 0.001);
+    }
+
+    void lowMemoryModeIsASwitchUnderGeneralThatAsksForARestart()
+    {
+        OpenChat::ChatController chats;
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        chats.setCurrentSettingsCategory(0);
+        const int page = chats.currentSettingsElements().indexOf(QStringLiteral("Low memory mode"));
+        QVERIFY(page >= 0);
+        chats.setCurrentSettingsSubcategory(page);
+        OpenChat::CallController calls;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *memory = engine.singletonInstance<OpenChat::MemorySettings *>("OpenChat.Native",
+                                                                           "MemorySettings");
+        QVERIFY(memory);
+        QVERIFY(!memory->lowMemoryMode());
+        auto *toggle = findVisualItem(window->contentItem(), QStringLiteral("lowMemorySwitch"));
+        auto *restart = findVisualItem(window->contentItem(), QStringLiteral("lowMemoryRestart"));
+        auto *restartButton =
+            findVisualItem(window->contentItem(), QStringLiteral("lowMemoryRestartButton"));
+        QVERIFY(toggle && toggle->isVisible());
+        QVERIFY(restart && restartButton);
+        // Nothing to finish while the running process has the saved choice.
+        QVERIFY(!restart->isVisible());
+
+        const QPoint switchCentre = toggle->mapToScene(QPointF(toggle->width() / 2,
+                                                               toggle->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, switchCentre);
+        QTRY_VERIFY(memory->lowMemoryMode());
+        QVERIFY(toggle->property("checked").toBool());
+        QVERIFY(QSettings().value(QStringLiteral("Performance/lowMemoryMode")).toBool());
+        // Drawing without the graphics card waits for a restart, which the page
+        // offers, but not in the middle of a call.
+        QVERIFY(memory->restartPending());
+        QVERIFY(restart->isVisible());
+        QVERIFY(restartButton->isEnabled());
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(!restartButton->isEnabled());
+        calls.enableForPreview(OpenChat::CallState::Idle, QString(), QString(), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(restartButton->isEnabled());
+
+        // Switching back before restarting leaves nothing to finish.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, switchCentre);
+        QTRY_VERIFY(!memory->lowMemoryMode());
+        QVERIFY(!memory->restartPending());
+        QVERIFY(!restart->isVisible());
+        QVERIFY(!QSettings().value(QStringLiteral("Performance/lowMemoryMode")).toBool());
     }
 
     void darkModeSwitchUpdatesTheAppAndRemembersTheChoice()
@@ -2335,13 +2395,13 @@ private slots:
         QVERIFY(findVisualItem(panelItem, QStringLiteral("requestAccept_") + requestId));
         QVERIFY(findVisualItem(panelItem, QStringLiteral("requestDecline_") + requestId));
 
-        // The dialog is present but hidden until the controller opens it.
-        QObject *dialog = root->findChild<QObject *>(QStringLiteral("addContactDialog"));
-        QVERIFY(dialog);
-        QVERIFY(!dialog->property("visible").toBool());
+        // The dialog is not even built until the controller opens it.
+        QVERIFY(!root->findChild<QObject *>(QStringLiteral("addContactDialog")));
 
         contactController.openDialog();
         QCoreApplication::processEvents();
+        QObject *dialog = root->findChild<QObject *>(QStringLiteral("addContactDialog"));
+        QVERIFY(dialog);
         QVERIFY(dialog->property("visible").toBool());
 
         // Every field, action, and the invite/status surfaces are reachable, and the
@@ -2544,13 +2604,13 @@ private slots:
         QCOMPARE(engine.rootObjects().size(), 1);
         QObject *root = engine.rootObjects().constFirst();
 
-        // The dialog is present but hidden until the controller opens the surface.
-        QObject *dialog = root->findChild<QObject *>(QStringLiteral("safetyNumberDialog"));
-        QVERIFY(dialog);
-        QVERIFY(!dialog->property("visible").toBool());
+        // The dialog is not even built until the controller opens the surface.
+        QVERIFY(!root->findChild<QObject *>(QStringLiteral("safetyNumberDialog")));
 
         contactController.openSafetyNumberPreview();
         QCoreApplication::processEvents();
+        QObject *dialog = root->findChild<QObject *>(QStringLiteral("safetyNumberDialog"));
+        QVERIFY(dialog);
         QVERIFY(dialog->property("visible").toBool());
 
         // Every key element is reachable and bound to the controller's surface.
@@ -2611,11 +2671,9 @@ private slots:
             root->findChild<QQuickItem *>(QStringLiteral("conversationHeader"));
         QVERIFY(conversationHeader);
         // Out of a call nothing changes: the conversation header is what shows,
-        // and the call surface is present but hidden.
+        // and the call surface is not built at all.
         QVERIFY(conversationHeader->isVisible());
-        auto *idleCallHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
-        QVERIFY(idleCallHeader);
-        QVERIFY(!idleCallHeader->isVisible());
+        QVERIFY(!root->findChild<QQuickItem *>(QStringLiteral("callHeader")));
 
         callController.enableForPreview(OpenChat::CallState::Active,
                                         QStringLiteral("Jessica"),
@@ -2925,13 +2983,13 @@ private slots:
         QCOMPARE(engine.rootObjects().size(), 1);
         QObject *root = engine.rootObjects().constFirst();
 
-        auto *callHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
         auto *conversationHeader =
             root->findChild<QQuickItem *>(QStringLiteral("conversationHeader"));
         auto *stripSlot = root->findChild<QQuickItem *>(QStringLiteral("callStripSlot"));
         auto *history = root->findChild<QQuickItem *>(QStringLiteral("messageHistory"));
-        QVERIFY(callHeader && conversationHeader && stripSlot);
-        // No call: no strip, and no room taken by it.
+        QVERIFY(conversationHeader && stripSlot);
+        // No call: no call surface, no strip, and no room taken by it.
+        QVERIFY(!root->findChild<QQuickItem *>(QStringLiteral("callHeader")));
         QVERIFY(!stripSlot->isVisible());
         QCOMPARE(stripSlot->height(), 0.0);
 
@@ -2939,6 +2997,8 @@ private slots:
         callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
                                         QStringLiteral("jessica"), false, false);
         QCoreApplication::processEvents();
+        auto *callHeader = root->findChild<QQuickItem *>(QStringLiteral("callHeader"));
+        QVERIFY(callHeader);
         QVERIFY(callHeader->isVisible());
         QVERIFY(!conversationHeader->isVisible());
         QVERIFY(!stripSlot->isVisible());
@@ -3562,6 +3622,54 @@ private slots:
         QVERIFY2(observer.expired(), "the enlarged copy kept the share's pixels alive");
     }
 
+    void anEnlargedPictureGoesWithTheCallAndLeavesNothingBehind()
+    {
+        // The call surface is only built while there is a call, so a call that
+        // ends with a camera enlarged takes the tile away under the copy. The
+        // copy must close with it, and leave nothing holding Escape: the next
+        // call's full-window mode still hands the window back on Escape.
+        OpenChat::ChatController chats;
+        OpenChat::CallController calls;
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), true, false);
+        QImage wide(640, 360, QImage::Format_RGB32);
+        wide.fill(Qt::blue);
+        calls.setPreviewVideo(wide, wide);
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QQuickWindow *window = showActiveWindow(root);
+        QVERIFY(window);
+
+        auto *remote = root->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+        QVERIFY(remote);
+        auto *zoomChip = remote->findChild<QQuickItem *>(QStringLiteral("zoomButton"));
+        auto *overlay = root->findChild<QQuickItem *>(QStringLiteral("mediaZoomOverlay"));
+        QVERIFY(zoomChip && overlay);
+        clickItem(window, zoomChip);
+        QTRY_VERIFY(overlay->property("expanded").toBool());
+
+        calls.enableForPreview(OpenChat::CallState::Idle, QString(), QString(), false, false);
+        QCoreApplication::processEvents();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QVERIFY(!root->findChild<QQuickItem *>(QStringLiteral("callHeader")));
+        QVERIFY2(!overlay->isVisible(), "the enlarged copy outlived the call");
+        QVERIFY(!overlay->property("expanded").toBool());
+
+        calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                               QStringLiteral("jessica"), true, false);
+        QCoreApplication::processEvents();
+        QVERIFY(root->setProperty("callFullscreen", true));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY2(!root->property("callFullscreen").toBool(),
+                     "Escape no longer leaves the full-window call");
+    }
+
     void theCallCanFillTheWholeWindowAndGivesItBackWhenItEnds()
     {
         // The corner chip collapses the sidebar and the conversation and hands
@@ -3667,6 +3775,9 @@ int main(int argc, char **argv)
     qmlRegisterSingletonType<OpenChat::VoiceEffectHost>(
         "OpenChat.Native", 1, 0, "VoiceEffectHost",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::VoiceEffectHost; });
+    qmlRegisterSingletonType<OpenChat::MemorySettings>(
+        "OpenChat.Native", 1, 0, "MemorySettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MemorySettings; });
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");

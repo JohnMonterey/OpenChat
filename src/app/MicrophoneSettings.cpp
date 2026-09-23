@@ -41,11 +41,22 @@ MicrophoneSettings::MicrophoneSettings(QObject *parent)
     if (!s_instance)
         s_instance = this;
     load();
-    connect(&m_devices, &QMediaDevices::audioInputsChanged, this, [this] {
-        emit inputDevicesChanged();
+}
+
+// Follows the device list from the first time something shows it. Not from
+// construction: listening to QMediaDevices is what loads Qt Multimedia's
+// backend, which low memory mode keeps unloaded until it is needed.
+void MicrophoneSettings::watchDevices() const
+{
+    if (m_watchingDevices)
+        return;
+    m_watchingDevices = true;
+    auto *self = const_cast<MicrophoneSettings *>(this);
+    connect(&m_devices, &QMediaDevices::audioInputsChanged, self, [self] {
+        emit self->inputDevicesChanged();
         // The chosen device may have just arrived or gone; the name shown
         // beside the picker follows either way.
-        emit inputDeviceChanged();
+        emit self->inputDeviceChanged();
     });
 }
 
@@ -109,6 +120,7 @@ void MicrophoneSettings::save() const
 
 QVariantList MicrophoneSettings::inputDevices() const
 {
+    watchDevices();
     QVariantList list;
     const QAudioDevice systemDefault = QMediaDevices::defaultAudioInput();
     for (const QAudioDevice &device : QMediaDevices::audioInputs()) {
@@ -123,6 +135,7 @@ QVariantList MicrophoneSettings::inputDevices() const
 
 QString MicrophoneSettings::inputDeviceName() const
 {
+    watchDevices();
     const QAudioDevice device = selectedInputDevice();
     if (device.isNull())
         return QStringLiteral("No microphone found");

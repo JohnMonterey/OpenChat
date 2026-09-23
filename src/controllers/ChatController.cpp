@@ -73,7 +73,8 @@ QStringList settingsElementsForCategory(int index)
     switch (index) {
     case 0:
         return {QStringLiteral("Language"), QStringLiteral("Show in taskbar"),
-                QStringLiteral("Launch on startup"), QStringLiteral("On close, keep running")};
+                QStringLiteral("Launch on startup"), QStringLiteral("On close, keep running"),
+                QStringLiteral("Low memory mode")};
     case 1:
         return {QStringLiteral("Display name"), QStringLiteral("Presence status"),
                 QStringLiteral("Profile picture"), QStringLiteral("Manage account")};

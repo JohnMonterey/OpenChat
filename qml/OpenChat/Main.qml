@@ -122,8 +122,8 @@ Window {
                     visible: !root.callInView
                 }
 
-                // Loaded only when a call bridge exists at all, so the default
-                // and capture paths never instantiate (or bind against) it.
+                // Built only while there is a call (ringing, live or just
+                // ended), so an idle window neither holds nor binds against it.
                 Component {
                     id: callHeaderComponent
 
@@ -142,21 +142,21 @@ Window {
                 Loader {
                     id: callHeaderLoader
                     anchors.fill: parent
-                    active: root.callController !== null
+                    active: root.inCall
                     visible: root.callInView
                     sourceComponent: callHeaderComponent
                 }
             }
 
             // The call, from any other conversation: one line, and the way
-            // back. Loaded only with a call bridge, like the surface itself.
+            // back. Built only while there is a call, like the surface itself.
             Loader {
                 id: callStripLoader
                 objectName: "callStripSlot"
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: headerSlot.bottom
-                active: root.callController !== null
+                active: root.inCall
                 readonly property bool shown: root.inCall && !root.callInView && !root.callFullscreen
                 visible: shown
                 height: shown && item ? item.implicitHeight : 0
@@ -376,9 +376,15 @@ Window {
                             readonly property bool vocalFxSetting:
                                 !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
                                 && elementLabel === "Custom Vocal FX"
+                            readonly property bool lowMemorySetting:
+                                !navigationRow && root.chatController.currentSettingsCategoryName === "General"
+                                && elementLabel === "Low memory mode"
+                            readonly property bool panelSetting:
+                                microphoneSetting || vocalFxSetting || lowMemorySetting
                             width: parent.width
                             height: microphoneSetting ? microphonePanel.height
-                                  : vocalFxSetting ? vocalFxPanel.height : (themeSetting ? 70 : 48)
+                                  : vocalFxSetting ? vocalFxPanel.height
+                                  : lowMemorySetting ? lowMemoryPanel.height : (themeSetting ? 70 : 48)
                             activeFocusOnTab: navigationRow
                             Accessible.role: navigationRow ? Accessible.Button : Accessible.Pane
                             Accessible.name: elementLabel
@@ -421,8 +427,19 @@ Window {
                                 sourceComponent: MicrophoneSettingsPanel {}
                             }
 
+                            Loader {
+                                id: lowMemoryPanel
+                                active: settingsElementRow.lowMemorySetting
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: item ? item.implicitHeight : 0
+                                sourceComponent: LowMemoryPanel {
+                                    restartAllowed: !root.inCall
+                                }
+                            }
+
                             Text {
-                                visible: !settingsElementRow.microphoneSetting && !settingsElementRow.vocalFxSetting
+                                visible: !settingsElementRow.panelSetting
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.verticalCenterOffset: settingsElementRow.themeSetting ? -10 : 0
@@ -457,8 +474,7 @@ Window {
 
                             Item {
                                 visible: !settingsElementRow.themeSetting
-                                         && !settingsElementRow.microphoneSetting
-                                         && !settingsElementRow.vocalFxSetting
+                                         && !settingsElementRow.panelSetting
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 14
@@ -509,27 +525,35 @@ Window {
     }
 
     // Add-contact overlay: floats above every section, filling the window. It binds
-    // to the optional contactController and self-hides when that is null or its
-    // dialog is closed, so the default and capture paths render unchanged.
-    AddContactDialog {
-        contactController: root.contactController
+    // to the optional contactController and is built only while its dialog is
+    // open, so the default and capture paths render unchanged.
+    Loader {
+        anchors.fill: parent
+        active: root.contactController !== null && root.contactController.dialogOpen
+        sourceComponent: AddContactDialog {
+            contactController: root.contactController
+        }
     }
 
     // Safety-number overlay: the contact-verification surface, shown at the natural
     // verify moment. Like the add-contact overlay it binds to the optional
-    // contactController and self-hides when that is null or its safety-number surface
-    // is closed, so the default and capture paths render unchanged.
-    SafetyNumberDialog {
-        contactController: root.contactController
+    // contactController and is built only while its safety-number surface is open,
+    // so the default and capture paths render unchanged.
+    Loader {
+        anchors.fill: parent
+        active: root.contactController !== null && root.contactController.safetyNumberOpen
+        sourceComponent: SafetyNumberDialog {
+            contactController: root.contactController
+        }
     }
 
     // Screen-source picker: raised by the call surface's share button, which
     // never guesses what to capture. It floats above every section like the
-    // other overlays and, with no call bridge attached, never loads at all.
+    // other overlays and, like the call surface, is built only during a call.
     Loader {
         id: screenSharePickerLoader
         anchors.fill: parent
-        active: root.callController !== null
+        active: root.inCall
         z: 20
 
         sourceComponent: ScreenSharePicker {

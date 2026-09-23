@@ -16,6 +16,9 @@ Item {
     // Folded, the header's bottom rule shares a row with the next header's top
     // rule instead of doubling it.
     property bool collapsed: false
+    // False builds no rows at all: for a category that is never shown, where
+    // keeping a hidden row per contact would only cost memory.
+    property bool populated: true
 
     implicitHeight: visibleCount > 0 ? (collapsed ? 39 : 40 + visibleCount * rowHeight) : 0
     visible: visibleCount > 0
@@ -68,7 +71,7 @@ Item {
         visible: !category.collapsed
 
         Repeater {
-            model: category.contactModel
+            model: category.populated ? category.contactModel : null
 
             ContactRow {
                 id: contactRowDelegate

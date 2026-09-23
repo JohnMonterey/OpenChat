@@ -75,6 +75,7 @@ qt_add_executable(OpenChat
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
+    src/app/MemorySettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
@@ -116,6 +117,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/AeroMenuSetting.qml
         qml/OpenChat/components/MicrophoneContextMenu.qml
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
+        qml/OpenChat/components/LowMemoryPanel.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
@@ -141,12 +143,15 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/CaseReel.qml
         qml/OpenChat/components/CaseTile.qml
         qml/OpenChat/components/CosmeticPreview.qml
+    # The logo and the placeholder picture ship as 256 px copies of the
+    # full-size artwork beside them: neither is ever drawn larger, and the
+    # window icon stays decoded for as long as the process runs.
     RESOURCES
         assets/Jessica.png
         assets/alex.png
         assets/michael.png
         assets/ryan.png
-        assets/userpfp_none.png
+        assets/userpfp_none-256.png
         assets/icons/video-call.svg
         assets/icons/video-call-dark.svg
         assets/icons/phone-call.svg
@@ -155,7 +160,7 @@ qt_add_qml_module(OpenChat
         assets/icons/settings-dark.svg
         assets/icons/chevron-down.svg
         assets/icons/chevron-down-dark.svg
-        assets/icons/openchat.png
+        assets/icons/openchat-256.png
         assets/sounds/crate-display.wav
         assets/sounds/crate-item-scroll.wav
         assets/sounds/crate-open.wav
@@ -186,7 +191,7 @@ if(UNIX AND NOT APPLE)
     install(TARGETS OpenChat RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(FILES deploy/openchat.desktop
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
-    install(FILES assets/icons/openchat.png
+    install(FILES assets/icons/openchat-256.png
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/256x256/apps
         RENAME openchat.png)
 endif()
@@ -987,6 +992,7 @@ add_executable(tst_qmlload
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
     src/app/AppearanceSettings.cpp
+    src/app/MemorySettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
@@ -1050,7 +1056,7 @@ qt_add_resources(openchat-profile-gallery gallery_photos
         assets/alex.png
         assets/michael.png
         assets/ryan.png
-        assets/userpfp_none.png
+        assets/userpfp_none-256.png
 )
 target_include_directories(openchat-profile-gallery PRIVATE src)
 target_compile_definitions(openchat-profile-gallery PRIVATE

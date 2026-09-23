@@ -26,6 +26,11 @@ class DailyCaseController : public QObject {
     // drawn with the same tier odds from a per-account, per-day seed. It stays
     // put when the claim lands, so nothing on screen swaps as the spin starts.
     Q_PROPERTY(QVariantList fillers READ fillers NOTIFY fillersChanged)
+    // Everything this account has unboxed, as catalogue ids, and whether the
+    // authority has said so yet: until it has (or after a failed reply for a
+    // new account) the list is empty and means nothing.
+    Q_PROPERTY(QStringList owned READ owned NOTIFY ownedChanged)
+    Q_PROPERTY(bool ownershipKnown READ ownershipKnown NOTIFY ownedChanged)
 public:
     enum State { Available, Opening, OpenedToday };
     Q_ENUM(State)
@@ -40,6 +45,8 @@ public:
     QString error() const { return m_error; }
     QVariantMap reward() const { return m_reward; }
     QVariantList fillers() const { return m_fillers; }
+    QStringList owned() const { return m_owned; }
+    bool ownershipKnown() const { return m_ownershipKnown; }
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void open();
     Q_INVOKABLE void dismiss();
@@ -49,10 +56,12 @@ signals:
     void positionChanged();
     void preferencesChanged();
     void fillersChanged();
+    void ownedChanged();
     void crossed(int index);
     void revealed();
 private:
     void adopt(const CaseResult &result);
+    void adoptOwned(const CaseReply &reply);
     void arrangeBelt();
     void setPosition(double position);
     void finish();
@@ -60,6 +69,8 @@ private:
     QString m_account, m_error;
     QVariantMap m_reward;
     QVariantList m_fillers;
+    QStringList m_owned;
+    bool m_ownershipKnown = false;
     quint64 m_beltSeed = 0;
     State m_state = Available;
     int m_winner = CaseMotion::firstWinnerIndex;

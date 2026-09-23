@@ -36,14 +36,72 @@ AppearanceSettings::AppearanceSettings(QObject *parent) : QObject(parent)
     m_nameFlair = knownCosmetic(settings, flairKey, QStringLiteral("flair"));
     m_profileScene = knownCosmetic(settings, sceneKey, QStringLiteral("scene"));
     m_bubbleSkin = knownCosmetic(settings, bubbleKey, QStringLiteral("bubble"));
-    BubbleSkins::prepare(m_bubbleSkin);
+    // Nothing is worn, or prepared, until ownership is known.
     applyPalette();
+}
+
+const std::array<AppearanceSettings::EquipSlot, 5> &AppearanceSettings::equipSlots()
+{
+    static const std::array<EquipSlot, 5> list{{
+        {&AppearanceSettings::m_avatarFrame, QStringLiteral("frame"), frameKey,
+         &AppearanceSettings::avatarFrameChanged},
+        {&AppearanceSettings::m_presenceBead, QStringLiteral("bead"), beadKey,
+         &AppearanceSettings::presenceBeadChanged},
+        {&AppearanceSettings::m_nameFlair, QStringLiteral("flair"), flairKey,
+         &AppearanceSettings::nameFlairChanged},
+        {&AppearanceSettings::m_profileScene, QStringLiteral("scene"), sceneKey,
+         &AppearanceSettings::profileSceneChanged},
+        {&AppearanceSettings::m_bubbleSkin, QStringLiteral("bubble"), bubbleKey,
+         &AppearanceSettings::bubbleSkinChanged},
+    }};
+    return list;
+}
+
+void AppearanceSettings::setOwnedCosmetics(const QStringList &ids)
+{
+    QStringList owned;
+    for (const QString &id : ids) {
+        if (CosmeticCatalog::find(id) && !owned.contains(id))
+            owned.append(id);
+    }
+    if (m_ownershipKnown && owned == m_owned)
+        return;
+    const bool wasKnown = m_ownershipKnown;
+    m_owned = owned;
+    m_ownershipKnown = true;
+
+    // What the account does not own is taken off and forgotten; what it does
+    // own and was waiting on ownership is worn from now on.
+    QSettings settings;
+    QList<void (AppearanceSettings::*)()> changed;
+    for (const EquipSlot &slot : equipSlots()) {
+        QString &field = this->*slot.field;
+        if (field.isEmpty())
+            continue;
+        if (!m_owned.contains(field)) {
+            field.clear();
+            settings.remove(slot.key);
+            if (wasKnown)
+                changed.append(slot.changed);
+        } else if (!wasKnown) {
+            changed.append(slot.changed);
+        }
+    }
+    settings.sync();
+    BubbleSkins::prepare(m_bubbleSkin);
+    emit ownedCosmeticsChanged();
+    for (const auto signal : changed)
+        (this->*signal)();
 }
 
 bool AppearanceSettings::storeCosmetic(QString &field, const QString &id, const QString &category,
                                        const QString &key)
 {
     const QString value = CosmeticCatalog::isKnown(id, category) ? id : QString();
+    // Only what the account has unboxed can be worn; anything else leaves
+    // the current choice alone.
+    if (!value.isEmpty() && !owns(value))
+        return false;
     if (value == field)
         return false;
     field = value;

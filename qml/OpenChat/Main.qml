@@ -14,6 +14,17 @@ Window {
         objectName: "dailyCaseController"
         accountKey: root.dailyCaseAccount
     }
+    // Only what this account has unboxed can be worn: the case's authority
+    // says what that is, and AppearanceSettings refuses anything else. An
+    // unknown collection hands over nothing, rather than an empty one that
+    // would take everything off.
+    Binding {
+        target: AppearanceSettings
+        property: "ownedCosmetics"
+        value: dailyCase.owned
+        when: dailyCase.ownershipKnown
+        restoreMode: Binding.RestoreNone
+    }
     onActiveChanged: { if (active) dailyCase.refresh(); }
     // Optional add-contact bridge; null in the default/capture paths. The visible
     // add-contact surface binds to it in a later change; declaring it here keeps the

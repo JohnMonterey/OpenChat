@@ -39,7 +39,10 @@ Item {
     Item {
         id: localUser
         width: parent.width
-        height: 88
+        // With the search field below, this block ends where the conversation
+        // header does: the first category's top rule lands on the header's
+        // bottom rule, one continuous line across the window.
+        height: Theme.conversationHeaderHeight - 1 - searchArea.height
         // Above the search field so a profile notice can overhang it.
         z: 1
 
@@ -54,7 +57,7 @@ Item {
             id: localAvatar
             objectName: "localUserAvatar"
             x: 13
-            y: 22
+            y: 12
             width: 44
             height: 44
             avatarKey: sidebar.controller.localAvatarKey
@@ -119,7 +122,7 @@ Item {
             id: localName
             objectName: "localUserName"
             x: localUser.textLeft
-            y: 22
+            y: 12
             // Leaves room for the bead after the name; a long name elides.
             width: Math.min(implicitWidth, localUser.statusRight - x - localBead.width - 8)
             elide: Text.ElideRight
@@ -173,7 +176,7 @@ Item {
             id: statusEditor
             objectName: "localStatusEditor"
             x: localUser.textLeft - 4
-            y: 43
+            y: 33
             width: Math.max(60, localUser.statusRight - x)
             height: 22
             property bool editing: false
@@ -301,7 +304,7 @@ Item {
             objectName: "addContactButton"
             anchors.right: parent.right
             anchors.rightMargin: 18
-            y: 34
+            y: 24
             width: 20
             height: 20
             visible: sidebar.contactController && sidebar.contactController.enabled

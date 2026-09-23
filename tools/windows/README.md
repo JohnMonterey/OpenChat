@@ -60,8 +60,10 @@ tools/windows/rootless-toolchain.sh run tools/windows/symbolize-crash.sh crash-â
 ```
 
 If screen sharing misbehaves on a tester's machine, have them run
-`OpenChat.exe --screen-share-check` from a console in the unpacked folder and
-send what it prints plus the PNGs it saves. See `docs/crash-reports.md` and the
+`start /wait OpenChat.exe --screen-share-check` from a Command Prompt in the
+unpacked folder and send what it prints plus the PNGs it saves. `OpenChat.exe`
+is a GUI program (no console window of its own); run from a prompt it prints
+into that prompt's console, and `start /wait` makes the prompt wait for it. See `docs/crash-reports.md` and the
 "Capture on each platform" section of `docs/screen-sharing.md`.
 
 Under Wine, `OpenChat.exe --screen-share-check` exercises the GDI fallback

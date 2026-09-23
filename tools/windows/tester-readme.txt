@@ -29,9 +29,10 @@ If screen sharing does not work
 -------------------------------
 Open a Command Prompt in this folder and run:
 
-    OpenChat.exe --screen-share-check
+    start /wait OpenChat.exe --screen-share-check
 
-It lists what can be shared, captures each screen for a few seconds, and
+("start /wait" keeps the prompt from coming back before the check has
+finished printing.) It lists what can be shared, captures each screen for a few seconds, and
 says how fast this computer can encode the share. Send
 what it prints, and the capture-*.png pictures it names, to whoever gave you
 this build. The check never prints window titles; the pictures show your

@@ -86,6 +86,11 @@ qt_add_executable(OpenChat
     src/app/TransportSettings.cpp
 )
 
+# A GUI program on Windows, so launching it opens no console window. Run from
+# a Command Prompt it borrows that prompt's console for what it prints (see
+# attachParentConsole in main.cpp).
+set_target_properties(OpenChat PROPERTIES WIN32_EXECUTABLE TRUE)
+
 if(APPLE)
     configure_file(cmake/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist @ONLY)
     # Declare usage strings to Qt's permission-plugin finalizer and embed them

@@ -10,10 +10,6 @@ Popup {
     property var returnFocus: null
     readonly property var reward: controller ? controller.reward : ({})
     readonly property bool rewarded: !!(reward && reward.id)
-    readonly property var categoryNames: ({
-        bubble: "chat bubble", frame: "avatar frame", bead: "presence bead",
-        flair: "name flair", scene: "profile scene"
-    })
     function ink(color) { return Theme.darkMode ? Qt.lighter(color, 1.3) : Qt.darker(color, 1.3) }
     parent: Overlay.overlay
     anchors.centerIn: parent
@@ -133,7 +129,7 @@ Popup {
                 : root.controller.state === DailyCaseController.Opening ? "Finding your moment…"
                 : root.controller.state === DailyCaseController.OpenedToday && root.rewarded
                     ? "<b>" + root.reward.name + "</b> · <font color=\"" + root.ink(root.reward.rarityColor)
-                      + "\">" + root.reward.rarityName + "</font> " + (root.categoryNames[root.reward.category] || "")
+                      + "\">" + root.reward.rarityName + "</font> " + Cosmetics.categoryName(root.reward.category)
                       + " · See you tomorrow"
                 : root.controller.state === DailyCaseController.OpenedToday ? "Today's case opened · See you tomorrow"
                 : "One free case a day · Items can't be kept yet"

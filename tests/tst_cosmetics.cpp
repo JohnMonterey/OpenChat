@@ -62,6 +62,8 @@ private slots:
             QVERIFY(info.id.startsWith(info.category + QLatin1Char('.')));
             QVERIFY(!info.name.isEmpty());
             QVERIFY(!info.description.isEmpty());
+            QVERIFY2(!OpenChat::CosmeticCatalog::categoryName(info.category).isEmpty(),
+                     qPrintable(info.category));
         }
         for (const char *category : {"bubble", "frame", "bead", "flair", "scene"})
             QVERIFY(OpenChat::CosmeticCatalog::inCategory(QLatin1String(category)).size() >= 5);

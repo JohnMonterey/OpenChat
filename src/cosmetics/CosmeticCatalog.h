@@ -40,6 +40,10 @@ class CosmeticCatalog
     // True when `id` names an item of `category`; empty and unknown ids are not.
     static bool isKnown(const QString &id, const QString &category);
 
+    // How the popup names a category: "chat bubble", "avatar frame", ... ;
+    // empty for a category this build does not know.
+    static QString categoryName(const QString &category);
+
     static QList<Rarity> rarities();
     static QString rarityId(Rarity rarity);   // "common" … "exotic"
     static QString rarityName(Rarity rarity); // "Common" … "Exotic"
@@ -63,6 +67,7 @@ class CosmeticsCatalogObject : public QObject
     Q_INVOKABLE QVariantList items(const QString &category) const;
     Q_INVOKABLE QVariantMap item(const QString &id) const;
     Q_INVOKABLE QString displayName(const QString &id) const;
+    Q_INVOKABLE QString categoryName(const QString &category) const;
     // [{id, name, color, weight, percent}] from Common to Exotic.
     Q_INVOKABLE QVariantList tiers() const;
 };

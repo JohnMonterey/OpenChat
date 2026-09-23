@@ -717,8 +717,18 @@ void ProfileScene::setFadeHeight(qreal height)
     update();
 }
 
+void ProfileScene::setControlRect(const QRectF &rect)
+{
+    if (m_controlRect == rect)
+        return;
+    m_controlRect = rect;
+    emit controlRectChanged();
+    update();
+}
+
 QImage ProfileScene::render(const QString &sceneId, const QSizeF &size, bool dark,
-                            const QRectF &readable, qreal fadeHeight, qreal dpr)
+                            const QRectF &readable, qreal fadeHeight, qreal dpr,
+                            const QRectF &control)
 {
     if (sceneId.isEmpty() || size.isEmpty())
         return transparentImage(size.isEmpty() ? QSizeF(1, 1) : size, dpr);
@@ -752,13 +762,16 @@ QImage ProfileScene::render(const QString &sceneId, const QSizeF &size, bool dar
 
     QPainter p(&image);
     p.setRenderHint(QPainter::Antialiasing, true);
-    // Frost the glass behind the words so they read over any scene.
-    if (!readable.isEmpty()) {
-        const QColor veil = dark ? QColor(20, 34, 48, 120) : QColor(248, 252, 255, 150);
-        drawBlurred(p, readable, 7.0, [&](QPainter &lp) {
+    // Frost the glass behind the words, and behind a control drawn over the
+    // scene, so they read over any scene.
+    const QColor veil = dark ? QColor(20, 34, 48, 120) : QColor(248, 252, 255, 150);
+    for (const QRectF &patch : {readable, control}) {
+        if (patch.isEmpty())
+            continue;
+        drawBlurred(p, patch, 7.0, [&](QPainter &lp) {
             lp.setPen(Qt::NoPen);
             lp.setBrush(veil);
-            lp.drawRoundedRect(readable, 8, 8);
+            lp.drawRoundedRect(patch, 8, 8);
         });
     }
     // Fade out into the sidebar along the bottom.
@@ -777,7 +790,7 @@ void ProfileScene::paint(QPainter *painter)
     if (m_sceneId.isEmpty())
         return;
     painter->drawImage(QPointF(0, 0), render(m_sceneId, size(), m_darkMode, m_readableRect,
-                                             m_fadeHeight, deviceScale(*painter)));
+                                             m_fadeHeight, deviceScale(*painter), m_controlRect));
 }
 
 } // namespace OpenChat

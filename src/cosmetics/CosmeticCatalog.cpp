@@ -2,6 +2,7 @@
 
 #include "cosmetics/BubbleSkins.h"
 
+#include <QHash>
 #include <QVariantMap>
 
 #include <array>
@@ -226,6 +227,18 @@ QList<CosmeticInfo> CosmeticCatalog::ofRarity(Rarity rarity)
     return result;
 }
 
+QString CosmeticCatalog::categoryName(const QString &category)
+{
+    static const QHash<QString, QString> names = {
+        {QStringLiteral("bubble"), QStringLiteral("chat bubble")},
+        {QStringLiteral("frame"), QStringLiteral("avatar frame")},
+        {QStringLiteral("bead"), QStringLiteral("presence bead")},
+        {QStringLiteral("flair"), QStringLiteral("name flair")},
+        {QStringLiteral("scene"), QStringLiteral("profile scene")},
+    };
+    return names.value(category);
+}
+
 QList<Rarity> CosmeticCatalog::rarities()
 {
     QList<Rarity> list;
@@ -307,6 +320,11 @@ QString CosmeticsCatalogObject::displayName(const QString &id) const
 {
     const CosmeticInfo *info = CosmeticCatalog::find(id);
     return info ? info->name : QString();
+}
+
+QString CosmeticsCatalogObject::categoryName(const QString &category) const
+{
+    return CosmeticCatalog::categoryName(category);
 }
 
 QVariantList CosmeticsCatalogObject::tiers() const

@@ -64,6 +64,11 @@ Item {
                                            Math.max(localName.width + 8 + localBead.width,
                                                     statusLabel.implicitWidth)) + 16,
                                   48)
+            // And behind the daily-case button, which sits over the scene's
+            // top-right corner, where several scenes put their sun or moon.
+            controlRect: caseEntry.visible ? Qt.rect(caseEntry.x - 4, caseEntry.y - 4,
+                                                     caseEntry.width + 8, caseEntry.height + 8)
+                                           : Qt.rect(0, 0, 0, 0)
         }
     }
 

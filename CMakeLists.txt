@@ -15,6 +15,13 @@ set(CMAKE_AUTOMOC ON)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus Gui HttpServer Multimedia Network Quick QuickControls2 Sql Svg Test WebSockets)
+# The notification-area icon drives the platform's tray directly (see
+# src/app/TrayIcon.h), which is Qt Gui's private platform interface. That ties
+# a build to the Qt it was built against, which every build here already is:
+# the Windows package ships its own Qt, and the Linux build is rebuilt with
+# the system's.
+set(QT_NO_PRIVATE_MODULE_WARNING ON)
+find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
 
 include(cmake/dependencies/AudioPlugins.cmake)
@@ -77,7 +84,10 @@ qt_add_executable(OpenChat
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
+    src/render/TrayOrb.cpp
     src/app/AppearanceSettings.cpp
+    src/app/CloseToTray.cpp
+    src/app/TrayIcon.cpp
     src/app/MemorySettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
@@ -193,6 +203,7 @@ target_link_libraries(OpenChat PRIVATE
     openchat_notify
     Qt6::Core
     Qt6::Gui
+    Qt6::GuiPrivate
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Svg
@@ -1186,7 +1197,10 @@ add_executable(tst_qmlload
     src/render/BubbleBackground.cpp
     src/render/AvatarArtwork.cpp
     src/render/CallVideoItem.cpp
+    src/render/TrayOrb.cpp
     src/app/AppearanceSettings.cpp
+    src/app/CloseToTray.cpp
+    src/app/TrayIcon.cpp
     src/app/MemorySettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
@@ -1214,6 +1228,7 @@ target_link_libraries(tst_qmlload PRIVATE
     openchat_domain
     Qt6::Core
     Qt6::Gui
+    Qt6::GuiPrivate
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Network

@@ -36,6 +36,8 @@
 #include <optional>
 
 #include "app/AccountBootstrap.h"
+#include "app/CloseToTray.h"
+#include "app/TrayIcon.h"
 #include "app/LocalDataReset.h"
 #include "diagnostics/Logging.h"
 #include "app/AppMetadata.h"
@@ -471,7 +473,10 @@ private:
             if (m_deviceLink->isRejected())
                 m_chatController->setSessionState(SessionState::SignedOut);
         }
+        m_closeToTray.reset();
         m_engine = std::make_unique<QQmlApplicationEngine>();
+        // Null where the desktop has no notification area.
+        m_tray = OpenChat::TrayIcon::create();
         QObject::connect(
             m_engine.get(), &QQmlApplicationEngine::objectCreationFailed, qApp,
             [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
@@ -480,7 +485,8 @@ private:
              {QStringLiteral("dailyCaseAccount"), m_session && m_session->accountId()
                   ? m_session->accountId().value().toHex() : QStringLiteral("preview")},
              {QStringLiteral("contactController"), QVariant::fromValue(m_contactController.get())},
-             {QStringLiteral("callController"), QVariant::fromValue(m_callController.get())}});
+             {QStringLiteral("callController"), QVariant::fromValue(m_callController.get())},
+             {QStringLiteral("tray"), QVariant::fromValue(m_tray.get())}});
         m_engine->loadFromModule("OpenChat", "Main");
         if (m_engine->rootObjects().isEmpty()) {
             QCoreApplication::exit(EXIT_FAILURE);
@@ -489,6 +495,10 @@ private:
         if (auto *window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().constFirst())) {
             configureWindow(window);
             enableNotifications(window);
+            // With an icon in the notification area, closing the window
+            // hides it there; the icon's Close is what quits.
+            if (m_tray)
+                m_closeToTray = std::make_unique<OpenChat::CloseToTray>(window);
         }
         releaseFreedHeapLater(m_engine.get());
 
@@ -548,14 +558,13 @@ private:
                                  m_chatController->currentContactId());
                          });
 
-        // Clicking a notification is a request to read that message: raise the
-        // window, leave any other section, and open the conversation.
+        // Clicking a notification is a request to read that message: bring the
+        // window back (from the notification area too), leave any other
+        // section, and open the conversation.
         QObject::connect(m_notifications.get(),
                          &OpenChat::NotificationService::conversationActivated, window,
                          [this, window](const QString &contactId) {
-                             window->show();
-                             window->raise();
-                             window->requestActivate();
+                             QMetaObject::invokeMethod(window, "bringToFront");
                              if (m_chatController == nullptr)
                                  return;
                              m_chatController->setNavSection(
@@ -961,7 +970,11 @@ private:
     // connections to it are severed with the window. Its destructor takes back
     // anything the application still has showing on the desktop.
     std::unique_ptr<OpenChat::NotificationService> m_notifications;
+    // Declared before the engine, whose window binds to it, so it outlives it.
+    std::unique_ptr<OpenChat::TrayIcon> m_tray;
     std::unique_ptr<QQmlApplicationEngine> m_engine;
+    // Declared after the engine so it lets go of the window first.
+    std::unique_ptr<OpenChat::CloseToTray> m_closeToTray;
     bool m_uglyVoiceDebug = false;
     std::unique_ptr<OpenChat::VoiceDebugController> m_voiceDebugController;
     std::unique_ptr<QQmlApplicationEngine> m_debugEngine;

@@ -3,6 +3,14 @@ OpenChat test build for Windows
 
 Run OpenChat.exe from this folder. Keep the whole folder together.
 
+Closing OpenChat
+----------------
+Closing the window keeps OpenChat running in the notification area (the
+icons by the clock; Windows may tuck it under the ^ arrow), so messages and
+calls still reach you. Click the icon to bring the window back, or
+right-click it and choose Close to quit. During a call the icon is a green
+light that brightens while you talk, and turns red when you are muted.
+
 If OpenChat crashes
 -------------------
 OpenChat restarts itself and shows what happened. Press "Copy report" and send

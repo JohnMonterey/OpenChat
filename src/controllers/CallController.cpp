@@ -973,6 +973,14 @@ void CallController::setPreviewCanRejoin(bool canRejoin)
     emit callChanged();
 }
 
+void CallController::setPreviewMuted(bool muted)
+{
+    if (m_engine != nullptr || m_muted == muted)
+        return;
+    m_muted = muted;
+    emit callChanged();
+}
+
 void CallController::setPreviewCallInCurrentChat(bool inCurrentChat)
 {
     if (m_engine != nullptr || m_callInCurrentChat == inCurrentChat)

@@ -17,6 +17,9 @@
 #include <QStyleHints>
 #include <QQuickWindow>
 
+#include <qpa/qplatformmenu.h>
+#include <qpa/qplatformsystemtrayicon.h>
+
 #include <algorithm>
 #include <memory>
 #include <optional>
@@ -29,7 +32,10 @@
 #include "controllers/VoiceDebugController.h"
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
+#include "render/TrayOrb.h"
+#include "app/TrayIcon.h"
 #include "app/AppearanceSettings.h"
+#include "app/CloseToTray.h"
 #include "app/MemorySettings.h"
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
@@ -225,6 +231,87 @@ void typeText(QWindow *window, const QString &text)
 {
     for (const QChar character : text)
         QTest::keyClick(window, character.toLatin1());
+}
+
+// A notification area for TrayIcon to drive, recording what it was shown: the
+// offscreen platform has none of its own.
+class FakeTrayMenuItem final : public QPlatformMenuItem
+{
+public:
+    void setText(const QString &text) override { this->text = text; }
+    void setIcon(const QIcon &) override {}
+    void setMenu(QPlatformMenu *) override {}
+    void setVisible(bool) override {}
+    void setIsSeparator(bool) override {}
+    void setFont(const QFont &) override {}
+    void setRole(MenuRole) override {}
+    void setCheckable(bool) override {}
+    void setChecked(bool) override {}
+    void setShortcut(const QKeySequence &) override {}
+    void setEnabled(bool) override {}
+    void setIconSize(int) override {}
+
+    QString text;
+};
+
+class FakeTrayMenu final : public QPlatformMenu
+{
+public:
+    void insertMenuItem(QPlatformMenuItem *item, QPlatformMenuItem *before) override
+    {
+        items.insert(before ? items.indexOf(before) : items.size(), item);
+    }
+    void removeMenuItem(QPlatformMenuItem *item) override { items.removeOne(item); }
+    void syncMenuItem(QPlatformMenuItem *) override {}
+    void syncSeparatorsCollapsible(bool) override {}
+    void setText(const QString &) override {}
+    void setIcon(const QIcon &) override {}
+    void setEnabled(bool) override {}
+    void setVisible(bool) override {}
+    QPlatformMenuItem *menuItemAt(int position) const override { return items.value(position); }
+    QPlatformMenuItem *menuItemForTag(quintptr tag) const override
+    {
+        for (QPlatformMenuItem *item : items)
+            if (item->tag() == tag)
+                return item;
+        return nullptr;
+    }
+    QPlatformMenuItem *createMenuItem() const override { return new FakeTrayMenuItem; }
+
+    QList<QPlatformMenuItem *> items;
+};
+
+class FakeTray final : public QPlatformSystemTrayIcon
+{
+public:
+    // Outlives the fake, which the TrayIcon under test owns.
+    struct Record
+    {
+        bool shown = false;
+        QIcon icon;
+        QString toolTip;
+        FakeTrayMenu *menu = nullptr;
+    };
+    explicit FakeTray(Record *record) : record(record) {}
+
+    void init() override { record->shown = true; }
+    void cleanup() override { record->shown = false; }
+    void updateIcon(const QIcon &icon) override { record->icon = icon; }
+    void updateToolTip(const QString &toolTip) override { record->toolTip = toolTip; }
+    void updateMenu(QPlatformMenu *menu) override { record->menu = static_cast<FakeTrayMenu *>(menu); }
+    QRect geometry() const override { return {}; }
+    void showMessage(const QString &, const QString &, const QIcon &, MessageIcon, int) override {}
+    bool isSystemTrayAvailable() const override { return true; }
+    bool supportsMessages() const override { return false; }
+    QPlatformMenu *createMenu() const override { return new FakeTrayMenu; }
+
+    Record *record;
+};
+
+// The colour in the lower half of the icon's 16 px picture, below the gloss.
+QColor trayColour(const QIcon &icon)
+{
+    return icon.pixmap(QSize(16, 16), 1.0).toImage().pixelColor(8, 11);
 }
 
 } // namespace
@@ -4599,6 +4686,273 @@ private slots:
         QVERIFY(QFileInfo::exists(path + QStringLiteral(".seen")));
         report.dismiss();
         QCOMPARE(finished.count(), 1);
+    }
+
+    void theTrayOrbColoursWhatTheMicrophoneIsDoing()
+    {
+        // Sampled below the gloss, where the glass shows its own colour.
+        const auto glass = [](QStringView state) {
+            return OpenChat::TrayOrb::render(state, 64).pixelColor(32, 46);
+        };
+        const QColor call = glass(u"call");
+        const QColor talking = glass(u"talking");
+        const QColor muted = glass(u"muted");
+        const QColor deafened = glass(u"deafened");
+
+        // Dark green in the call, bright green while talking.
+        QVERIFY(call.green() > call.red() + 50 && call.green() > call.blue() + 50);
+        QVERIFY(call.lightness() < 100);
+        QVERIFY(talking.green() > talking.red() + 50 && talking.green() > talking.blue() + 50);
+        QVERIFY(talking.lightness() > call.lightness() + 40);
+        // Red when muted, dark grey when deafened.
+        QVERIFY(muted.red() > muted.green() + 80 && muted.red() > muted.blue() + 80);
+        QVERIFY(deafened.hslSaturation() < 50);
+        QVERIFY(deafened.lightness() < 120);
+
+        // A round orb: the corners are clear, the middle is solid glass.
+        const QImage orb = OpenChat::TrayOrb::render(u"call", 64);
+        QCOMPARE(orb.pixelColor(0, 0).alpha(), 0);
+        QCOMPARE(orb.pixelColor(63, 63).alpha(), 0);
+        QCOMPARE(orb.pixelColor(32, 32).alpha(), 255);
+        QVERIFY(OpenChat::TrayOrb::render(u"idle", 64).isNull());
+
+        // The icon is drawn at each size a tray asks for, never scaled.
+        const QIcon icon = OpenChat::TrayOrb::icon(u"talking");
+        const QList<QSize> sizes = icon.availableSizes();
+        for (const int side : {16, 20, 24, 32, 48, 64})
+            QVERIFY2(sizes.contains(QSize(side, side)), qPrintable(QString::number(side)));
+        QCOMPARE(icon.pixmap(QSize(16, 16), 1.0).size(), QSize(16, 16));
+        QVERIFY(OpenChat::TrayOrb::icon(u"").isNull());
+    }
+
+    void theTrayIconShowsTheCallAndOffersOpenAndClose()
+    {
+        const QIcon applicationIcon = QGuiApplication::windowIcon();
+        QGuiApplication::setWindowIcon(QIcon(QStringLiteral(OPENCHAT_SOURCE_DIR "/assets/icons/openchat-256.png")));
+        const auto restoreIcon = qScopeGuard([&] { QGuiApplication::setWindowIcon(applicationIcon); });
+
+        FakeTray::Record shown;
+        {
+            OpenChat::TrayIcon tray(std::make_unique<FakeTray>(&shown));
+            QVERIFY(shown.shown);
+
+            // Outside a call: the application's own icon.
+            QCOMPARE(shown.icon.cacheKey(), QGuiApplication::windowIcon().cacheKey());
+            QCOMPARE(shown.toolTip, QStringLiteral("OpenChat"));
+
+            // In one: the orb, and the tooltip says so without following speech.
+            tray.setCallState(QStringLiteral("call"));
+            QColor colour = trayColour(shown.icon);
+            QVERIFY(colour.green() > colour.red() + 50 && colour.lightness() < 100);
+            QCOMPARE(shown.toolTip, QStringLiteral("OpenChat — in a call"));
+            tray.setCallState(QStringLiteral("talking"));
+            QVERIFY(trayColour(shown.icon).lightness() > colour.lightness() + 40);
+            QCOMPARE(shown.toolTip, QStringLiteral("OpenChat — in a call"));
+            tray.setCallState(QStringLiteral("muted"));
+            colour = trayColour(shown.icon);
+            QVERIFY(colour.red() > colour.green() + 80);
+            QCOMPARE(shown.toolTip, QStringLiteral("OpenChat — in a call, muted"));
+            tray.setCallState(QStringLiteral("deafened"));
+            QVERIFY(trayColour(shown.icon).hslSaturation() < 50);
+            QCOMPARE(shown.toolTip, QStringLiteral("OpenChat — in a call, deafened"));
+            tray.setCallState(QString());
+            QCOMPARE(shown.icon.cacheKey(), QGuiApplication::windowIcon().cacheKey());
+
+            // Right-click: Open, then Close.
+            QVERIFY(shown.menu);
+            QCOMPARE(shown.menu->items.size(), 2);
+            QCOMPARE(static_cast<FakeTrayMenuItem *>(shown.menu->items.at(0))->text, QStringLiteral("Open"));
+            QCOMPARE(static_cast<FakeTrayMenuItem *>(shown.menu->items.at(1))->text, QStringLiteral("Close"));
+            QSignalSpy open(&tray, &OpenChat::TrayIcon::openRequested);
+            QSignalSpy close(&tray, &OpenChat::TrayIcon::closeRequested);
+            emit shown.menu->items.at(0)->activated();
+            QCOMPARE(open.count(), 1);
+            QCOMPARE(close.count(), 0);
+            emit shown.menu->items.at(1)->activated();
+            QCOMPARE(close.count(), 1);
+        }
+        // Gone with the application.
+        QVERIFY(!shown.shown);
+    }
+
+    // A click or a double click on the icon opens the window; the right click
+    // is the menu's, and the middle click does nothing.
+    void aClickOnTheTrayIconOpensTheWindow()
+    {
+        FakeTray::Record shown;
+        auto platform = std::make_unique<FakeTray>(&shown);
+        FakeTray *fake = platform.get();
+        OpenChat::TrayIcon tray(std::move(platform));
+        QSignalSpy open(&tray, &OpenChat::TrayIcon::openRequested);
+        emit fake->activated(QPlatformSystemTrayIcon::Trigger);
+        emit fake->activated(QPlatformSystemTrayIcon::DoubleClick);
+        QCOMPARE(open.count(), 2);
+        emit fake->activated(QPlatformSystemTrayIcon::Context);
+        emit fake->activated(QPlatformSystemTrayIcon::MiddleClick);
+        QCOMPARE(open.count(), 2);
+    }
+
+    void theWindowDrivesItsTrayIcon()
+    {
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::CallController callController;
+        FakeTray::Record shown;
+        OpenChat::TrayIcon tray(std::make_unique<FakeTray>(&shown));
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)},
+             {QStringLiteral("tray"), QVariant::fromValue(&tray)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        // The icon follows the call.
+        QCOMPARE(tray.callState(), QString());
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, true);
+        QCOMPARE(tray.callState(), QStringLiteral("talking"));
+        callController.setPreviewMuted(true);
+        QCOMPARE(tray.callState(), QStringLiteral("muted"));
+
+        // Open brings the hidden window back; Close quits the application.
+        window->hide();
+        emit tray.openRequested();
+        QTRY_VERIFY(window->isVisible());
+        QSignalSpy quit(&engine, &QQmlEngine::quit);
+        emit tray.closeRequested();
+        QCOMPARE(quit.count(), 1);
+    }
+
+    void theTrayShowsAnOrbOnlyWhileInAVoiceCall()
+    {
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::CallController callController;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        const auto trayState = [root] { return root->property("trayCallState").toString(); };
+
+        // Only the application has a tray; a preview never closes into one.
+        QVERIFY(root->property("tray").value<QObject *>() == nullptr);
+
+        QCOMPARE(trayState(), QString());
+        // Ringing is not being in the call yet.
+        callController.enableForPreview(OpenChat::CallState::Ringing, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QCOMPARE(trayState(), QString());
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), true, false);
+        QCOMPARE(trayState(), QStringLiteral("call"));
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, true);
+        QCOMPARE(trayState(), QStringLiteral("talking"));
+        // Muted outranks talking: the orb says nobody hears it.
+        callController.setPreviewMuted(true);
+        QCOMPARE(trayState(), QStringLiteral("muted"));
+        callController.setPreviewMuted(false);
+        QCOMPARE(trayState(), QStringLiteral("talking"));
+        // The call's ended surface is no longer a voice chat.
+        callController.enableForPreview(OpenChat::CallState::Ended, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QCOMPARE(trayState(), QString());
+    }
+
+    void closingTheWindowHidesItIntoTheTrayUntilTheApplicationQuits()
+    {
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        const bool quitOnLastWindowClosed = QGuiApplication::quitOnLastWindowClosed();
+        {
+            OpenChat::CloseToTray closeToTray(window);
+            // Another window closing must not end an application whose main
+            // window is out of sight in the tray.
+            QVERIFY(!QGuiApplication::quitOnLastWindowClosed());
+
+            // Closed, the window is only hidden: still there to come back.
+            QVERIFY(!window->close());
+            QVERIFY(!window->isVisible());
+            QVERIFY(window->handle() != nullptr);
+
+            // Qt closes every window on its way out, and a quit must never be
+            // refused by a window hiding itself.
+            window->show();
+            QEvent quit(QEvent::Quit);
+            QVERIFY(!closeToTray.eventFilter(QCoreApplication::instance(), &quit));
+            QVERIFY(window->close());
+            QVERIFY(!window->isVisible());
+
+            // A quit that something else cancelled leaves it closing to the tray.
+            QCoreApplication::processEvents();
+            window->show();
+            QVERIFY(QTest::qWaitForWindowExposed(window));
+            QVERIFY(!window->close());
+            QVERIFY(!window->isVisible());
+        }
+        QCOMPARE(QGuiApplication::quitOnLastWindowClosed(), quitOnLastWindowClosed);
+    }
+
+    void theWindowComesBackFromTheTrayAsItWasLeft()
+    {
+        OpenChat::ChatController chatController;
+        chatController.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::CallController callController;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        const auto bringToFront = [window] {
+            QVERIFY(QMetaObject::invokeMethod(window, "bringToFront"));
+        };
+
+        // Maximised, hidden into the tray, and opened again: still maximised.
+        window->showMaximized();
+        QTRY_COMPARE(window->visibility(), QWindow::Maximized);
+        window->hide();
+        QVERIFY(!window->isVisible());
+        bringToFront();
+        QVERIFY(window->isVisible());
+        QTRY_COMPARE(window->visibility(), QWindow::Maximized);
+
+        // Minimised to the taskbar, it comes back up as well.
+        window->showNormal();
+        QTRY_COMPARE(window->visibility(), QWindow::Windowed);
+        window->showMinimized();
+        QTRY_COMPARE(window->visibility(), QWindow::Minimized);
+        bringToFront();
+        QTRY_COMPARE(window->visibility(), QWindow::Windowed);
+
+        // A call that rings while the window is in the tray brings it back.
+        window->hide();
+        callController.enableForPreview(OpenChat::CallState::Ringing, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QTRY_VERIFY(window->isVisible());
     }
 };
 

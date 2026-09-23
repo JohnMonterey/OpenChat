@@ -24,10 +24,10 @@ Item {
     // only for now). Empty means the classic bubble.
     property string bubbleSkin: outgoing ? AppearanceSettings.bubbleSkin : ""
     readonly property real senderHeight: showSender ? 18 : 0
-    readonly property real maximumBubbleWidth: Math.min(360, width * 0.68)
-    readonly property real directionalLimit: outgoing
-        ? Math.min(338, maximumBubbleWidth)
-        : Math.min(290, maximumBubbleWidth)
+    // A bubble hugs its text and only widens for a longer message: up to most
+    // of the pane, but never past about eighty characters a line. Text that
+    // wraps sizes the bubble by its widest line, not by the limit.
+    readonly property real maximumBubbleWidth: Math.min(720, width * 0.72)
     readonly property real bubbleTailWidth: 9
     readonly property real bodyLeadingInset: outgoing ? 0 : bubbleTailWidth
     readonly property real bodyTrailingInset: outgoing ? bubbleTailWidth : 0
@@ -37,9 +37,8 @@ Item {
     readonly property real horizontalContentInset: contentLeftInset + contentRightInset
     readonly property real preferredBubbleWidth: kind === 1
         ? 158
-        : Math.min(directionalLimit,
-                   Math.max(naturalMessageBody.implicitWidth + horizontalContentInset,
-                            messageTime.implicitWidth + horizontalContentInset))
+        : Math.max(messageBody.paintedWidth + horizontalContentInset,
+                   messageTime.implicitWidth + horizontalContentInset)
     readonly property real bubbleWidth: Math.min(maximumBubbleWidth, preferredBubbleWidth)
     readonly property real bubbleHeight: kind === 1
         ? 54
@@ -200,7 +199,7 @@ Item {
         width: delegateRoot.kind === 1
             ? bubble.width - messageTime.implicitWidth - (delegateRoot.outgoing ? 49 : 58)
             : Math.min(naturalMessageBody.implicitWidth,
-                       bubble.width - delegateRoot.horizontalContentInset)
+                       delegateRoot.maximumBubbleWidth - delegateRoot.horizontalContentInset)
         text: delegateRoot.body
         color: bubble.skinned ? bubble.skinTextColor : Theme.textPrimary
         style: bubble.skinned ? Text.Raised : Text.Normal

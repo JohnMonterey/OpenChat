@@ -2040,30 +2040,49 @@ private slots:
         component.loadFromModule("OpenChat", "MessageDelegate");
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
 
-        const auto bubbleWidth = [&component](const QString &body) {
+        const auto bubbleWidth = [&component](const QString &body, qreal paneWidth = 540) {
             QScopedPointer<QObject> delegate(component.createWithInitialProperties(
                 {{QStringLiteral("deliveryState"), 0},
-             {QStringLiteral("direction"), 0},
+                 {QStringLiteral("direction"), 0},
                  {QStringLiteral("body"), body},
                  {QStringLiteral("timestamp"), QStringLiteral("10:15 AM")},
                  {QStringLiteral("kind"), 0},
                  {QStringLiteral("dateLabel"), QStringLiteral("May 24, 2010")},
                  {QStringLiteral("showDateDivider"), false},
-             {QStringLiteral("senderName"), QString()},
-                 {QStringLiteral("width"), 540}}));
+                 {QStringLiteral("senderName"), QString()},
+                 {QStringLiteral("width"), paneWidth}}));
             return delegate ? delegate->property("bubbleWidth").toDouble() : -1.0;
         };
 
         const qreal shortWidth = bubbleWidth(QStringLiteral("Hi"));
         const qreal referenceWidth = bubbleWidth(QStringLiteral("Hey Daniel!"));
-        const qreal wrappedWidth = bubbleWidth(
+        const qreal sentenceWidth = bubbleWidth(
             QStringLiteral("Pretty good, just working on some stuff. You?"));
         QVERIFY(shortWidth >= 70.0);
         QVERIFY(shortWidth < 100.0);
         QVERIFY(shortWidth < referenceWidth);
-        QVERIFY(referenceWidth < wrappedWidth);
-        QVERIFY(wrappedWidth <= 360.0);
-        QVERIFY(wrappedWidth <= 540.0 * 0.68);
+        QVERIFY(referenceWidth < sentenceWidth);
+
+        // A wider pane leaves short messages alone and lets a long one run
+        // past the old 360px cap, up to a readable line length.
+        const QString paragraph = QStringLiteral(
+            "Pretty good, just working on some stuff. The crash report came back with "
+            "a full stack trace this time, so I can finally see where it goes wrong.");
+        QCOMPARE(bubbleWidth(QStringLiteral("Hi"), 1600), shortWidth);
+        QCOMPARE(bubbleWidth(QStringLiteral("Hey Daniel!"), 1600), referenceWidth);
+        const qreal wideParagraphWidth = bubbleWidth(paragraph, 1600);
+        QVERIFY2(wideParagraphWidth > 600.0, qPrintable(QString::number(wideParagraphWidth)));
+        QVERIFY(wideParagraphWidth <= 720.0);
+
+        // A narrow pane still wraps it within most of its width.
+        QVERIFY(bubbleWidth(paragraph) <= 540.0 * 0.72);
+
+        // Wrapped text sizes the bubble by its widest line: two words that
+        // cannot share a line leave no slack beside either.
+        const QString word(30, QLatin1Char('m'));
+        const qreal wordWidth = bubbleWidth(word, 1600);
+        QVERIFY2(wordWidth > 720.0 / 2 && wordWidth < 720.0, qPrintable(QString::number(wordWidth)));
+        QCOMPARE(bubbleWidth(word + QLatin1Char(' ') + word, 1600), wordWidth);
     }
 
     void onboardingScreensDriveController()

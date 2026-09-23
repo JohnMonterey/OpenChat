@@ -4,6 +4,7 @@ import OpenChat
 Item {
     id: control
     property bool checked: false
+    property string accessibleName: "Dark mode"
     signal toggled(bool checked)
     implicitWidth: 54
     implicitHeight: 30
@@ -11,7 +12,7 @@ Item {
     height: implicitHeight
     activeFocusOnTab: true
     Accessible.role: Accessible.CheckBox
-    Accessible.name: "Dark mode"
+    Accessible.name: control.accessibleName
     Accessible.checkable: true
     Accessible.checked: checked
     Accessible.onToggleAction: control.toggled(!control.checked)

@@ -573,6 +573,8 @@ add_library(openchat_call STATIC
     src/call/CallVideoSession.cpp
     src/call/CallScreenSession.cpp
     src/call/ScreenVideoCodec.cpp
+    src/call/ScreenAudio.cpp
+    src/call/ScreenAudioCapture.cpp
     src/call/QtVideoCapture.cpp
     src/call/QtScreenCapture.cpp
     src/call/VideoFrameCopy.cpp
@@ -582,8 +584,33 @@ target_include_directories(openchat_call PUBLIC src)
 target_link_libraries(openchat_call
     PUBLIC openchat_media openchat_network openchat_domain openchat_effects
            Qt6::Core Qt6::Gui Qt6::Multimedia
-    PRIVATE OpenSSL::Crypto openchat_vpx
+    PRIVATE OpenSSL::Crypto openchat_vpx openchat_opus
 )
+
+# A screen share's sound: what the computer plays, minus OpenChat's own
+# output. See src/call/ScreenAudioCapture.h. Windows uses WASAPI process
+# loopback; Linux the PulseAudio client library (PipeWire serves it too);
+# anything else shares screens without sound.
+if(WIN32)
+    target_sources(openchat_call PRIVATE src/call/ScreenAudioCaptureWin.cpp)
+    target_link_libraries(openchat_call PRIVATE ole32 uuid)
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(OPENCHAT_PULSE_PC QUIET IMPORTED_TARGET libpulse)
+    endif()
+    if(OPENCHAT_PULSE_PC_FOUND AND NOT APPLE)
+        target_sources(openchat_call PRIVATE src/call/ScreenAudioCapturePulse.cpp)
+        target_link_libraries(openchat_call PRIVATE PkgConfig::OPENCHAT_PULSE_PC)
+        message(STATUS "OpenChat: screen shares carry sound through libpulse ${OPENCHAT_PULSE_PC_VERSION}")
+    else()
+        target_sources(openchat_call PRIVATE src/call/ScreenAudioCaptureNone.cpp)
+        if(NOT APPLE)
+            message(WARNING "OpenChat: libpulse not found; screen shares will have no sound. "
+                            "Install the PulseAudio client library (pkg-config 'libpulse').")
+        endif()
+    endif()
+endif()
 
 # Screen capture through the operating system's own API where Qt's cannot be
 # relied on: the Windows Qt ships no FFmpeg backend (so no QScreenCapture at
@@ -1055,6 +1082,18 @@ add_test(NAME tst_crashreport COMMAND tst_crashreport)
 add_executable(tst_screenvideo tests/tst_screenvideo.cpp)
 target_link_libraries(tst_screenvideo PRIVATE openchat_call Qt6::Gui Qt6::Test)
 add_test(NAME tst_screenvideo COMMAND tst_screenvideo)
+
+add_executable(tst_screenaudio tests/tst_screenaudio.cpp)
+target_link_libraries(tst_screenaudio PRIVATE openchat_call Qt6::Test)
+if(OPENCHAT_PULSE_PC_FOUND AND NOT APPLE AND NOT WIN32)
+    pkg_check_modules(OPENCHAT_PULSE_SIMPLE_PC QUIET IMPORTED_TARGET libpulse-simple)
+    if(OPENCHAT_PULSE_SIMPLE_PC_FOUND)
+        target_compile_definitions(tst_screenaudio PRIVATE OPENCHAT_TEST_PULSE=1)
+        target_link_libraries(tst_screenaudio PRIVATE PkgConfig::OPENCHAT_PULSE_SIMPLE_PC
+                                                      PkgConfig::OPENCHAT_PULSE_PC)
+    endif()
+endif()
+add_test(NAME tst_screenaudio COMMAND tst_screenaudio)
 
 add_executable(tst_screenshare tests/tst_screenshare.cpp)
 target_link_libraries(tst_screenshare PRIVATE openchat_call Qt6::Gui Qt6::Test)

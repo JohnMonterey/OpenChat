@@ -52,6 +52,10 @@ struct CallMediaKeySchedule final {
     // entitled to be using for its own screen at the same moment.
     [[nodiscard]] static std::optional<CallMediaKeySchedule>
     deriveScreenFeedback(QByteArrayView secret, const CallId &callId);
+    // The sound of a shared screen: a fifth stream, numbered from zero like
+    // the others, so a fifth domain.
+    [[nodiscard]] static std::optional<CallMediaKeySchedule>
+    deriveScreenAudio(QByteArrayView secret, const CallId &callId);
 
     // The pair this end uses, given which side of the call it is on.
     [[nodiscard]] const CallMediaKeys &sendKeys(CallDirection direction) const noexcept;

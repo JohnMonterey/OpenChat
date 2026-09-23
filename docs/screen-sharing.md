@@ -16,6 +16,9 @@ incoming share appears by itself on a stage below the participants, in the same
 `CallVideoItem` the camera tiles use, and disappears the moment it stops. In a
 group, one member's share holds the stage until they stop; the next takes it.
 
+A share carries the computer's sound too, unless **Share sound** in the picker is
+switched off (remembered between shares). See [Sound](#sound).
+
 ## A video stream, not re-sent squares
 
 Screen sharing is a VP9 video stream (`src/call/ScreenVideoCodec`), in libvpx's
@@ -253,6 +256,61 @@ never sequenced and never acknowledged. **No new envelope kind was added, so no
 relay redeployment is needed.** The relay routes opaque sealed bytes and cannot
 read, let alone re-encode, a single pixel.
 
+## Sound
+
+What the sharer's computer plays (a video, a game, music) goes out beside the
+picture, and the far end hears it in stereo on top of the call. OpenChat's own
+output is never captured. That output is the other people in the call, and
+capturing it would send each of them their own voice back a moment late.
+
+**Capturing** (`src/call/ScreenAudioCapture.h`, one file per platform):
+
+- **Windows**: WASAPI process loopback (Windows 10 2004 and later). A screen
+  share captures every process except OpenChat's process tree. A window share
+  captures only the tree of the process that owns the window, which covers a
+  browser's separate audio process. Exceptions: a window of OpenChat itself,
+  or of a Store app (whose window belongs to the frame host), shares
+  everything but OpenChat instead. Older Windows shares without sound and says
+  why. `OPENCHAT_SCREEN_AUDIO=endpoint` switches to the whole-output loopback
+  for testing only. It captures the call too, so nothing picks it otherwise.
+- **Linux**: the PulseAudio client API, which PipeWire's pulse server speaks.
+  The output's monitor cannot be used, because it contains OpenChat's playback.
+  Instead, every application stream except those whose `application.process.id`
+  is OpenChat's gets its own monitor stream, and they are summed. Streams are
+  followed as applications start, stop and move between outputs. A Wayland
+  client cannot tell which application owns a window, so a window share carries
+  the same sound as a screen share.
+- **macOS**: not yet; the picker says so.
+
+Whatever the platform hands over, and however irregular its pieces, becomes one
+20 ms stereo frame every 20 ms (`ScreenAudioFramer`). Each source keeps a 40 ms
+cushion. A source running ahead of the clock is trimmed back rather than
+allowed to build up delay. Silence is sent too, so the far end hears the
+share's sound as on until it actually stops.
+
+**Sending.** Stereo Opus at 128 kbit/s in music mode (`ScreenAudioEncoder`),
+encoded once and sealed per peer under its own key domain
+(`openchat/call/v1/screenaudio/...`). Wire version `5` uses the voice frame's
+header: version, flags, call id, sequence, then the sealed Opus packet. At about
+300 bytes a packet it takes the UDP path when there is one, like voice, and
+bypasses the picture's pacer. Muting the microphone does not mute the share's
+sound. The sound starts and stops with the share, and **Share sound** turns it
+on and off mid-share.
+
+**Receiving.** Each peer's `ScreenAudioSession` opens, reorders (a jitter buffer
+starting at 120 ms, about what the picture takes to arrive) and decodes. The
+`ScreenAudioMixer` sums every share arriving with sound, and the speaker pulls
+it once per frame, right after the voices, through `pullStereoOverlay`. The
+playback pump adds it to the stereo output after the call's mono has been
+widened. A share's stop notice cuts its sound at once. Sound that stopped for
+over a second starts afresh, rather than replaying the tail left in the buffer.
+
+**On screen.** The received share shows a speaker in its corner while sound is
+arriving. Clicking it mutes; hovering shows a volume slider (the volume is
+remembered). Your own preview's caption reads "· with sound" while sound goes
+out. If sound could not start, a note under the call controls says why and the
+picture carries on.
+
 ## Wire format
 
 A VP9 share uses version byte `4` on the same header, with the same keys and
@@ -401,6 +459,25 @@ nothing about a running share.
 
 ## Validation
 
+- `tst_screenaudio`:
+  - A tone on the left comes out on the left, at least 26 dB clear of the
+    right.
+  - Replayed, tampered, wrong-version, wrong-call, reflected and voice-keyed
+    packets are refused.
+  - Sound that stops stops being active, and the mixer follows the volume.
+  - The framer keeps one frame per 20 ms through bursts and gaps, trims a source
+    that runs ahead, and sums sources.
+  - 44.1 kHz float mono converts to 48 kHz stereo at the same pitch.
+  - `ownPlaybackIsNeverCapturedButOthersIs`, against a real sound server:
+    OpenChat's own tone is never captured, and another program's is. Point
+    `OPENCHAT_TEST_PULSE_SINK` at a null sink to run it (`pactl load-module
+    module-null-sink sink_name=...`). With the process check disabled it fails
+    ("captured our own tone at 16383").
+- `tst_callengine::aSharesSoundReachesThePeerInStereoAndStopsWithIt` and
+  `tst_groupcall::aSharesSoundIsEncodedOnceAndHeardByEveryMember`: the engine's
+  send and receive halves, one-to-one and in a mesh.
+- `OpenChat --screen-share-check` ends with the sound: three seconds through the
+  same capture a call uses, with the frame count and the loudest level.
 - `tst_screenvideo`: colour survives the trip through I420, and a larger source
   is scaled into it. A scrolling desktop survives encode and decode (above
   28 dB). The first frame is the only keyframe until one is asked for. The

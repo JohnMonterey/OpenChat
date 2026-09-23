@@ -397,6 +397,7 @@ Item {
         width: parent.width - 40
         spacing: 3
         visible: cameraErrorText.visible || screenShareErrorText.visible
+                 || screenAudioErrorText.visible
 
         Text {
             id: cameraErrorText
@@ -421,6 +422,23 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             color: Theme.declineBottom
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+        }
+
+        // The picture carries on without the sound, so this is a note rather
+        // than an alarm.
+        Text {
+            id: screenAudioErrorText
+            objectName: "screenAudioErrorText"
+            width: parent.width
+            visible: text.length > 0 && callHeader.controller.screenShareEnabled === true
+            text: callHeader.controller.screenAudioError !== undefined
+                  && callHeader.controller.screenAudioError.length > 0
+                  ? "Sharing without sound: " + callHeader.controller.screenAudioError : ""
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            color: Theme.textSecondary
             font.family: Theme.uiFont
             font.pixelSize: 12
         }

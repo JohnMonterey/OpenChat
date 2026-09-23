@@ -187,6 +187,60 @@ Item {
                 }
             }
 
+            // Whether the share carries what this computer plays. Remembered
+            // from one share to the next; unavailable machines say why.
+            Row {
+                id: soundRow
+                objectName: "screenShareSoundRow"
+                width: parent.width
+                spacing: 10
+                readonly property bool available: picker.controller !== null
+                                                  && picker.controller.screenAudioAvailable === true
+
+                AeroSwitch {
+                    id: soundSwitch
+                    objectName: "screenShareSoundSwitch"
+                    anchors.verticalCenter: parent.verticalCenter
+                    accessibleName: "Share sound"
+                    enabled: soundRow.available
+                    opacity: enabled ? 1 : 0.5
+                    checked: soundRow.available && picker.controller.shareScreenAudio === true
+                    onToggled: value => {
+                        if (picker.controller)
+                            picker.controller.shareScreenAudio = value;
+                    }
+                }
+
+                Column {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - soundSwitch.width - parent.spacing
+                    spacing: 1
+
+                    Text {
+                        width: parent.width
+                        text: "Share sound"
+                        color: soundRow.available ? Theme.textPrimary : Theme.textSecondary
+                        font.family: Theme.uiFont
+                        font.pixelSize: 13
+                        renderType: Text.NativeRendering
+                    }
+
+                    Text {
+                        objectName: "screenShareSoundNote"
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        text: soundRow.available
+                              ? "What this computer plays goes out with the picture. OpenChat's "
+                                + "own sound, the call itself, never does."
+                              : (picker.controller ? picker.controller.screenAudioUnavailableReason : "")
+                        color: Theme.textSecondary
+                        font.family: Theme.uiFont
+                        font.pixelSize: 11
+                        renderType: Text.NativeRendering
+                    }
+                }
+            }
+
             Row {
                 anchors.right: parent.right
                 spacing: 10

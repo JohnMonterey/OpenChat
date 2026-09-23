@@ -43,10 +43,12 @@ void SyncCallTransport::sendSignal(const ConversationId &conversation,
 void SyncCallTransport::sendMedia(const ConversationId &conversation,
                                   const DeviceId &recipientDevice, const QByteArray &packet)
 {
-    // Voice only: wire version byte 1, negotiated codec must be Opus so packets stay ≈230 B (<= 1400 B).
-    // Camera (v2) and screen (v3) packets — 64–96 KiB — stay on the WS path.
-    if (m_udpMediaPath && !packet.isEmpty() && static_cast<quint8>(packet.at(0)) == 1
-        && packet.size() <= 1400) {
+    // Voice (wire version 1) and a shared screen's sound (version 5): small,
+    // steady and late-intolerant, so they take the UDP path when there is one.
+    // Camera (v2) and screen picture (v3, v4) packets — up to 96 KiB — stay on
+    // the WebSocket path.
+    const quint8 version = packet.isEmpty() ? 0 : static_cast<quint8>(packet.at(0));
+    if (m_udpMediaPath && (version == 1 || version == 5) && packet.size() <= 1400) {
         if (m_udpMediaPath->sendMedia(recipientDevice, packet))
             return;
     }

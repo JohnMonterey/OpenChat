@@ -4238,6 +4238,33 @@ private slots:
         QVERIFY(caption);
         QCOMPARE(caption->property("text").toString(), QStringLiteral("Jessica's screen"));
 
+        // Sound controls appear only while the share is arriving with sound.
+        auto *sound = root->findChild<QQuickItem *>(QStringLiteral("remoteScreenSoundControls"));
+        auto *speaker = root->findChild<QQuickItem *>(QStringLiteral("remoteScreenSoundButton"));
+        auto *volume = root->findChild<QQuickItem *>(QStringLiteral("remoteScreenVolume"));
+        QVERIFY(sound && speaker && volume);
+        QVERIFY2(!sound->isVisible(), "sound controls showed for a share without sound");
+        callController.setPreviewRemoteScreenAudio(true);
+        QCoreApplication::processEvents();
+        QVERIFY2(sound->isVisible(), "a share arriving with sound showed no way to mute it");
+        QCOMPARE(speaker->property("icon").toString(), QStringLiteral("speaker"));
+        // The speaker mutes, and shows it; muting keeps the controls up.
+        QVERIFY(QMetaObject::invokeMethod(speaker, "clicked"));
+        QCoreApplication::processEvents();
+        QVERIFY(callController.screenAudioMuted());
+        QCOMPARE(speaker->property("icon").toString(), QStringLiteral("speakerMuted"));
+        QVERIFY(sound->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(speaker, "clicked"));
+        QVERIFY(!callController.screenAudioMuted());
+        // The slider moves the volume, and follows it.
+        QVERIFY(QMetaObject::invokeMethod(volume, "moved", Q_ARG(double, 0.4)));
+        QCOMPARE(callController.screenAudioVolume(), 0.4);
+        QCOMPARE(volume->property("value").toDouble(), 0.4);
+        callController.setScreenAudioVolume(1.0);
+        callController.setPreviewRemoteScreenAudio(false);
+        QCoreApplication::processEvents();
+        QVERIFY(!sound->isVisible());
+
         // Stopping takes the stage down with it and lets go of the pixels.
         std::weak_ptr<OpenChat::ScreenCanvas> observer = canvas;
         callController.setPreviewScreenShare({}, QString());
@@ -4283,6 +4310,27 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(picker, "show"));
         QCoreApplication::processEvents();
         QVERIFY2(picker->isVisible(), "the picker did not open");
+
+        // The sound switch reflects, sets and remembers the choice, or is off
+        // and says why on a machine that cannot share sound.
+        auto *soundSwitch = root->findChild<QQuickItem *>(QStringLiteral("screenShareSoundSwitch"));
+        auto *soundNote = root->findChild<QQuickItem *>(QStringLiteral("screenShareSoundNote"));
+        QVERIFY(soundSwitch && soundNote);
+        QVERIFY(!soundNote->property("text").toString().isEmpty());
+        if (callController.screenAudioAvailable()) {
+            QVERIFY(soundSwitch->isEnabled());
+            const bool before = callController.shareScreenAudio();
+            QCOMPARE(soundSwitch->property("checked").toBool(), before);
+            QVERIFY(QMetaObject::invokeMethod(soundSwitch, "toggled", Q_ARG(bool, !before)));
+            QCOMPARE(callController.shareScreenAudio(), !before);
+            QCOMPARE(soundSwitch->property("checked").toBool(), !before);
+            QCOMPARE(QSettings().value(QStringLiteral("Calls/shareScreenAudio")).toBool(), !before);
+            callController.setShareScreenAudio(before);
+        } else {
+            QVERIFY(!soundSwitch->isEnabled());
+            QCOMPARE(soundNote->property("text").toString(),
+                     callController.screenAudioUnavailableReason());
+        }
 
         auto *list = root->findChild<QQuickItem *>(QStringLiteral("screenSourceList"));
         QVERIFY(list);

@@ -3,6 +3,7 @@
 #include "call/CallEngine.h"
 #include "call/CallTypes.h"
 #include "call/QtScreenCapture.h"
+#include "call/ScreenAudioCapture.h"
 #include "call/QtVideoCapture.h"
 #include "models/CallParticipantModel.h"
 
@@ -71,6 +72,23 @@ class CallController final : public QObject
     // going out, nowhere near the resolution it is going out at.
     Q_PROPERTY(QImage localScreenPreview READ localScreenPreview NOTIFY localScreenChanged)
     Q_PROPERTY(double remoteScreenAspect READ remoteScreenAspect NOTIFY remoteScreenChanged)
+    // A share's sound. Whether this machine can send it at all (and if not,
+    // why), whether the next share should (remembered), whether the share
+    // going out carries it now, and what went wrong if starting it failed —
+    // the picture carries on without it.
+    Q_PROPERTY(bool screenAudioAvailable READ screenAudioAvailable CONSTANT)
+    Q_PROPERTY(QString screenAudioUnavailableReason READ screenAudioUnavailableReason CONSTANT)
+    Q_PROPERTY(bool shareScreenAudio READ shareScreenAudio WRITE setShareScreenAudio
+                   NOTIFY screenAudioChanged)
+    Q_PROPERTY(bool screenAudioSharing READ screenAudioSharing NOTIFY screenAudioChanged)
+    Q_PROPERTY(QString screenAudioError READ screenAudioError NOTIFY screenAudioChanged)
+    // The receiving side: whether the staged share is arriving with sound, and
+    // how loud shared sound plays here.
+    Q_PROPERTY(bool remoteScreenAudioActive READ remoteScreenAudioActive NOTIFY screenAudioChanged)
+    Q_PROPERTY(double screenAudioVolume READ screenAudioVolume WRITE setScreenAudioVolume
+                   NOTIFY screenAudioChanged)
+    Q_PROPERTY(bool screenAudioMuted READ screenAudioMuted WRITE setScreenAudioMuted
+                   NOTIFY screenAudioChanged)
     Q_PROPERTY(bool inCall READ inCall NOTIFY callChanged)
     Q_PROPERTY(bool isIncoming READ isIncoming NOTIFY callChanged)
     // True only while an incoming call is still waiting to be answered, i.e.
@@ -203,6 +221,19 @@ public:
     [[nodiscard]] bool screenShareAvailable() const noexcept;
     [[nodiscard]] bool screenShareEnabled() const noexcept { return m_screenShareEnabled; }
     [[nodiscard]] QString screenShareError() const { return m_screenShareError; }
+
+    [[nodiscard]] bool screenAudioAvailable() const;
+    [[nodiscard]] QString screenAudioUnavailableReason() const;
+    [[nodiscard]] bool shareScreenAudio() const noexcept { return m_shareScreenAudio; }
+    // Remembered for the next share, and applied to the one going out now.
+    void setShareScreenAudio(bool share);
+    [[nodiscard]] bool screenAudioSharing() const noexcept { return m_screenAudioCapture != nullptr; }
+    [[nodiscard]] QString screenAudioError() const { return m_screenAudioError; }
+    [[nodiscard]] bool remoteScreenAudioActive() const noexcept { return m_remoteScreenAudioActive; }
+    [[nodiscard]] double screenAudioVolume() const noexcept { return m_screenAudioVolume; }
+    void setScreenAudioVolume(double volume);
+    [[nodiscard]] bool screenAudioMuted() const noexcept { return m_screenAudioMuted; }
+    void setScreenAudioMuted(bool muted);
     [[nodiscard]] bool screenSharePermissionNeeded() const noexcept
     {
         return m_screenSharePermissionNeeded;
@@ -234,6 +265,8 @@ public:
     // surface without an engine, for the capture path and the QML tests. Never
     // reachable from a live session.
     void setPreviewScreenShare(const ScreenCanvasPtr &canvas, const QString &sharerName);
+    // Previews only: whether the staged share is arriving with sound.
+    void setPreviewRemoteScreenAudio(bool active);
 
     Q_INVOKABLE void dismissCall();
 
@@ -272,6 +305,7 @@ signals:
     void callChanged();
     void videoChanged();
     void screenShareChanged();
+    void screenAudioChanged();
     void remoteScreenChanged();
     void localScreenChanged();
     // Raised by toggleScreenShare() when a source still has to be chosen. The
@@ -302,11 +336,26 @@ private:
     // already there until they stop.
     void refreshGroupScreenStage();
     void onScreenFrameCaptured(const ScreenFrameView &view);
+    // Starts or stops the capture of the share's sound to match the setting
+    // and whether a share is going out.
+    void startScreenAudio();
+    void stopScreenAudio();
+    void syncRemoteScreenAudio();
+    void applyScreenAudioVolume();
     void updateScreenPreview(const ScreenFrameView &view, qint64 nowMs);
     void syncLevels();
 
     QtVideoCapture m_camera;
     QtScreenCapture m_screenCapture;
+    // The share's sound, while it is being captured. Its frames arrive on the
+    // capture's own thread and are handed to the engine on this one.
+    std::unique_ptr<ScreenAudioCapture> m_screenAudioCapture;
+    ScreenShareSource m_screenAudioSource;
+    bool m_shareScreenAudio = true;
+    QString m_screenAudioError;
+    bool m_remoteScreenAudioActive = false;
+    double m_screenAudioVolume = 1.0;
+    bool m_screenAudioMuted = false;
     QVector<ScreenShareSource> m_screenSources;
     bool m_screenShareEnabled = false;
     bool m_screenShareUnsupported = false;

@@ -6,10 +6,14 @@
 #include "diagnostics/BlackBox.h"
 
 #include <QDateTime>
+#include <QMetaObject>
 #include <QSet>
 #include <QStringList>
+#include <QSettings>
 #include <QTimer>
 #include <QVariantMap>
+
+#include <algorithm>
 
 namespace OpenChat {
 
@@ -67,6 +71,12 @@ CallController::CallController(QObject *parent)
     m_screenCapture.onFrame = [this](const ScreenFrameView &view) {
         onScreenFrameCaptured(view);
     };
+    {
+        const QSettings settings;
+        m_shareScreenAudio = settings.value(QStringLiteral("Calls/shareScreenAudio"), true).toBool();
+        m_screenAudioVolume =
+            std::clamp(settings.value(QStringLiteral("Calls/screenAudioVolume"), 1.0).toDouble(), 0.0, 1.0);
+    }
     connect(&m_screenCapture, &QtScreenCapture::failed, this,
             [this](const QString &message, bool permanent) {
                 if (permanent)
@@ -471,12 +481,24 @@ void CallController::startScreenShare(int sourceIndex)
     m_lastPreviewMs = 0;
     m_appliedCaptureFps = 0;
     m_screenCapture.start(source);
+    m_screenAudioSource = source;
+    m_screenAudioError.clear();
+    if (m_shareScreenAudio)
+        startScreenAudio();
     emit screenShareChanged();
+    emit screenAudioChanged();
 }
 
 void CallController::stopScreenShare()
 {
     const bool wasEnabled = m_screenShareEnabled;
+    // The sound first: its thread is joined, so no frame of it can reach the
+    // engine after the share has been torn down.
+    const bool hadSound = m_screenAudioCapture != nullptr;
+    stopScreenAudio();
+    m_screenAudioSource = ScreenShareSource();
+    if (hadSound)
+        emit screenAudioChanged();
     // The capture goes down before the engine is told, so no frame can arrive
     // for a session that is already releasing its buffers.
     m_screenCapture.stop();
@@ -490,6 +512,125 @@ void CallController::stopScreenShare()
         emit localScreenChanged();
         emit screenShareChanged();
     }
+}
+
+bool CallController::screenAudioAvailable() const
+{
+    return ScreenAudioCapturePlatform::isSupported();
+}
+
+QString CallController::screenAudioUnavailableReason() const
+{
+    return ScreenAudioCapturePlatform::unsupportedReason();
+}
+
+void CallController::setShareScreenAudio(bool share)
+{
+    if (share == m_shareScreenAudio)
+        return;
+    m_shareScreenAudio = share;
+    QSettings().setValue(QStringLiteral("Calls/shareScreenAudio"), share);
+    if (m_screenShareEnabled) {
+        if (share) {
+            m_screenAudioError.clear();
+            startScreenAudio();
+        } else {
+            stopScreenAudio();
+        }
+    }
+    emit screenAudioChanged();
+}
+
+void CallController::startScreenAudio()
+{
+    if (m_screenAudioCapture || !m_screenShareEnabled || m_engine == nullptr)
+        return;
+    if (!ScreenAudioCapturePlatform::isSupported()) {
+        m_screenAudioError = ScreenAudioCapturePlatform::unsupportedReason();
+        return;
+    }
+    ScreenAudioTarget target;
+    target.window = m_screenAudioSource.kind == ScreenShareSource::Kind::Window;
+    target.nativeWindow = m_screenAudioSource.native ? m_screenAudioSource.nativeId : 0;
+    std::unique_ptr<ScreenAudioCapture> capture = ScreenAudioCapturePlatform::create(target);
+    if (!capture) {
+        m_screenAudioError = QStringLiteral("This computer's sound cannot be shared.");
+        return;
+    }
+    // Frames arrive on the capture's thread; the engine is this thread's.
+    // A frame still queued when the sound stops finds no capture and is
+    // dropped.
+    capture->onFrame = [this](const StereoFrame &frame) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, frame] {
+                if (m_engine != nullptr && m_screenAudioCapture)
+                    m_engine->sendScreenAudioFrame(frame);
+            },
+            Qt::QueuedConnection);
+    };
+    QString failure;
+    if (!capture->start(failure)) {
+        m_screenAudioError = failure;
+        return;
+    }
+    m_screenAudioError.clear();
+    m_screenAudioCapture = std::move(capture);
+    m_engine->setScreenAudioSharing(true);
+}
+
+void CallController::stopScreenAudio()
+{
+    if (!m_screenAudioCapture)
+        return;
+    std::unique_ptr<ScreenAudioCapture> capture = std::move(m_screenAudioCapture);
+    capture->stop();
+    capture.reset();
+    if (m_engine != nullptr)
+        m_engine->setScreenAudioSharing(false);
+}
+
+void CallController::setScreenAudioVolume(double volume)
+{
+    const double clamped = std::clamp(volume, 0.0, 1.0);
+    if (qFuzzyCompare(clamped + 1.0, m_screenAudioVolume + 1.0))
+        return;
+    m_screenAudioVolume = clamped;
+    QSettings().setValue(QStringLiteral("Calls/screenAudioVolume"), clamped);
+    applyScreenAudioVolume();
+    emit screenAudioChanged();
+}
+
+void CallController::setScreenAudioMuted(bool muted)
+{
+    if (muted == m_screenAudioMuted)
+        return;
+    m_screenAudioMuted = muted;
+    applyScreenAudioVolume();
+    emit screenAudioChanged();
+}
+
+void CallController::applyScreenAudioVolume()
+{
+    if (m_engine != nullptr)
+        m_engine->setScreenAudioVolume(m_screenAudioMuted ? 0.0 : m_screenAudioVolume);
+}
+
+void CallController::syncRemoteScreenAudio()
+{
+    bool active = false;
+    if (m_engine != nullptr && m_remoteScreen) {
+        if (m_remoteScreenDevice.isEmpty()) {
+            active = m_engine->isRemoteScreenAudioActive();
+        } else if (const auto device =
+                       DeviceId::fromBytes(QByteArray::fromHex(m_remoteScreenDevice.toLatin1()))) {
+            active = m_engine->isParticipantScreenAudioActive(*device);
+        }
+    }
+    if (active == m_remoteScreenAudioActive)
+        return;
+    m_remoteScreenAudioActive = active;
+    emit screenAudioChanged();
 }
 
 void CallController::openScreenSharePermissionSettings()
@@ -539,6 +680,7 @@ void CallController::setRemoteScreen(const ScreenCanvasPtr &canvas)
     emit remoteScreenChanged();
     if (wasActive != (canvas != nullptr))
         emit screenShareChanged();
+    syncRemoteScreenAudio();
 }
 
 void CallController::refreshGroupScreenStage()
@@ -571,6 +713,7 @@ void CallController::refreshGroupScreenStage()
     emit remoteScreenChanged();
     if (wasActive != (staged != nullptr) || stageMoved)
         emit screenShareChanged();
+    syncRemoteScreenAudio();
 }
 
 void CallController::setRemoteScreenViewSize(int width, int height)
@@ -684,6 +827,14 @@ void CallController::setPreviewScreenShare(const ScreenCanvasPtr &canvas,
     emit screenShareChanged();
 }
 
+void CallController::setPreviewRemoteScreenAudio(bool active)
+{
+    if (m_engine || active == m_remoteScreenAudioActive)
+        return;
+    m_remoteScreenAudioActive = active;
+    emit screenAudioChanged();
+}
+
 void CallController::dismissCall()
 {
     if (m_engine != nullptr)
@@ -710,6 +861,11 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
 
     connect(engine, &CallEngine::remoteVideoFrame, this, &CallController::setRemoteVideo);
     connect(engine, &CallEngine::remoteScreenFrame, this, &CallController::setRemoteScreen);
+    connect(engine, &CallEngine::screenAudioChanged, this, &CallController::syncRemoteScreenAudio);
+    // A group member's sound can start or stop while someone else's goes on,
+    // which the engine's any-sound signal does not see; the level tick does.
+    connect(engine, &CallEngine::levelsChanged, this, &CallController::syncRemoteScreenAudio);
+    applyScreenAudioVolume();
     connect(engine, &CallEngine::participantScreenFrame, this,
             [this](const DeviceId &device, const ScreenCanvasPtr &canvas) {
                 m_participants.setScreenCanvas(device.toHex(), canvas);

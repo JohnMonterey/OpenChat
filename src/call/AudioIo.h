@@ -42,6 +42,12 @@ public:
     // Installed by the call before start(). Must return exactly one full frame
     // every time it is called; the call's session guarantees that.
     std::function<AudioFrame()> pullFrame;
+
+    // Optional, and called once right after each pullFrame(): a stereo frame
+    // (ScreenAudioFormat, 3840 bytes) laid over the call's mono frame once
+    // that is widened to stereo. It carries shared screens' sound, the one
+    // stereo source in a call. Empty when there is none.
+    std::function<QByteArray()> pullStereoOverlay;
 };
 
 // How a call obtains its devices. Injecting this is what lets a call run with

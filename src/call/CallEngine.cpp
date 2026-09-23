@@ -46,6 +46,15 @@ constexpr int pacerTickMs = 4;
 constexpr qint64 pacerAdmissionMs = 150;
 constexpr qint64 pacerMinimumAdmissionBytes = 48 * 1024;
 
+[[nodiscard]] bool isScreenAudioPacket(const QByteArray &packet)
+{
+    return !packet.isEmpty() && static_cast<quint8>(packet[0]) == ScreenAudioSession::wireVersion;
+}
+
+// The mixer's key for the one-to-one peer; group members are keyed by their
+// device id.
+const QByteArray peerAudioKey = QByteArrayLiteral("peer");
+
 [[nodiscard]] bool isScreenPacket(const QByteArray &packet)
 {
     if (packet.isEmpty())
@@ -168,6 +177,7 @@ CallEngine::CallEngine(Config config, CallTransport &transport, CallAudioIoFacto
     m_levelTimer->setInterval(levelRefreshMs);
     connect(m_levelTimer, &QTimer::timeout, this, [this] {
         refreshParticipantLevels();
+        refreshScreenAudioActivity();
         emit levelsChanged();
     });
 
@@ -1311,12 +1321,21 @@ void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sen
     if (!m_session || sender != m_peer.device || conversation != m_peer.conversation)
         return;
 
+    if (isScreenAudioPacket(packet)) {
+        if (m_screenAudio)
+            (void)m_screenAudio->receive(packet);
+        return;
+    }
     if (isScreenPacket(packet)) {
         if (!m_screenSession)
             return;
         qint64 lastSeenMs = 0;
         const ScreenPacketOutcome outcome =
             handleScreenPacket(*m_screenSession, packet, m_remoteScreenActive, lastSeenMs);
+        // A share that ended takes its sound with it at once, rather than
+        // playing out what is still buffered.
+        if (outcome.stopNotice && m_screenAudio)
+            m_screenAudio->resetReceiver();
         if (m_remoteScreenActive)
             m_screenTimeout->start(screenStaleMs);
         else
@@ -1354,11 +1373,18 @@ void CallEngine::onMedia(const ConversationId &conversation, const DeviceId &sen
 
 void CallEngine::onGroupMedia(Member &member, const QByteArray &packet)
 {
+    if (isScreenAudioPacket(packet)) {
+        if (member.screenAudio)
+            (void)member.screenAudio->receive(packet);
+        return;
+    }
     if (isScreenPacket(packet)) {
         if (!member.screen)
             return;
         const ScreenPacketOutcome outcome =
             handleScreenPacket(*member.screen, packet, member.screenOn, member.lastScreenMs);
+        if (outcome.stopNotice && member.screenAudio)
+            member.screenAudio->resetReceiver();
         if (outcome.ended || outcome.changed)
             emit participantScreenFrame(member.info.peer.device, outcome.canvas);
         return;
@@ -1395,8 +1421,11 @@ bool CallEngine::openPlayback()
     if (!m_playback)
         return false;
     m_playback->pullFrame = [this] { return pullPlaybackFrame(); };
+    // The mixer, not the engine, is what the speaker's thread holds on to.
+    m_playback->pullStereoOverlay = [mixer = m_screenAudioMixer] { return mixer->pull(); };
     if (!m_playback->start()) {
         m_playback->pullFrame = nullptr;
+        m_playback->pullStereoOverlay = nullptr;
         m_playback.reset();
         return false;
     }
@@ -1408,6 +1437,7 @@ void CallEngine::closePlayback()
     if (!m_playback)
         return;
     m_playback->pullFrame = nullptr;
+    m_playback->pullStereoOverlay = nullptr;
     m_playback->stop();
     m_playback.reset();
 }
@@ -1467,6 +1497,9 @@ bool CallEngine::startMedia()
     // so a call that never shares a screen pays for an empty object and no more.
     ensureScreenEncoder();
     m_screenSession = createScreenSession(m_sessionDirection, m_secret, std::nullopt);
+    m_screenAudio = ScreenAudioSession::create(*m_callId, m_sessionDirection, m_secret,
+                                               m_config.mediaClock);
+    m_screenAudioMixer->add(peerAudioKey, m_screenAudio);
     m_screenFeedbackTimer->start();
     m_session->setMuted(m_muted);
 
@@ -1508,6 +1541,9 @@ bool CallEngine::openMemberMedia(Member &member)
     member.video = CallVideoSession::create(*m_callId, direction, pairSecret);
     ensureScreenEncoder();
     member.screen = createScreenSession(direction, pairSecret, member.info.peer.device);
+    member.screenAudio = ScreenAudioSession::create(*m_callId, direction, pairSecret,
+                                                    m_config.mediaClock);
+    m_screenAudioMixer->add(member.info.peer.device.bytes(), member.screenAudio);
     m_screenFeedbackTimer->start();
     if (m_udpPath)
         m_udpPath->startProbing(member.info.peer.device);
@@ -1536,6 +1572,8 @@ void CallEngine::closeMemberMedia(Member &member)
         member.screenOn = false;
         emit participantScreenFrame(member.info.peer.device, {});
     }
+    m_screenAudioMixer->remove(member.info.peer.device.bytes());
+    member.screenAudio.reset();
     member.screen.reset();
     member.video.reset();
     member.session.reset();
@@ -1590,6 +1628,15 @@ void CallEngine::stopCapture()
     m_screenSharing = false;
     clearScreenOutbox();
     m_screenSession.reset();
+    m_screenAudioSharing = false;
+    m_screenAudioMixer->remove(peerAudioKey);
+    m_screenAudio.reset();
+    m_screenAudioEncoder.reset();
+    // The level timer that notices sound stopping has just stopped itself.
+    if (m_screenAudioHeard) {
+        m_screenAudioHeard = false;
+        emit screenAudioChanged();
+    }
     m_screenEncoder.reset();
     m_tileEncoder.reset();
     m_videoEncoder.reset();
@@ -1692,6 +1739,7 @@ CallEngine::ScreenPacketOutcome CallEngine::handleScreenPacket(CallScreenSession
         applyScreenEncoderPolicy();
         break;
     case CallScreenSession::Update::Kind::Stopped:
+        outcome.stopNotice = true;
         if (activeFlag) {
             activeFlag = false;
             outcome.ended = true;
@@ -1983,6 +2031,7 @@ void CallEngine::stopScreenShare()
     if (!m_screenSharing)
         return;
     m_screenSharing = false;
+    m_screenAudioSharing = false;
     // What is still waiting is a picture nobody should see any more; the
     // stop notice goes out ahead of it, straight to the transport.
     clearScreenOutbox();
@@ -2022,6 +2071,99 @@ void CallEngine::releaseScreenSender()
                 member.screen->resetSendState();
         }
     }
+}
+
+void CallEngine::setScreenAudioSharing(bool on)
+{
+    m_screenAudioSharing = on && m_screenSharing;
+    // The encoder carries state from frame to frame; a new stretch of sound
+    // starts it afresh rather than predicting from a long-gone one.
+    if (!m_screenAudioSharing)
+        m_screenAudioEncoder.reset();
+}
+
+void CallEngine::sendScreenAudioFrame(const StereoFrame &frame)
+{
+    if (!m_screenSharing || !m_screenAudioSharing || !isFullStereoFrame(frame)
+        || (m_state != CallState::Connecting && m_state != CallState::Active)
+        || !m_transport.isConnected()) {
+        return;
+    }
+    if (!m_screenAudioEncoder) {
+        m_screenAudioEncoder = std::make_unique<ScreenAudioEncoder>();
+        if (!m_screenAudioEncoder->isValid()) {
+            m_screenAudioEncoder.reset();
+            m_screenAudioSharing = false;
+            return;
+        }
+    }
+    // Encoded once, sealed per peer: every pair has its own keys.
+    const QByteArray payload = m_screenAudioEncoder->encode(frame);
+    if (payload.isEmpty())
+        return;
+    ++m_screenAudioFramesSent;
+    if (m_group) {
+        for (Member &member : m_group->members) {
+            if (!member.screenAudio)
+                continue;
+            const QByteArray packet = member.screenAudio->seal(payload);
+            if (!packet.isEmpty())
+                m_transport.sendMedia(m_group->conversation, member.info.peer.device, packet);
+        }
+        return;
+    }
+    if (!m_screenAudio)
+        return;
+    const QByteArray packet = m_screenAudio->seal(payload);
+    if (!packet.isEmpty())
+        m_transport.sendMedia(m_peer.conversation, m_peer.device, packet);
+}
+
+void CallEngine::setScreenAudioVolume(double volume)
+{
+    m_screenAudioMixer->setVolume(volume);
+}
+
+double CallEngine::screenAudioVolume() const
+{
+    return m_screenAudioMixer->volume();
+}
+
+bool CallEngine::isRemoteScreenAudioActive() const
+{
+    if (m_group) {
+        for (const Member &member : m_group->members) {
+            if (member.screenAudio && member.screenAudio->isActive())
+                return true;
+        }
+        return false;
+    }
+    return m_screenAudio && m_screenAudio->isActive();
+}
+
+bool CallEngine::isParticipantScreenAudioActive(const DeviceId &device) const
+{
+    if (!m_group)
+        return false;
+    for (const Member &member : m_group->members) {
+        if (member.info.peer.device == device)
+            return member.screenAudio && member.screenAudio->isActive();
+    }
+    return false;
+}
+
+StereoFrame CallEngine::pullScreenAudioFrame()
+{
+    return m_screenAudioMixer->pull();
+}
+
+void CallEngine::refreshScreenAudioActivity()
+{
+    const bool heard = isRemoteScreenAudioActive();
+    if (heard == m_screenAudioHeard)
+        return;
+    m_screenAudioHeard = heard;
+    emit screenAudioChanged();
 }
 
 int CallEngine::screenShareTargetFps() const

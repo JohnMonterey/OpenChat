@@ -17,6 +17,9 @@ class AppearanceSettings final : public QObject
     Q_PROPERTY(QString presenceBead READ presenceBead WRITE setPresenceBead NOTIFY presenceBeadChanged)
     Q_PROPERTY(QString nameFlair READ nameFlair WRITE setNameFlair NOTIFY nameFlairChanged)
     Q_PROPERTY(QString profileScene READ profileScene WRITE setProfileScene NOTIFY profileSceneChanged)
+    // The equipped chat-bubble skin for the local user's own messages
+    // ("bubble.aero", ...). Empty means the classic bubble. Local only.
+    Q_PROPERTY(QString bubbleSkin READ bubbleSkin WRITE setBubbleSkin NOTIFY bubbleSkinChanged)
 public:
     explicit AppearanceSettings(QObject *parent = nullptr);
     bool darkMode() const { return m_darkMode; }
@@ -30,12 +33,15 @@ public:
     void setNameFlair(const QString &id);
     QString profileScene() const { return m_profileScene; }
     void setProfileScene(const QString &id);
+    QString bubbleSkin() const { return m_bubbleSkin; }
+    void setBubbleSkin(const QString &skin);
 signals:
     void darkModeChanged();
     void avatarFrameChanged();
     void presenceBeadChanged();
     void nameFlairChanged();
     void profileSceneChanged();
+    void bubbleSkinChanged();
 private:
     void applyPalette();
     // Validates, stores and persists one equipped cosmetic; true if it changed.
@@ -46,6 +52,7 @@ private:
     QString m_presenceBead;
     QString m_nameFlair;
     QString m_profileScene;
+    QString m_bubbleSkin;
 };
 
 } // namespace OpenChat

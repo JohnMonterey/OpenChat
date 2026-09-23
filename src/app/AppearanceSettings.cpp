@@ -1,6 +1,7 @@
 #include "app/AppearanceSettings.h"
 
 #include "cosmetics/CosmeticCatalog.h"
+#include "cosmetics/BubbleSkins.h"
 
 #include <QGuiApplication>
 #include <QPalette>
@@ -33,6 +34,8 @@ AppearanceSettings::AppearanceSettings(QObject *parent) : QObject(parent)
     m_presenceBead = knownCosmetic(settings, beadKey, QStringLiteral("bead"));
     m_nameFlair = knownCosmetic(settings, flairKey, QStringLiteral("flair"));
     m_profileScene = knownCosmetic(settings, sceneKey, QStringLiteral("scene"));
+    m_bubbleSkin = settings.value(QStringLiteral("Appearance/bubbleSkin")).toString();
+    BubbleSkins::prepare(m_bubbleSkin);
     applyPalette();
 }
 
@@ -74,6 +77,18 @@ void AppearanceSettings::setProfileScene(const QString &id)
 {
     if (storeCosmetic(m_profileScene, id, QStringLiteral("scene"), sceneKey))
         emit profileSceneChanged();
+}
+
+void AppearanceSettings::setBubbleSkin(const QString &skin)
+{
+    if (skin == m_bubbleSkin)
+        return;
+    m_bubbleSkin = skin;
+    QSettings settings;
+    settings.setValue(QStringLiteral("Appearance/bubbleSkin"), skin);
+    settings.sync();
+    BubbleSkins::prepare(skin);
+    emit bubbleSkinChanged();
 }
 
 void AppearanceSettings::setDarkMode(bool enabled)

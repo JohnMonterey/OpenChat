@@ -81,7 +81,7 @@ class ChatController final : public QObject
     Q_PROPERTY(QString securityNoticeText READ securityNoticeText NOTIFY sessionStateChanged)
     Q_PROPERTY(NavSection navSection READ navSection NOTIFY navSectionChanged)
     Q_PROPERTY(int chatUnreadCount READ chatUnreadCount NOTIFY chatUnreadCountChanged)
-    Q_PROPERTY(int callMissedCount READ callMissedCount CONSTANT)
+    Q_PROPERTY(int callMissedCount READ callMissedCount NOTIFY callMissedCountChanged)
     Q_PROPERTY(int callCount READ callCount CONSTANT)
     Q_PROPERTY(QStringList settingsCategories READ settingsCategories CONSTANT)
     Q_PROPERTY(int currentSettingsCategory READ currentSettingsCategory WRITE
@@ -200,6 +200,8 @@ public:
     Q_INVOKABLE void setComposerText(const QString &text);
     Q_INVOKABLE bool sendMessage();
     Q_INVOKABLE void setSessionState(SessionState state);
+    // Opening the Call section (even when it is already open) clears the
+    // missed-call count.
     Q_INVOKABLE void setNavSection(NavSection section);
     Q_INVOKABLE void setCurrentSettingsCategory(int index);
     Q_INVOKABLE void setCurrentSettingsSubcategory(int index);
@@ -213,6 +215,8 @@ public:
     // borrowed and must outlive this controller.
     void setLiveServices(ProfileSession *session, SyncEngine *engine,
                          ContactRequestService *requests, GroupService *groups = nullptr);
+    // Counts one more missed call for the Call tab's badge.
+    void noteMissedCall();
 
     // Re-reads one contact's roster row (e.g. after its handle was resolved) and
     // refreshes its list row. Live mode only; hex is the AccountId hex.
@@ -271,6 +275,7 @@ signals:
     void navSectionChanged();
     void localOnlineChanged();
     void chatUnreadCountChanged();
+    void callMissedCountChanged();
     void currentSettingsCategoryChanged();
     void groupNoticeChanged();
     void groupCandidatesChanged();
@@ -384,6 +389,8 @@ private:
     QString m_searchQuery;
     SessionState m_sessionState = SessionState::Ready;
     NavSection m_navSection = NavSection::Chat;
+    // Calls missed since the Call section was last opened, in this run.
+    int m_callMissedCount = 0;
     // -1 denotes the root list / category overview, respectively.
     int m_currentSettingsCategory = -1;
     int m_currentSettingsSubcategory = -1;

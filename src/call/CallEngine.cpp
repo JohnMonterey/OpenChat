@@ -1864,6 +1864,9 @@ void CallEngine::endCall(CallEndReason reason, bool notifyPeer)
 {
     if (m_state == CallState::Idle || m_state == CallState::Ended)
         return;
+    // Declining and hanging up are answers; a superseded offer rings again.
+    const bool missed = m_direction == CallDirection::Incoming && m_state == CallState::Ringing
+        && (reason == CallEndReason::Unanswered || reason == CallEndReason::RemoteHangup);
     // Whoever is still in the call after we go is who we could rejoin. Taken
     // before the teardown below forgets who that was.
     std::optional<OngoingCall> departed;
@@ -1926,6 +1929,8 @@ void CallEngine::endCall(CallEndReason reason, bool notifyPeer)
     m_endReason = reason;
     setState(CallState::Ended);
     emit callEnded(reason);
+    if (missed)
+        emit callMissed();
     emit levelsChanged();
     if (departed)
         rememberOngoing(std::move(*departed));

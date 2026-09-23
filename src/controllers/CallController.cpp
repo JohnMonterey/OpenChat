@@ -654,6 +654,7 @@ void CallController::setLiveEngine(CallEngine *engine, ChatController *chats)
     connect(engine, &CallEngine::mutedChanged, this, &CallController::syncFromEngine);
     connect(engine, &CallEngine::levelsChanged, this, &CallController::syncLevels);
     connect(engine, &CallEngine::incomingCall, this, &CallController::incomingCall);
+    connect(engine, &CallEngine::callMissed, chats, &ChatController::noteMissedCall);
     connect(engine, &CallEngine::participantsChanged, this, &CallController::syncParticipants);
     connect(engine, &CallEngine::participantVideoFrame, this,
             [this](const DeviceId &device, const QImage &image) {

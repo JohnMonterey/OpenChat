@@ -235,23 +235,28 @@ private slots:
         QVERIFY(chatContactArea->property("visible").toBool());
         QVERIFY(!sidebarCallList->property("visible").toBool());
 
-        // Badge labels are backed by the controller's counts, not hardcoded.
+        // Badge labels are backed by the controller's counts, not hardcoded, and
+        // a badge shows only while its count is above zero.
         QObject *chatBadge = root->findChild<QObject *>(QStringLiteral("chatBadgeLabel"));
-        QObject *callBadge = root->findChild<QObject *>(QStringLiteral("callBadgeLabel"));
+        QObject *callBadge = root->findChild<QObject *>(QStringLiteral("callBadge"));
+        QObject *callBadgeLabel = root->findChild<QObject *>(QStringLiteral("callBadgeLabel"));
         QVERIFY(chatBadge);
         QVERIFY(callBadge);
+        QVERIFY(callBadgeLabel);
         QCOMPARE(chatBadge->property("text").toString(),
                  QString::number(controller.chatUnreadCount()));
-        QCOMPARE(callBadge->property("text").toString(),
-                 QString::number(controller.callMissedCount()));
         QCOMPARE(chatBadge->property("text").toString(), QStringLiteral("3"));
-        QCOMPARE(callBadge->property("text").toString(), QStringLiteral("1"));
+        QVERIFY(!callBadge->property("visible").toBool());
+        controller.noteMissedCall();
+        QVERIFY(callBadge->property("visible").toBool());
+        QCOMPARE(callBadgeLabel->property("text").toString(), QStringLiteral("1"));
 
         // Call: the call placeholder replaces the chat pane exclusively, and the
         // sidebar swaps the contact list for the call history list with its
         // empty state showing.
         controller.setNavSection(OpenChat::ChatController::NavSection::Call);
         QCoreApplication::processEvents();
+        QVERIFY(!callBadge->property("visible").toBool()); // seen, so cleared
         QVERIFY(callView->property("visible").toBool());
         QVERIFY(!conversationPane->property("visible").toBool());
         QVERIFY(!settingsView->property("visible").toBool());

@@ -326,6 +326,9 @@ signals:
     void incomingCall();
     // A call reached Ended. `reason` is also readable from endReason().
     void callEnded(OpenChat::CallEndReason reason);
+    // An incoming call stopped ringing without being answered or declined
+    // here: it rang out, or everyone calling gave up. Follows callEnded.
+    void callMissed();
     // The set of calls this device could join, or who is in one, changed.
     void ongoingCallsChanged();
 

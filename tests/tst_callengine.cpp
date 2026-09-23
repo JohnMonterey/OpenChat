@@ -593,6 +593,7 @@ private slots:
     {
         connectEndpoints();
         QSignalSpy aliceEnded(m_alice.engine.get(), &CallEngine::callEnded);
+        QSignalSpy bobMissed(m_bob.engine.get(), &CallEngine::callMissed);
 
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         m_bob.engine->declineCall();
@@ -602,6 +603,8 @@ private slots:
         QCOMPARE(m_alice.engine->state(), CallState::Ended);
         QCOMPARE(m_alice.engine->endReason(), CallEndReason::Declined);
         QCOMPARE(aliceEnded.count(), 1);
+        // A call turned down was answered, not missed.
+        QCOMPARE(bobMissed.count(), 0);
         // Declining must not open the microphone.
         QVERIFY(!m_bob.devices.capture->started);
     }
@@ -1008,6 +1011,8 @@ private slots:
         callee.ringTimeoutMs = 60'000;
         connectEndpoints(caller, callee);
         QSignalSpy ended(m_alice.engine.get(), &CallEngine::callEnded);
+        QSignalSpy aliceMissed(m_alice.engine.get(), &CallEngine::callMissed);
+        QSignalSpy bobMissed(m_bob.engine.get(), &CallEngine::callMissed);
 
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         QVERIFY(ended.wait(2000));
@@ -1015,6 +1020,29 @@ private slots:
         // The callee records it as a missed call rather than as a refusal.
         QCOMPARE(m_bob.engine->state(), CallState::Ended);
         QCOMPARE(m_bob.engine->endReason(), CallEndReason::RemoteHangup);
+        QCOMPARE(bobMissed.count(), 1);
+        QCOMPARE(aliceMissed.count(), 0);
+    }
+
+    void aRingThatRunsOutOnTheCalleeIsAMissedCall()
+    {
+        // This time the callee's ring gives up first.
+        CallEngine::Config caller;
+        caller.ringTimeoutMs = 60'000;
+        CallEngine::Config callee;
+        callee.ringTimeoutMs = 40;
+        connectEndpoints(caller, callee);
+        QSignalSpy bobEnded(m_bob.engine.get(), &CallEngine::callEnded);
+        QSignalSpy aliceMissed(m_alice.engine.get(), &CallEngine::callMissed);
+        QSignalSpy bobMissed(m_bob.engine.get(), &CallEngine::callMissed);
+
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        QVERIFY(bobEnded.wait(2000));
+        QCOMPARE(m_bob.engine->endReason(), CallEndReason::Unanswered);
+        QCOMPARE(bobMissed.count(), 1);
+        // Whoever placed the call missed nothing.
+        QCOMPARE(m_alice.engine->state(), CallState::Ended);
+        QCOMPARE(aliceMissed.count(), 0);
     }
 
     void aCallWhoseMediaNeverArrivesGivesUp()

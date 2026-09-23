@@ -477,7 +477,7 @@ private slots:
 
         QCOMPARE(controller.navSection(), ChatController::NavSection::Chat);
         QCOMPARE(controller.chatUnreadCount(), 3);
-        QCOMPARE(controller.callMissedCount(), 1);
+        QCOMPARE(controller.callMissedCount(), 0);
         QCOMPARE(controller.callCount(), 0);
 
         QSignalSpy navSpy(&controller, &ChatController::navSectionChanged);
@@ -497,6 +497,35 @@ private slots:
         controller.setNavSection(ChatController::NavSection::Chat);
         QCOMPARE(controller.navSection(), ChatController::NavSection::Chat);
         QCOMPARE(navSpy.count(), 3);
+    }
+
+    void missedCallsCountUntilTheCallSectionOpens()
+    {
+        ChatController controller;
+        QSignalSpy countSpy(&controller, &ChatController::callMissedCountChanged);
+
+        controller.noteMissedCall();
+        controller.noteMissedCall();
+        QCOMPARE(controller.callMissedCount(), 2);
+        QCOMPARE(countSpy.count(), 2);
+
+        // Other sections leave the count alone.
+        controller.setNavSection(ChatController::NavSection::Settings);
+        controller.setNavSection(ChatController::NavSection::Chat);
+        QCOMPARE(controller.callMissedCount(), 2);
+
+        controller.setNavSection(ChatController::NavSection::Call);
+        QCOMPARE(controller.callMissedCount(), 0);
+        QCOMPARE(countSpy.count(), 3);
+
+        // A call missed while the Call section is open is cleared by opening it
+        // again, and clearing nothing says nothing.
+        controller.noteMissedCall();
+        controller.setNavSection(ChatController::NavSection::Call);
+        QCOMPARE(controller.callMissedCount(), 0);
+        QCOMPARE(countSpy.count(), 5);
+        controller.setNavSection(ChatController::NavSection::Call);
+        QCOMPARE(countSpy.count(), 5);
     }
 
     void settingsCategoriesDriveSelectionAndElements()

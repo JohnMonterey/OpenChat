@@ -800,8 +800,13 @@ int ChatController::chatUnreadCount() const
 
 int ChatController::callMissedCount() const
 {
-    // Static mock until call history is wired in.
-    return 1;
+    return m_callMissedCount;
+}
+
+void ChatController::noteMissedCall()
+{
+    ++m_callMissedCount;
+    emit callMissedCountChanged();
 }
 
 int ChatController::callCount() const
@@ -884,6 +889,10 @@ void ChatController::showSettingsCategories()
 
 void ChatController::setNavSection(NavSection section)
 {
+    if (section == NavSection::Call && m_callMissedCount != 0) {
+        m_callMissedCount = 0;
+        emit callMissedCountChanged();
+    }
     if (m_navSection == section)
         return;
 

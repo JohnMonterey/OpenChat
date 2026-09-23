@@ -1,5 +1,6 @@
 #include "DailyCaseController.h"
 #include "cosmetics/CosmeticCatalog.h"
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QSettings>
 #include <random>
@@ -28,24 +29,50 @@ DailyCaseController::DailyCaseController(std::unique_ptr<DailyCaseService> servi
     connect(&m_animation, &QVariantAnimation::finished, this, &DailyCaseController::finish);
     m_audioRelease.setSingleShot(true);
     connect(&m_audioRelease, &QTimer::timeout, &m_audio, &CaseAudio::stop);
-    m_nextDay.setSingleShot(true);
-    connect(&m_nextDay, &QTimer::timeout, this, [this] {
-        if (m_state == Opening) m_nextDay.start(1000);
-        else refresh();
+    // One shot at the moment the next case is due; nothing polls meanwhile.
+    m_dropTimer.setSingleShot(true);
+    connect(&m_dropTimer, &QTimer::timeout, this, [this] {
+        reportRunningTime();
+        // A report that failed is tried again in a minute, time and all.
+        if (!m_dropTimer.isActive() && m_running.isValid())
+            m_dropTimer.start(60 * 1000);
+        if (m_state == Opened && !m_revealOnShow && m_drops > 0)
+            showNextCase();
+        emit changed();
     });
+    // Running time counts up to the moment OpenChat quits, and no further.
+    if (QCoreApplication::instance())
+        connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                this, &DailyCaseController::reportRunningTime);
+}
+DailyCaseController::~DailyCaseController()
+{
+    reportRunningTime();
 }
 void DailyCaseController::setAccountKey(const QString &account)
 {
     if (account == m_account) return;
     dismiss();
+    // The account that was open keeps the time it ran.
+    reportRunningTime();
     m_account = account;
-    // Another account's collection never carries over, even if its own
-    // cannot be read.
+    // Another account's collection and cases never carry over, even if its
+    // own cannot be read.
     if (m_ownershipKnown || !m_owned.isEmpty()) {
         m_owned.clear();
         m_ownershipKnown = false;
         emit ownedChanged();
     }
+    m_drops = 0;
+    m_progressMs = 0;
+    m_dropsKnown = false;
+    m_dropTimer.stop();
+    if (m_account.isEmpty())
+        m_running.invalidate();
+    else
+        m_running.start();
+    m_state = Available;
+    m_reward.clear();
     refresh();
 }
 void DailyCaseController::adopt(const CaseResult &result)
@@ -62,11 +89,58 @@ void DailyCaseController::adoptOwned(const CaseReply &reply)
     m_ownershipKnown = true;
     emit ownedChanged();
 }
-void DailyCaseController::arrangeBelt()
+void DailyCaseController::adoptDrops(const CaseReply &reply)
+{
+    // A failed reply says nothing about the cases either.
+    if (!reply.error.isEmpty())
+        return;
+    m_drops = reply.drops;
+    m_progressMs = reply.progressMs;
+    m_nextCaseKey = reply.caseKey;
+    m_dropsKnown = true;
+    if (m_running.isValid())
+        m_dropTimer.start(int(std::clamp<qint64>(untilNextDropMs(), 0, m_service->dropIntervalMs())));
+}
+qint64 DailyCaseController::untilNextDropMs() const
+{
+    const qint64 unreported = m_running.isValid() ? m_running.elapsed() : 0;
+    return std::max<qint64>(0, m_service->dropIntervalMs() - m_progressMs - unreported);
+}
+QDateTime DailyCaseController::nextDropAt() const
+{
+    if (!m_dropsKnown || !m_running.isValid())
+        return {};
+    return QDateTime::currentDateTimeUtc().addMSecs(untilNextDropMs());
+}
+void DailyCaseController::reportRunningTime()
+{
+    if (m_account.isEmpty() || !m_running.isValid())
+        return;
+    const qint64 ms = m_running.elapsed();
+    if (ms <= 0)
+        return;
+    const auto reply = m_service->accrue(m_account, ms);
+    // Unreported, the time is carried into the next report instead.
+    if (!reply.error.isEmpty())
+        return;
+    // A report counts no more than the next drop still needed, so time the
+    // machine spent asleep past it is not kept either.
+    m_running.restart();
+    adoptOwned(reply);
+    adoptDrops(reply);
+}
+void DailyCaseController::showNextCase()
+{
+    m_state = Available;
+    m_reward.clear();
+    m_revealOnShow = false;
+    arrangeBelt(m_nextCaseKey);
+    setPosition(CaseMotion::startIndex);
+}
+void DailyCaseController::arrangeBelt(const QString &caseKey)
 {
     // Visual only: the reward never comes from here (the service draws it).
-    const auto day = QDateTime::currentDateTimeUtc().date().toString(Qt::ISODate);
-    const auto digest = QCryptographicHash::hash((m_account + '|' + day).toUtf8(),
+    const auto digest = QCryptographicHash::hash((m_account + '|' + caseKey).toUtf8(),
                                                  QCryptographicHash::Sha256);
     quint64 seed = 0;
     for (int i = 0; i < 8; ++i)
@@ -86,28 +160,45 @@ void DailyCaseController::refresh()
     if (m_state == Opening) return;
     const auto reply = m_service->status(m_account);
     adoptOwned(reply);
-    m_nextDay.stop();
+    adoptDrops(reply);
     m_error = reply.error;
-    m_state = reply.result ? OpenedToday : Available;
-    if (!reply.result) m_reward.clear();
-    arrangeBelt();
-    if (reply.result) {
-        adopt(*reply.result);
-        m_nextDay.start(int(std::clamp(QDateTime::currentDateTimeUtc().msecsTo(reply.result->nextAvailableAt),
-                                     qint64(1000), qint64(86400000))));
+    if (!reply.error.isEmpty()) {
+        if (m_fillers.isEmpty())
+            arrangeBelt({});
+        emit changed();
+        return;
     }
-    setPosition(reply.result ? m_winner : CaseMotion::startIndex);
+    if (m_state == Opened && m_revealOnShow) {
+        // A fresh reveal stays on show until the popup closes.
+    } else if (m_drops > 0) {
+        showNextCase();
+    } else if (reply.result) {
+        m_state = Opened;
+        adopt(*reply.result);
+        arrangeBelt(reply.result->caseKey);
+        setPosition(m_winner);
+    } else {
+        m_state = Opened;
+        m_reward.clear();
+        arrangeBelt(m_nextCaseKey);
+        setPosition(CaseMotion::startIndex);
+    }
     emit changed();
 }
 void DailyCaseController::open()
 {
-    if (m_state != Available) return;
+    if (m_state == Opening || m_drops <= 0) return;
+    // After a reveal, the next case starts from its own belt.
+    if (m_state == Opened)
+        showNextCase();
     m_state = Opening; // Guard before entering the claim adapter.
+    m_revealOnShow = false;
     m_error.clear();
     emit changed();
     const auto reply = m_service->claim(m_account);
     // Granted with the claim: the collection holds the item before the reel moves.
     adoptOwned(reply);
+    adoptDrops(reply);
     m_error = reply.error;
     if (!reply.result) {
         m_state = Available;
@@ -115,10 +206,10 @@ void DailyCaseController::open()
         return;
     }
     adopt(*reply.result); // Claim durably recorded BEFORE any motion or sound.
-    m_nextDay.start(int(std::clamp(QDateTime::currentDateTimeUtc().msecsTo(reply.result->nextAvailableAt),
-                                 qint64(1000), qint64(86400000))));
     if (!reply.newlyClaimed) {
-        m_state = OpenedToday;
+        // Another window opened the last one; its result is what there is.
+        m_state = Opened;
+        arrangeBelt(reply.result->caseKey);
         setPosition(m_winner);
         emit changed();
         return;
@@ -146,7 +237,8 @@ void DailyCaseController::setPosition(double position)
 void DailyCaseController::finish()
 {
     if (m_state != Opening) return;
-    m_state = OpenedToday;
+    m_state = Opened;
+    m_revealOnShow = true;
     setPosition(m_winner); // Exact integer endpoint, independent of viewport size.
     emit changed();
     emit revealed();
@@ -168,10 +260,17 @@ void DailyCaseController::dismiss()
     m_animation.stop();
     m_audioRelease.stop();
     m_audio.stop();
+    const State before = m_state;
     if (m_state == Opening) {
-        m_state = OpenedToday;
+        m_state = Opened;
         setPosition(m_winner);
-        emit changed();
     }
+    // Closing the popup puts the reveal away; the next waiting case is what
+    // it shows when it opens again.
+    m_revealOnShow = false;
+    if (m_state == Opened && m_drops > 0)
+        showNextCase();
+    if (m_state != before)
+        emit changed();
 }
 }

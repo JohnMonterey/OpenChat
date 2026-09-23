@@ -1,28 +1,53 @@
-# Daily case opening
+# Case drops
 
 The small case icon beside the add-contact control opens a native Qt Quick popup.
-Each tile shows a collectible cosmetic with its rarity tier, and the claim draws
-one of them with the published odds. The drawn item joins the account's
-collection, and only collected items can be worn (Settings → Cosmetics).
-There is no payment and no monetary value.
+Each tile shows a collectible cosmetic with its rarity tier, and opening a case
+draws one of them with the published odds. Cases drop while OpenChat is open:
+one for every `caseDropIntervalMs` (30 minutes) of running time, so two an hour,
+and none while it is closed. Unopened cases wait and stack; each open takes one.
+A new account starts with one waiting. The popup counts the waiting cases and
+says when the next drops if OpenChat stays open; the icon's dot shows while any
+wait, and its tooltip gives the count or the time. The drawn item joins the
+account's collection, and only collected items can be worn (Settings →
+Cosmetics). There is no payment and no monetary value.
+
+The case started out daily, which is why its classes, files and settings keys
+still carry `DailyCase` names.
+
+## Running time
+
+`DailyCaseController` counts running time for its account on a monotonic clock
+(`QElapsedTimer`) and reports it to the service with `accrue(ms)`: when the next
+drop is due (one single-shot timer, nothing polls), when the account changes,
+when the application is about to quit, and when the controller is destroyed.
+Time toward the next drop is kept across restarts; time with the app closed is
+never reported, so it earns nothing. One report credits at most what the next
+drop still needs, so a machine left asleep with OpenChat open earns the one
+drop that was due, not a stack. A report that fails is retried a minute later
+with its time. A crash loses the running time since the last report (under
+half an hour).
 
 ## Ownership and integration
 
 `DailyCaseController` belongs to the main window, independently of the popup's
 lifetime. `DailyCaseModal` and its 80 lightweight tiles are loaded on demand and
-destroyed when closed. The controller has Available, Opening, and OpenedToday
-states; its Opening guard is set before entering the claim service. Closing a
-spin stops the animation and audio immediately and keeps the recorded result.
-Reopening displays the result without replaying its impact.
+destroyed when closed. The controller has Available (a case waits), Opening,
+and Opened (the last case opened is on show) states; its Opening guard is set
+before entering the claim service. Closing a spin stops the animation and
+audio immediately and keeps the recorded result. A fresh reveal stays on show
+until the popup closes or "Open next case" starts the next waiting one; with
+none waiting, reopening displays the last result without replaying its impact.
 
-`LocalDailyCaseService` is a **temporary local mock authority**. It records a
-claim ID, presentation seed, and next UTC midnight in an atomic JSON file under
-the application's local data directory, keyed by a hash of the account ID. A
-nonblocking per-account process lock serializes status/claim transactions.
-Repeated claims return the existing result. Different local accounts are
-independent. Preview windows use a separate `preview` key. Corrupt/unwritable
-files fail closed with a retryable UI error. The midnight refresh is a single
-shot timer; there is no polling while closed.
+`LocalDailyCaseService` is a **temporary local mock authority**. It records the
+waiting drops, the running time toward the next, and the last claim's ID,
+reward, presentation seed and case key in an atomic JSON file under the
+application's local data directory, keyed by a hash of the account ID. A
+nonblocking per-account process lock serializes status/claim/accrue
+transactions. A claim with no case waiting returns the last result. Different
+local accounts are independent. Preview windows use a separate `preview` key.
+Corrupt/unwritable files fail closed with a retryable UI error. A claim saved
+by a build with a cooldown (daily or hourly) leaves one case waiting if it was
+already due, and none if not.
 
 Every reward the mock hands out goes into `LocalCosmeticInventory`: one atomic
 `<hash>.owned.json` per account beside the claim, listing catalogue ids in the
@@ -33,19 +58,23 @@ existed still count. An unreadable collection fails closed like a corrupt claim.
 Every reply carries the collection (`CaseReply::owned`), exposed as
 `DailyCaseController.owned` once known.
 
-This mock uses the local clock and local storage, and is **not secure eligibility**
-or a secure inventory. Deleting its files, changing the clock, using another
-device or editing the collection file can bypass it. That is acceptable only
-because cosmetics are local-only and worth nothing; anything with value, or
-anything shown to contacts, needs the online authority below.
+This mock uses local storage and believes whatever running time the client
+reports, so it is **not secure eligibility** or a secure inventory. Deleting or
+editing its files, reporting time that never ran, running two copies, or using
+another device can bypass it. That is acceptable only because cosmetics are
+local-only and worth nothing; anything with value, or anything shown to
+contacts, needs the online authority below.
 
 For the online implementation, use the existing authenticated relay/account
-conventions. The relay currently has no daily-case endpoint. Add a server
-transaction with a unique `(account_id, server_day)` claim constraint. Verify
-eligibility, choose the reward, persist consumption, and return the persisted
-claim on all retries, including after a lost response. Grant the reward into a
-server-side inventory in the same transaction. Return at least `claimId`,
-`rewardId`, `seed`, `nextAvailableAt` and the account's owned ids. The seed controls only the
+conventions. The relay currently has no case endpoint. Count running time on
+the server from the client's authenticated connection (not from its reports),
+drop cases from it, and add a claim transaction, serialized per account, that
+consumes one waiting drop, chooses the reward, persists consumption and grants
+the reward into a server-side inventory together. Key claims by a client
+request id so a retry after a lost response returns the persisted claim rather
+than consuming a second drop. Return at least `claimId`, `rewardId`, `seed`,
+the case key, the waiting drops, the progress toward the next and the
+account's owned ids. The seed controls only the
 visual arrangement; it must never select the actual reward on the client.
 `rewardId` is a cosmetic catalogue id; the server draws it with the tier odds
 below. `adopt()` is where the predetermined result enters the presentation. Implement the network service asynchronously, routing its
@@ -78,10 +107,13 @@ purpose.
 
 The local mock draws at claim time and stores the id beside the claim; a claim
 saved before rewards existed replays as `placeholder` and shows the "?" tile.
-The belt around the winner is the day's: `DailyCaseController.fillers` is drawn
-with the same odds from a hash of the account and the UTC date. It does not
-change when the claim lands, so nothing on screen swaps as the spin starts, and
-the seed still only chooses which of five slots the winner occupies.
+The belt around the winner is the case's: `DailyCaseController.fillers` is
+drawn with the same odds from a hash of the account and the reply's case key.
+The service names the case on offer after the last claim ("first" before any)
+and stores that key with the claim, so the belt does not change when the claim
+lands, shows again around a replayed result, stays the same in every window and
+across restarts, and changes when the next waiting case is shown. The seed
+still only chooses which of five slots the winner occupies.
 
 Tiles draw each item through the component that wears it (`CosmeticPreview`),
 with the tier's colour as a bottom bar, a glow and a label. The popup always
@@ -109,7 +141,7 @@ an equipped id the account does not own is taken off and forgotten, and
 equipping one it does not own is refused (whoever asks). An unknown collection
 (a failed reply for a new account) hands over nothing rather than an empty
 list. In the picker, items not yet unboxed stay in the grid, dimmed under a
-padlock, with a tooltip pointing at the daily case; each section counts
+padlock, with a tooltip pointing at the case drops; each section counts
 "N of M unboxed", and a newly unboxed item unlocks on the open page.
 
 What is equipped stays on this device (the page says so); nothing is

@@ -22,17 +22,6 @@ bool writeClaim(const QString &directory, const QByteArray &account, const QJson
     return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
         && file.write(QJsonDocument(claim).toJson()) > 0;
 }
-// Moves a saved claim to yesterday, so the account may claim again.
-bool expireClaim(const QString &directory, const QByteArray &account)
-{
-    QFile file(accountStem(directory, account) + ".json");
-    if (!file.open(QIODevice::ReadOnly))
-        return false;
-    auto claim = QJsonDocument::fromJson(file.readAll()).object();
-    file.close();
-    claim["next"] = QDateTime::currentDateTimeUtc().addDays(-1).toString(Qt::ISODate);
-    return writeClaim(directory, account, claim);
-}
 }
 class DailyCaseTest : public QObject {
     Q_OBJECT
@@ -82,7 +71,76 @@ private slots:
         QCOMPARE(duplicate.result->seed, claim.result->seed);
         QCOMPARE(first.status("alice").result->claimId, claim.result->claimId);
         QVERIFY(second.claim("bob").result->claimId != claim.result->claimId);
-        QCOMPARE(claim.result->nextAvailableAt.time(), QTime(0, 0));
+        // A new account's first case was the one waiting; none waits now.
+        QCOMPARE(claim.drops, 0);
+        QCOMPARE(caseDropIntervalMs, qint64(30 * 60 * 1000));
+    }
+    void casesDropWithRunningTimeAndWaitToBeOpened()
+    {
+        QTemporaryDir directory;
+        const qint64 interval = 1000;
+        LocalDailyCaseService service(directory.path(), interval);
+        // One case waits for a new account, and nothing counts toward the next yet.
+        const auto offered = service.status("alice");
+        QVERIFY(!offered.result);
+        QCOMPARE(offered.drops, 1);
+        QCOMPARE(offered.progressMs, 0);
+        const auto claim = service.claim("alice");
+        QVERIFY(claim.newlyClaimed);
+        QCOMPARE(claim.drops, 0);
+        // The opened case keeps the key it was offered under; the next has its own.
+        QCOMPARE(claim.result->caseKey, offered.caseKey);
+        QVERIFY(claim.caseKey != offered.caseKey);
+        // With none waiting, asking again replays the last one.
+        const auto replay = service.claim("alice");
+        QVERIFY(!replay.newlyClaimed);
+        QCOMPARE(replay.result->claimId, claim.result->claimId);
+        // Running time counts toward the next drop...
+        QCOMPARE(service.accrue("alice", 400).progressMs, 400);
+        QCOMPARE(service.status("alice").drops, 0);
+        // ...and one report credits no more than the drop still needs, so a
+        // machine left asleep for hours earns one case, not a stack.
+        const auto dropped = service.accrue("alice", 5 * interval);
+        QCOMPARE(dropped.drops, 1);
+        QCOMPARE(dropped.progressMs, 0);
+        QCOMPARE(service.accrue("alice", -50).drops, 1);
+        // Unopened drops stack, and survive a restart.
+        QCOMPARE(service.accrue("alice", interval).drops, 2);
+        QCOMPARE(service.accrue("alice", 250).progressMs, 250);
+        LocalDailyCaseService restarted(directory.path(), interval);
+        QCOMPARE(restarted.status("alice").drops, 2);
+        QCOMPARE(restarted.status("alice").progressMs, 250);
+        // Each open takes one.
+        const auto next = restarted.claim("alice");
+        QVERIFY(next.newlyClaimed);
+        QVERIFY(next.result->claimId != claim.result->claimId);
+        QCOMPARE(next.result->caseKey, claim.caseKey);
+        QCOMPARE(next.drops, 1);
+        QVERIFY(restarted.claim("alice").newlyClaimed);
+        QCOMPARE(restarted.status("alice").drops, 0);
+        // Other accounts count their own.
+        QCOMPARE(restarted.status("bob").drops, 1);
+    }
+    void aClaimSavedByACooldownBuildLeavesOneCaseIfItWasDue()
+    {
+        QTemporaryDir directory;
+        // Due already: one case waits.
+        QVERIFY(writeClaim(directory.path(), "alice", {{"claim", "daily"}, {"reward", "bead.star"},
+            {"seed", 7.0}, {"next", QDateTime::currentDateTimeUtc().addSecs(-60).toString(Qt::ISODate)}}));
+        // Still waiting for midnight: none does, and the claim stays on show.
+        QVERIFY(writeClaim(directory.path(), "bob", {{"claim", "hourly"}, {"reward", "frame.neon"},
+            {"seed", 7.0}, {"next", QDateTime::currentDateTimeUtc().addSecs(3600).toString(Qt::ISODate)}}));
+        LocalDailyCaseService service(directory.path());
+        const auto alice = service.status("alice");
+        QVERIFY(alice.error.isEmpty());
+        QCOMPARE(alice.drops, 1);
+        QCOMPARE(alice.result->claimId, QStringLiteral("daily"));
+        QCOMPARE(alice.owned, QStringList{"bead.star"});
+        QVERIFY(service.claim("alice").newlyClaimed);
+        const auto bob = service.status("bob");
+        QCOMPARE(bob.drops, 0);
+        QCOMPARE(bob.result->rewardId, QStringLiteral("frame.neon"));
+        QVERIFY(!service.claim("bob").newlyClaimed);
     }
     void lockAndCorruptionFailClosed()
     {
@@ -156,13 +214,13 @@ private slots:
         QFile file(path);
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write(QJsonDocument(QJsonObject{{"claim", "earlier"}, {"seed", 7.0},
-            {"next", QDateTime::currentDateTimeUtc().addDays(1).toString(Qt::ISODate)}}).toJson());
+            {"next", QDateTime::currentDateTimeUtc().addSecs(1800).toString(Qt::ISODate)}}).toJson());
         file.close();
         QCOMPARE(LocalDailyCaseService(directory.path()).status("alice").result->rewardId,
                  QStringLiteral("placeholder"));
         DailyCaseController controller(std::make_unique<LocalDailyCaseService>(directory.path()));
         controller.setAccountKey("alice");
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QVERIFY(controller.reward().isEmpty());
     }
     void unboxedItemsStayInTheAccountsCollection()
@@ -179,8 +237,8 @@ private slots:
         QCOMPARE(LocalDailyCaseService(directory.path()).status("alice").owned, first.owned);
         QCOMPARE(service.claim("alice").owned, first.owned);
         QCOMPARE(service.status("bob").owned, QStringList());
-        // The next day's item joins it; one already owned is not kept twice.
-        QVERIFY(expireClaim(directory.path(), "alice"));
+        // The next case's item joins it; one already owned is not kept twice.
+        QCOMPARE(service.accrue("alice", caseDropIntervalMs).drops, 1);
         QCOMPARE(service.status("alice").owned, first.owned);
         const auto second = service.claim("alice");
         QVERIFY(second.newlyClaimed);
@@ -200,7 +258,7 @@ private slots:
             {"seed", 7.0}, {"next", QDateTime::currentDateTimeUtc().addDays(-1).toString(Qt::ISODate)}}));
         LocalDailyCaseService service(directory.path());
         const auto status = service.status("alice");
-        QVERIFY(!status.result);
+        QCOMPARE(status.result->claimId, QStringLiteral("earlier"));
         QCOMPARE(status.owned, QStringList{"frame.neon"});
         QCOMPARE(LocalCosmeticInventory(directory.path()).owned("alice").value_or(QStringList{}),
                  QStringList{"frame.neon"});
@@ -242,7 +300,7 @@ private slots:
         QCOMPARE(changed.size(), 1);
         // The unboxed item is in the collection as soon as the claim is recorded.
         controller.open();
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QVERIFY(controller.owned().contains(controller.reward().value("id").toString()));
         // A failed reply (another window mid-claim) keeps what is known.
         const QStringList known = controller.owned();
@@ -258,7 +316,7 @@ private slots:
         QVERIFY(controller.ownershipKnown());
         QCOMPARE(controller.owned(), QStringList());
     }
-    void theBeltIsTheDaysAndStaysPutWhenTheClaimLands()
+    void theBeltIsTheCasesAndStaysPutWhenTheClaimLands()
     {
         QTemporaryDir directory;
         DailyCaseController first(std::make_unique<LocalDailyCaseService>(directory.path()));
@@ -278,12 +336,82 @@ private slots:
         first.setProperty("reducedMotion", true);
         QSignalSpy rearranged(&first, &DailyCaseController::fillersChanged);
         first.open();
-        QCOMPARE(first.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(first.state(), DailyCaseController::Opened);
         QCOMPARE(first.fillers(), belt);
         QCOMPARE(rearranged.size(), 0);
         QCOMPARE(first.reward().value("id").toString(),
                  LocalDailyCaseService(directory.path()).status("alice").result->rewardId);
         QVERIFY(first.reward().value("rarityColor").value<QColor>().isValid());
+        // Another window, and this one refreshed, still show this case's belt.
+        again.refresh();
+        QCOMPARE(again.state(), DailyCaseController::Opened);
+        QCOMPARE(again.fillers(), belt);
+        first.refresh();
+        QCOMPARE(first.fillers(), belt);
+        // The next case drops after half an hour of running.
+        QCOMPARE(first.drops(), 0);
+        const qint64 wait = QDateTime::currentDateTimeUtc().msecsTo(first.nextDropAt());
+        QVERIFY2(wait > caseDropIntervalMs - 5000 && wait <= caseDropIntervalMs, qPrintable(QString::number(wait)));
+        // Once it has, the reveal on show stays until the popup closes; then
+        // the new case waits, with a belt of its own.
+        QCOMPARE(LocalDailyCaseService(directory.path()).accrue("alice", caseDropIntervalMs).drops, 1);
+        first.refresh();
+        QCOMPARE(first.drops(), 1);
+        QCOMPARE(first.state(), DailyCaseController::Opened);
+        QCOMPARE(first.fillers(), belt);
+        first.dismiss();
+        QCOMPARE(first.state(), DailyCaseController::Available);
+        QVERIFY(first.reward().isEmpty());
+        QVERIFY(first.fillers() != belt);
+        QCOMPARE(rearranged.size(), 1);
+        again.refresh();
+        QCOMPARE(again.state(), DailyCaseController::Available);
+        QCOMPARE(again.fillers(), first.fillers());
+    }
+    void casesDropOnlyWhileTheAppIsOpen()
+    {
+        QTemporaryDir directory;
+        const qint64 interval = 600;
+        const auto service = [&] { return std::make_unique<LocalDailyCaseService>(directory.path(), interval); };
+        {
+            DailyCaseController running(service());
+            running.setProperty("muted", true);
+            running.setProperty("reducedMotion", true);
+            running.setAccountKey("alice");
+            // A case to start with; opening it leaves none.
+            QCOMPARE(running.drops(), 1);
+            running.open();
+            QCOMPARE(running.drops(), 0);
+            QVERIFY(running.nextDropAt().isValid());
+            // While it runs, a case drops every interval, and they stack.
+            QTRY_COMPARE_WITH_TIMEOUT(running.drops(), 1, 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(running.drops(), 2, 5000);
+            // The reveal stays on show until dismissed; then a case waits.
+            QCOMPARE(running.state(), DailyCaseController::Opened);
+            running.dismiss();
+            QCOMPARE(running.state(), DailyCaseController::Available);
+            QTest::qWait(int(interval / 3));
+        }
+        // Closed: the time it ran toward the next case is kept, and nothing more
+        // is added however long it stays closed.
+        const auto closed = LocalDailyCaseService(directory.path(), interval).status("alice");
+        QCOMPARE(closed.drops, 2);
+        QVERIFY2(closed.progressMs >= interval / 4 && closed.progressMs < interval,
+                 qPrintable(QString::number(closed.progressMs)));
+        QTest::qWait(int(3 * interval));
+        const auto later = LocalDailyCaseService(directory.path(), interval).status("alice");
+        QCOMPARE(later.drops, 2);
+        QCOMPARE(later.progressMs, closed.progressMs);
+        // Opened again, it picks up where it left off.
+        DailyCaseController reopened(service());
+        reopened.setAccountKey("alice");
+        QCOMPARE(reopened.drops(), 2);
+        QVERIFY(QDateTime::currentDateTimeUtc().msecsTo(reopened.nextDropAt()) <= interval - closed.progressMs);
+        QTRY_COMPARE_WITH_TIMEOUT(reopened.drops(), 3, 5000);
+        // Switching accounts keeps each one's running time apart.
+        reopened.setAccountKey("bob");
+        QCOMPARE(reopened.drops(), 1);
+        QVERIFY(LocalDailyCaseService(directory.path(), interval).status("alice").drops >= 3);
     }
     void duplicateClickDismissAndReducedMotion()
     {
@@ -299,7 +427,7 @@ private slots:
         controller.open();
         QCOMPARE(controller.winnerIndex(), winner);
         controller.dismiss();
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QCOMPARE(controller.position(), double(winner));
         QSignalSpy movement(&controller, &DailyCaseController::positionChanged);
         QTest::qWait(80);
@@ -312,7 +440,7 @@ private slots:
         controller.setAccountKey("bob");
         controller.setProperty("reducedMotion", true);
         controller.open();
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QCOMPARE(reveal.size(), 1);
         controller.open();
         QCOMPARE(reveal.size(), 1);

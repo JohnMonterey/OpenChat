@@ -38,8 +38,8 @@ Item {
     function categoryNote(name) {
         switch (name) {
         case "Cosmetics":
-            return "Unbox cosmetics from the daily case, then wear them here. They show on this "
-                   + "device only; your contacts still see your usual look.";
+            return "Unbox cosmetics from the cases that drop while OpenChat is open, then wear "
+                   + "them here. They show on this device only; your contacts still see your usual look.";
         }
         return "";
     }

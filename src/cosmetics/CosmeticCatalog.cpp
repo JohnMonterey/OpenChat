@@ -22,7 +22,7 @@ struct TierInfo
 
 // The ladder and its odds. The colours are the familiar crate-grade ones (blue,
 // purple, pink, red, gold); the weights are gentler than a paid crate's because
-// the case is free and daily: something Epic or better about every week.
+// the case is free: something Epic or better about every seven cases.
 constexpr std::array<TierInfo, 5> kTiers = {{
     {Rarity::Common, "common", "Common", 0xff4b69ff, 600},
     {Rarity::Rare, "rare", "Rare", 0xff8847ff, 250},

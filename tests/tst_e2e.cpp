@@ -18,6 +18,9 @@
 
 #include "app/AccountBootstrap.h"
 #include "app/AddContactService.h"
+#include "case/DailyCaseController.h"
+#include "case/RelayCaseService.h"
+#include "domain/CosmeticRules.h"
 #include "app/ContactRequestService.h"
 #include "app/DeviceLink.h"
 #include "app/GroupService.h"
@@ -44,6 +47,7 @@
 #include "storage/SqlCipherContactRepository.h"
 
 #include "AuthService.h"
+#include "CosmeticsService.h"
 #include "DirectoryService.h"
 #include "EnvelopeService.h"
 #include "KeyPackageService.h"
@@ -326,6 +330,7 @@ private slots:
     void passwordLoginFromAFreshInstallTakesOverTheAccount();
     void callCarriesAudioVideoAndAScreenOverRealTls();
     void groupChatAndGroupCallOverRealTls();
+    void casesAndCosmeticsLiveOnTheRelay();
 
 private:
     void bootstrapClient(ClientStack &stack, const QString &handlePrefix);
@@ -354,6 +359,7 @@ private:
     std::unique_ptr<EnvelopeService> m_envelopes;
     std::unique_ptr<KeyPackageService> m_keyPackages;
     std::unique_ptr<DirectoryService> m_directory;
+    std::unique_ptr<CosmeticsService> m_cosmetics;
     std::unique_ptr<RelayServer> m_server;
     quint16 m_relayPort = 0;
 
@@ -415,8 +421,10 @@ void EndToEndTest::initTestCase()
     m_envelopes = std::make_unique<EnvelopeService>(*m_store);
     m_keyPackages = std::make_unique<KeyPackageService>(*m_store);
     m_directory = std::make_unique<DirectoryService>(*m_store);
+    m_cosmetics = std::make_unique<CosmeticsService>(*m_store);
     m_server = std::make_unique<RelayServer>(*m_store, *m_auth, *m_envelopes, *m_keyPackages,
                                              *m_directory);
+    m_server->setCosmetics(m_cosmetics.get());
     m_relayPort = m_server->start(QHostAddress::LocalHost, 0);
     QVERIFY(m_relayPort != 0);
 
@@ -443,6 +451,7 @@ void EndToEndTest::cleanupTestCase()
     // services, then the store; the TLS proxy (independent of all of them) is
     // released last. The per-run database is left in place, isolated by name.
     m_server.reset();
+    m_cosmetics.reset();
     m_directory.reset();
     m_keyPackages.reset();
     m_envelopes.reset();
@@ -454,21 +463,11 @@ void EndToEndTest::cleanupTestCase()
 
 RelayEndpoints EndToEndTest::proxyEndpoints() const
 {
-    const QString base = QStringLiteral("https://localhost:%1/v1").arg(m_proxyPort);
-    RelayEndpoints endpoints;
-    endpoints.accounts = QUrl(base + QStringLiteral("/accounts"));
-    endpoints.authLogin = QUrl(base + QStringLiteral("/auth/login"));
-    endpoints.authChallenge = QUrl(base + QStringLiteral("/auth/challenge"));
-    endpoints.authComplete = QUrl(base + QStringLiteral("/auth/complete"));
-    endpoints.authRefresh = QUrl(base + QStringLiteral("/auth/refresh"));
-    endpoints.sync = QUrl(base + QStringLiteral("/sync"));
-    endpoints.keyPackages = QUrl(base + QStringLiteral("/key-packages"));
-    endpoints.keyPackagesClaim = QUrl(base + QStringLiteral("/key-packages/claim"));
-    endpoints.directory = QUrl(base + QStringLiteral("/directory"));
-    endpoints.directoryAccount = QUrl(base + QStringLiteral("/directory/account"));
-    endpoints.invites = QUrl(base + QStringLiteral("/invites"));
-    endpoints.invitesRedeem = QUrl(base + QStringLiteral("/invites/redeem"));
-    endpoints.live = QUrl(QStringLiteral("wss://localhost:%1/v1/live").arg(m_proxyPort));
+    // Every endpoint, from the one place they are spelled out (the live stream
+    // comes out as wss://localhost:<port>/v1/live).
+    const RelayEndpoints endpoints =
+        RelayEndpoints::fromBaseUrl(QStringLiteral("https://localhost:%1/v1").arg(m_proxyPort));
+    Q_ASSERT(endpoints.isSecure());
     return endpoints;
 }
 
@@ -1657,6 +1656,102 @@ void EndToEndTest::groupChatAndGroupCallOverRealTls()
     alice.session->lock();
     bob.session->lock();
     carol.session->lock();
+}
+
+// Cases, the collection and what is worn live on the relay: the app's case
+// authority talks to it over real TLS, a collection kept on the device is
+// handed over once, the relay draws and grants, holds the loadout, refuses
+// what is not owned, and anyone signed in can see what someone wears.
+void EndToEndTest::casesAndCosmeticsLiveOnTheRelay()
+{
+    if (!m_available)
+        QSKIP("PostgreSQL not available for the E2E test");
+
+    ClientStack alice;
+    ClientStack bob;
+    bootstrapClient(alice, QStringLiteral("alicecases"));
+    if (QTest::currentTestFailed())
+        return;
+    bootstrapClient(bob, QStringLiteral("bobcases"));
+    if (QTest::currentTestFailed())
+        return;
+    QTRY_VERIFY_WITH_TIMEOUT(alice.client->isConnected() && bob.client->isConnected(), 30000);
+
+    // What this device kept before the relay held it: a star bead.
+    QTemporaryDir localCases;
+    const QString aliceKey = alice.account.toHex();
+    QVERIFY(LocalCosmeticInventory(localCases.path()).grant(aliceKey, {QStringLiteral("bead.star")}));
+
+    auto *service = new RelayCaseService(alice.client.get(), localCases.path());
+    DailyCaseController controller{std::unique_ptr<DailyCaseService>(service)};
+    controller.setProperty("muted", true);
+    controller.setProperty("reducedMotion", true);
+    controller.setAccountKey(aliceKey);
+
+    // The relay's first case waits, and the device's star came across once.
+    QTRY_VERIFY_WITH_TIMEOUT(controller.ownershipKnown()
+                                 && controller.owned().contains(QStringLiteral("bead.star")), 15000);
+    QVERIFY(!service->usingLocalStandIn());
+    QVERIFY(!service->needsRunningTime());
+    QTRY_COMPARE(controller.drops(), 1);
+    QVERIFY(controller.loadoutKnown());
+
+    // Opening it draws on the relay, which grants the item there.
+    controller.open();
+    QTRY_COMPARE_WITH_TIMEOUT(controller.state(), int(DailyCaseController::Opened), 15000);
+    const QString reward = controller.reward().value(QStringLiteral("id")).toString();
+    const CosmeticRules::Item *item = CosmeticRules::find(reward);
+    QVERIFY2(item, qPrintable(reward));
+    QVERIFY(controller.owned().contains(reward));
+    QCOMPARE(controller.drops(), 0);
+
+    // Wearing it is held by the relay...
+    const QString slot = QString::fromLatin1(item->slot);
+    controller.equip(slot, reward);
+    QTRY_COMPARE_WITH_TIMEOUT(controller.loadout().value(slot).toString(), reward, 15000);
+
+    // ...and Bob sees it.
+    QHash<QByteArray, QHash<QString, QString>> seen;
+    bool answered = false;
+    connect(bob.client.get(), &RelayClient::loadoutsReceived, this,
+            [&](const QHash<QByteArray, QHash<QString, QString>> &loadouts) {
+                seen = loadouts;
+                answered = true;
+            });
+    bob.client->fetchLoadouts({alice.account, bob.account});
+    QTRY_VERIFY_WITH_TIMEOUT(answered, 15000);
+    QCOMPARE(seen.value(alice.account.bytes()).value(slot), reward);
+    QVERIFY(!seen.contains(bob.account.bytes()));
+
+    // Something Alice does not own cannot be worn; what she wears stands.
+    QString unowned;
+    for (const CosmeticRules::Item &candidate : CosmeticRules::items()) {
+        if (QLatin1StringView(candidate.slot) == slot && !controller.owned().contains(QLatin1StringView(candidate.id))) {
+            unowned = QString::fromLatin1(candidate.id);
+            break;
+        }
+    }
+    QVERIFY(!unowned.isEmpty());
+    controller.equip(slot, unowned);
+    QTest::qWait(500);
+    controller.refresh();
+    QTest::qWait(500);
+    QCOMPARE(controller.loadout().value(slot).toString(), reward);
+
+    // An operator's grant reaches the account the next time it asks.
+    QCOMPARE(m_cosmetics->grantDrops(5, alice.account).value(), 1);
+    controller.refresh();
+    QTRY_COMPARE_WITH_TIMEOUT(controller.drops(), 5, 15000);
+
+    // A restart finds the same collection and loadout on the relay, and does
+    // not import the device's collection again.
+    DailyCaseController again{std::make_unique<RelayCaseService>(alice.client.get(), localCases.path())};
+    QVERIFY(LocalCosmeticInventory(localCases.path()).grant(aliceKey, {QStringLiteral("scene.sakura")}));
+    again.setAccountKey(aliceKey);
+    QTRY_VERIFY_WITH_TIMEOUT(again.ownershipKnown() && again.loadoutKnown(), 15000);
+    QCOMPARE(again.owned(), controller.owned());
+    QVERIFY(!again.owned().contains(QStringLiteral("scene.sakura")));
+    QCOMPARE(again.loadout().value(slot).toString(), reward);
 }
 
 QTEST_GUILESS_MAIN(EndToEndTest)

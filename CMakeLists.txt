@@ -952,6 +952,7 @@ add_executable(tst_e2e
 )
 target_include_directories(tst_e2e PRIVATE src tests relay/src)
 target_link_libraries(tst_e2e PRIVATE
+    openchat_case_relay
     openchat_cosmetics
     openchat_app
     openchat_avatar

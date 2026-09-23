@@ -1,8 +1,14 @@
 #include "storage/SqlCipherDatabase.h"
 
+#include <QElapsedTimer>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QtTest/QTest>
+
+#include <sqlite3.h>
+
+#include <chrono>
+#include <thread>
 
 using namespace OpenChat;
 
@@ -15,6 +21,7 @@ private slots:
   void wrongKeyFailsClosed();
   void modifiedCiphertextFailsIntegrityCheck();
   void invalidKeyDoesNotCreateAFile();
+  void anotherWritersCommitIsWaitedFor();
 };
 
 void SqlCipherStorageTest::plaintextNeverAppearsOnDisk() {
@@ -114,6 +121,50 @@ void SqlCipherStorageTest::modifiedCiphertextFailsIntegrityCheck() {
   auto reopened = SqlCipherDatabase::open(path, key);
   QVERIFY(!reopened.hasValue());
   QCOMPARE(reopened.error(), StorageError::WrongKeyOrCorrupt);
+}
+
+// A second OpenChat, or the previous one still closing, may be in the middle
+// of a commit when this one opens the profile. Opening used to fail at once
+// with SQLITE_BUSY, which made the app quit at startup without a word.
+void SqlCipherStorageTest::anotherWritersCommitIsWaitedFor() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString path = directory.filePath(QStringLiteral("profile.sqlite3"));
+  auto key = SecureBuffer::random(32);
+  {
+    auto created = SqlCipherDatabase::open(path, key);
+    QVERIFY(created.hasValue());
+  }
+
+  sqlite3 *writer = nullptr;
+  QCOMPARE(sqlite3_open_v2(QFile::encodeName(path).constData(), &writer,
+                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                           nullptr),
+           SQLITE_OK);
+  QCOMPARE(sqlite3_key(writer, key.view().data(), static_cast<int>(key.size())),
+           SQLITE_OK);
+  QCOMPARE(sqlite3_exec(writer, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr),
+           SQLITE_OK);
+  QCOMPARE(sqlite3_exec(writer,
+                        "INSERT INTO verification_markers(marker) VALUES(x'01');",
+                        nullptr, nullptr, nullptr),
+           SQLITE_OK);
+  std::thread commit([writer] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    sqlite3_exec(writer, "COMMIT;", nullptr, nullptr, nullptr);
+  });
+
+  QElapsedTimer waited;
+  waited.start();
+  auto reopened = SqlCipherDatabase::open(path, key);
+  const qint64 elapsed = waited.elapsed();
+  commit.join();
+  sqlite3_close_v2(writer);
+
+  QVERIFY2(reopened.hasValue(), "opening failed while another connection was committing");
+  QVERIFY2(elapsed >= 300, qPrintable(QStringLiteral("opened after %1 ms, before the writer "
+                                                     "committed").arg(elapsed)));
+  QVERIFY(reopened.value().hasVerificationMarker(QByteArray(1, '\x01')).value());
 }
 
 QTEST_GUILESS_MAIN(SqlCipherStorageTest)

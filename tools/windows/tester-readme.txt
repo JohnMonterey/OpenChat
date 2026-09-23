@@ -14,6 +14,14 @@ files. Reports are kept in:
 If OpenChat freezes and you close it, or it disappears without a window, the
 explanation appears the next time you start it.
 
+Starting OpenChat again while it is open brings the open window to the front;
+it does not start a second copy. If OpenChat cannot start at all, it says why
+in a small window.
+
+If OpenChat takes ten seconds or more to show its window, it notes which step
+of starting up it was waiting on: a freeze-*.txt file appears in the crashes
+folder above. Please send it, even if OpenChat opened in the end.
+
 To see what a crash report looks like without waiting for a real one, run
 this from a Command Prompt in this folder:
 

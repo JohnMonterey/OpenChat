@@ -3914,6 +3914,42 @@ private slots:
         report.dismiss();
         QCOMPARE(finished.count(), 1);
     }
+
+    // A start that fails says why in a window, instead of quitting with the
+    // reason written to a console that closes with the process.
+    void startupProblemSaysWhyAndCloses()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine, QUrl::fromLocalFile(
+            QStringLiteral(OPENCHAT_SOURCE_DIR "/qml/OpenChat/StartupProblem.qml")));
+        const QString explanation = QStringLiteral(
+            "OpenChat couldn't open your account's data on this computer. If OpenChat was "
+            "just closed, wait a moment and start it again.");
+        std::unique_ptr<QObject> root(component.createWithInitialProperties(
+            {{QStringLiteral("headline"), QStringLiteral("OpenChat couldn't start")},
+             {QStringLiteral("explanation"), explanation}}));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto textOf = [&](const char *name) {
+            QObject *item = window->findChild<QObject *>(QString::fromLatin1(name));
+            return item ? item->property("text").toString() : QString();
+        };
+        QCOMPARE(textOf("startupProblemHeadline"), QStringLiteral("OpenChat couldn't start"));
+        QCOMPARE(textOf("startupProblemExplanation"), explanation);
+        // The whole explanation fits: nothing runs off the bottom.
+        auto *explained = window->findChild<QQuickItem *>(QStringLiteral("startupProblemExplanation"));
+        QVERIFY(explained);
+        QVERIFY(explained->mapToScene(QPointF(0, explained->height())).y() <= window->height());
+        if (qEnvironmentVariableIsSet("OPENCHAT_CAPTURE_STARTUP_PROBLEM"))
+            window->grabWindow().save(qEnvironmentVariable("OPENCHAT_CAPTURE_STARTUP_PROBLEM"));
+
+        auto *close = window->findChild<QQuickItem *>(QStringLiteral("startupProblemCloseButton"));
+        QVERIFY(close);
+        clickItem(window, close);
+        QTRY_VERIFY(!window->isVisible());
+    }
 };
 
 int main(int argc, char **argv)

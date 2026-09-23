@@ -22,6 +22,11 @@ constexpr qsizetype wrappingKeySize = 32;
 constexpr qsizetype nonceSize = 12;
 constexpr qsizetype tagSize = 16;
 constexpr qsizetype maximumMlsStateSize = qsizetype{8} * 1024 * 1024;
+// How long a statement waits for another connection's write to finish before
+// it reports the database busy. Without it SQLite fails at once: a second
+// OpenChat process, or the previous one still closing, holding the write lock
+// for a single commit made the unlock at startup fail and the app quit.
+constexpr int busyTimeoutMs = 5000;
 
 using CipherContextPointer =
     std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
@@ -192,6 +197,7 @@ SqlCipherDatabase::open(const QString &path, const SecureBuffer &key) {
   }
 
   SqlCipherDatabase database(handle, path);
+  sqlite3_busy_timeout(handle, busyTimeoutMs);
   if (sqlite3_key(handle, key.view().data(), static_cast<int>(key.size())) !=
       SQLITE_OK) {
     database.close();

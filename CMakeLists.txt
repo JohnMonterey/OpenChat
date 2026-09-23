@@ -106,6 +106,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/Main.qml
         qml/OpenChat/Onboarding.qml
         qml/OpenChat/CrashNotice.qml
+        qml/OpenChat/StartupProblem.qml
         qml/OpenChat/VoiceDebugWindow.qml
         qml/OpenChat/Theme.qml
         qml/OpenChat/VocalFx.qml
@@ -619,10 +620,12 @@ add_library(openchat_app STATIC
     src/app/GroupService.cpp
     src/app/DeviceLink.cpp
     src/app/KeyPackageSupply.cpp
+    src/app/SingleInstance.cpp
 )
 target_include_directories(openchat_app PUBLIC src)
 target_link_libraries(openchat_app
     PUBLIC openchat_network openchat_crypto openchat_storage openchat_security Qt6::Core
+           Qt6::Network
 )
 
 add_executable(tst_domain tests/tst_domain.cpp)
@@ -647,7 +650,7 @@ add_test(NAME tst_safetynumber COMMAND tst_safetynumber)
 
 add_executable(tst_sqlcipherstorage tests/tst_sqlcipherstorage.cpp)
 target_include_directories(tst_sqlcipherstorage PRIVATE src)
-target_link_libraries(tst_sqlcipherstorage PRIVATE openchat_storage Qt6::Core Qt6::Test)
+target_link_libraries(tst_sqlcipherstorage PRIVATE openchat_storage openchat_sqlcipher Qt6::Core Qt6::Test)
 add_test(NAME tst_sqlcipherstorage COMMAND tst_sqlcipherstorage)
 
 add_executable(tst_repositories tests/tst_repositories.cpp)
@@ -1014,6 +1017,15 @@ add_test(NAME tst_onboardingcontroller COMMAND tst_onboardingcontroller)
 add_executable(tst_videocall tests/tst_videocall.cpp)
 target_link_libraries(tst_videocall PRIVATE openchat_call Qt6::Test)
 add_test(NAME tst_videocall COMMAND tst_videocall)
+
+# One OpenChat per user: the lock, the hand-over to a running instance, and
+# the real application started twice.
+add_executable(tst_singleinstance tests/tst_singleinstance.cpp)
+target_link_libraries(tst_singleinstance PRIVATE openchat_app Qt6::Core Qt6::Network Qt6::Test)
+target_compile_definitions(tst_singleinstance PRIVATE
+    OPENCHAT_EXECUTABLE="$<TARGET_FILE:OpenChat>")
+add_dependencies(tst_singleinstance OpenChat)
+add_test(NAME tst_singleinstance COMMAND tst_singleinstance)
 
 add_executable(tst_crashreport tests/tst_crashreport.cpp)
 target_include_directories(tst_crashreport PRIVATE src)

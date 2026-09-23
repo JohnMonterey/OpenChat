@@ -100,6 +100,11 @@ The newest 20 reports are kept, with their minidumps. File names are in UTC:
     it suspends the thread just long enough to read its registers; on POSIX it
     signals the thread to record its own return addresses. A suspended machine and an attached debugger are not treated as
     freezes.
+  - Startup counts too. The detector starts on the first event-loop turn,
+    which on a returning launch is the keychain read, and each later startup
+    step names itself (`startup: opening the profile`, `startup: loading the
+    main window`, `startup: starting the relay link`, ...). So a start that
+    stalls for 10 s leaves a freeze report whose "Doing" line names the step.
   - On the next launch it reads the previous session's black box and writes
     the `frozen-`/`closed-` report.
 

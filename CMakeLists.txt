@@ -49,6 +49,7 @@ qt_add_executable(OpenChat
     src/app/AppearanceSettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
+    src/app/ComposerEditing.cpp
 )
 
 if(APPLE)
@@ -923,6 +924,7 @@ add_executable(tst_qmlload
     src/app/AppearanceSettings.cpp
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
+    src/app/ComposerEditing.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE

@@ -53,6 +53,7 @@ class ChatController final : public QObject
     // unusable picture file); empty when there is nothing to say.
     Q_PROPERTY(QString profileNotice READ profileNotice NOTIFY profileNoticeChanged)
     Q_PROPERTY(bool hasCurrentContact READ hasCurrentContact NOTIFY currentContactChanged)
+    Q_PROPERTY(QString currentContactId READ currentContactId NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentContactName READ currentContactName NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentStatusText READ currentStatusText NOTIFY currentContactChanged)
     Q_PROPERTY(QString currentAvatarKey READ currentAvatarKey NOTIFY currentContactChanged)

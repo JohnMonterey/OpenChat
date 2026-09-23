@@ -50,6 +50,7 @@
 #include "app/AppearanceSettings.h"
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
+#include "app/ComposerEditing.h"
 #include "call/ScreenCanvas.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
@@ -94,6 +95,7 @@ void registerQmlTypes()
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
+    qmlRegisterType<OpenChat::ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
         QStringLiteral("ChatController is provided by the application"));

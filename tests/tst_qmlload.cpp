@@ -1,4 +1,5 @@
 #include <QColor>
+#include <QClipboard>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
@@ -26,6 +27,7 @@
 #include "app/AppearanceSettings.h"
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
+#include "app/ComposerEditing.h"
 #include <QQmlExpression>
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
@@ -117,20 +119,34 @@ private slots:
         QVERIFY(root->findChild<QObject *>(QStringLiteral("messageHistory")));
         QVERIFY(root->findChild<QObject *>(QStringLiteral("messageComposer")));
 
-        QObject *input = root->findChild<QObject *>(QStringLiteral("messageInput"));
-        QObject *send = root->findChild<QObject *>(QStringLiteral("sendButton"));
+        auto *input = qobject_cast<QQuickItem *>(
+            root->findChild<QObject *>(QStringLiteral("messageInput")));
         QVERIFY(input);
-        QVERIFY(send);
-        QCOMPARE(send->property("enabled").toBool(), false);
+        // There is no Send button: Enter sends.
+        QVERIFY(!root->findChild<QObject *>(QStringLiteral("sendButton")));
+        QVERIFY(!controller.canSend());
 
+        QQuickWindow *window = showActiveWindow(root);
+        if (!window)
+            QSKIP("No active window on this platform to type into");
+        // The open chat's composer already has the keyboard.
+        QTRY_VERIFY(input->hasActiveFocus());
         const int before = controller.messages()->rowCount();
+        // Enter with nothing to send neither sends nor starts a new line.
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(controller.messages()->rowCount(), before);
+        QCOMPARE(input->property("text").toString(), QString());
         QVERIFY(input->setProperty("text", QStringLiteral("Hello")));
         QCoreApplication::processEvents();
-        QCOMPARE(send->property("enabled").toBool(), true);
-        QVERIFY(QMetaObject::invokeMethod(send, "clicked"));
+        QVERIFY(controller.canSend());
+        QTest::keyClick(window, Qt::Key_Return);
         QCoreApplication::processEvents();
         QCOMPARE(controller.messages()->rowCount(), before + 1);
         QCOMPARE(controller.composerText(), QString());
+        // The keypad's Enter sends too.
+        QVERIFY(input->setProperty("text", QStringLiteral("Again")));
+        QTest::keyClick(window, Qt::Key_Enter, Qt::KeypadModifier);
+        QCOMPARE(controller.messages()->rowCount(), before + 2);
 
         root->setProperty("height", 560);
         QCoreApplication::processEvents();
@@ -570,18 +586,15 @@ private slots:
         QCOMPARE(attachment->property("y").toReal(), 0.0);
 
         // Holding one line, the composer lines up with the sidebar's navigation
-        // bar beside it, and Send lines up with the field.
+        // bar beside it, and the field spans it with even margins either side.
         auto *composerItem = qobject_cast<QQuickItem *>(composer);
         auto *bottomNav = qobject_cast<QQuickItem *>(
             root->findChild<QObject *>(QStringLiteral("bottomNav")));
         auto *frameItem = qobject_cast<QQuickItem *>(frame);
-        auto *send = qobject_cast<QQuickItem *>(
-            root->findChild<QObject *>(QStringLiteral("sendButton")));
-        QVERIFY(composerItem && bottomNav && frameItem && send);
+        QVERIFY(composerItem && bottomNav && frameItem);
         QCOMPARE(composerItem->height(), bottomNav->height());
         QCOMPARE(composerItem->mapToScene(QPointF()).y(), bottomNav->mapToScene(QPointF()).y());
-        QCOMPARE(send->y(), frameItem->y());
-        QCOMPARE(send->height(), singleLineHeight);
+        QCOMPARE(composerItem->width() - (frameItem->x() + frameItem->width()), frameItem->x());
 
         QVERIFY(input->setProperty("text", QStringLiteral("First line\nSecond line\nThird line")));
         QCoreApplication::processEvents();
@@ -618,6 +631,189 @@ private slots:
         QVERIFY(input->setProperty("text", QString()));
         QCoreApplication::processEvents();
         QCOMPARE(frame->property("height").toReal(), singleLineHeight);
+    }
+
+    void composerScrollsUnderTheWheelAndSelectsByDragging()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to scroll in");
+        auto *input = qobject_cast<QQuickItem *>(
+            window->findChild<QObject *>(QStringLiteral("messageInput")));
+        QObject *scroll = window->findChild<QObject *>(QStringLiteral("messageInputScroll"));
+        QVERIFY(input && scroll);
+        QStringList lines;
+        for (int i = 0; i < 80; ++i)
+            lines << QStringLiteral("Line %1").arg(i);
+        QVERIFY(input->setProperty("text", lines.join(QLatin1Char('\n'))));
+        QVERIFY(input->setProperty("cursorPosition", 0));
+        QTRY_COMPARE(scroll->property("contentY").toReal(), 0.0);
+
+        // A notch of the wheel over the text moves it down, and back up.
+        const QPointF over = input->mapToScene(QPointF(input->width() / 2, 30));
+        // One event per notch, as a wheel sends them, each later than the last:
+        // Flickable ignores a wheel event that is not newer than the one before.
+        ulong timestamp = 1'000'000;
+        const auto wheel = [&](int notches) {
+            for (int i = 0; i < std::abs(notches); ++i) {
+                QWheelEvent event(over, window->mapToGlobal(over), QPoint(),
+                                  QPoint(0, notches < 0 ? -120 : 120), Qt::NoButton,
+                                  Qt::NoModifier, Qt::NoScrollPhase, false);
+                timestamp += 50;
+                event.setTimestamp(timestamp);
+                QGuiApplication::sendEvent(window, &event);
+                QTest::qWait(20);
+            }
+        };
+        wheel(-1);
+        QTRY_VERIFY(scroll->property("contentY").toReal() > 0.0);
+        wheel(10);
+        QTRY_COMPARE(scroll->property("contentY").toReal(), 0.0);
+
+        // Dragging across the text selects it rather than scrolling it.
+        const QPoint from = input->mapToScene(QPointF(4, 10)).toPoint();
+        const QPoint to = input->mapToScene(QPointF(24, 140)).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
+        for (int step = 1; step <= 10; ++step)
+            QTest::mouseMove(window, from + (to - from) * step / 10);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, to);
+        QVERIFY(!input->property("selectedText").toString().isEmpty());
+        QCOMPARE(scroll->property("contentY").toReal(), 0.0);
+    }
+
+    void composerEditsLikeACodeEditor()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to type into");
+        auto *input = qobject_cast<QQuickItem *>(
+            window->findChild<QObject *>(QStringLiteral("messageInput")));
+        QVERIFY(input);
+        QTRY_VERIFY(input->hasActiveFocus());
+        const auto text = [&] { return input->property("text").toString(); };
+        const auto cursor = [&] { return input->property("cursorPosition").toInt(); };
+        const auto start = [&](const QString &value, int position) {
+            input->setProperty("text", value);
+            input->setProperty("cursorPosition", position);
+        };
+        const auto press = [&](Qt::Key key, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+            QTest::keyClick(window, key, modifiers);
+        };
+        const Qt::KeyboardModifiers ctrl = Qt::ControlModifier;
+        const Qt::KeyboardModifiers shift = Qt::ShiftModifier;
+        const Qt::KeyboardModifiers alt = Qt::AltModifier;
+        const int sent = controller.messages()->rowCount();
+
+        // Shift+Enter breaks the line and keeps its indentation; nothing is sent.
+        start(QStringLiteral("    first"), 9);
+        press(Qt::Key_Return, shift);
+        QCOMPARE(text(), QStringLiteral("    first\n    "));
+        QCOMPARE(cursor(), 14);
+        QCOMPARE(controller.messages()->rowCount(), sent);
+
+        // Ctrl+Enter opens an indented line below wherever the cursor is in
+        // its line; Ctrl+Shift+Enter one above.
+        start(QStringLiteral("  one\ntwo"), 3);
+        press(Qt::Key_Return, ctrl);
+        QCOMPARE(text(), QStringLiteral("  one\n  \ntwo"));
+        QCOMPARE(cursor(), 8);
+        start(QStringLiteral("  one\ntwo"), 7);
+        press(Qt::Key_Return, ctrl | shift);
+        QCOMPARE(text(), QStringLiteral("  one\n\ntwo"));
+        QCOMPARE(cursor(), 6);
+
+        // Tab fills to the next tab stop; across lines it indents them all.
+        // Shift+Tab takes a level back out.
+        start(QStringLiteral("ab"), 2);
+        press(Qt::Key_Tab);
+        QCOMPARE(text(), QStringLiteral("ab  "));
+        start(QStringLiteral("one\ntwo"), 0);
+        input->setProperty("cursorPosition", 0);
+        QVERIFY(QMetaObject::invokeMethod(input, "select", Q_ARG(int, 0), Q_ARG(int, 7)));
+        press(Qt::Key_Tab);
+        QCOMPARE(text(), QStringLiteral("    one\n    two"));
+        press(Qt::Key_Backtab, shift);
+        QCOMPARE(text(), QStringLiteral("one\ntwo"));
+
+        // Ctrl+] and Ctrl+[ indent and outdent the line the cursor is on.
+        start(QStringLiteral("x"), 1);
+        press(Qt::Key_BracketRight, ctrl);
+        QCOMPARE(text(), QStringLiteral("    x"));
+        QCOMPARE(cursor(), 5);
+        press(Qt::Key_BracketLeft, ctrl);
+        QCOMPARE(text(), QStringLiteral("x"));
+        QCOMPARE(cursor(), 1);
+
+        // Alt+Down and Alt+Up move the line, the cursor with it; a move is a
+        // single step to undo, and Ctrl+Y or Ctrl+Shift+Z redo it.
+        start(QStringLiteral("one\ntwo\nthree"), 1);
+        press(Qt::Key_Down, alt);
+        QCOMPARE(text(), QStringLiteral("two\none\nthree"));
+        QCOMPARE(cursor(), 5);
+        press(Qt::Key_Down, alt);
+        QCOMPARE(text(), QStringLiteral("two\nthree\none"));
+        press(Qt::Key_Up, alt);
+        QCOMPARE(text(), QStringLiteral("two\none\nthree"));
+        QCOMPARE(cursor(), 5);
+        press(Qt::Key_Z, ctrl);
+        QCOMPARE(text(), QStringLiteral("two\nthree\none"));
+        press(Qt::Key_Y, ctrl);
+        QCOMPARE(text(), QStringLiteral("two\none\nthree"));
+        press(Qt::Key_Z, ctrl);
+        press(Qt::Key_Z, ctrl | shift);
+        QCOMPARE(text(), QStringLiteral("two\none\nthree"));
+
+        // Shift+Alt+Down copies the line below and follows the copy; Ctrl+Shift+K
+        // deletes the line.
+        start(QStringLiteral("one\ntwo"), 1);
+        press(Qt::Key_Down, shift | alt);
+        QCOMPARE(text(), QStringLiteral("one\none\ntwo"));
+        QCOMPARE(cursor(), 5);
+        press(Qt::Key_K, ctrl | shift);
+        QCOMPARE(text(), QStringLiteral("one\ntwo"));
+        QCOMPARE(cursor(), 4);
+
+        // Ctrl+L selects the line, then the next one too.
+        start(QStringLiteral("one\ntwo\nthree"), 1);
+        press(Qt::Key_L, ctrl);
+        QCOMPARE(input->property("selectedText").toString(), QStringLiteral("one\n"));
+        press(Qt::Key_L, ctrl);
+        QCOMPARE(input->property("selectionEnd").toInt(), 8);
+
+        // With nothing selected, Ctrl+C copies the whole line and Ctrl+X cuts it.
+        start(QStringLiteral("one\ntwo"), 1);
+        press(Qt::Key_C, ctrl);
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("one\n"));
+        QCOMPARE(text(), QStringLiteral("one\ntwo"));
+        input->setProperty("cursorPosition", 5);
+        press(Qt::Key_X, ctrl);
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("two\n"));
+        QCOMPARE(text(), QStringLiteral("one"));
+
+        // None of it sent anything; switching chats hands the new chat's
+        // composer the keyboard.
+        QCOMPARE(controller.messages()->rowCount(), sent);
+        auto *search = qobject_cast<QQuickItem *>(
+            window->findChild<QObject *>(QStringLiteral("contactSearch")));
+        QVERIFY(search);
+        search->forceActiveFocus();
+        QVERIFY(!input->hasActiveFocus());
+        QVERIFY(controller.selectContact(QStringLiteral("alex")));
+        QTRY_VERIFY(input->hasActiveFocus());
     }
 
     void composerStopsAtTheLongestMessage()
@@ -853,12 +1049,10 @@ private slots:
         QObject *messageList = root->findChild<QObject *>(QStringLiteral("messageList"));
         QObject *notice = root->findChild<QObject *>(QStringLiteral("securityNotice"));
         QObject *input = root->findChild<QObject *>(QStringLiteral("messageInput"));
-        QObject *send = root->findChild<QObject *>(QStringLiteral("sendButton"));
         QVERIFY(banner);
         QVERIFY(messageList);
         QVERIFY(notice);
         QVERIFY(input);
-        QVERIFY(send);
 
         // Ready: the banner is collapsed and invisible, history is shown, and the
         // security notice is hidden — the approved interface is unchanged.
@@ -877,7 +1071,7 @@ private slots:
         QVERIFY(!messageList->property("visible").toBool());
         QVERIFY(notice->property("visible").toBool());
         QCOMPARE(controller.messages()->rowCount(), 0);
-        QCOMPARE(send->property("enabled").toBool(), false);
+        QVERIFY(!controller.canSend());
 
         // Returning to Ready restores the interface and the composer draft is intact.
         controller.setSessionState(OpenChat::ChatController::SessionState::Ready);
@@ -887,7 +1081,7 @@ private slots:
         QVERIFY(messageList->property("visible").toBool());
         QVERIFY(!notice->property("visible").toBool());
         QCOMPARE(controller.composerText(), QStringLiteral("blocked while locked"));
-        QCOMPARE(send->property("enabled").toBool(), true);
+        QVERIFY(controller.canSend());
     }
 
     void bubbleWidthFollowsContentWithinLimits()
@@ -2679,6 +2873,7 @@ int main(int argc, char **argv)
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>(
         "OpenChat.Native", 1, 0, "AvatarArtwork");
+    qmlRegisterType<OpenChat::ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
         QStringLiteral("ChatController is provided by the application"));

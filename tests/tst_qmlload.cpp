@@ -278,8 +278,13 @@ private slots:
         capture("available");
         auto *offer = findVisualItem(window->contentItem(), "caseStatus");
         QVERIFY(offer);
-        QVERIFY(offer->property("text").toString().contains(QStringLiteral("every hour")));
+        QVERIFY(offer->property("text").toString().contains(QStringLiteral("every 30 minutes while OpenChat is open")));
         QCOMPARE(open->property("text").toString(), QStringLiteral("Open case"));
+        // A new account's first case waits, and the popup counts it.
+        auto *waiting = findVisualItem(window->contentItem(), "caseDrops");
+        QVERIFY(waiting);
+        QCOMPARE(controller->drops(), 1);
+        QVERIFY(waiting->property("text").toString().startsWith(QStringLiteral("1 case waiting")));
         QSignalSpy reveal(controller, &OpenChat::DailyCaseController::revealed);
         QSignalSpy ticks(controller, &OpenChat::DailyCaseController::crossed);
         click(open);
@@ -318,11 +323,14 @@ private slots:
         QVERIFY(status);
         QVERIFY(status->property("text").toString().contains(reward.value("name").toString()));
         QVERIFY(status->property("text").toString().contains(reward.value("rarityName").toString()));
-        // The next case is an hour away, and the button says when.
-        const QDateTime next = controller->nextAvailableAt();
-        QVERIFY(qAbs(QDateTime::currentDateTimeUtc().secsTo(next) - OpenChat::caseCooldownSeconds) < 30);
-        QCOMPARE(open->property("text").toString(),
-                 QStringLiteral("Next at ") + QLocale().toString(next.toLocalTime().time(), QLocale::ShortFormat));
+        // None waits now; the next drops half an hour of running from the
+        // start, and the button and the count say when.
+        QCOMPARE(controller->drops(), 0);
+        const QDateTime next = controller->nextDropAt();
+        QVERIFY(qAbs(QDateTime::currentDateTimeUtc().msecsTo(next) - OpenChat::caseDropIntervalMs) < 60 * 1000);
+        QVERIFY(!open->isEnabled());
+        QVERIFY(open->property("text").toString().startsWith(QStringLiteral("Next at ")));
+        QVERIFY(waiting->property("text").toString().startsWith(QStringLiteral("Next case drops at ")));
         // And it is the account's to keep: now in its collection, and wearable.
         QVERIFY(controller->owned().contains(reward.value("id").toString()));
         auto *wardrobe = engine.singletonInstance<OpenChat::AppearanceSettings *>(
@@ -379,6 +387,36 @@ private slots:
         QTest::keyClick(window, Qt::Key_Escape);
         QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
         appearance->setDarkMode(false);
+
+        // Drops stack: both waiting cases are counted, and after a reveal the
+        // next opens from the same popup, from a belt of its own.
+        const QString stacked = QUuid::createUuid().toString();
+        QCOMPARE(OpenChat::LocalDailyCaseService().accrue(stacked, OpenChat::caseDropIntervalMs).drops, 2);
+        controller->setProperty("reducedMotion", true);
+        controller->setAccountKey(stacked);
+        QCOMPARE(controller->drops(), 2);
+        click(entry);
+        QTRY_VERIFY((reel = findVisualItem(window->contentItem(), "caseReel")));
+        auto *count = findVisualItem(window->contentItem(), "caseDrops");
+        open = findVisualItem(window->contentItem(), "caseOpenButton");
+        QVERIFY(count && open);
+        QVERIFY(count->property("text").toString().startsWith(QStringLiteral("2 cases waiting")));
+        click(open);
+        QTRY_COMPARE(controller->state(), OpenChat::DailyCaseController::Opened);
+        QCOMPARE(controller->drops(), 1);
+        QVERIFY(count->property("text").toString().startsWith(QStringLiteral("1 case waiting")));
+        QTRY_VERIFY(open->isEnabled());
+        QCOMPARE(open->property("text").toString(), QStringLiteral("Open next case"));
+        const QVariantList firstBelt = controller->fillers();
+        click(open);
+        QTRY_COMPARE(reveal.size(), 3);
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::Opened);
+        QCOMPARE(controller->drops(), 0);
+        QVERIFY(controller->fillers() != firstBelt);
+        QVERIFY(!open->isEnabled());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        controller->setProperty("reducedMotion", false);
         QCOMPARE(warnings.size(), 0);
     }
 
@@ -1382,7 +1420,7 @@ private slots:
         // here reaches contacts.
         auto *note = findVisualItem(root, QStringLiteral("settingsCategoryNote"));
         QVERIFY(note && note->isVisible());
-        QVERIFY(note->property("text").toString().contains(QStringLiteral("hourly case")));
+        QVERIFY(note->property("text").toString().contains(QStringLiteral("cases that drop")));
         QVERIFY(note->property("text").toString().contains(QStringLiteral("this device only")));
         QTRY_COMPARE(appearance->property("ownedCosmetics").toStringList(), owned);
 

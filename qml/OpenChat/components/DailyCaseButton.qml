@@ -11,11 +11,12 @@ AbstractButton {
     height: 28
     Accessible.name: "Daily case"
     ToolTip.visible: hovered
-    ToolTip.text: !controller ? "Hourly case"
-        : controller.state === DailyCaseController.Available ? "Your case is ready"
-        : controller.state === DailyCaseController.Opened && !isNaN(controller.nextAvailableAt)
-            ? "Next case at " + controller.nextAvailableAt.toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
-        : "Hourly case"
+    ToolTip.text: !controller ? "Case drops"
+        : controller.drops === 1 ? "A case is ready"
+        : controller.drops > 1 ? controller.drops + " cases are ready"
+        : !isNaN(controller.nextDropAt)
+            ? "Next case drops at " + controller.nextDropAt.toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
+        : "Case drops"
     background: Rectangle {
         radius: 4
         color: root.hovered ? Theme.buttonHover : "transparent"
@@ -34,7 +35,7 @@ AbstractButton {
         Rectangle {
             x: parent.width - 6; y: 1; width: 5; height: 5; radius: 3
             color: Theme.accentBlue
-            visible: root.controller !== null && root.controller.state === DailyCaseController.Available
+            visible: root.controller !== null && root.controller.drops > 0
         }
     }
 }

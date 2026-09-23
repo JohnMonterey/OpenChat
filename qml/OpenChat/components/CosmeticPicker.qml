@@ -7,7 +7,7 @@ import OpenChat.Native
 // first, then every item of the kind from Common to Exotic. Picking a tile
 // equips it at once: AppearanceSettings remembers it, and the sidebar header
 // (or, for bubbles, your own messages) wears it. Each tile draws its item with
-// the component that wears it, under the same tier bar as the hourly case.
+// the component that wears it, under the same tier bar as the case.
 // Only what the account has unboxed can be picked; the rest stay in the grid,
 // dimmed under a padlock, so the collection shows what is still to find.
 Item {
@@ -154,7 +154,7 @@ Item {
                     ToolTip.visible: hovered && !none
                     ToolTip.delay: 700
                     ToolTip.text: none ? ""
-                        : locked ? modelData.description + "\nNot unboxed yet: it can drop from the hourly case."
+                        : locked ? modelData.description + "\nNot unboxed yet: it can come in any case that drops."
                         : modelData.description
 
                     // Everything that shows the item, dimmed while it is locked.

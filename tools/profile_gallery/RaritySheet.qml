@@ -28,7 +28,7 @@ Window {
 
         SheetTitle {
             title: "Rarity ladder"
-            subtitle: "All " + sheet.everything.length + " collectibles as the hourly case shows them. A draw picks a tier by its odds, then one of its items evenly."
+            subtitle: "All " + sheet.everything.length + " collectibles as the case shows them. A draw picks a tier by its odds, then one of its items evenly."
         }
 
         Repeater {

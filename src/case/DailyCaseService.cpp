@@ -11,7 +11,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QUuid>
-#include <QTimeZone>
+#include <algorithm>
 
 namespace OpenChat {
 namespace {
@@ -73,12 +73,17 @@ bool LocalCosmeticInventory::grant(const QString &account, const QStringList &id
     return output.open(QIODevice::WriteOnly) && output.write(bytes) == bytes.size() && output.commit();
 }
 
-LocalDailyCaseService::LocalDailyCaseService(QString directory)
+LocalDailyCaseService::LocalDailyCaseService(QString directory, qint64 dropIntervalMs)
     : m_directory(directory.isEmpty() ? defaultDailyCaseDirectory() : std::move(directory)),
+      m_dropIntervalMs(std::max<qint64>(1, dropIntervalMs)),
       m_inventory(m_directory) {}
-CaseReply LocalDailyCaseService::status(const QString &account) { return transact(account, false); }
-CaseReply LocalDailyCaseService::claim(const QString &account) { return transact(account, true); }
-CaseReply LocalDailyCaseService::transact(const QString &account, bool claim)
+CaseReply LocalDailyCaseService::status(const QString &account) { return transact(account, Action::Status); }
+CaseReply LocalDailyCaseService::claim(const QString &account) { return transact(account, Action::Claim); }
+CaseReply LocalDailyCaseService::accrue(const QString &account, qint64 ms)
+{
+    return transact(account, Action::Accrue, ms);
+}
+CaseReply LocalDailyCaseService::transact(const QString &account, Action action, qint64 ms)
 {
     if (account.isEmpty() || !QDir().mkpath(m_directory))
         return {{}, false, QStringLiteral("Could not access your case. Please try again.")};
@@ -96,50 +101,96 @@ CaseReply LocalDailyCaseService::transact(const QString &account, bool claim)
         if (CosmeticCatalog::find(id) && !owned.contains(id) && m_inventory.grant(account, {id}))
             owned.append(id);
     };
-    const auto now = QDateTime::currentDateTimeUtc(); // MOCK ONLY; server time in online adapter.
-    // The case on offer follows the last claim; before any, it is the first.
-    QString caseKey = QStringLiteral("first");
+    // The account's record. None yet is a new account's: one case waits, so
+    // the first is there to open straight away.
+    CaseResult last;
+    int drops = 1;
+    qint64 progress = 0;
     QFile file(path);
     if (file.exists()) {
         if (!file.open(QIODevice::ReadOnly))
             return {{}, false, QStringLiteral("Could not read your case.")};
         const auto obj = QJsonDocument::fromJson(file.readAll()).object();
-        const auto next = QDateTime::fromString(obj.value("next").toString(), Qt::ISODate);
-        const QString claimId = obj.value("claim").toString();
-        if (!next.isValid() || claimId.isEmpty() || !obj.value("seed").isDouble())
-            return {{}, false, QStringLiteral("The saved case could not be read.")};
+        last.claimId = obj.value("claim").toString();
+        const bool seeded = obj.value("seed").isDouble();
+        if (obj.contains("drops")) {
+            drops = int(obj.value("drops").toDouble(-1));
+            progress = qint64(obj.value("progressMs").toDouble(-1));
+            if (drops < 0 || progress < 0 || (!last.claimId.isEmpty() && !seeded))
+                return {{}, false, QStringLiteral("The saved case could not be read.")};
+        } else {
+            // Saved by a build with a cooldown: one case waits if it was due.
+            const auto next = QDateTime::fromString(obj.value("next").toString(), Qt::ISODate);
+            if (!next.isValid() || last.claimId.isEmpty() || !seeded)
+                return {{}, false, QStringLiteral("The saved case could not be read.")};
+            drops = QDateTime::currentDateTimeUtc() >= next ? 1 : 0;
+            progress = 0;
+        }
+        last.rewardId = obj.value("reward").toString(QStringLiteral("placeholder"));
+        last.seed = quint32(obj.value("seed").toDouble());
+        last.caseKey = obj.value("case").toString(last.claimId);
         // A claim saved before collections existed still hands its reward over.
         keep(obj.value("reward").toString());
-        // One saved under the old once-a-day rule waits for midnight; no
-        // hourly claim ever waits longer than the cooldown, so it is released.
-        const bool dailyRule = next > now.addSecs(caseCooldownSeconds);
-        if (now < next && !dailyRule)
-            return {CaseResult{claimId, obj.value("reward").toString(QStringLiteral("placeholder")),
-                               quint32(obj.value("seed").toDouble()), next},
-                    false, {}, owned, obj.value("case").toString(claimId)};
-        caseKey = QStringLiteral("after ") + claimId;
     }
-    if (!claim)
-        return {{}, false, {}, owned, caseKey};
+    // The case on offer follows the last claim; before any, it is the first.
+    const auto nextKey = [&] {
+        return last.claimId.isEmpty() ? QStringLiteral("first") : QStringLiteral("after ") + last.claimId;
+    };
+    const auto reply = [&](bool newlyClaimed) {
+        return CaseReply{last.claimId.isEmpty() ? std::nullopt : std::optional<CaseResult>(last),
+                         newlyClaimed, {}, owned, nextKey(), drops, progress};
+    };
+    const auto save = [&] {
+        QJsonObject obj{{"drops", drops}, {"progressMs", double(progress)}};
+        if (!last.claimId.isEmpty()) {
+            obj.insert("claim", last.claimId);
+            obj.insert("reward", last.rewardId);
+            obj.insert("seed", double(last.seed));
+            obj.insert("case", last.caseKey);
+        }
+        const auto bytes = QJsonDocument(obj).toJson();
+        QSaveFile output(path);
+        return output.open(QIODevice::WriteOnly) && output.write(bytes) == bytes.size() && output.commit();
+    };
+
+    switch (action) {
+    case Action::Status:
+        return reply(false);
+    case Action::Accrue: {
+        // MOCK ONLY: the running time is the client's word for it.
+        const qint64 credited = std::clamp<qint64>(ms, 0, std::max<qint64>(0, m_dropIntervalMs - progress));
+        if (credited == 0 && progress < m_dropIntervalMs)
+            return reply(false);
+        progress += credited;
+        if (progress >= m_dropIntervalMs) {
+            ++drops;
+            progress = 0;
+        }
+        if (!save())
+            return {{}, false, QStringLiteral("Could not save your case progress.")};
+        return reply(false);
+    }
+    case Action::Claim:
+        break;
+    }
+    if (drops <= 0) {
+        if (last.claimId.isEmpty())
+            return {{}, false, QStringLiteral("There is no case to open yet.")};
+        return reply(false);
+    }
     // The reward is drawn here, by the authority, with the tier odds; the seed
     // below only arranges the reel. MOCK ONLY: the online adapter's server draws.
     auto *random = QRandomGenerator::global();
     const auto &reward = CosmeticCatalog::draw(random->bounded(quint32(CosmeticCatalog::totalWeight)),
                                                random->generate());
-    // Whole seconds, as the record keeps it, so a replay names the same moment.
-    CaseResult result{QUuid::createUuid().toString(QUuid::WithoutBraces), reward.id,
-                      random->generate(),
-                      QDateTime::fromSecsSinceEpoch(now.toSecsSinceEpoch() + caseCooldownSeconds,
-                                                    QTimeZone::UTC)};
-    const auto bytes = QJsonDocument(QJsonObject{{"claim", result.claimId},
-        {"reward", result.rewardId}, {"seed", double(result.seed)},
-        {"next", result.nextAvailableAt.toString(Qt::ISODate)}, {"case", caseKey}}).toJson();
-    QSaveFile output(path);
-    if (!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit())
+    last = CaseResult{QUuid::createUuid().toString(QUuid::WithoutBraces), reward.id,
+                      random->generate(), nextKey()};
+    --drops;
+    if (!save())
         return {{}, false, QStringLiteral("Could not save your case. Please try again.")};
     // Recorded as claimed first, so a failed grant is only ever retried,
     // never turned into a second draw.
-    keep(result.rewardId);
-    return {result, true, {}, owned, caseKey};
+    keep(last.rewardId);
+    return reply(true);
 }
 }

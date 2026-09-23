@@ -30,10 +30,14 @@ services:
       OPENCHAT_RELAY_PG_DATABASE: openchat_relay
       OPENCHAT_RELAY_BIND: "0.0.0.0"
       OPENCHAT_RELAY_PORT: "8443"
+      OPENCHAT_RELAY_MEDIA_BIND: "0.0.0.0"
+      OPENCHAT_RELAY_MEDIA_PORT: "8444"
+    ports:
+      - "8444:8444/udp"
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [backend]
+    networks: [edge, backend]
 
   caddy:
     image: caddy:2-alpine

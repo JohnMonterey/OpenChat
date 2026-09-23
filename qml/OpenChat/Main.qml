@@ -379,12 +379,16 @@ Window {
                             readonly property bool lowMemorySetting:
                                 !navigationRow && root.chatController.currentSettingsCategoryName === "General"
                                 && elementLabel === "Low memory mode"
+                            readonly property bool connectionSetting:
+                                !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
+                                && elementLabel === "Connection"
                             readonly property bool panelSetting:
-                                microphoneSetting || vocalFxSetting || lowMemorySetting
+                                microphoneSetting || vocalFxSetting || lowMemorySetting || connectionSetting
                             width: parent.width
                             height: microphoneSetting ? microphonePanel.height
                                   : vocalFxSetting ? vocalFxPanel.height
-                                  : lowMemorySetting ? lowMemoryPanel.height : (themeSetting ? 70 : 48)
+                                  : lowMemorySetting ? lowMemoryPanel.height
+                                  : connectionSetting ? connectionPanel.height : (themeSetting ? 70 : 48)
                             activeFocusOnTab: navigationRow
                             Accessible.role: navigationRow ? Accessible.Button : Accessible.Pane
                             Accessible.name: elementLabel
@@ -436,6 +440,15 @@ Window {
                                 sourceComponent: LowMemoryPanel {
                                     restartAllowed: !root.inCall
                                 }
+                            }
+
+                            Loader {
+                                id: connectionPanel
+                                active: settingsElementRow.connectionSetting
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                height: item ? item.implicitHeight : 0
+                                sourceComponent: ConnectionSettingsPanel {}
                             }
 
                             Text {

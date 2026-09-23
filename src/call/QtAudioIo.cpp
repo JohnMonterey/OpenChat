@@ -266,6 +266,13 @@ bool QtAudioPlaybackSink::start()
     if (device.isNull())
         return false;
     m_sink = std::make_unique<QAudioSink>(device, callPlaybackQAudioFormat());
+    // Everything the sink holds is delay between the jitter buffer and the
+    // speaker, and Qt's default ring is a quarter of a second: measured, it
+    // pulls 341 ms of audio inside the first 50 ms of a call and never gives it
+    // back. It also empties the jitter buffer in one gulp on every refill,
+    // which is what the cushion exists to prevent. Two frames is enough for the
+    // backend to stay fed and bounds the queue at 40 ms.
+    m_sink->setBufferSize(playbackBytesPerFrame * playbackRingFrames);
     m_pump = std::make_unique<FramePump>(*this);
     if (!m_pump->open(QIODevice::ReadOnly))
         return false;

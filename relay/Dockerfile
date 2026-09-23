@@ -72,7 +72,9 @@ USER relay
 # Plain HTTP/WS on the internal network; TLS terminates at the Caddy proxy.
 # Postgres connection settings are supplied by compose via the environment.
 ENV OPENCHAT_RELAY_BIND=0.0.0.0 \
-    OPENCHAT_RELAY_PORT=8443
+    OPENCHAT_RELAY_PORT=8443 \
+    OPENCHAT_RELAY_MEDIA_BIND=0.0.0.0 \
+    OPENCHAT_RELAY_MEDIA_PORT=8444
 
-EXPOSE 8443
+EXPOSE 8443 8444/udp
 ENTRYPOINT ["/usr/local/bin/openchat-relay"]

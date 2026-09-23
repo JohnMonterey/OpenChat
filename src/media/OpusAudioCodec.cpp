@@ -16,10 +16,15 @@ OpusAudioCodec::OpusAudioCodec(int bitrate)
     } else {
         opus_encoder_ctl(m_encoder, OPUS_SET_BITRATE(bitrate));
         opus_encoder_ctl(m_encoder, OPUS_SET_COMPLEXITY(10));
-        // In-band FEC lets the decoder reconstruct a lost frame from the next
-        // packet; it costs bitrate only when the encoder is told loss is likely.
-        opus_encoder_ctl(m_encoder, OPUS_SET_INBAND_FEC(1));
-        opus_encoder_ctl(m_encoder, OPUS_SET_PACKET_LOSS_PERC(10));
+        // In-band FEC is off on purpose. Reconstructing a lost frame from the
+        // next packet means holding that next packet before playing the gap,
+        // which buys robustness with exactly the delay this path is trying to
+        // shed — so decode() asks for concealment instead, never decode_fec.
+        // Leaving the encoder side on would spend bitrate on redundancy nothing
+        // reads. If it is ever turned back on, the decoder has to be taught to
+        // use it in the same change.
+        opus_encoder_ctl(m_encoder, OPUS_SET_INBAND_FEC(0));
+        opus_encoder_ctl(m_encoder, OPUS_SET_PACKET_LOSS_PERC(0));
         opus_encoder_ctl(m_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     }
 

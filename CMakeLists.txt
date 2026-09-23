@@ -69,6 +69,7 @@ qt_add_executable(OpenChat
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
     src/controllers/CrashReportController.cpp
+    src/controllers/VoiceDebugController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/CallParticipantModel.cpp
@@ -81,6 +82,7 @@ qt_add_executable(OpenChat
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
+    src/app/TransportSettings.cpp
 )
 
 if(APPLE)
@@ -104,6 +106,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/Main.qml
         qml/OpenChat/Onboarding.qml
         qml/OpenChat/CrashNotice.qml
+        qml/OpenChat/VoiceDebugWindow.qml
         qml/OpenChat/Theme.qml
         qml/OpenChat/VocalFx.qml
         qml/OpenChat/components/VocalFxPanel.qml
@@ -121,6 +124,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/MicrophoneContextMenu.qml
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/LowMemoryPanel.qml
+        qml/OpenChat/components/ConnectionSettingsPanel.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
@@ -399,6 +403,7 @@ set_source_files_properties(src/diagnostics/CrashReporter.cpp PROPERTIES COMPILE
 add_library(openchat_protocol STATIC
     src/protocol/CiphertextEnvelope.cpp
     src/protocol/CanonicalCborCodec.cpp
+    src/protocol/UdpMediaFrame.cpp
 )
 target_include_directories(openchat_protocol PUBLIC src)
 target_link_libraries(openchat_protocol PUBLIC openchat_domain Qt6::Core)
@@ -548,6 +553,7 @@ add_library(openchat_call STATIC
     src/call/QtVideoCapture.cpp
     src/call/QtScreenCapture.cpp
     src/call/VideoFrameCopy.cpp
+    src/call/UdpCallMediaPath.cpp
 )
 target_include_directories(openchat_call PUBLIC src)
 target_link_libraries(openchat_call
@@ -667,6 +673,11 @@ target_compile_definitions(tst_envelopecodec PRIVATE
 target_link_libraries(tst_envelopecodec PRIVATE openchat_protocol Qt6::Core Qt6::Test)
 add_test(NAME tst_envelopecodec COMMAND tst_envelopecodec)
 
+add_executable(tst_udpmediaframe tests/tst_udpmediaframe.cpp)
+target_include_directories(tst_udpmediaframe PRIVATE src)
+target_link_libraries(tst_udpmediaframe PRIVATE openchat_protocol Qt6::Core Qt6::Test)
+add_test(NAME tst_udpmediaframe COMMAND tst_udpmediaframe)
+
 add_executable(tst_mlsbridge tests/tst_mlsbridge.cpp)
 target_include_directories(tst_mlsbridge PRIVATE src)
 target_link_libraries(tst_mlsbridge PRIVATE openchat_crypto Qt6::Core Qt6::Test)
@@ -693,6 +704,23 @@ target_link_libraries(tst_relayclient PRIVATE
 )
 add_test(NAME tst_relayclient COMMAND tst_relayclient)
 set_tests_properties(tst_relayclient PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(tst_udpmediaservice tests/tst_udpmediaservice.cpp)
+target_include_directories(tst_udpmediaservice PRIVATE src tests relay/src)
+target_link_libraries(tst_udpmediaservice PRIVATE
+    openchat_relay_server
+    openchat_relay_core
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Sql
+    Qt6::HttpServer
+    Qt6::Test
+    OpenSSL::Crypto
+)
+add_test(NAME tst_udpmediaservice COMMAND tst_udpmediaservice)
 
 add_executable(tst_deviceidentity tests/tst_deviceidentity.cpp)
 target_include_directories(tst_deviceidentity PRIVATE src relay/src)
@@ -1037,6 +1065,59 @@ target_link_libraries(tst_callengine PRIVATE
 )
 add_test(NAME tst_callengine COMMAND tst_callengine)
 
+# Real 1:1 call verifying UDP Active state, audio roundtrips, and transparent fallback to WS
+add_executable(tst_calludp
+    tests/tst_calludp.cpp
+    src/app/TransportSettings.cpp
+)
+target_include_directories(tst_calludp PRIVATE src tests relay/src)
+target_link_libraries(tst_calludp PRIVATE
+    openchat_call
+    openchat_media
+    openchat_network
+    openchat_protocol
+    openchat_domain
+    openchat_relay_server
+    openchat_relay_core
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Sql
+    Qt6::HttpServer
+    Qt6::Test
+    OpenSSL::Crypto
+)
+add_test(NAME tst_calludp COMMAND tst_calludp)
+
+# The seam the other UDP tests leave open: a real RelayClient asking for a media
+# token over its live socket, a real UdpMediaService minting and binding it, and
+# a real UdpCallMediaPath reaching Active with nothing hand-injected.
+add_executable(tst_udpmediae2e
+    tests/tst_udpmediae2e.cpp
+    tests/relay/RelayTestSupport.cpp
+    src/app/TransportSettings.cpp
+)
+target_include_directories(tst_udpmediae2e PRIVATE src tests relay/src)
+target_link_libraries(tst_udpmediae2e PRIVATE
+    openchat_call
+    openchat_media
+    openchat_network
+    openchat_protocol
+    openchat_domain
+    openchat_security
+    openchat_relay_server
+    openchat_relay_core
+    Qt6::Core
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Sql
+    Qt6::HttpServer
+    Qt6::Test
+    OpenSSL::Crypto
+)
+add_test(NAME tst_udpmediae2e COMMAND tst_udpmediae2e)
+set_tests_properties(tst_udpmediae2e PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # Group calls over a mesh of scripted endpoints: everyone rings, joins one by
 # one, hears the others mixed, leaves without ending it for the rest, and the
 # decline/busy/timeout/glare edges.
@@ -1080,6 +1161,7 @@ add_executable(tst_qmlload
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
+    src/controllers/VoiceDebugController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/CallParticipantModel.cpp
@@ -1093,6 +1175,7 @@ add_executable(tst_qmlload
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
     src/controllers/CrashReportController.cpp
+    src/app/TransportSettings.cpp
 )
 target_include_directories(tst_qmlload PRIVATE src)
 target_compile_definitions(tst_qmlload PRIVATE
@@ -1144,6 +1227,7 @@ add_executable(openchat-profile-gallery
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
+    src/app/TransportSettings.cpp
 )
 # The bundled contact photos, at the paths the avatar painter looks them up,
 # so frames are judged against real faces.

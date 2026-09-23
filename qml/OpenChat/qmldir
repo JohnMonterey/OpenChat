@@ -2,6 +2,7 @@ module OpenChat
 Main 1.0 Main.qml
 Onboarding 1.0 Onboarding.qml
 CrashNotice 1.0 CrashNotice.qml
+VoiceDebugWindow 1.0 VoiceDebugWindow.qml
 singleton Theme 1.0 Theme.qml
 singleton VocalFx 1.0 VocalFx.qml
 VocalFxPanel 1.0 components/VocalFxPanel.qml
@@ -19,6 +20,7 @@ AeroMenuSetting 1.0 components/AeroMenuSetting.qml
 MicrophoneContextMenu 1.0 components/MicrophoneContextMenu.qml
 MicrophoneSettingsPanel 1.0 components/MicrophoneSettingsPanel.qml
 LowMemoryPanel 1.0 components/LowMemoryPanel.qml
+ConnectionSettingsPanel 1.0 components/ConnectionSettingsPanel.qml
 ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml
 ContactRow 1.0 components/ContactRow.qml

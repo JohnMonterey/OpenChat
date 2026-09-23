@@ -7,6 +7,7 @@
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHostInfo>
 #include <QIcon>
 #include <QPainter>
 #include <QPointer>
@@ -53,6 +54,7 @@
 #include "diagnostics/BlackBox.h"
 #include "diagnostics/CrashReporter.h"
 #include "controllers/OnboardingController.h"
+#include "controllers/VoiceDebugController.h"
 #include "domain/Identifiers.h"
 #include "network/RelayClient.h"
 #include "notify/NotificationBackend.h"
@@ -68,6 +70,8 @@
 #include "call/ScreenCanvas.h"
 #include "case/DailyCaseController.h"
 #include "cosmetics/CosmeticTypes.h"
+#include "app/TransportSettings.h"
+#include "call/UdpCallMediaPath.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
@@ -120,6 +124,16 @@ void registerQmlTypes()
             }
             return new OpenChat::MemorySettings;
         });
+    // The UDP media preference, shared the same way.
+    qmlRegisterSingletonType<OpenChat::TransportSettings>(
+        "OpenChat.Native", 1, 0, "TransportSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * {
+            if (auto *shared = OpenChat::TransportSettings::instance()) {
+                QQmlEngine::setObjectOwnership(shared, QQmlEngine::CppOwnership);
+                return shared;
+            }
+            return new OpenChat::TransportSettings;
+        });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
@@ -141,6 +155,9 @@ void registerQmlTypes()
     qmlRegisterUncreatableType<OpenChat::CallParticipantModel>(
         "OpenChat.Native", 1, 0, "CallParticipantModel",
         QStringLiteral("CallParticipantModel is provided by the CallController"));
+    qmlRegisterUncreatableType<OpenChat::VoiceDebugController>(
+        "OpenChat.Native", 1, 0, "VoiceDebugController",
+        QStringLiteral("VoiceDebugController is provided by the application"));
 }
 
 // Applies an optional --width/--height override to a window, honouring the app's
@@ -283,13 +300,15 @@ class AppRuntime final
 public:
     AppRuntime(QString profilesRoot, OpenChat::RelayEndpoints endpoints,
                std::optional<QSslConfiguration> tls, int keyPackageCount,
-               std::optional<int> width, std::optional<int> height)
+               std::optional<int> width, std::optional<int> height,
+               bool uglyVoiceDebug = false)
         : m_profilesRoot(std::move(profilesRoot))
         , m_endpoints(std::move(endpoints))
         , m_tls(std::move(tls))
         , m_keyPackageCount(keyPackageCount)
         , m_width(width)
         , m_height(height)
+        , m_uglyVoiceDebug(uglyVoiceDebug)
     {
     }
 
@@ -437,6 +456,22 @@ private:
             enableNotifications(window);
         }
         releaseFreedHeapLater(m_engine.get());
+
+        if (m_uglyVoiceDebug) {
+            m_voiceDebugController = std::make_unique<OpenChat::VoiceDebugController>();
+            m_voiceDebugController->setLiveSources(
+                m_callEngine.get(), m_udpCallMediaPath.get(),
+                m_transportSettings.get(), m_microphoneSettings.get());
+            m_debugEngine = std::make_unique<QQmlApplicationEngine>();
+            m_debugEngine->setInitialProperties(
+                {{QStringLiteral("debugController"), QVariant::fromValue(m_voiceDebugController.get())}});
+            m_debugEngine->loadFromModule("OpenChat", "VoiceDebugWindow");
+            if (!m_debugEngine->rootObjects().isEmpty()) {
+                if (auto *debugWindow = qobject_cast<QQuickWindow *>(m_debugEngine->rootObjects().constFirst())) {
+                    debugWindow->show();
+                }
+            }
+        }
     }
 
     // Announces inbound messages on the desktop and brings the window back when
@@ -536,11 +571,46 @@ private:
         m_deviceLink = std::make_unique<OpenChat::DeviceLink>(*m_session, *m_relay);
         m_deviceLink->start(linkStart);
 
+        const auto credential = m_session->publicCredential();
+        const OpenChat::DeviceId localDevice = credential.hasValue()
+            ? credential.value().deviceId
+            : OpenChat::DeviceId::generate();
+        m_udpCallMediaPath = std::make_unique<OpenChat::UdpCallMediaPath>(localDevice);
+        m_udpCallMediaPath->setRelayClient(m_relay.get());
+        m_udpCallMediaPath->setSettings(m_transportSettings.get());
+        const QString envMediaHost = qEnvironmentVariable("OPENCHAT_RELAY_MEDIA_HOST");
+        QString relayHost = !envMediaHost.isEmpty()
+            ? envMediaHost
+            : (m_endpoints.live.host().isEmpty()
+                ? QStringLiteral("127.0.0.1")
+                : m_endpoints.live.host());
+        // If connected to chat.rigidstudios.de without an explicit UDP host override,
+        // send UDP packets directly to the origin server IP since Cloudflare Tunnel
+        // only proxies HTTP/WebSocket over TCP.
+        if (envMediaHost.isEmpty() && relayHost == QStringLiteral("chat.rigidstudios.de")) {
+            relayHost = QStringLiteral("2.29.10.226");
+        }
+        QHostAddress relayAddress(relayHost);
+        if (relayAddress.isNull()) {
+            const auto hostInfo = QHostInfo::fromName(relayHost);
+            if (!hostInfo.addresses().isEmpty()) {
+                relayAddress = hostInfo.addresses().first();
+            } else {
+                relayAddress = QHostAddress(QStringLiteral("127.0.0.1"));
+            }
+        }
+        const quint16 mediaPort = static_cast<quint16>(
+            qEnvironmentVariableIntValue("OPENCHAT_RELAY_MEDIA_PORT") > 0
+                ? qEnvironmentVariableIntValue("OPENCHAT_RELAY_MEDIA_PORT")
+                : 8444);
+        m_udpCallMediaPath->setRelayEndpoint(relayAddress, mediaPort);
+
         // Voice calls ride the same engine: signalling as durable MLS control
         // messages, media as unreliable datagrams. The transport tracks the live
         // link so media is dropped rather than piling up while offline.
         m_callTransport = std::make_unique<OpenChat::SyncCallTransport>(*engine);
         m_callTransport->setConnected(m_relay->isConnected());
+        m_callTransport->setUdpMediaPath(m_udpCallMediaPath.get());
         QObject::connect(m_relay.get(), &OpenChat::RelayClient::connected, m_callTransport.get(),
                          [this] { m_callTransport->setConnected(true); });
         QObject::connect(m_relay.get(), &OpenChat::RelayClient::disconnected,
@@ -556,7 +626,7 @@ private:
             || OpenChat::hasUsableCallAudioDevices()) {
             OpenChat::CallEngine::Config callConfig;
             // A group call keys each pair's media from both device ids.
-            if (const auto credential = m_session->publicCredential(); credential.hasValue())
+            if (credential.hasValue())
                 callConfig.localDevice = credential.value().deviceId;
             // The microphone the user picked, with their gain and gate; the
             // engine follows the settings for as long as both exist.
@@ -565,6 +635,7 @@ private:
                 callConfig, *m_callTransport,
                 OpenChat::makeQtCallAudioIoFactory(
                     [this] { return m_microphoneSettings->selectedInputDevice(); }));
+            m_callEngine->setUdpMediaPath(m_udpCallMediaPath.get());
             QObject::connect(m_microphoneSettings.get(),
                              &OpenChat::MicrophoneSettings::processingChanged,
                              m_callEngine.get(), [this] {
@@ -833,9 +904,12 @@ private:
     // Low memory mode, the instance the Settings page switches.
     std::unique_ptr<OpenChat::MemorySettings> m_memorySettings =
         std::make_unique<OpenChat::MemorySettings>();
+    std::unique_ptr<OpenChat::TransportSettings> m_transportSettings =
+        std::make_unique<OpenChat::TransportSettings>();
     // The voice-call stack. Declared after the engine/relay they borrow, so both
     // are torn down while the SyncEngine and RelayClient are still alive; the
     // engine is destroyed before the transport it holds a reference to.
+    std::unique_ptr<OpenChat::UdpCallMediaPath> m_udpCallMediaPath;
     std::unique_ptr<OpenChat::SyncCallTransport> m_callTransport;
     std::unique_ptr<OpenChat::CallEngine> m_callEngine;
 
@@ -853,6 +927,9 @@ private:
     // anything the application still has showing on the desktop.
     std::unique_ptr<OpenChat::NotificationService> m_notifications;
     std::unique_ptr<QQmlApplicationEngine> m_engine;
+    bool m_uglyVoiceDebug = false;
+    std::unique_ptr<OpenChat::VoiceDebugController> m_voiceDebugController;
+    std::unique_ptr<QQmlApplicationEngine> m_debugEngine;
 };
 
 // Loads the chat window with a mock ChatController and runs the event loop. This
@@ -1027,7 +1104,8 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
                   const QCommandLineOption &captureOption,
                   const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
                   const QCommandLineOption &heightOption, bool incoming, bool video, bool group,
-                  bool screenShare, bool sourcePicker, bool fullscreen, bool zoom)
+                  bool screenShare, bool sourcePicker, bool fullscreen, bool zoom,
+                  bool uglyVoiceDebug = false)
 {
     OpenChat::ChatController chatController;
     chatController.setLocalUserName(QStringLiteral("Developer"));
@@ -1128,6 +1206,23 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         }
     }
     scheduleCaptureIfRequested(parser, window, captureOption, delayOption);
+
+    std::unique_ptr<OpenChat::VoiceDebugController> debugController;
+    std::unique_ptr<QQmlApplicationEngine> debugEngine;
+    if (uglyVoiceDebug) {
+        debugController = std::make_unique<OpenChat::VoiceDebugController>();
+        debugController->enableForPreview(&callController);
+        debugEngine = std::make_unique<QQmlApplicationEngine>();
+        debugEngine->setInitialProperties(
+            {{QStringLiteral("debugController"), QVariant::fromValue(debugController.get())}});
+        debugEngine->loadFromModule("OpenChat", "VoiceDebugWindow");
+        if (!debugEngine->rootObjects().isEmpty()) {
+            if (auto *dbgWin = qobject_cast<QQuickWindow *>(debugEngine->rootObjects().constFirst())) {
+                dbgWin->show();
+            }
+        }
+    }
+
     return application.exec();
 }
 
@@ -1435,12 +1530,15 @@ int main(int argc, char *argv[])
         QStringLiteral("screen-share-check"),
         QStringLiteral("List what can be screen-shared on this machine, capture each screen for "
                        "a few seconds, save a picture of each, and print what happened."));
+    const QCommandLineOption uglyVoiceDebugOption(
+        {QStringLiteral("ugly-voice-debug"), QStringLiteral("voice-debug")},
+        QStringLiteral("Launch verbose voice diagnostics & lag spike pinpointing overlay in a second window."));
     parser.addOptions({captureOption, delayOption, widthOption, heightOption, onboardingOption,
                        onboardingRecoveryOption, onboardingLoginOption,
                        onboardingFilledOption, addContactOption, verifyOption, callOption,
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
                        callPickerOption, callFullscreenOption, callZoomOption, crashReportOption,
-                       crashTestOption, screenCheckOption});
+                       crashTestOption, screenCheckOption, uglyVoiceDebugOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -1469,6 +1567,7 @@ int main(int argc, char *argv[])
         }
         return runScreenShareCheck(application);
     }
+    const bool uglyVoiceDebug = parser.isSet(uglyVoiceDebugOption);
 
     // Onboarding preview: launch the screens directly with no real services.
     const bool previewRecovery = parser.isSet(onboardingRecoveryOption);
@@ -1501,7 +1600,7 @@ int main(int argc, char *argv[])
                              heightOption, previewIncomingCall, parser.isSet(callVideoOption),
                              parser.isSet(callGroupOption), parser.isSet(callScreenOption),
                              parser.isSet(callPickerOption), parser.isSet(callFullscreenOption),
-                             parser.isSet(callZoomOption));
+                             parser.isSet(callZoomOption), uglyVoiceDebug);
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))
@@ -1540,7 +1639,8 @@ int main(int argc, char *argv[])
                            buildDevCaTls(devCaPath),
                            OpenChat::AccountBootstrap::defaultKeyPackageCount,
                            widthValid ? std::optional<int>(requestedWidth) : std::nullopt,
-                           heightValid ? std::optional<int>(requestedHeight) : std::nullopt);
+                           heightValid ? std::optional<int>(requestedHeight) : std::nullopt,
+                           uglyVoiceDebug);
         if (!runtime.start())
             return EXIT_FAILURE;
 

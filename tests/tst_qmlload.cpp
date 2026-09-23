@@ -26,6 +26,7 @@
 #include "controllers/ContactController.h"
 #include "controllers/CrashReportController.h"
 #include "controllers/OnboardingController.h"
+#include "controllers/VoiceDebugController.h"
 #include "models/RequestListModel.h"
 #include "render/AvatarArtwork.h"
 #include "app/AppearanceSettings.h"
@@ -33,6 +34,7 @@
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
 #include "app/ComposerEditing.h"
+#include "app/TransportSettings.h"
 #include <QQmlExpression>
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
@@ -1164,6 +1166,93 @@ private slots:
         settings->resetToDefaults();
         QCOMPARE(settings->gain(), 1.0);
         QVERIFY(qAbs(settings->processing().gateThreshold - 0.02) < 0.001);
+    }
+
+    void theConnectionPanelDrivesAndRemembersTheSettings()
+    {
+        OpenChat::ChatController chats;
+        chats.setLocalUserName(QStringLiteral("Developer"));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        chats.setCurrentSettingsCategory(4); // Audio & Video
+        // Settings are pages now: open the Connection page, as a click would.
+        const int page = chats.currentSettingsElements().indexOf(QStringLiteral("Connection"));
+        QVERIFY(page >= 0);
+        chats.setCurrentSettingsSubcategory(page);
+        OpenChat::ContactController contacts;
+        contacts.enableForPreview();
+        OpenChat::CallController calls;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("contactController"), QVariant::fromValue(&contacts)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *settings = engine.singletonInstance<OpenChat::TransportSettings *>(
+            "OpenChat.Native", "TransportSettings");
+        QVERIFY(settings);
+        QCOMPARE(settings->mode(), QStringLiteral("auto"));
+
+        auto *panel = findVisualItem(window->contentItem(), QStringLiteral("connectionSettingsPanel"));
+        QVERIFY(panel && panel->isVisible());
+        auto *autoRow = findVisualItem(window->contentItem(), QStringLiteral("connectionMode_auto"));
+        QVERIFY(autoRow && autoRow->isVisible());
+        QVERIFY(autoRow->property("selected").toBool());
+
+        auto *udpRow = findVisualItem(window->contentItem(), QStringLiteral("connectionMode_udp"));
+        QVERIFY(udpRow && udpRow->isVisible());
+        QVERIFY(!udpRow->property("selected").toBool());
+
+        // Select UDP
+        QMetaObject::invokeMethod(udpRow, "activate");
+        QCOMPARE(settings->mode(), QStringLiteral("udp"));
+        QVERIFY(udpRow->property("selected").toBool());
+        QVERIFY(!autoRow->property("selected").toBool());
+
+        // Verify across engine reboot
+        {
+            QQmlApplicationEngine nextEngine;
+            nextEngine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            QQmlComponent component(&nextEngine);
+            component.setData("import QtQuick; import OpenChat.Native; "
+                              "QtObject { property string mode: TransportSettings.mode }",
+                              QUrl());
+            std::unique_ptr<QObject> restored(component.create());
+            QVERIFY2(restored, qPrintable(component.errorString()));
+            QCOMPARE(restored->property("mode").toString(), QStringLiteral("udp"));
+        }
+
+        // Reset back to auto
+        settings->setMode(QStringLiteral("auto"));
+        QCOMPARE(settings->mode(), QStringLiteral("auto"));
+    }
+
+    void voiceDebugWindowLoadsAndBindsController()
+    {
+        OpenChat::VoiceDebugController controller;
+        controller.enableForPreview();
+
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("debugController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "VoiceDebugWindow");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        QVERIFY(root);
+        QCOMPARE(root->objectName(), QStringLiteral("voiceDebugWindow"));
+        QCOMPARE(root->property("title").toString(),
+                 QStringLiteral("[VOICE DEBUG OVERLAY] OpenChat Latency, Jitter & Transport Diagnostics"));
+
+        // Simulate a lag spike and verify properties update
+        controller.simulateSpike(210.5);
+        QVERIFY(controller.lagSpikeCount() > 0);
+        QVERIFY(controller.isSpikeActive());
+        QCOMPARE(controller.currentRtt(), 210.5);
     }
 
     void lowMemoryModeIsASwitchUnderGeneralThatAsksForARestart()
@@ -3851,6 +3940,9 @@ int main(int argc, char **argv)
     qmlRegisterSingletonType<OpenChat::MemorySettings>(
         "OpenChat.Native", 1, 0, "MemorySettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MemorySettings; });
+    qmlRegisterSingletonType<OpenChat::TransportSettings>(
+        "OpenChat.Native", 1, 0, "TransportSettings",
+        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::TransportSettings; });
     qmlRegisterType<OpenChat::BubbleBackground>(
         "OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
@@ -3867,6 +3959,9 @@ int main(int argc, char **argv)
     qmlRegisterUncreatableType<OpenChat::ContactController>(
         "OpenChat.Native", 1, 0, "ContactController",
         QStringLiteral("ContactController is provided by the application"));
+    qmlRegisterUncreatableType<OpenChat::VoiceDebugController>(
+        "OpenChat.Native", 1, 0, "VoiceDebugController",
+        QStringLiteral("VoiceDebugController is provided by the application"));
     QmlLoadTest test;
     return QTest::qExec(&test, argc, argv);
 }

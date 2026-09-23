@@ -43,13 +43,17 @@ services:
       OPENCHAT_RELAY_PG_DATABASE: openchat_relay
       OPENCHAT_RELAY_BIND: "0.0.0.0"
       OPENCHAT_RELAY_PORT: "8443"
+      OPENCHAT_RELAY_MEDIA_BIND: "0.0.0.0"
+      OPENCHAT_RELAY_MEDIA_PORT: "8444"
     depends_on:
       postgres:
         condition: service_healthy
-    # Internal only: the relay's plain HTTP/WS port is never published to the
-    # host. Only Caddy (below) reaches it, and only over the private network.
+    # Internal HTTP/WS port reached only via Caddy proxy; UDP voice media port
+    # is published directly to host since TLS reverse proxies do not forward UDP.
     expose:
       - "8443"
+    ports:
+      - "8444:8444/udp"
     networks:
       - internal
     restart: on-failure

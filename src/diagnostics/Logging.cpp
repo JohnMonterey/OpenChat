@@ -13,6 +13,7 @@ Q_LOGGING_CATEGORY(relayLog, "openchat.relay", QtWarningMsg)
 Q_LOGGING_CATEGORY(contactsLog, "openchat.contacts", QtWarningMsg)
 Q_LOGGING_CATEGORY(mlsLog, "openchat.mls", QtWarningMsg)
 Q_LOGGING_CATEGORY(effectsLog, "openchat.effects", QtWarningMsg)
+Q_LOGGING_CATEGORY(mediaLog, "openchat.media", QtWarningMsg)
 
 namespace {
 QMutex logMutex;

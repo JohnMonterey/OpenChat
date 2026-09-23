@@ -1,6 +1,7 @@
 #include "controllers/CallController.h"
 
 #include "call/NativeScreenCapture.h"
+#include "call/UdpCallMediaPath.h"
 #include "controllers/ChatController.h"
 #include "diagnostics/BlackBox.h"
 
@@ -151,6 +152,14 @@ QString CallController::statusText() const
 QString CallController::durationText() const
 {
     return formatDuration(m_durationMs);
+}
+
+QString CallController::mediaPathText() const
+{
+    if (m_engine && m_engine->state() == CallState::Active && m_engine->udpMediaPath()) {
+        return m_engine->udpMediaPath()->mediaPathText(m_engine->peer().device);
+    }
+    return QString();
 }
 
 void CallController::callCurrentContact(bool video)

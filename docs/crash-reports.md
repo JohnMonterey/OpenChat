@@ -136,6 +136,12 @@ anyone can see exactly what each kind of report looks like:
 - `throw`
 - `qfatal`
 - `stack-overflow`
+- `pure-virtual`: a pure virtual function called through a real vtable. On
+  Linux and macOS OpenChat's own `__cxa_pure_virtual` names it. The MinGW
+  build never links one: GCC declares it weak, and the MinGW linker resolves
+  weak symbols unreliably (a definition of our own was bound to an unrelated
+  function). So on Windows the call jumps to address 0. The report explains
+  that jump, and names the caller under "Where".
 - `hang`: freezes the main thread for 45 s. Kill it to see the next-launch
   report.
 - `screen-frame`: crashes inside the next captured screen-share frame. Combine

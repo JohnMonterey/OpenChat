@@ -1523,8 +1523,8 @@ int main(int argc, char *argv[])
     const QCommandLineOption crashTestOption(
         QStringLiteral("crash-test"),
         QStringLiteral("Fail on purpose, to see what a crash report looks like: segv, abort, "
-                       "throw, qfatal, stack-overflow, hang, or screen-frame (crashes inside the "
-                       "next screen-share frame)."),
+                       "throw, qfatal, stack-overflow, pure-virtual, hang, or screen-frame "
+                       "(crashes inside the next screen-share frame)."),
         QStringLiteral("kind"));
     const QCommandLineOption screenCheckOption(
         QStringLiteral("screen-share-check"),

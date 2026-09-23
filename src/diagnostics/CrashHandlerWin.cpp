@@ -269,7 +269,10 @@ int collectFrames(CONTEXT context, const StackBounds &bounds, DWORD64 *frames,
 #if defined(_M_X64) || defined(__x86_64__)
     for (int frame = 0; frame < capacity; ++frame) {
         const DWORD64 pc = context.Rip;
-        if (pc == 0)
+        // Address 0 ends a walk, except where the crash itself is: a call
+        // through an empty pointer (or, in this build, to a pure virtual
+        // function) lands there, and its caller is on top of the stack.
+        if (pc == 0 && frame > 0)
             break;
         frames[count++] = pc;
         // The unwinder reads saved registers out of the frame; a stack
@@ -386,6 +389,20 @@ std::uintptr_t blamedFrame(const ModuleTable &table, const CONTEXT &context,
     return index < count ? std::uintptr_t(frames[index]) : 0;
 }
 
+// For a call into nothing: the code that made it, which is the first frame
+// below the bad address that is in a loaded module. That is where the bug is.
+std::uintptr_t callerOfBadJump(const ModuleTable &table, const CONTEXT &context,
+                               const StackBounds &bounds) noexcept
+{
+    DWORD64 frames[8];
+    const int count = collectFrames(context, bounds, frames, 8);
+    for (int index = 1; index < count; ++index) {
+        if (moduleAt(table, std::uintptr_t(frames[index])) != nullptr)
+            return std::uintptr_t(frames[index]);
+    }
+    return 0;
+}
+
 void describeException(Writer &out, const EXCEPTION_RECORD &record, const Data &data) noexcept
 {
     const ULONG_PTR kind = record.NumberParameters >= 1 ? record.ExceptionInformation[0] : 0;
@@ -399,6 +416,19 @@ void describeException(Writer &out, const EXCEPTION_RECORD &record, const Data &
             .hex(address, 1);
         if (record.ExceptionCode == EXCEPTION_IN_PAGE_ERROR)
             out.text(", but the page could not be read in from disk or the network.");
+        // This build never links the C++ runtime's handler for a pure virtual
+        // call; every reference to it stays at address 0. A pure call through
+        // a vtable therefore lands near 0, and one the compiler turned into a
+        // direct call lands just below the program. Both look like a jump into
+        // nothing, so say what they usually are.
+        else if (kind == 8 && address < 0x10000)
+            out.text(", which is not valid: a call through an empty function pointer, or to a "
+                     "pure virtual function (this build leaves those at address 0).");
+        else if (kind == 8 && moduleAt(g_crashModules, std::uintptr_t(address)) == nullptr)
+            out.text(", where nothing is loaded: a call to a function that was never linked "
+                     "into this build (such as a pure virtual function the compiler called "
+                     "directly), or through a corrupted pointer. \"Where\" is the code that made "
+                     "the call.");
         else if (address < 0x10000)
             out.text(", which is not valid: a null pointer.");
         else if (kind == 8)
@@ -611,11 +641,17 @@ void writeCrashReport() noexcept
             || record.ExceptionCode == pureCallCode || record.ExceptionCode == invalidParameterCode
             || record.ExceptionCode == gccThrowCode || record.ExceptionCode == msvcThrowCode;
         std::uintptr_t blamed = deliberate ? blamedFrame(g_crashModules, context, g_crashedStack) : 0;
+        // A jump into nothing has no "where" of its own; the caller does.
+        const bool intoNothing = moduleAt(g_crashModules, faultAddress) == nullptr;
+        if (blamed == 0 && intoNothing)
+            blamed = callerOfBadJump(g_crashModules, context, g_crashedStack);
         if (blamed == 0)
             blamed = faultAddress;
         const Module *faultModule = moduleAt(g_crashModules, blamed);
         out.newline().text("Where:          ");
         writeAddress(out, g_crashModules, blamed);
+        if (intoNothing && blamed != faultAddress)
+            out.text(", calling ").hex(faultAddress, 1).text(" where nothing is loaded");
         out.newline().text("Thread:         ");
         char name[threadNameBytes];
         if (CrashWriter::threadName(data, g_crashedThread, name, sizeof(name)))

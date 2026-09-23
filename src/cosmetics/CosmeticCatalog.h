@@ -9,13 +9,13 @@
 
 namespace OpenChat {
 
-// How rare a collectible is, lowest first. The daily case rolls a tier by its
+// How rare a collectible is, lowest first. The hourly case rolls a tier by its
 // weight, then one item of that tier uniformly, so an item's odds are its
 // tier's share divided by the tier's size.
 enum class Rarity { Common, Rare, Epic, Legendary, Exotic };
 
 // Every collectible cosmetic the client can draw, by stable id. The ids are
-// what settings (and later the inventory and the daily case) store, so they
+// what settings (and later the inventory and the hourly case) store, so they
 // never change once shipped; names, descriptions and rarity are presentation.
 struct CosmeticInfo
 {

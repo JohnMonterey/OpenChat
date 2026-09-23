@@ -10,6 +10,9 @@ Popup {
     property var returnFocus: null
     readonly property var reward: controller ? controller.reward : ({})
     readonly property bool rewarded: !!(reward && reward.id)
+    // When the next case can be opened, in the local short time format.
+    readonly property string nextTime: controller && !isNaN(controller.nextAvailableAt)
+        ? controller.nextAvailableAt.toLocaleTimeString(Qt.locale(), Locale.ShortFormat) : ""
     function ink(color) { return Theme.darkMode ? Qt.lighter(color, 1.3) : Qt.darker(color, 1.3) }
     parent: Overlay.overlay
     anchors.centerIn: parent
@@ -57,14 +60,14 @@ Popup {
 
     contentItem: Item {
         Text {
-            text: "Daily case"
+            text: "Hourly case"
             color: Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 23
         }
         Text {
             y: 33
-            text: "A little moment, once a day."
+            text: "A little moment, once an hour."
             color: Theme.textSecondary
             font.family: Theme.uiFont
             font.pixelSize: 13
@@ -81,7 +84,7 @@ Popup {
                 color: closeButton.hovered ? Theme.buttonHover : "transparent"
                 border.color: closeButton.activeFocus ? Theme.focusBorder : "transparent"
             }
-            Accessible.name: "Close daily case"
+            Accessible.name: "Close case"
             onClicked: root.close()
             KeyNavigation.tab: sound
         }
@@ -120,6 +123,7 @@ Popup {
             }
         }
         Text {
+            id: status
             objectName: "caseStatus"
             y: 290
             width: parent.width
@@ -127,12 +131,12 @@ Popup {
             textFormat: Text.StyledText
             text: root.controller.error.length ? root.controller.error
                 : root.controller.state === DailyCaseController.Opening ? "Finding your moment…"
-                : root.controller.state === DailyCaseController.OpenedToday && root.rewarded
+                : root.controller.state === DailyCaseController.Opened && root.rewarded
                     ? "<b>" + root.reward.name + "</b> · <font color=\"" + root.ink(root.reward.rarityColor)
                       + "\">" + root.reward.rarityName + "</font> " + Cosmetics.categoryName(root.reward.category)
                       + " · Yours to wear from Settings"
-                : root.controller.state === DailyCaseController.OpenedToday ? "Today's case opened · See you tomorrow"
-                : "One free case a day · Keep what you unbox"
+                : root.controller.state === DailyCaseController.Opened ? "Case opened · Next one at " + root.nextTime
+                : "One free case every hour · Keep what you unbox"
             color: root.controller.error.length ? Theme.warningText : Theme.textSecondary
             font.family: Theme.uiFont
             font.pixelSize: 12
@@ -165,12 +169,13 @@ Popup {
             id: action
             objectName: "caseOpenButton"
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 320
+            // Below the status, which wraps to a second line in a narrow popup.
+            y: Math.max(320, status.y + status.height + 12)
             width: root.width < 480 ? 132 : 170
             height: 36
             enabled: root.controller.state === DailyCaseController.Available
             text: root.controller.state === DailyCaseController.Opening ? "Opening…"
-                : root.controller.state === DailyCaseController.OpenedToday ? "Opened today" : "Open daily case"
+                : root.controller.state === DailyCaseController.Opened ? "Next at " + root.nextTime : "Open case"
             font.family: Theme.uiFont
             font.pixelSize: 13
             palette.buttonText: Theme.buttonText

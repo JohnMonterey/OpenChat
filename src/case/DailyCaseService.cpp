@@ -81,7 +81,7 @@ CaseReply LocalDailyCaseService::claim(const QString &account) { return transact
 CaseReply LocalDailyCaseService::transact(const QString &account, bool claim)
 {
     if (account.isEmpty() || !QDir().mkpath(m_directory))
-        return {{}, false, QStringLiteral("Could not access today's case. Please try again.")};
+        return {{}, false, QStringLiteral("Could not access your case. Please try again.")};
     const QString path = accountFileStem(m_directory, account) + ".json";
     QLockFile lock(path + ".lock");
     if (!lock.tryLock(0))
@@ -97,40 +97,49 @@ CaseReply LocalDailyCaseService::transact(const QString &account, bool claim)
             owned.append(id);
     };
     const auto now = QDateTime::currentDateTimeUtc(); // MOCK ONLY; server time in online adapter.
+    // The case on offer follows the last claim; before any, it is the first.
+    QString caseKey = QStringLiteral("first");
     QFile file(path);
     if (file.exists()) {
         if (!file.open(QIODevice::ReadOnly))
-            return {{}, false, QStringLiteral("Could not read today's case.")};
+            return {{}, false, QStringLiteral("Could not read your case.")};
         const auto obj = QJsonDocument::fromJson(file.readAll()).object();
         const auto next = QDateTime::fromString(obj.value("next").toString(), Qt::ISODate);
-        if (!next.isValid() || obj.value("claim").toString().isEmpty() || !obj.value("seed").isDouble())
+        const QString claimId = obj.value("claim").toString();
+        if (!next.isValid() || claimId.isEmpty() || !obj.value("seed").isDouble())
             return {{}, false, QStringLiteral("The saved case could not be read.")};
         // A claim saved before collections existed still hands its reward over.
         keep(obj.value("reward").toString());
-        if (now < next)
-            return {CaseResult{obj.value("claim").toString(),
-                               obj.value("reward").toString(QStringLiteral("placeholder")),
-                               quint32(obj.value("seed").toDouble()), next}, false, {}, owned};
+        // One saved under the old once-a-day rule waits for midnight; no
+        // hourly claim ever waits longer than the cooldown, so it is released.
+        const bool dailyRule = next > now.addSecs(caseCooldownSeconds);
+        if (now < next && !dailyRule)
+            return {CaseResult{claimId, obj.value("reward").toString(QStringLiteral("placeholder")),
+                               quint32(obj.value("seed").toDouble()), next},
+                    false, {}, owned, obj.value("case").toString(claimId)};
+        caseKey = QStringLiteral("after ") + claimId;
     }
     if (!claim)
-        return {{}, false, {}, owned};
+        return {{}, false, {}, owned, caseKey};
     // The reward is drawn here, by the authority, with the tier odds; the seed
     // below only arranges the reel. MOCK ONLY: the online adapter's server draws.
     auto *random = QRandomGenerator::global();
     const auto &reward = CosmeticCatalog::draw(random->bounded(quint32(CosmeticCatalog::totalWeight)),
                                                random->generate());
+    // Whole seconds, as the record keeps it, so a replay names the same moment.
     CaseResult result{QUuid::createUuid().toString(QUuid::WithoutBraces), reward.id,
                       random->generate(),
-                      QDateTime(now.date().addDays(1), QTime(0, 0), QTimeZone::UTC)};
+                      QDateTime::fromSecsSinceEpoch(now.toSecsSinceEpoch() + caseCooldownSeconds,
+                                                    QTimeZone::UTC)};
     const auto bytes = QJsonDocument(QJsonObject{{"claim", result.claimId},
         {"reward", result.rewardId}, {"seed", double(result.seed)},
-        {"next", result.nextAvailableAt.toString(Qt::ISODate)}}).toJson();
+        {"next", result.nextAvailableAt.toString(Qt::ISODate)}, {"case", caseKey}}).toJson();
     QSaveFile output(path);
     if (!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit())
-        return {{}, false, QStringLiteral("Could not save today's case. Please try again.")};
+        return {{}, false, QStringLiteral("Could not save your case. Please try again.")};
     // Recorded as claimed first, so a failed grant is only ever retried,
     // never turned into a second draw.
     keep(result.rewardId);
-    return {result, true, {}, owned};
+    return {result, true, {}, owned, caseKey};
 }
 }

@@ -28,9 +28,9 @@ DailyCaseController::DailyCaseController(std::unique_ptr<DailyCaseService> servi
     connect(&m_animation, &QVariantAnimation::finished, this, &DailyCaseController::finish);
     m_audioRelease.setSingleShot(true);
     connect(&m_audioRelease, &QTimer::timeout, &m_audio, &CaseAudio::stop);
-    m_nextDay.setSingleShot(true);
-    connect(&m_nextDay, &QTimer::timeout, this, [this] {
-        if (m_state == Opening) m_nextDay.start(1000);
+    m_nextCase.setSingleShot(true);
+    connect(&m_nextCase, &QTimer::timeout, this, [this] {
+        if (m_state == Opening) m_nextCase.start(1000);
         else refresh();
     });
 }
@@ -52,6 +52,13 @@ void DailyCaseController::adopt(const CaseResult &result)
 {
     m_winner = CaseMotion::firstWinnerIndex + int(result.seed % CaseMotion::winnerVariants);
     m_reward = cosmeticToVariant(CosmeticCatalog::find(result.rewardId));
+    m_nextAvailableAt = result.nextAvailableAt;
+}
+void DailyCaseController::waitForNextCase()
+{
+    // One shot at the moment the cooldown ends; nothing polls meanwhile.
+    m_nextCase.start(int(std::clamp(QDateTime::currentDateTimeUtc().msecsTo(m_nextAvailableAt),
+                                    qint64(1000), qint64(caseCooldownSeconds) * 1000)));
 }
 void DailyCaseController::adoptOwned(const CaseReply &reply)
 {
@@ -62,11 +69,10 @@ void DailyCaseController::adoptOwned(const CaseReply &reply)
     m_ownershipKnown = true;
     emit ownedChanged();
 }
-void DailyCaseController::arrangeBelt()
+void DailyCaseController::arrangeBelt(const QString &caseKey)
 {
     // Visual only: the reward never comes from here (the service draws it).
-    const auto day = QDateTime::currentDateTimeUtc().date().toString(Qt::ISODate);
-    const auto digest = QCryptographicHash::hash((m_account + '|' + day).toUtf8(),
+    const auto digest = QCryptographicHash::hash((m_account + '|' + caseKey).toUtf8(),
                                                  QCryptographicHash::Sha256);
     quint64 seed = 0;
     for (int i = 0; i < 8; ++i)
@@ -86,15 +92,19 @@ void DailyCaseController::refresh()
     if (m_state == Opening) return;
     const auto reply = m_service->status(m_account);
     adoptOwned(reply);
-    m_nextDay.stop();
+    m_nextCase.stop();
     m_error = reply.error;
-    m_state = reply.result ? OpenedToday : Available;
-    if (!reply.result) m_reward.clear();
-    arrangeBelt();
+    m_state = reply.result ? Opened : Available;
+    if (!reply.result) {
+        m_reward.clear();
+        m_nextAvailableAt = {};
+    }
+    // A failed reply names no case; the belt on show stays.
+    if (reply.error.isEmpty() || m_fillers.isEmpty())
+        arrangeBelt(reply.caseKey);
     if (reply.result) {
         adopt(*reply.result);
-        m_nextDay.start(int(std::clamp(QDateTime::currentDateTimeUtc().msecsTo(reply.result->nextAvailableAt),
-                                     qint64(1000), qint64(86400000))));
+        waitForNextCase();
     }
     setPosition(reply.result ? m_winner : CaseMotion::startIndex);
     emit changed();
@@ -115,10 +125,9 @@ void DailyCaseController::open()
         return;
     }
     adopt(*reply.result); // Claim durably recorded BEFORE any motion or sound.
-    m_nextDay.start(int(std::clamp(QDateTime::currentDateTimeUtc().msecsTo(reply.result->nextAvailableAt),
-                                 qint64(1000), qint64(86400000))));
+    waitForNextCase();
     if (!reply.newlyClaimed) {
-        m_state = OpenedToday;
+        m_state = Opened;
         setPosition(m_winner);
         emit changed();
         return;
@@ -146,7 +155,7 @@ void DailyCaseController::setPosition(double position)
 void DailyCaseController::finish()
 {
     if (m_state != Opening) return;
-    m_state = OpenedToday;
+    m_state = Opened;
     setPosition(m_winner); // Exact integer endpoint, independent of viewport size.
     emit changed();
     emit revealed();
@@ -169,7 +178,7 @@ void DailyCaseController::dismiss()
     m_audioRelease.stop();
     m_audio.stop();
     if (m_state == Opening) {
-        m_state = OpenedToday;
+        m_state = Opened;
         setPosition(m_winner);
         emit changed();
     }

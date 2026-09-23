@@ -95,7 +95,7 @@ QStringList everyCosmeticId()
     return ids;
 }
 
-// A fresh daily-case account that has unboxed exactly `ids`, to hand the
+// A fresh case account that has unboxed exactly `ids`, to hand the
 // window as its dailyCaseAccount: only what it owns can be worn.
 QString accountOwning(const QStringList &ids)
 {
@@ -275,6 +275,10 @@ private slots:
         };
         QTest::qWait(100);
         capture("available");
+        auto *offer = findVisualItem(window->contentItem(), "caseStatus");
+        QVERIFY(offer);
+        QVERIFY(offer->property("text").toString().contains(QStringLiteral("every hour")));
+        QCOMPARE(open->property("text").toString(), QStringLiteral("Open case"));
         QSignalSpy reveal(controller, &OpenChat::DailyCaseController::revealed);
         QSignalSpy ticks(controller, &OpenChat::DailyCaseController::crossed);
         click(open);
@@ -299,7 +303,7 @@ private slots:
                 QVERIFY(selector);
                 QCOMPARE(selector->x() + selector->width()/2, reel->width()/2);
             });
-        QTRY_COMPARE_WITH_TIMEOUT(controller->state(), OpenChat::DailyCaseController::OpenedToday, 8500);
+        QTRY_COMPARE_WITH_TIMEOUT(controller->state(), OpenChat::DailyCaseController::Opened, 8500);
         disconnect(connection);
         QVERIFY(frames > 100);
         QVERIFY(ticks.size() > 35);
@@ -313,6 +317,11 @@ private slots:
         QVERIFY(status);
         QVERIFY(status->property("text").toString().contains(reward.value("name").toString()));
         QVERIFY(status->property("text").toString().contains(reward.value("rarityName").toString()));
+        // The next case is an hour away, and the button says when.
+        const QDateTime next = controller->nextAvailableAt();
+        QVERIFY(qAbs(QDateTime::currentDateTimeUtc().secsTo(next) - OpenChat::caseCooldownSeconds) < 30);
+        QCOMPARE(open->property("text").toString(),
+                 QStringLiteral("Next at ") + QLocale().toString(next.toLocalTime().time(), QLocale::ShortFormat));
         // And it is the account's to keep: now in its collection, and wearable.
         QVERIFY(controller->owned().contains(reward.value("id").toString()));
         auto *wardrobe = engine.singletonInstance<OpenChat::AppearanceSettings *>(
@@ -356,7 +365,7 @@ private slots:
         QTest::qWait(160);
         QTest::keyClick(window, Qt::Key_Escape);
         QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
-        QCOMPARE(controller->state(), OpenChat::DailyCaseController::OpenedToday);
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::Opened);
         QSignalSpy stopped(controller, &OpenChat::DailyCaseController::positionChanged);
         QTest::qWait(160);
         QCOMPARE(stopped.size(), 0);
@@ -1372,7 +1381,7 @@ private slots:
         // here reaches contacts.
         auto *note = findVisualItem(root, QStringLiteral("settingsCategoryNote"));
         QVERIFY(note && note->isVisible());
-        QVERIFY(note->property("text").toString().contains(QStringLiteral("daily case")));
+        QVERIFY(note->property("text").toString().contains(QStringLiteral("hourly case")));
         QVERIFY(note->property("text").toString().contains(QStringLiteral("this device only")));
         QTRY_COMPARE(appearance->property("ownedCosmetics").toStringList(), owned);
 

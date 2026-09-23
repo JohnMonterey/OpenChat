@@ -20,11 +20,15 @@ class DailyCaseController : public QObject {
     Q_PROPERTY(bool muted MEMBER m_muted NOTIFY preferencesChanged)
     Q_PROPERTY(bool reducedMotion MEMBER m_reducedMotion NOTIFY preferencesChanged)
     // The claimed item as a catalogue map ({id, category, name, rarity,
-    // rarityName, rarityColor, ...}); empty until today's claim is known.
+    // rarityName, rarityColor, ...}); empty while a case is available.
     Q_PROPERTY(QVariantMap reward READ reward NOTIFY changed)
-    // What every reel tile shows before the winner is known: the day's belt,
-    // drawn with the same tier odds from a per-account, per-day seed. It stays
-    // put when the claim lands, so nothing on screen swaps as the spin starts.
+    // When the next case can be opened, while the last one's cooldown runs;
+    // invalid while a case is available.
+    Q_PROPERTY(QDateTime nextAvailableAt READ nextAvailableAt NOTIFY changed)
+    // What every reel tile shows before the winner is known: the case's belt,
+    // drawn with the same tier odds from the account and the service's case
+    // key. It stays put when the claim lands, so nothing on screen swaps as the
+    // spin starts, and changes when the next case becomes available.
     Q_PROPERTY(QVariantList fillers READ fillers NOTIFY fillersChanged)
     // Everything this account has unboxed, as catalogue ids, and whether the
     // authority has said so yet: until it has (or after a failed reply for a
@@ -32,7 +36,7 @@ class DailyCaseController : public QObject {
     Q_PROPERTY(QStringList owned READ owned NOTIFY ownedChanged)
     Q_PROPERTY(bool ownershipKnown READ ownershipKnown NOTIFY ownedChanged)
 public:
-    enum State { Available, Opening, OpenedToday };
+    enum State { Available, Opening, Opened };
     Q_ENUM(State)
     explicit DailyCaseController(QObject *parent = nullptr);
     DailyCaseController(std::unique_ptr<DailyCaseService> service, QObject *parent = nullptr);
@@ -44,6 +48,7 @@ public:
     int tileCount() const { return CaseMotion::tileCount; }
     QString error() const { return m_error; }
     QVariantMap reward() const { return m_reward; }
+    QDateTime nextAvailableAt() const { return m_nextAvailableAt; }
     QVariantList fillers() const { return m_fillers; }
     QStringList owned() const { return m_owned; }
     bool ownershipKnown() const { return m_ownershipKnown; }
@@ -62,12 +67,14 @@ signals:
 private:
     void adopt(const CaseResult &result);
     void adoptOwned(const CaseReply &reply);
-    void arrangeBelt();
+    void arrangeBelt(const QString &caseKey);
+    void waitForNextCase();
     void setPosition(double position);
     void finish();
     std::unique_ptr<DailyCaseService> m_service;
     QString m_account, m_error;
     QVariantMap m_reward;
+    QDateTime m_nextAvailableAt;
     QVariantList m_fillers;
     QStringList m_owned;
     bool m_ownershipKnown = false;
@@ -79,6 +86,6 @@ private:
     QVariantAnimation m_animation;
     CaseAudio m_audio;
     QTimer m_audioRelease;
-    QTimer m_nextDay;
+    QTimer m_nextCase;
 };
 }

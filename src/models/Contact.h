@@ -53,4 +53,13 @@ inline QString presenceText(Presence presence)
     return QStringLiteral("Offline");
 }
 
+// The line under a person's name: their own words while they can be reached,
+// and "Offline" whenever they cannot (gone, or appearing offline), so a status
+// written earlier never reads as if they were there.
+inline QString contactStatusLine(Presence presence, const QString &statusText)
+{
+    return presence == Presence::Offline || statusText.isEmpty() ? presenceText(presence)
+                                                                 : statusText;
+}
+
 } // namespace OpenChat

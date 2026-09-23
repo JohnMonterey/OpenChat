@@ -62,6 +62,26 @@ private slots:
         QCOMPARE(model.regularCount(), 1);
     }
 
+    void anOfflineContactReadsOfflineWhateverTheyLastWrote()
+    {
+        Contact bob{"bob", "Bob", Presence::Busy, false, "mono"};
+        bob.statusText = "Not available";
+        ContactListModel model;
+        model.setContacts({bob});
+        const auto line = [&] {
+            return model.data(model.index(0), ContactListModel::StatusTextRole).toString();
+        };
+
+        QCOMPARE(line(), QString("Not available"));
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        model.setPresence("bob", Presence::Offline);
+        QCOMPARE(line(), QString("Offline"));
+        QCOMPARE(changed.count(), 1);
+        QVERIFY(changed.first().at(2).value<QList<int>>().contains(ContactListModel::StatusTextRole));
+        model.setPresence("bob", Presence::Away);
+        QCOMPARE(line(), QString("Not available"));
+    }
+
     void searchFiltersCaseInsensitively()
     {
         ContactListModel model;

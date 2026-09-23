@@ -1307,6 +1307,15 @@ private slots:
         controller.setLocalPresence(-1);
         QCOMPARE(controller.localPresence(), 2);
 
+        // Appearing offline reads Offline even with words set, the way
+        // contacts see it; the words come back with the presence.
+        controller.setLocalStatusText(QStringLiteral("Not available"));
+        QCOMPARE(controller.localStatusLine(), QStringLiteral("Offline"));
+        controller.setLocalPresence(static_cast<int>(OpenChat::Presence::Busy));
+        QCOMPARE(controller.localStatusLine(), QStringLiteral("Not available"));
+        controller.setLocalStatusText(QString());
+        controller.setLocalPresence(2);
+
         // A picture file is scaled into a content-keyed avatar; junk is refused
         // with a notice the sidebar can show, and clears again on request.
         QTemporaryDir dir;
@@ -1448,11 +1457,11 @@ private slots:
         QVERIFY(live.deliverFromPeer(EnvelopeMessageKind::ProfileUpdate,
                                      encodeProfileUpdate(theirs)));
 
-        // The row shows their words and picture. Their chosen presence is
+        // The row shows their picture. Their chosen presence and words are
         // remembered but only shown while their device is reachable, which
-        // without a relay it never is: the bead stays Offline.
+        // without a relay it never is: bead and status line both read Offline.
         QVERIFY(contactSpy.count() >= 1);
-        QCOMPARE(controller.currentStatusText(), QStringLiteral("Deep in code"));
+        QCOMPARE(controller.currentStatusText(), QStringLiteral("Offline"));
         QCOMPARE(controller.currentAvatarKey(), AvatarStore::keyFor(jpeg));
         QVERIFY(AvatarStore::instance().image(controller.currentAvatarKey()).has_value());
         QCOMPARE(controller.currentPresence(), static_cast<int>(Presence::Offline));
@@ -1460,7 +1469,7 @@ private slots:
         const QModelIndex row = controller.contacts()->index(0);
         QCOMPARE(controller.contacts()->data(row, OpenChat::ContactListModel::StatusTextRole)
                      .toString(),
-                 QStringLiteral("Deep in code"));
+                 QStringLiteral("Offline"));
 
         // It is durable: the roster row holds it, and a restart shows it again.
         auto stored = live.session->contacts()->find(live.peerAccount);
@@ -1470,7 +1479,7 @@ private slots:
         QCOMPARE(stored.value()->avatarJpeg, jpeg);
         ChatController reloaded;
         reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
-        QCOMPARE(reloaded.currentStatusText(), QStringLiteral("Deep in code"));
+        QCOMPARE(reloaded.currentStatusText(), QStringLiteral("Offline"));
         QCOMPARE(reloaded.currentAvatarKey(), AvatarStore::keyFor(jpeg));
         // And the call screen would show that picture for them.
         QCOMPARE(reloaded.callRouteFor(live.peerAccount.toHex())->avatarKey,

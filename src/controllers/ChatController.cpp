@@ -180,7 +180,7 @@ QString ChatController::currentStatusText() const
         return QString();
     if (contact->isGroup)
         return currentGroupMembers();
-    return contact->statusText.isEmpty() ? presenceText(contact->presence) : contact->statusText;
+    return contactStatusLine(contact->presence, contact->statusText);
 }
 
 bool ChatController::isGroupChatId(const QString &chatId)
@@ -447,11 +447,9 @@ int ChatController::currentPresence() const
 
 QString ChatController::localStatusLine() const
 {
-    if (!m_localStatusText.isEmpty())
-        return m_localStatusText;
-    if (!m_localOnline)
-        return presenceText(Presence::Offline);
-    return presenceText(static_cast<Presence>(m_localPresence));
+    return contactStatusLine(m_localOnline ? static_cast<Presence>(m_localPresence)
+                                           : Presence::Offline,
+                             m_localStatusText);
 }
 
 ProfileUpdateMessage ChatController::localProfile() const

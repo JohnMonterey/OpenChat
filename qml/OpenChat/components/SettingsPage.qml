@@ -38,7 +38,7 @@ Item {
     function categoryNote(name) {
         switch (name) {
         case "Cosmetics":
-            return "Unbox cosmetics from the daily case, then wear them here. They show on this "
+            return "Unbox cosmetics from the hourly case, then wear them here. They show on this "
                    + "device only; your contacts still see your usual look.";
         }
         return "";

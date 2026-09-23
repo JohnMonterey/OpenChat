@@ -64,7 +64,7 @@ Item {
                                            Math.max(localName.width + 8 + localBead.width,
                                                     statusLabel.implicitWidth)) + 16,
                                   48)
-            // And behind the daily-case button, which sits over the scene's
+            // And behind the case button, which sits over the scene's
             // top-right corner, where several scenes put their sun or moon.
             controlRect: caseEntry.visible ? Qt.rect(caseEntry.x - 4, caseEntry.y - 4,
                                                      caseEntry.width + 8, caseEntry.height + 8)
@@ -87,7 +87,7 @@ Item {
         readonly property int textLeft: localAvatar.x + localAvatar.width + 14
         // The right edge the status field may grow to: clear of the add-contact
         // "+" when it is shown, otherwise of the sidebar's own margin, and of the
-        // daily-case button beside it.
+        // case button beside it.
         readonly property int statusRight: caseEntry.visible ? caseEntry.x - 10 : width - 48
 
         // On the "+" row, just left of the "+", or in its slot when it is hidden:

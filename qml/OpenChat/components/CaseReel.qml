@@ -11,7 +11,7 @@ Item {
     readonly property real stride: tileWidth + tileGap
     readonly property real winnerCenter: width / 2 + (controller.winnerIndex - controller.position) * stride
     readonly property bool rewarded: !!(controller.reward && controller.reward.id)
-    readonly property bool settled: controller.state === DailyCaseController.OpenedToday
+    readonly property bool settled: controller.state === DailyCaseController.Opened
     // The reveal takes the winner's tier colour; the top two tiers get more.
     readonly property color tierColor: rewarded ? controller.reward.rarityColor : Theme.accentBlue
     readonly property int tierRank: rewarded ? controller.reward.rarityRank : 0

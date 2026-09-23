@@ -2,7 +2,7 @@ import QtQuick
 import OpenChat
 import OpenChat.Native
 
-// The daily-case reveal frozen mid-burst for three tiers, so the tier colour,
+// The case reveal frozen mid-burst for three tiers, so the tier colour,
 // the heavier ring and the top tiers' flash and echo can be judged still.
 Window {
     id: sheet
@@ -53,7 +53,7 @@ Window {
                             property var fillers: Cosmetics.items("")
                             property int winnerIndex: 14
                             property real position: 14
-                            property int state: DailyCaseController.OpenedToday
+                            property int state: DailyCaseController.Opened
                             property int tileCount: 29
                             property bool reducedMotion: false
                             signal revealed()

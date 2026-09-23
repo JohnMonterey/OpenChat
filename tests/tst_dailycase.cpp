@@ -22,7 +22,7 @@ bool writeClaim(const QString &directory, const QByteArray &account, const QJson
     return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
         && file.write(QJsonDocument(claim).toJson()) > 0;
 }
-// Moves a saved claim to yesterday, so the account may claim again.
+// Ends a saved claim's hour, so the account may claim again.
 bool expireClaim(const QString &directory, const QByteArray &account)
 {
     QFile file(accountStem(directory, account) + ".json");
@@ -30,7 +30,7 @@ bool expireClaim(const QString &directory, const QByteArray &account)
         return false;
     auto claim = QJsonDocument::fromJson(file.readAll()).object();
     file.close();
-    claim["next"] = QDateTime::currentDateTimeUtc().addDays(-1).toString(Qt::ISODate);
+    claim["next"] = QDateTime::currentDateTimeUtc().addSecs(-1).toString(Qt::ISODate);
     return writeClaim(directory, account, claim);
 }
 }
@@ -82,7 +82,48 @@ private slots:
         QCOMPARE(duplicate.result->seed, claim.result->seed);
         QCOMPARE(first.status("alice").result->claimId, claim.result->claimId);
         QVERIFY(second.claim("bob").result->claimId != claim.result->claimId);
-        QCOMPARE(claim.result->nextAvailableAt.time(), QTime(0, 0));
+        // The next case comes an hour after this one.
+        const qint64 wait = QDateTime::currentDateTimeUtc().secsTo(claim.result->nextAvailableAt);
+        QVERIFY2(wait > caseCooldownSeconds - 5 && wait <= caseCooldownSeconds, qPrintable(QString::number(wait)));
+        QCOMPARE(caseCooldownSeconds, 60 * 60);
+    }
+    void anotherCaseOpensOnceTheHourIsUp()
+    {
+        QTemporaryDir directory;
+        LocalDailyCaseService service(directory.path());
+        const auto offered = service.status("alice");
+        QVERIFY(!offered.result);
+        const auto claim = service.claim("alice");
+        QVERIFY(claim.newlyClaimed);
+        // The case keeps its key through its claim, so its belt stays put.
+        QCOMPARE(claim.caseKey, offered.caseKey);
+        // Within the hour it stays opened; asking again replays it.
+        QCOMPARE(service.status("alice").result->claimId, claim.result->claimId);
+        QVERIFY(!service.claim("alice").newlyClaimed);
+        QCOMPARE(service.status("alice").caseKey, offered.caseKey);
+        // Once the hour is up another case is on offer, with a key of its own.
+        QVERIFY(expireClaim(directory.path(), "alice"));
+        const auto next = service.status("alice");
+        QVERIFY(!next.result);
+        QVERIFY(next.caseKey != offered.caseKey);
+        const auto again = service.claim("alice");
+        QVERIFY(again.newlyClaimed);
+        QVERIFY(again.result->claimId != claim.result->claimId);
+        QCOMPARE(again.caseKey, next.caseKey);
+    }
+    void aClaimSavedUnderTheDailyRuleIsReleased()
+    {
+        QTemporaryDir directory;
+        // Saved by the once-a-day build: it would wait for midnight.
+        QVERIFY(writeClaim(directory.path(), "alice", {{"claim", "daily"}, {"reward", "bead.star"},
+            {"seed", 7.0}, {"next", QDateTime::currentDateTimeUtc().addSecs(caseCooldownSeconds + 600)
+                                        .toString(Qt::ISODate)}}));
+        LocalDailyCaseService service(directory.path());
+        const auto status = service.status("alice");
+        QVERIFY(status.error.isEmpty());
+        QVERIFY(!status.result);
+        QCOMPARE(status.owned, QStringList{"bead.star"});
+        QVERIFY(service.claim("alice").newlyClaimed);
     }
     void lockAndCorruptionFailClosed()
     {
@@ -156,13 +197,13 @@ private slots:
         QFile file(path);
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write(QJsonDocument(QJsonObject{{"claim", "earlier"}, {"seed", 7.0},
-            {"next", QDateTime::currentDateTimeUtc().addDays(1).toString(Qt::ISODate)}}).toJson());
+            {"next", QDateTime::currentDateTimeUtc().addSecs(1800).toString(Qt::ISODate)}}).toJson());
         file.close();
         QCOMPARE(LocalDailyCaseService(directory.path()).status("alice").result->rewardId,
                  QStringLiteral("placeholder"));
         DailyCaseController controller(std::make_unique<LocalDailyCaseService>(directory.path()));
         controller.setAccountKey("alice");
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QVERIFY(controller.reward().isEmpty());
     }
     void unboxedItemsStayInTheAccountsCollection()
@@ -242,7 +283,7 @@ private slots:
         QCOMPARE(changed.size(), 1);
         // The unboxed item is in the collection as soon as the claim is recorded.
         controller.open();
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QVERIFY(controller.owned().contains(controller.reward().value("id").toString()));
         // A failed reply (another window mid-claim) keeps what is known.
         const QStringList known = controller.owned();
@@ -258,7 +299,7 @@ private slots:
         QVERIFY(controller.ownershipKnown());
         QCOMPARE(controller.owned(), QStringList());
     }
-    void theBeltIsTheDaysAndStaysPutWhenTheClaimLands()
+    void theBeltIsTheCasesAndStaysPutWhenTheClaimLands()
     {
         QTemporaryDir directory;
         DailyCaseController first(std::make_unique<LocalDailyCaseService>(directory.path()));
@@ -278,12 +319,28 @@ private slots:
         first.setProperty("reducedMotion", true);
         QSignalSpy rearranged(&first, &DailyCaseController::fillersChanged);
         first.open();
-        QCOMPARE(first.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(first.state(), DailyCaseController::Opened);
         QCOMPARE(first.fillers(), belt);
         QCOMPARE(rearranged.size(), 0);
         QCOMPARE(first.reward().value("id").toString(),
                  LocalDailyCaseService(directory.path()).status("alice").result->rewardId);
         QVERIFY(first.reward().value("rarityColor").value<QColor>().isValid());
+        // Another window, and this one refreshed, still show this case's belt.
+        again.refresh();
+        QCOMPARE(again.state(), DailyCaseController::Opened);
+        QCOMPARE(again.fillers(), belt);
+        first.refresh();
+        QCOMPARE(first.fillers(), belt);
+        // The next case is an hour away, and brings a belt of its own.
+        const qint64 wait = QDateTime::currentDateTimeUtc().secsTo(first.nextAvailableAt());
+        QVERIFY2(wait > caseCooldownSeconds - 5 && wait <= caseCooldownSeconds, qPrintable(QString::number(wait)));
+        QVERIFY(expireClaim(directory.path(), "alice"));
+        first.refresh();
+        QCOMPARE(first.state(), DailyCaseController::Available);
+        QVERIFY(!first.nextAvailableAt().isValid());
+        QVERIFY(first.reward().isEmpty());
+        QVERIFY(first.fillers() != belt);
+        QCOMPARE(rearranged.size(), 1);
     }
     void duplicateClickDismissAndReducedMotion()
     {
@@ -299,7 +356,7 @@ private slots:
         controller.open();
         QCOMPARE(controller.winnerIndex(), winner);
         controller.dismiss();
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QCOMPARE(controller.position(), double(winner));
         QSignalSpy movement(&controller, &DailyCaseController::positionChanged);
         QTest::qWait(80);
@@ -312,7 +369,7 @@ private slots:
         controller.setAccountKey("bob");
         controller.setProperty("reducedMotion", true);
         controller.open();
-        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(controller.state(), DailyCaseController::Opened);
         QCOMPARE(reveal.size(), 1);
         controller.open();
         QCOMPARE(reveal.size(), 1);

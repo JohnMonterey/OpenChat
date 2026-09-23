@@ -3,7 +3,7 @@ import OpenChat
 import OpenChat.Native
 
 // Every collectible on its rung of the rarity ladder, drawn by the real
-// daily-case tile, with each tier's odds and each item's own chance.
+// case tile, with each tier's odds and each item's own chance.
 Window {
     id: sheet
     visible: true
@@ -28,7 +28,7 @@ Window {
 
         SheetTitle {
             title: "Rarity ladder"
-            subtitle: "All " + sheet.everything.length + " collectibles as the daily case shows them. A draw picks a tier by its odds, then one of its items evenly."
+            subtitle: "All " + sheet.everything.length + " collectibles as the hourly case shows them. A draw picks a tier by its odds, then one of its items evenly."
         }
 
         Repeater {

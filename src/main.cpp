@@ -22,8 +22,13 @@
 #include <qqml.h>
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <optional>
+
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #include "app/AccountBootstrap.h"
 #include "app/LocalDataReset.h"
@@ -193,6 +198,20 @@ std::optional<OpenChat::ProfileId> findExistingProfile(const QString &profilesRo
             return id;
     }
     return std::nullopt;
+}
+
+// Hands back to the system the memory the heap is merely holding on to. glibc
+// keeps what a burst of short-lived allocations freed -- building the
+// interface at startup, above all -- for reuse, and an idle chat window never
+// reuses it; returning it takes around 1.5 MB off the settled process. A no-op
+// where the C library is not glibc.
+void releaseFreedHeapLater(QObject *context)
+{
+#if defined(__GLIBC__)
+    QTimer::singleShot(std::chrono::seconds(5), context, [] { malloc_trim(0); });
+#else
+    Q_UNUSED(context);
+#endif
 }
 
 // Overwrites a byte array's contents before releasing it (key material that had
@@ -393,6 +412,7 @@ private:
             configureWindow(window);
             enableNotifications(window);
         }
+        releaseFreedHeapLater(m_engine.get());
     }
 
     // Announces inbound messages on the desktop and brings the window back when
@@ -1080,10 +1100,29 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
     return application.exec();
 }
 
+// Keeps Qt Multimedia's FFmpeg backend from opening hardware codec devices.
+// OpenChat never decodes or encodes video through it -- calls carry Opus and
+// the application's own JPEG tiles, and the camera only hands over frames --
+// but the backend opens every device it can find (CUDA, VDPAU, VA-API, ...)
+// the first time an audio device is listed, which happens at startup. That
+// costs a driver thread and, measured on NVIDIA, around 11 MB for the life of
+// the process. An
+// empty device list turns it off; a lone comma is that list, and unlike an
+// empty value it survives qputenv on Windows. A value set by the user wins.
+void disableHardwareCodecProbing()
+{
+    for (const char *name :
+         {"QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"}) {
+        if (!qEnvironmentVariableIsSet(name))
+            qputenv(name, ",");
+    }
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
+    disableHardwareCodecProbing();
     QGuiApplication application(argc, argv);
     QCoreApplication::setApplicationName(OpenChat::AppMetadata::name.toString());
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChat"));
@@ -1094,7 +1133,7 @@ int main(int argc, char *argv[])
     // for the notifications posted below.
     QGuiApplication::setDesktopFileName(OpenChat::AppMetadata::desktopEntry.toString());
     QGuiApplication::setWindowIcon(
-        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat.png")));
+        QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat-256.png")));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("OpenChat secure chat client"));

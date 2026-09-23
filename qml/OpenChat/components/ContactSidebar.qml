@@ -688,8 +688,12 @@ Item {
             ContactCategory {
                 objectName: "favoritesCategory"
                 // Superseded by the requests panel above once the contact bridge is
-                // enabled; otherwise it keeps its original visibility.
-                visible: !(sidebar.contactController && sidebar.contactController.enabled)
+                // enabled; otherwise it keeps its original visibility. Superseded,
+                // it builds no rows either: every contact has one under Chats.
+                readonly property bool superseded:
+                    !!(sidebar.contactController && sidebar.contactController.enabled)
+                visible: !superseded
+                populated: !superseded
                 width: parent.width
                 label: "Requests"
                 favoriteCategory: true

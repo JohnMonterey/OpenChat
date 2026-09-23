@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
-import QtQuick.Controls as Controls
+import QtQuick.Controls.Basic as Controls
 import OpenChat
 
 // Compact call controls. Shares the request row's Aero treatment

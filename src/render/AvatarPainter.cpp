@@ -22,7 +22,7 @@ QString photoResourcePath(const QString &avatarKey)
     if (avatarKey == QStringLiteral("ryan"))
         return QStringLiteral(":/qt/qml/OpenChat/assets/ryan.png");
     if (avatarKey == QStringLiteral("userpfp_none"))
-        return QStringLiteral(":/qt/qml/OpenChat/assets/userpfp_none.png");
+        return QStringLiteral(":/qt/qml/OpenChat/assets/userpfp_none-256.png");
     return {};
 }
 

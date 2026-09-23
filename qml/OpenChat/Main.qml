@@ -108,8 +108,8 @@ Window {
                     visible: !root.callInView
                 }
 
-                // Loaded only when a call bridge exists at all, so the default
-                // and capture paths never instantiate (or bind against) it.
+                // Built only while there is a call (ringing, live or just
+                // ended), so an idle window neither holds nor binds against it.
                 Component {
                     id: callHeaderComponent
 
@@ -128,21 +128,21 @@ Window {
                 Loader {
                     id: callHeaderLoader
                     anchors.fill: parent
-                    active: root.callController !== null
+                    active: root.inCall
                     visible: root.callInView
                     sourceComponent: callHeaderComponent
                 }
             }
 
             // The call, from any other conversation: one line, and the way
-            // back. Loaded only with a call bridge, like the surface itself.
+            // back. Built only while there is a call, like the surface itself.
             Loader {
                 id: callStripLoader
                 objectName: "callStripSlot"
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: headerSlot.bottom
-                active: root.callController !== null
+                active: root.inCall
                 readonly property bool shown: root.inCall && !root.callInView && !root.callFullscreen
                 visible: shown
                 height: shown && item ? item.implicitHeight : 0
@@ -482,27 +482,35 @@ Window {
     }
 
     // Add-contact overlay: floats above every section, filling the window. It binds
-    // to the optional contactController and self-hides when that is null or its
-    // dialog is closed, so the default and capture paths render unchanged.
-    AddContactDialog {
-        contactController: root.contactController
+    // to the optional contactController and is built only while its dialog is
+    // open, so the default and capture paths render unchanged.
+    Loader {
+        anchors.fill: parent
+        active: root.contactController !== null && root.contactController.dialogOpen
+        sourceComponent: AddContactDialog {
+            contactController: root.contactController
+        }
     }
 
     // Safety-number overlay: the contact-verification surface, shown at the natural
     // verify moment. Like the add-contact overlay it binds to the optional
-    // contactController and self-hides when that is null or its safety-number surface
-    // is closed, so the default and capture paths render unchanged.
-    SafetyNumberDialog {
-        contactController: root.contactController
+    // contactController and is built only while its safety-number surface is open,
+    // so the default and capture paths render unchanged.
+    Loader {
+        anchors.fill: parent
+        active: root.contactController !== null && root.contactController.safetyNumberOpen
+        sourceComponent: SafetyNumberDialog {
+            contactController: root.contactController
+        }
     }
 
     // Screen-source picker: raised by the call surface's share button, which
     // never guesses what to capture. It floats above every section like the
-    // other overlays and, with no call bridge attached, never loads at all.
+    // other overlays and, like the call surface, is built only during a call.
     Loader {
         id: screenSharePickerLoader
         anchors.fill: parent
-        active: root.callController !== null
+        active: root.inCall
         z: 20
 
         sourceComponent: ScreenSharePicker {

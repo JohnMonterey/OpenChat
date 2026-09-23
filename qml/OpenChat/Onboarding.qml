@@ -257,7 +257,7 @@ Item {
                         width: 46
                         height: 46
                         anchors.verticalCenter: parent.verticalCenter
-                        source: Qt.resolvedUrl("../../assets/icons/openchat.png")
+                        source: Qt.resolvedUrl("../../assets/icons/openchat-256.png")
                         sourceSize: Qt.size(width * 2, height * 2)
                     }
                     Text {

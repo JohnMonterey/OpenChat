@@ -322,12 +322,19 @@ private slots:
 
     void pipelineDeliversMessagesOverRealTls();
     void relockedProfileRelinksWithoutTokens();
+    void messagesWaitForARecipientWhoIsOffline();
     void passwordLoginFromAFreshInstallTakesOverTheAccount();
     void callCarriesAudioVideoAndAScreenOverRealTls();
     void groupChatAndGroupCallOverRealTls();
 
 private:
     void bootstrapClient(ClientStack &stack, const QString &handlePrefix);
+    // The two halves of the app restart in relockedProfileRelinksWithoutTokens.
+    // Closing stops the live socket and locks the profile; reopening unlocks it
+    // with a brand-new, token-less RelayClient and starts networking, leaving
+    // the device link to the caller so it can wire the new engine first.
+    void closeApp(ClientStack &stack);
+    void reopenApp(ClientStack &stack);
     // Creates a fresh local profile in `stack` and logs it in to an existing
     // account by username + password key. Returns the bootstrap error, if any.
     std::optional<AccountBootstrap::Error> loginClient(ClientStack &stack, const QString &handle,
@@ -950,6 +957,139 @@ void EndToEndTest::relockedProfileRelinksWithoutTokens()
 
     carol.client->disconnect();
     carol.session->lock();
+}
+
+void EndToEndTest::closeApp(ClientStack &stack)
+{
+    stack.client->disconnect();
+    stack.session->lock();
+    stack.transport.reset();
+    stack.client.reset();
+}
+
+void EndToEndTest::reopenApp(ClientStack &stack)
+{
+    const auto profileId = ProfileId::fromBytes(
+        QByteArray::fromHex(QDir(stack.dir.path()).entryList(QDir::Dirs | QDir::NoDotAndDotDot)
+                                .constFirst()
+                                .toLatin1()));
+    QVERIFY(profileId.has_value());
+    auto unlocked = ProfileSession::unlock(*profileId, stack.vault,
+                                           ProfilePaths::forProfile(stack.dir.path(), *profileId));
+    QVERIFY(unlocked.hasValue());
+    stack.session = std::move(unlocked).value();
+    stack.client = std::make_unique<RelayClient>(stack.deviceId, stack.account, proxyEndpoints(),
+                                                 RelayCredentials{});
+    stack.client->setTlsConfiguration(RelayTest::clientConfigTrusting(m_ca->caCertPem()));
+    stack.transport = std::make_unique<RelayTransport>(*stack.client);
+    QVERIFY(stack.session->startNetworking(*stack.transport).hasValue());
+}
+
+void EndToEndTest::messagesWaitForARecipientWhoIsOffline()
+{
+    if (!m_available)
+        QSKIP("PostgreSQL not available for the E2E test");
+
+    // Alice messages Bob while Bob's app is closed, then closes her own app;
+    // Bob opens his later and the messages are there. The relay holds them for
+    // Bob's device, so nothing needs Alice to be online when Bob comes back.
+    ClientStack alice;
+    ClientStack bob;
+    bootstrapClient(alice, QStringLiteral("oalice"));
+    if (QTest::currentTestFailed())
+        return;
+    bootstrapClient(bob, QStringLiteral("obob"));
+    if (QTest::currentTestFailed())
+        return;
+    QTRY_VERIFY_WITH_TIMEOUT(alice.client->isConnected() && bob.client->isConnected(), 30000);
+    {
+        ContactRequestService aliceRequests(*alice.session, *alice.session->syncEngine());
+        ContactRequestService bobRequests(*bob.session, *bob.session->syncEngine());
+        becomeContacts(alice, aliceRequests, bob, bobRequests);
+    }
+    if (QTest::currentTestFailed())
+        return;
+    const auto contact = alice.session->contacts()->find(bob.account);
+    QVERIFY(contact.hasValue() && contact.value().has_value());
+    QVERIFY(contact.value()->conversationId.has_value());
+    const ConversationId conversation = *contact.value()->conversationId;
+
+    closeApp(bob);
+
+    const auto stateOf = [](ChatController &chat, int row) {
+        return chat.messages()->data(chat.messages()->index(row),
+                                     MessageListModel::DeliveryStateRole).toInt();
+    };
+    {
+        ContactRequestService aliceRequests(*alice.session, *alice.session->syncEngine());
+        ChatController aliceChat;
+        aliceChat.setLiveServices(alice.session.get(), alice.session->syncEngine(),
+                                  &aliceRequests);
+        QVERIFY(aliceChat.hasCurrentContact());
+
+        // Bob is not connected, yet the relay takes the message: Sent, not failed.
+        aliceChat.setComposerText(QStringLiteral("are you there?"));
+        QVERIFY(aliceChat.sendMessage());
+        QTRY_COMPARE_WITH_TIMEOUT(stateOf(aliceChat, 0),
+                                  static_cast<int>(MessageDeliveryState::Sent), 30000);
+
+        // Alice loses her own link and writes again: the message waits in her
+        // outbox as Queued instead of failing.
+        alice.client->disconnect();
+        QTRY_VERIFY_WITH_TIMEOUT(!alice.client->isConnected(), 30000);
+        aliceChat.setComposerText(QStringLiteral("I'll wait"));
+        QVERIFY(aliceChat.sendMessage());
+        QCOMPARE(aliceChat.messages()->rowCount(), 2);
+        QTest::qWait(1500); // past a retry tick
+        QCOMPARE(stateOf(aliceChat, 1), static_cast<int>(MessageDeliveryState::Queued));
+    }
+
+    // Alice closes the app with that message unsent and opens it again later:
+    // it leaves as soon as her device relinks.
+    closeApp(alice);
+    reopenApp(alice);
+    if (QTest::currentTestFailed())
+        return;
+    {
+        DeviceLink link(*alice.session, *alice.client);
+        link.start(DeviceLink::Start::NeedsAuthentication);
+        const auto waitingState = [&] {
+            const auto rows = alice.session->chats()->messages(conversation, 50, std::nullopt);
+            if (rows.hasValue())
+                for (const MessageRecord &row : rows.value())
+                    if (row.body == QStringLiteral("I'll wait"))
+                        return row.deliveryState;
+            return DeliveryState::Draft;
+        };
+        QTRY_COMPARE_WITH_TIMEOUT(waitingState(), DeliveryState::Sent, 30000);
+    }
+    // And closes it again before Bob is back.
+    closeApp(alice);
+
+    // Bob opens his app: the relay replays what arrived while he was away.
+    reopenApp(bob);
+    if (QTest::currentTestFailed())
+        return;
+    QStringList bobReceived;
+    connect(bob.session->syncEngine(), &SyncEngine::messageReceived, this,
+            [&](const MessageRecord &message) { bobReceived.append(message.body); });
+    {
+        DeviceLink link(*bob.session, *bob.client);
+        link.start(DeviceLink::Start::NeedsAuthentication);
+        QTRY_COMPARE_WITH_TIMEOUT(bobReceived.size(), 2, 30000);
+    }
+    QCOMPARE(bobReceived,
+             (QStringList{QStringLiteral("are you there?"), QStringLiteral("I'll wait")}));
+    QVERIFY(!bob.session->syncEngine()->isFailedClosed());
+    {
+        ContactRequestService bobRequests(*bob.session, *bob.session->syncEngine());
+        ChatController bobChat;
+        bobChat.setLiveServices(bob.session.get(), bob.session->syncEngine(), &bobRequests);
+        QVERIFY(bobChat.hasCurrentContact());
+        QCOMPARE(bobChat.messages()->rowCount(), 2);
+    }
+
+    closeApp(bob);
 }
 
 void EndToEndTest::callCarriesAudioVideoAndAScreenOverRealTls()

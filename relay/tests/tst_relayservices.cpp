@@ -131,9 +131,10 @@ private slots:
     void challengeReplayRejected();
     void challengeExpiryRejected();
     void refreshRotationAndReuseRevokesFamily();
-    void livePresenceRejectionAndReconnectReplay();
+    void livePresenceOfflineStorageAndReconnectReplay();
     void duplicateSendIsIdempotent();
-    void offlineRejectionAndLostAcceptanceAreUnambiguous();
+    void offlineRecipientIsStoredAndResendIsIdempotent();
+    void retentionSweepDropsExpiredAndUnreachableInboxes();
     void datagramValidationIsFullButStoresNothing();
     void keyPackageClaimIsOneTime();
     void eightPackagePoolExhaustion();
@@ -398,7 +399,7 @@ void RelayServicesTest::duplicateSendIsIdempotent()
     QCOMPARE(forged.error(), RelayError::Unauthorized);
 }
 
-void RelayServicesTest::livePresenceRejectionAndReconnectReplay()
+void RelayServicesTest::livePresenceOfflineStorageAndReconnectReplay()
 {
     const auto sender = registerDevice(QStringLiteral("live_sender"));
     const auto recipient = registerDevice(QStringLiteral("live_recipient"));
@@ -443,27 +444,31 @@ void RelayServicesTest::livePresenceRejectionAndReconnectReplay()
     QTRY_COMPARE(replies.size(), 1);
     response = QCborValue::fromCbor(replies.takeFirst().first().toByteArray()).toArray();
     QVERIFY(!response.at(1).toArray().first().toArray().at(1).toBool());
-    const auto rejected = signedEnvelope(sender.key.pkey, sender.account, sender.device,
-                                         recipient.device, "offline", m_now);
-    local.sendBinaryMessage(encodeCanonical(rejected));
+    // The recipient is offline, yet the envelope is accepted and stored for it.
+    const auto offline = signedEnvelope(sender.key.pkey, sender.account, sender.device,
+                                        recipient.device, "offline", m_now);
+    local.sendBinaryMessage(encodeCanonical(offline));
     QTRY_COMPARE(replies.size(), 1);
     response = QCborValue::fromCbor(replies.takeFirst().first().toByteArray()).toArray();
-    QCOMPARE(response.at(0).toInteger(), 9);
-    QCOMPARE(response.at(1).toByteArray(), rejected.envelopeId.bytes());
+    QCOMPARE(response.at(0).toInteger(), 1); // RelayAccepted
+    QCOMPARE(response.at(1).toByteArray(), offline.envelopeId.bytes());
+    // The sender goes away too; the relay holds the envelope on its own.
+    local.close();
+    QTRY_COMPARE(local.state(), QAbstractSocket::UnconnectedState);
     received.clear();
     peer.open(request(recipient.tokens.accessToken));
-    QTRY_COMPARE(received.size(), 2); // only the pre-existing backlog
+    QTRY_COMPARE(received.size(), 3); // the backlog, then what was sent while offline
     for (const auto &frame : received) {
         const auto delivery = QCborValue::fromCbor(frame.first().toByteArray()).toArray();
         QCOMPARE(delivery.at(0).toInteger(), 4);
     }
+    const auto last = QCborValue::fromCbor(received.last().first().toByteArray()).toArray();
+    QCOMPARE(last.at(2).toByteArray(), encodeCanonical(offline));
     peer.close();
-    local.close();
     QTRY_COMPARE(peer.state(), QAbstractSocket::UnconnectedState);
-    QTRY_COMPARE(local.state(), QAbstractSocket::UnconnectedState);
 }
 
-void RelayServicesTest::offlineRejectionAndLostAcceptanceAreUnambiguous()
+void RelayServicesTest::offlineRecipientIsStoredAndResendIsIdempotent()
 {
     const auto sender = registerDevice(QStringLiteral("retry_sender"));
     const auto recipient = registerDevice(QStringLiteral("retry_recipient"));
@@ -472,18 +477,60 @@ void RelayServicesTest::offlineRejectionAndLostAcceptanceAreUnambiguous()
                                          recipient.device, "hello", m_now);
     const auto bytes = encodeCanonical(envelope);
     const AuthenticatedDevice identity{sender.account, sender.device};
-    const auto rejected = envelopes.submit(identity, bytes, false);
-    QVERIFY(!rejected.hasValue());
-    QCOMPARE(rejected.error(), RelayError::RecipientUnavailable);
-    QVERIFY(envelopes.fetchSince(recipient.device, 0, 100).value().items.isEmpty());
-    const auto accepted = envelopes.submit(identity, bytes, true);
+    // Nobody is connected: the envelope waits in the recipient's inbox.
+    const auto accepted = envelopes.submit(identity, bytes);
     QVERIFY(accepted.hasValue());
+    QVERIFY(!accepted.value().duplicate);
+    const auto waiting = envelopes.fetchSince(recipient.device, 0, 100);
+    QVERIFY(waiting.hasValue());
+    QCOMPARE(waiting.value().items.size(), 1);
+    QCOMPARE(waiting.value().items.first().envelope, bytes);
+    // Once received, a resend whose acceptance the sender never saw is a
+    // duplicate: it reports the original sequence and is not delivered again.
     QVERIFY(envelopes.acknowledge(recipient.device, accepted.value().serverSequence).hasValue());
-    const auto retry = envelopes.submit(identity, bytes, false);
+    const auto retry = envelopes.submit(identity, bytes);
     QVERIFY(retry.hasValue());
     QVERIFY(retry.value().duplicate);
     QCOMPARE(retry.value().serverSequence, accepted.value().serverSequence);
     QVERIFY(envelopes.fetchSince(recipient.device, 0, 100).value().items.isEmpty());
+}
+
+void RelayServicesTest::retentionSweepDropsExpiredAndUnreachableInboxes()
+{
+    const auto sender = registerDevice(QStringLiteral("sweep_sender"));
+    const auto waiting = registerDevice(QStringLiteral("sweep_waiting"));
+    const auto retired = registerDevice(QStringLiteral("sweep_retired"));
+    AuthService auth(*m_store);
+    EnvelopeService envelopes(*m_store);
+    const AuthenticatedDevice identity{sender.account, sender.device};
+    const auto submit = [&](const DeviceId &recipient, const QByteArray &ciphertext) {
+        const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device,
+                                             recipient, ciphertext, m_now);
+        const QByteArray bytes = encodeCanonical(envelope);
+        const auto stored = envelopes.submit(identity, bytes);
+        return stored.hasValue() ? bytes : QByteArray();
+    };
+
+    // signedEnvelope expires 60 s after creation.
+    QVERIFY(!submit(waiting.device, "expires first").isEmpty());
+    m_now += 30'000;
+    const QByteArray stillValid = submit(waiting.device, "still valid");
+    QVERIFY(!stillValid.isEmpty());
+    QVERIFY(!submit(retired.device, "never fetched").isEmpty());
+    QVERIFY(auth.revokeDevice(retired.device).hasValue());
+
+    // Neither recipient ever connects or acknowledges. Past the first expiry the
+    // sweep drops that envelope and the retired device's inbox, and leaves the
+    // unexpired one waiting for its recipient.
+    m_now += 45'000;
+    const auto pruned = envelopes.pruneExpired();
+    QVERIFY(pruned.hasValue());
+    QCOMPARE(pruned.value(), 2);
+    const auto remaining = envelopes.fetchSince(waiting.device, 0, 100);
+    QVERIFY(remaining.hasValue());
+    QCOMPARE(remaining.value().items.size(), 1);
+    QCOMPARE(remaining.value().items.first().envelope, stillValid);
+    QCOMPARE(envelopes.pruneExpired().value(), 0);
 }
 
 void RelayServicesTest::datagramValidationIsFullButStoresNothing()

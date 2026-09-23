@@ -13,7 +13,24 @@ namespace OpenChat {
 
 namespace {
 
-constexpr qint64 envelopeLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
+// How long an envelope may wait in the relay for a recipient that is offline.
+// Conversation traffic (messages, receipts, contact and group handshakes,
+// profile and group updates) gets the longest span the wire allows, so a
+// recipient who opens the app days later still receives it. Call signalling
+// stays short: an offer is meaningless long after the call, and must not reach
+// a device that only reappears days later.
+constexpr qint64 callEnvelopeLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
+
+[[nodiscard]] constexpr qint64 envelopeLifetimeMs(EnvelopeMessageKind kind) noexcept
+{
+    switch (kind) {
+    case EnvelopeMessageKind::CallSignal:
+    case EnvelopeMessageKind::CallMedia:
+        return callEnvelopeLifetimeMs;
+    default:
+        return maxEnvelopeLifetimeMs;
+    }
+}
 
 // DevicePublicCredential serializes as: version(1) || deviceId(16) || key(32).
 constexpr char credentialVersion = 1;
@@ -84,7 +101,7 @@ public:
             conversation,
             kind,
             created,
-            created + envelopeLifetimeMs,
+            created + envelopeLifetimeMs(kind),
             EnvelopeId::generate(),
             ciphertext,
             QCryptographicHash::hash(ciphertext, QCryptographicHash::Sha256),
@@ -122,6 +139,8 @@ public:
         }
         const QByteArray envelopeBytes = encodeCanonical(*envelope);
 
+        // Queued even with no relay link: the outbox is durable, so the send
+        // leaves when the link comes back, including after a restart.
         const MessageRecord message{MessageId::generate(),
                                     conversation,
                                     config.localDeviceId,
@@ -129,14 +148,12 @@ public:
                                     ContentKind::Text,
                                     text,
                                     now(),
-                                    transport.isConnected() ? DeliveryState::Queued : DeliveryState::Failed,
+                                    DeliveryState::Queued,
                                     std::nullopt,
                                     std::nullopt};
 
-        OutboxRecord outbox =
+        const OutboxRecord outbox =
             makeOutbox(envelope->envelopeId, message.id, conversation, envelopeBytes);
-        if (message.deliveryState == DeliveryState::Failed)
-            outbox.state = OutboxState::Failed;
 
         const QByteArray mlsState = mls.takePendingState();
         if (!store.commitSend(message, outbox, mlsState).hasValue()) {
@@ -144,7 +161,7 @@ public:
             return;
         }
         emit q->messageQueued(message);
-        emit q->messageStateChanged(message.id, message.deliveryState);
+        emit q->messageStateChanged(message.id, DeliveryState::Queued);
         drainOutbox();
     }
 
@@ -323,36 +340,32 @@ public:
             failClosed();
             return;
         }
-        MessageRecord message{MessageId::generate(),
-                              conversation,
-                              config.localDeviceId,
-                              MessageFlow::Outgoing,
-                              ContentKind::Text,
-                              text,
-                              now(),
-                              transport.isConnected() ? DeliveryState::Queued
-                                                      : DeliveryState::Failed,
-                              std::nullopt,
-                              std::nullopt};
-        auto outboxes = buildFanOut(conversation, recipients, ciphertext.value(),
-                                    EnvelopeMessageKind::MlsPrivateMessage, message.id);
+        // Queued with or without a relay link, as in doEnqueueText.
+        const MessageRecord message{MessageId::generate(),
+                                    conversation,
+                                    config.localDeviceId,
+                                    MessageFlow::Outgoing,
+                                    ContentKind::Text,
+                                    text,
+                                    now(),
+                                    DeliveryState::Queued,
+                                    std::nullopt,
+                                    std::nullopt};
+        const auto outboxes = buildFanOut(conversation, recipients, ciphertext.value(),
+                                          EnvelopeMessageKind::MlsPrivateMessage, message.id);
         if (!outboxes) {
             failClosed();
             return;
         }
-        if (message.deliveryState == DeliveryState::Failed)
-            for (OutboxRecord &outbox : *outboxes)
-                outbox.state = OutboxState::Failed;
 
         const QByteArray mlsState = mls.takePendingState();
         if (!store.commitGroupSend(message, *outboxes, mlsState).hasValue()) {
             failClosed();
             return;
         }
-        if (message.deliveryState != DeliveryState::Failed)
-            fanOut.insert(message.id.bytes(), FanOutProgress{outboxes->size(), false});
+        fanOut.insert(message.id.bytes(), FanOutProgress{outboxes->size(), false});
         emit q->messageQueued(message);
-        emit q->messageStateChanged(message.id, message.deliveryState);
+        emit q->messageStateChanged(message.id, DeliveryState::Queued);
         drainOutbox();
     }
 
@@ -458,7 +471,14 @@ public:
             if (!decoded.hasValue()) {
                 (void)store.advanceDeliveryState(record.messageId, DeliveryState::Failed);
                 (void)store.scheduleRetry(record.envelopeId, record.attemptCount,
-                                          nowMs + envelopeLifetimeMs);
+                                          nowMs + maxEnvelopeLifetimeMs);
+                continue;
+            }
+            // Queued offline for longer than its lifetime: the relay would
+            // refuse it on every attempt, so give up now rather than retrying.
+            if (decoded.value().expiresAtMs <= nowMs) {
+                inflight.remove(record.envelopeId.bytes());
+                failOne(record.envelopeId, record.messageId);
                 continue;
             }
             inflight.insert(record.envelopeId.bytes(), record.messageId);
@@ -493,6 +513,9 @@ public:
             emit q->messageStateChanged(messageId, DeliveryState::Failed);
     }
 
+    // The relay refused to hold an envelope because its recipient was not
+    // connected. Current relays store for offline devices and never say this;
+    // an older relay still can, and then the send has nowhere to wait.
     void onUnavailable(const EnvelopeId &envelopeId)
     {
         const auto it = inflight.constFind(envelopeId.bytes());

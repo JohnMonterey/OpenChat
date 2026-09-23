@@ -1,5 +1,6 @@
 #include "network/SyncEngine.h"
 
+#include "protocol/CanonicalCborCodec.h"
 #include "protocol/CiphertextEnvelope.h"
 
 #include <QSignalSpy>
@@ -464,6 +465,9 @@ class SyncEngineTest final : public QObject
 
 private slots:
     void initTestCase() { qRegisterMetaType<DeliveryState>(); }
+    // Every test starts from the same clock: some move it on by days, and the
+    // fixed incoming envelopes expire a minute after it.
+    void init() { m_now = 1'700'000'000'000; }
 
     void sendEncryptsPersistsAndReportsQueued();
     void relayAcceptanceMarksSent();
@@ -495,8 +499,11 @@ private slots:
         QCOMPARE(mls.encryptCount, 1);
         QCOMPARE(transport.sent.first().ciphertext, transport.sent.last().ciphertext);
     }
-    void offlineSendFailsWithoutLaterDelivery();
-    void offlineFailureSurvivesEngineRestart();
+    void offlineSendQueuesAndLeavesOnReconnect();
+    void offlineSendSurvivesEngineRestart();
+    void offlineGroupSendQueuesForEveryMember();
+    void conversationEnvelopesOutliveCallSignals();
+    void sendQueuedPastItsExpiryFailsWithoutSending();
     void neverReEncryptsOnResend();
     void duplicateIncomingIsAckedNotReprocessed();
     void staleMessageIsDroppedWithoutAckOrCallback();
@@ -578,28 +585,37 @@ void SyncEngineTest::relayAcceptanceMarksSent()
     QVERIFY(sawSent);
 }
 
-void SyncEngineTest::offlineSendFailsWithoutLaterDelivery()
+void SyncEngineTest::offlineSendQueuesAndLeavesOnReconnect()
 {
+    m_now = 1'700'000'000'000;
     FakeStore store;
     FakeMls mls;
     FakeTransport transport;
     transport.connected = false;
     SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy stateSpy(&engine, &SyncEngine::messageStateChanged);
     engine.start();
 
     engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("later"));
     QCOMPARE(store.outboxes.size(), 1);
-    QCOMPARE(store.messages.first().deliveryState, DeliveryState::Failed);
-    QCOMPARE(store.outboxes.first().record.state, OutboxState::Failed);
-    QCOMPARE(transport.sent.size(), 0); // but not sent while offline
+    QCOMPARE(store.messages.first().deliveryState, DeliveryState::Queued);
+    QCOMPARE(store.outboxes.first().record.state, OutboxState::Pending);
+    QCOMPARE(stateSpy.first().at(1).value<DeliveryState>(), DeliveryState::Queued);
+    QCOMPARE(transport.sent.size(), 0); // nothing leaves while offline
 
+    // The link comes back: the queued send leaves without a manual retry, as
+    // the ciphertext made offline, and the relay's acceptance marks it Sent.
     transport.connected = true;
-    transport.onConnected(); // failed sends require a manual retry
-    QCOMPARE(transport.sent.size(), 0);
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(mls.encryptCount, 1);
+    transport.onRelayAccepted(transport.sent.first().envelopeId, 1);
+    QCOMPARE(store.deliveryStates.value(store.messages.first().id.bytes()), DeliveryState::Sent);
 }
 
-void SyncEngineTest::offlineFailureSurvivesEngineRestart()
+void SyncEngineTest::offlineSendSurvivesEngineRestart()
 {
+    m_now = 1'700'000'000'000;
     FakeStore store; // shared durable store across engine instances
     FakeMls mls;
     FakeTransport transport;
@@ -615,11 +631,104 @@ void SyncEngineTest::offlineFailureSurvivesEngineRestart()
     QCOMPARE(store.outboxes.size(), 1);
     QCOMPARE(transport.sent.size(), 0);
 
+    // The app was closed before the message left and is opened days later,
+    // online: the stored envelope goes out as it is, never re-encrypted.
+    m_now += 3LL * 24 * 60 * 60 * 1000;
     transport.connected = true;
     SyncEngine second(makeConfig(), store, mls, transport, okSigner(), clock());
     second.start();
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(mls.encryptCount, 1);
+    transport.onRelayAccepted(transport.sent.first().envelopeId, 1);
+    QCOMPARE(store.deliveryStates.value(store.messages.first().id.bytes()), DeliveryState::Sent);
+}
+
+void SyncEngineTest::offlineGroupSendQueuesForEveryMember()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.connected = false;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    engine.enqueueGroupText(ConversationId::generate(),
+                            {DeviceId::generate(), DeviceId::generate()},
+                            QStringLiteral("see you all later"));
+    QCOMPARE(store.messages.first().deliveryState, DeliveryState::Queued);
+    QCOMPARE(store.outboxes.size(), 2);
+    for (const StoredOutbox &outbox : std::as_const(store.outboxes))
+        QCOMPARE(outbox.record.state, OutboxState::Pending);
     QCOMPARE(transport.sent.size(), 0);
-    QCOMPARE(store.messages.first().deliveryState, DeliveryState::Failed);
+
+    transport.connected = true;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 2);
+    transport.onRelayAccepted(transport.sent.first().envelopeId, 1);
+    QCOMPARE(store.deliveryStates.value(store.messages.first().id.bytes()), DeliveryState::Sent);
+}
+
+void SyncEngineTest::conversationEnvelopesOutliveCallSignals()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    // The relay holds an envelope for an offline recipient until it expires, so
+    // a message may wait as long as the wire allows; a call offer must not ring
+    // a device that reappears days after the call.
+    const ConversationId conversation = ConversationId::generate();
+    engine.enqueueText(conversation, DeviceId::generate(), QStringLiteral("whenever"));
+    engine.sendCallSignal(conversation, DeviceId::generate(), QByteArray("OFFER"));
+    QCOMPARE(transport.sent.size(), 2);
+    const auto lifetime = [](const CiphertextEnvelopeV1 &envelope) {
+        return envelope.expiresAtMs - envelope.createdAtMs;
+    };
+    QCOMPARE(lifetime(transport.sent.at(0)), maxEnvelopeLifetimeMs);
+    QCOMPARE(lifetime(transport.sent.at(1)), 24LL * 60 * 60 * 1000);
+    // Both are still valid wire envelopes.
+    for (const CiphertextEnvelopeV1 &envelope : std::as_const(transport.sent))
+        QVERIFY(decodeEnvelope(encodeCanonical(envelope)).hasValue());
+}
+
+void SyncEngineTest::sendQueuedPastItsExpiryFailsWithoutSending()
+{
+    m_now = 1'700'000'000'000;
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.connected = false;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    engine.enqueueText(conversation, DeviceId::generate(), QStringLiteral("two days late"));
+    engine.sendCallSignal(conversation, DeviceId::generate(), QByteArray("OFFER"));
+    engine.enqueueText(conversation, DeviceId::generate(), QStringLiteral("a month late"));
+    QCOMPARE(store.outboxes.size(), 3);
+
+    // Two days offline: the call offer has expired and is dropped unsent, the
+    // messages still go.
+    m_now += 2LL * 24 * 60 * 60 * 1000;
+    transport.connected = true;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 2);
+    for (const CiphertextEnvelopeV1 &envelope : std::as_const(transport.sent))
+        QCOMPARE(envelope.messageKind, EnvelopeMessageKind::MlsPrivateMessage);
+    QCOMPARE(store.outboxes.at(1).record.state, OutboxState::Failed);
+    transport.onRelayAccepted(transport.sent.at(0).envelopeId, 1);
+
+    // A queued message the relay would refuse as expired fails at once rather
+    // than being retried until the attempts run out.
+    m_now += maxEnvelopeLifetimeMs;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 2);
+    QCOMPARE(store.deliveryStates.value(store.messages.at(1).id.bytes()), DeliveryState::Failed);
+    QCOMPARE(store.deliveryStates.value(store.messages.at(0).id.bytes()), DeliveryState::Sent);
 }
 
 void SyncEngineTest::neverReEncryptsOnResend()

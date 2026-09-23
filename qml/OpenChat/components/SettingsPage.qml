@@ -24,8 +24,23 @@ Item {
         case "Custom Vocal FX": return vocalFxSection;
         case "Connection": return connectionSection;
         case "Theme": return themeSection;
+        case "Avatar frame": return frameSection;
+        case "Name flair": return flairSection;
+        case "Presence bead": return beadSection;
+        case "Profile scene": return sceneSection;
+        case "Chat bubble": return bubbleSection;
         }
         return null;
+    }
+
+    // A line under the title for a category that needs saying once, not
+    // per section.
+    function categoryNote(name) {
+        switch (name) {
+        case "Cosmetics":
+            return "Cosmetics show on this device only; your contacts still see your usual look.";
+        }
+        return "";
     }
 
     Text {
@@ -67,6 +82,27 @@ Item {
             function onCurrentSettingsCategoryChanged() { scroll.contentY = 0; }
         }
 
+        // Keep whatever the keyboard focuses on the page in view.
+        function reveal(item) {
+            let inside = item;
+            while (inside && inside !== sections)
+                inside = inside.parent;
+            if (!inside || contentHeight <= height)
+                return;
+            const box = item.mapToItem(sections, 0, 0, item.width, item.height);
+            let y = contentY;
+            if (box.y < y)
+                y = box.y - 8;
+            else if (box.y + box.height > y + height)
+                y = box.y + box.height - height + 8;
+            contentY = Math.max(0, Math.min(y, contentHeight - height));
+        }
+        Connections {
+            target: page.Window.window
+            enabled: page.visible
+            function onActiveFocusItemChanged() { scroll.reveal(page.Window.activeFocusItem); }
+        }
+
         ScrollBar.vertical: ScrollBar {
             id: scrollBar
             objectName: "settingsScrollBar"
@@ -90,6 +126,19 @@ Item {
         Column {
             id: sections
             width: scroll.width
+
+            Text {
+                objectName: "settingsCategoryNote"
+                visible: text.length > 0
+                width: parent.width
+                topPadding: 16
+                wrapMode: Text.WordWrap
+                text: page.categoryNote(page.controller.currentSettingsCategoryName)
+                color: Theme.textSecondary
+                font.family: Theme.uiFont
+                font.pixelSize: 13
+                renderType: Text.NativeRendering
+            }
 
             Repeater {
                 model: page.controller.currentSettingsElements
@@ -157,6 +206,31 @@ Item {
     Component {
         id: connectionSection
         ConnectionSettingsPanel {}
+    }
+
+    Component {
+        id: frameSection
+        CosmeticPicker { category: "frame" }
+    }
+
+    Component {
+        id: flairSection
+        CosmeticPicker { category: "flair" }
+    }
+
+    Component {
+        id: beadSection
+        CosmeticPicker { category: "bead" }
+    }
+
+    Component {
+        id: sceneSection
+        CosmeticPicker { category: "scene" }
+    }
+
+    Component {
+        id: bubbleSection
+        CosmeticPicker { category: "bubble" }
     }
 
     Component {

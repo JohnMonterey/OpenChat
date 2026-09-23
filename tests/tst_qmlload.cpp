@@ -1098,13 +1098,19 @@ private slots:
         const QStringList categories = chats.settingsCategories();
         QCOMPARE(categories, (QStringList{QStringLiteral("General"),
                                           QStringLiteral("Audio & Video"),
-                                          QStringLiteral("Appearance")}));
+                                          QStringLiteral("Appearance"),
+                                          QStringLiteral("Cosmetics")}));
         const QHash<QString, QString> controlOf = {
             {QStringLiteral("Memory"), QStringLiteral("lowMemoryPanel")},
             {QStringLiteral("Input"), QStringLiteral("microphoneSettingsPanel")},
             {QStringLiteral("Custom Vocal FX"), QStringLiteral("customVocalFxPanel")},
             {QStringLiteral("Connection"), QStringLiteral("connectionSettingsPanel")},
             {QStringLiteral("Theme"), QStringLiteral("darkModeSwitch")},
+            {QStringLiteral("Avatar frame"), QStringLiteral("cosmeticPicker_frame")},
+            {QStringLiteral("Name flair"), QStringLiteral("cosmeticPicker_flair")},
+            {QStringLiteral("Presence bead"), QStringLiteral("cosmeticPicker_bead")},
+            {QStringLiteral("Profile scene"), QStringLiteral("cosmeticPicker_scene")},
+            {QStringLiteral("Chat bubble"), QStringLiteral("cosmeticPicker_bubble")},
         };
 
         // The sidebar lists exactly the categories, with no Back row, and
@@ -1154,7 +1160,8 @@ private slots:
         }
 
         // Set OPENCHAT_SETTINGS_CAPTURE_DIR to keep every category, light and
-        // dark, and the foot of any page that scrolls, for eyeballing.
+        // dark, every screenful of any page that scrolls, and every category
+        // at the narrowest window, for eyeballing.
         const QString captureDir = qEnvironmentVariable("OPENCHAT_SETTINGS_CAPTURE_DIR");
         if (!captureDir.isEmpty()) {
             auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
@@ -1166,34 +1173,264 @@ private slots:
                 return window->grabWindow().save(captureDir + QLatin1Char('/') + name
                                                  + QStringLiteral(".png"));
             };
+            // The open category's top, then each further screenful.
+            const auto shootPage = [&](const QString &name) {
+                scroll->setProperty("contentY", 0);
+                bool saved = shoot(name);
+                const qreal overflow = scroll->property("contentHeight").toReal() - scroll->height();
+                for (int screen = 1; overflow > 0 && (screen - 1) * scroll->height() < overflow; ++screen) {
+                    scroll->setProperty("contentY", qMin(overflow, screen * scroll->height()));
+                    saved = shoot(name + QStringLiteral("-%1").arg(screen)) && saved;
+                }
+                return saved;
+            };
             for (const bool dark : {false, true}) {
                 appearance->setDarkMode(dark);
                 const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
                 for (int i = 0; i < categories.size(); ++i) {
                     chats.setCurrentSettingsCategory(i);
                     flushDeletes();
-                    const QString name = QStringLiteral("settings-%1-%2").arg(i).arg(theme);
-                    QVERIFY(shoot(name));
-                    const qreal overflow = scroll->property("contentHeight").toReal() - scroll->height();
-                    if (overflow > 0) {
-                        scroll->setProperty("contentY", overflow);
-                        QVERIFY(shoot(name + QStringLiteral("-end")));
-                    }
+                    QVERIFY(shootPage(QStringLiteral("settings-%1-%2").arg(i).arg(theme)));
                 }
+                // Cosmetics again, wearing one of each kind.
+                appearance->setAvatarFrame(QStringLiteral("frame.neon"));
+                appearance->setNameFlair(QStringLiteral("flair.holo"));
+                appearance->setPresenceBead(QStringLiteral("bead.gem"));
+                appearance->setProfileScene(QStringLiteral("scene.aurora"));
+                appearance->setBubbleSkin(QStringLiteral("bubble.nebula"));
+                chats.setCurrentSettingsCategory(int(categories.indexOf(QStringLiteral("Cosmetics"))));
+                flushDeletes();
+                QVERIFY(shootPage(QStringLiteral("settings-cosmetics-equipped-%1").arg(theme)));
+                for (const char *property : {"avatarFrame", "nameFlair", "presenceBead",
+                                             "profileScene", "bubbleSkin"})
+                    appearance->setProperty(property, QString());
             }
             appearance->setDarkMode(false);
+            const QSize size = window->size();
+            window->resize(window->minimumWidth(), size.height());
+            for (int i = 0; i < categories.size(); ++i) {
+                chats.setCurrentSettingsCategory(i);
+                flushDeletes();
+                QVERIFY(shoot(QStringLiteral("settings-%1-narrow").arg(i)));
+            }
+            window->resize(size);
         }
 
         // Leaving Settings tears the controls down again; coming back finds
         // the category that was open.
         chats.setNavSection(OpenChat::ChatController::NavSection::Chat);
         flushDeletes();
-        QVERIFY(!findVisualItem(window->contentItem(), QStringLiteral("darkModeSwitch")));
+        QVERIFY(!findVisualItem(window->contentItem(), QStringLiteral("cosmeticPicker_frame")));
         chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
         QCoreApplication::processEvents();
-        QCOMPARE(title->property("text").toString(), QStringLiteral("Appearance"));
-        auto *toggle = findVisualItem(window->contentItem(), QStringLiteral("darkModeSwitch"));
-        QVERIFY(toggle && toggle->isVisible());
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Cosmetics"));
+        auto *picker = findVisualItem(window->contentItem(), QStringLiteral("cosmeticPicker_frame"));
+        QVERIFY(picker && picker->isVisible());
+    }
+
+    // Settings → Cosmetics: each kind lists None and then every item of it,
+    // lowest tier first; a click or a key equips a tile at once (the header
+    // wears it and it is remembered), the check follows the equipped tile,
+    // and None puts the stock look back.
+    void theCosmeticsPageEquipsWhatYouPick()
+    {
+        clearAllCosmetics();
+        OpenChat::ChatController chats;
+        chats.setLocalUserName(QStringLiteral("Developer"));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        chats.setCurrentSettingsCategory(3); // Cosmetics
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        // The narrowest window leaves the tiles least room.
+        window->resize(window->minimumWidth(), 680);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QObject *appearance = engine.singletonInstance<QObject *>("OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QQuickItem *root = window->contentItem();
+
+        // Said once for the page: nothing here reaches contacts.
+        auto *note = findVisualItem(root, QStringLiteral("settingsCategoryNote"));
+        QVERIFY(note && note->isVisible());
+        QVERIFY(note->property("text").toString().contains(QStringLiteral("this device only")));
+
+        auto *scroll = findVisualItem(root, QStringLiteral("settingsScroll"));
+        QVERIFY(scroll);
+        auto *content = scroll->property("contentItem").value<QQuickItem *>();
+        QVERIFY(content);
+        const auto bringIntoView = [&](QQuickItem *item) {
+            const qreal top = item->mapToItem(content, QPointF(0, 0)).y();
+            const qreal most = qMax<qreal>(0, scroll->property("contentHeight").toReal() - scroll->height());
+            scroll->setProperty("contentY", qBound<qreal>(0, top - 24, most));
+            QCoreApplication::processEvents();
+        };
+        const auto inView = [&](QQuickItem *item) {
+            const QRectF box = item->mapRectToItem(scroll, QRectF(0, 0, item->width(), item->height()));
+            return box.top() >= 0 && box.bottom() <= scroll->height();
+        };
+        const auto click = [&](QQuickItem *item) {
+            bringIntoView(item);
+            QVERIFY(inView(item));
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                              item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint());
+        };
+        auto *avatar = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("localUserAvatar")));
+        QVERIFY(avatar);
+        QQuickItem *header = avatar->parentItem();
+        // What the local header wears for a kind, or empty when it wears nothing.
+        const auto worn = [&](const QString &category) -> QString {
+            QObject *item = nullptr;
+            const char *idProperty = "";
+            if (category == QLatin1String("frame")) {
+                item = findVisualItem(header, QStringLiteral("avatarFrame"));
+                idProperty = "frameId";
+            } else if (category == QLatin1String("bead")) {
+                item = findVisualItem(header, QStringLiteral("beadArt"));
+                idProperty = "styleId";
+            } else if (category == QLatin1String("flair")) {
+                item = window->findChild<QObject *>(QStringLiteral("localNameFlair"));
+                idProperty = "flairId";
+            } else if (category == QLatin1String("scene")) {
+                item = window->findChild<QObject *>(QStringLiteral("profileScene"));
+                idProperty = "sceneId";
+            }
+            return item ? item->property(idProperty).toString() : QString();
+        };
+
+        for (const QString category : {QStringLiteral("frame"), QStringLiteral("flair"),
+                                       QStringLiteral("bead"), QStringLiteral("scene"),
+                                       QStringLiteral("bubble")}) {
+            auto *picker = findVisualItem(root, QStringLiteral("cosmeticPicker_") + category);
+            QVERIFY2(picker && picker->isVisible(), qPrintable(category));
+            const QByteArray property = equipProperty(category);
+
+            // None, then the kind's items by tier, reading left to right.
+            QList<OpenChat::CosmeticInfo> items = OpenChat::CosmeticCatalog::inCategory(category);
+            std::stable_sort(items.begin(), items.end(), [](const auto &a, const auto &b) {
+                return a.rarity < b.rarity;
+            });
+            QStringList order{category + QStringLiteral(".none")};
+            for (const OpenChat::CosmeticInfo &info : items)
+                order.append(info.id);
+            QList<QQuickItem *> tiles;
+            for (const QString &id : order) {
+                auto *tile = findVisualItem(picker, QStringLiteral("cosmeticChoice_") + id);
+                QVERIFY2(tile && tile->isVisible(), qPrintable(id));
+                tiles.append(tile);
+                // Name and tier read in full, and a play mark flags exactly
+                // the items that move.
+                auto *name = findVisualItem(tile, QStringLiteral("cosmeticChoiceName"));
+                auto *rarity = findVisualItem(tile, QStringLiteral("cosmeticChoiceRarity"));
+                auto *animated = findVisualItem(tile, QStringLiteral("cosmeticChoiceAnimated"));
+                QVERIFY(name && rarity && animated);
+                QVERIFY2(!name->property("truncated").toBool(), qPrintable(id));
+                QVERIFY2(!rarity->property("truncated").toBool(), qPrintable(id));
+                const OpenChat::CosmeticInfo *info = OpenChat::CosmeticCatalog::find(id);
+                QCOMPARE(animated->isVisible(), info && info->animated);
+            }
+            const int columns = picker->property("columns").toInt();
+            QVERIFY(columns >= 3);
+            for (int i = 1; i < tiles.size(); ++i) {
+                const QPointF previous = tiles[i - 1]->mapToItem(picker, QPointF(0, 0));
+                const QPointF here = tiles[i]->mapToItem(picker, QPointF(0, 0));
+                QVERIFY2(here.y() > previous.y() || (here.y() == previous.y() && here.x() > previous.x()),
+                         qPrintable(order[i] + QStringLiteral(" is out of order")));
+                QCOMPARE(here.y() > previous.y(), i % columns == 0);
+                // Tiles fill the width, and never spill past it.
+                QVERIFY(here.x() + tiles[i]->width() <= picker->width() + 0.5);
+            }
+
+            // An animated frame's preview holds still until pointed at.
+            if (category == QLatin1String("frame")) {
+                const int orbit = int(order.indexOf(QStringLiteral("frame.orbit")));
+                const int inferno = int(order.indexOf(QStringLiteral("frame.inferno")));
+                QVERIFY(orbit > 0 && inferno > 0);
+                auto *orbitFrame = findVisualItem(tiles[orbit], QStringLiteral("avatarFrame"));
+                auto *infernoFrame = findVisualItem(tiles[inferno], QStringLiteral("avatarFrame"));
+                QVERIFY(orbitFrame && infernoFrame);
+                bringIntoView(tiles[orbit]);
+                const int orbitPhase = orbitFrame->property("phase").toInt();
+                const int infernoPhase = infernoFrame->property("phase").toInt();
+                QTest::mouseMove(window, tiles[orbit]->mapToScene(
+                    QPointF(tiles[orbit]->width() / 2, tiles[orbit]->height() / 2)).toPoint());
+                QTRY_VERIFY(orbitFrame->property("phase").toInt() != orbitPhase);
+                QCOMPARE(infernoFrame->property("phase").toInt(), infernoPhase);
+                QTest::mouseMove(window, QPoint(2, window->height() - 2));
+            }
+
+            // Nothing equipped: None carries the check.
+            const auto checked = [&](int index) {
+                for (int i = 0; i < tiles.size(); ++i) {
+                    auto *check = findVisualItem(tiles[i], QStringLiteral("cosmeticChoiceCheck"));
+                    if (tiles[i]->property("selected").toBool() != (i == index)
+                        || !check || check->isVisible() != (i == index))
+                        return false;
+                }
+                return true;
+            };
+            QVERIFY(checked(0));
+            QCOMPARE(worn(category), QString());
+
+            // A click equips the rarest item, remembered and worn at once.
+            const int rarest = int(tiles.size()) - 1;
+            click(tiles[rarest]);
+            QTRY_COMPARE(appearance->property(property.constData()).toString(), order[rarest]);
+            QCOMPARE(QSettings().value(QStringLiteral("Appearance/") + QString::fromLatin1(property)).toString(),
+                     order[rarest]);
+            QVERIFY(checked(rarest));
+            if (category != QLatin1String("bubble"))
+                QTRY_COMPARE(worn(category), order[rarest]);
+
+            // The keyboard: Left walks back a tile, Space equips it; Up and
+            // Down move by a row.
+            tiles[rarest]->forceActiveFocus(Qt::TabFocusReason);
+            QTest::keyClick(window, Qt::Key_Left);
+            QCOMPARE(window->activeFocusItem(), tiles[rarest - 1]);
+            QTest::keyClick(window, Qt::Key_Space);
+            QTRY_COMPARE(appearance->property(property.constData()).toString(), order[rarest - 1]);
+            QVERIFY(checked(rarest - 1));
+            tiles[0]->forceActiveFocus(Qt::TabFocusReason);
+            QTest::keyClick(window, Qt::Key_Down);
+            QCOMPARE(window->activeFocusItem(), tiles[columns]);
+            QTest::keyClick(window, Qt::Key_Up);
+            QCOMPARE(window->activeFocusItem(), tiles[0]);
+            QTest::keyClick(window, Qt::Key_Up); // Already on the top row.
+            QCOMPARE(window->activeFocusItem(), tiles[0]);
+
+            // None clears it and the stock look returns.
+            click(tiles[0]);
+            QTRY_COMPARE(appearance->property(property.constData()).toString(), QString());
+            QVERIFY(!QSettings().contains(QStringLiteral("Appearance/") + QString::fromLatin1(property)));
+            QVERIFY(checked(0));
+            QTRY_COMPARE(worn(category), QString());
+        }
+
+        // Tab stops once per kind, on its equipped tile, and the page scrolls
+        // to show it.
+        appearance->setProperty("nameFlair", QStringLiteral("flair.holo"));
+        auto *frameNone = findVisualItem(root, QStringLiteral("cosmeticChoice_frame.none"));
+        QVERIFY(frameNone);
+        bringIntoView(frameNone);
+        frameNone->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_COMPARE(window->activeFocusItem()->objectName(), QStringLiteral("cosmeticChoice_flair.holo"));
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_COMPARE(window->activeFocusItem()->objectName(), QStringLiteral("cosmeticChoice_bead.none"));
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_COMPARE(window->activeFocusItem()->objectName(), QStringLiteral("cosmeticChoice_bubble.none"));
+        QTRY_VERIFY(inView(window->activeFocusItem()));
+
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.isEmpty() ? QString()
+            : warnings.constFirst().constFirst().value<QList<QQmlError>>().value(0).toString()));
+        clearAllCosmetics();
     }
 
     void theMicrophonePanelDrivesAndRemembersTheSettings()

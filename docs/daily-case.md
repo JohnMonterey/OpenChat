@@ -3,8 +3,7 @@
 The small case icon beside the add-contact control opens a native Qt Quick popup.
 Each tile shows a collectible cosmetic with its rarity tier, and the claim draws
 one of them with the published odds. Nothing is granted yet: there is no
-inventory or equip flow behind the reveal. There is no payment and no monetary
-value.
+inventory behind the reveal. There is no payment and no monetary value.
 
 ## Ownership and integration
 
@@ -78,6 +77,21 @@ colour, and the ring thickens with the tier; Legendary and Exotic add a flash
 behind the belt and a second, later ring. Less motion skips all of it.
 `openchat-profile-gallery --page rarity-ladder` and `--page case-reveals`
 render the ladder and frozen reveals for review.
+
+## Equipping
+
+Settings → Cosmetics has one picker per kind (avatar frame, name flair,
+presence bead, profile scene, chat bubble). Each is a grid of tiles: None
+with the stock look first, then every item of the kind from Common to Exotic,
+drawn by `CosmeticPreview` over the same tier bar and glow as the case tiles.
+A click, Space or Enter equips the tile at once through `AppearanceSettings`,
+which remembers it; the sidebar header wears it while Settings is still open.
+Animated items carry a play mark and move while pointed at or focused. Arrow
+keys walk the grid and Tab stops once per kind, on its equipped tile.
+
+With no inventory, every item is offered. What is equipped stays on this
+device (the page says so); nothing is published to contacts. When an
+inventory lands, the picker is where unowned items get dimmed.
 
 ## Motion and sound
 

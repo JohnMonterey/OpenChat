@@ -58,7 +58,7 @@ QVector<Message> michaelConversation()
 QStringList settingsCategoryNames()
 {
     return {QStringLiteral("General"), QStringLiteral("Audio & Video"),
-            QStringLiteral("Appearance")};
+            QStringLiteral("Appearance"), QStringLiteral("Cosmetics")};
 }
 
 // The sections a settings category shows, top to bottom, indexed to match
@@ -74,6 +74,11 @@ QStringList settingsElementsForCategory(int index)
                 QStringLiteral("Connection")};
     case 2:
         return {QStringLiteral("Theme")};
+    case 3:
+        // One picker per kind of collectible, profile pieces before messages.
+        return {QStringLiteral("Avatar frame"), QStringLiteral("Name flair"),
+                QStringLiteral("Presence bead"), QStringLiteral("Profile scene"),
+                QStringLiteral("Chat bubble")};
     default:
         return {};
     }

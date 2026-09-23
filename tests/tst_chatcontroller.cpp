@@ -557,7 +557,8 @@ private slots:
         const QStringList categories = controller.settingsCategories();
         QCOMPARE(categories, (QStringList{QStringLiteral("General"),
                                           QStringLiteral("Audio & Video"),
-                                          QStringLiteral("Appearance")}));
+                                          QStringLiteral("Appearance"),
+                                          QStringLiteral("Cosmetics")}));
 
         // Defaults to the first category.
         QCOMPARE(controller.currentSettingsCategory(), 0);
@@ -584,12 +585,21 @@ private slots:
         controller.setCurrentSettingsCategory(2);
         QCOMPARE(categorySpy.count(), 2);
 
+        // Cosmetics holds one picker per kind of collectible.
+        controller.setCurrentSettingsCategory(3);
+        QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("Cosmetics"));
+        QCOMPARE(controller.currentSettingsElements(),
+                 (QStringList{QStringLiteral("Avatar frame"), QStringLiteral("Name flair"),
+                              QStringLiteral("Presence bead"), QStringLiteral("Profile scene"),
+                              QStringLiteral("Chat bubble")}));
+        QCOMPARE(categorySpy.count(), 3);
+
         // Out-of-range selections are ignored, leaving the current selection.
         controller.setCurrentSettingsCategory(-1);
-        controller.setCurrentSettingsCategory(3);
+        controller.setCurrentSettingsCategory(4);
         controller.setCurrentSettingsCategory(99);
-        QCOMPARE(controller.currentSettingsCategory(), 2);
-        QCOMPARE(categorySpy.count(), 2);
+        QCOMPARE(controller.currentSettingsCategory(), 3);
+        QCOMPARE(categorySpy.count(), 3);
     }
 
     void anInboundMessageAsksForADesktopNotification()

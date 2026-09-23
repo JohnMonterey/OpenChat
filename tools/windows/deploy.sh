@@ -15,6 +15,9 @@ qt_plugins="$sysroot/lib/qt6/plugins"
 objdump=x86_64-w64-mingw32-objdump
 source_dir="$(cd "$(dirname "$0")/../.." && pwd)"
 
+# A build that links can still call into nothing; never package one.
+"$source_dir/tools/windows/check-branches.sh" "$build_dir/OpenChat.exe"
+
 rm -rf "$dist"
 mkdir -p "$dist/plugins" "$dist/qml"
 cp "$build_dir/OpenChat.exe" "$dist/"

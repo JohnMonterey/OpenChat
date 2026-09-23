@@ -36,6 +36,58 @@
 #    define OPENCHAT_BUILD_ID "unknown revision"
 #endif
 
+// What the C++ runtime calls when a pure virtual function is called: through
+// the vtable of an object that is still being built or already being torn down,
+// or directly, where the compiler proved a virtual call can reach nothing else.
+// The runtime's own prints a line and terminates, which a report can only call
+// "std::terminate with no exception"; this one says what happened.
+//
+// Not on Windows. GCC declares this function weak, which makes this
+// definition weak too, and the MinGW linker's emulation of weak symbols then
+// resolved the references in this very file to an unrelated function (a pure
+// call ran the stack-overflow self-test) and every other reference to 0. There
+// the reference stays at 0, and CrashHandlerWin.cpp explains a call into
+// nothing instead.
+#ifndef _WIN32
+extern "C" [[noreturn]] void __cxa_pure_virtual()
+{
+    OpenChat::BlackBox::setContext(
+        "fatal", QStringLiteral("a pure virtual function was called (an object used while it "
+                                "was being built or destroyed, or a call the compiler proved "
+                                "could reach no implementation)"));
+    std::abort();
+}
+#endif
+
+namespace OpenChat::CrashReporter::SelfTest {
+
+// A pure virtual call through a real vtable, for the self-test. Outside any
+// anonymous namespace: for a class with internal linkage GCC may conclude which
+// override a call must reach and skip the vtable, and the test would test
+// nothing.
+struct HalfBuilt {
+    HalfBuilt();
+    virtual ~HalfBuilt() = default;
+    virtual void run() = 0;
+};
+
+[[gnu::noinline]] void runThrough(HalfBuilt *object)
+{
+    object->run();
+}
+
+// Still a HalfBuilt while this runs, so its vtable's run() is the pure one.
+HalfBuilt::HalfBuilt()
+{
+    runThrough(this);
+}
+
+struct Built final : HalfBuilt {
+    void run() override {}
+};
+
+} // namespace OpenChat::CrashReporter::SelfTest
+
 namespace OpenChat::CrashReporter {
 
 namespace {
@@ -496,7 +548,7 @@ bool isSelfTestKind(const QString &kind)
     static const QStringList kinds = {
         QStringLiteral("segv"),  QStringLiteral("abort"),          QStringLiteral("throw"),
         QStringLiteral("qfatal"), QStringLiteral("stack-overflow"), QStringLiteral("hang"),
-        QStringLiteral("screen-frame"),
+        QStringLiteral("screen-frame"), QStringLiteral("pure-virtual"),
     };
     return kinds.contains(kind);
 }
@@ -520,6 +572,8 @@ void runSelfTest(const QString &kind)
         qFatal("crash self-test: a deliberate Qt fatal error");
     } else if (kind == QStringLiteral("stack-overflow")) {
         std::printf("%d\n", recurseForever(0));
+    } else if (kind == QStringLiteral("pure-virtual")) {
+        SelfTest::Built built;
     } else if (kind == QStringLiteral("hang")) {
         BlackBox::Activity freeze("self-test", "freezing the main thread on purpose for 45 s");
         std::this_thread::sleep_for(std::chrono::seconds(45));

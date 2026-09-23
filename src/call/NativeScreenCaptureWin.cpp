@@ -51,6 +51,37 @@
 
 namespace OpenChat {
 
+#if OPENCHAT_HAVE_WGC
+// The two classic COM interfaces that join WinRT capture to Direct3D, from
+// windows.graphics.capture.interop.h and
+// windows.graphics.directx.direct3d11.interop.h. Declared here rather than
+// included: mingw-w64 lacks the second, and the first drags in ABI headers that
+// redefine one another under GCC. In a namespace of their own, so a toolchain
+// that has them cannot collide.
+//
+// NOT in the anonymous namespace below, and that matters. For a class with
+// internal linkage GCC assumes it can see every class derived from it. These
+// have none here — the objects behind them come from Windows — so it concluded
+// that the pure virtual declaration was the only possible target and compiled
+// every call through them as a call to __cxa_pure_virtual, which this build
+// resolves to address 0: sharing a window jumped straight into nothing.
+// tools/windows/check-branches.sh catches that kind of call in the linked
+// program.
+namespace WinRtInterop {
+
+struct CaptureItemInterop : ::IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE CreateForWindow(HWND window, REFIID iid, void **result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateForMonitor(HMONITOR monitor, REFIID iid,
+                                                       void **result) = 0;
+};
+
+struct DxgiInterfaceAccess : ::IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void **object) = 0;
+};
+
+} // namespace WinRtInterop
+#endif
+
 namespace {
 
 using Microsoft::WRL::ComPtr;
@@ -338,20 +369,9 @@ namespace wgc = winrt::Windows::Graphics::Capture;
 namespace wdx = winrt::Windows::Graphics::DirectX;
 namespace wd3d = winrt::Windows::Graphics::DirectX::Direct3D11;
 
-// The two classic COM interfaces that join WinRT capture to Direct3D, from
-// windows.graphics.capture.interop.h and
-// windows.graphics.directx.direct3d11.interop.h. Declared here rather than
-// included: mingw-w64 lacks the second, and the first drags in ABI headers that
-// redefine one another under GCC. In this file's own namespace, so a toolchain
-// that has them cannot collide.
-struct CaptureItemInterop : ::IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE CreateForWindow(HWND window, REFIID iid, void **result) = 0;
-    virtual HRESULT STDMETHODCALLTYPE CreateForMonitor(HMONITOR monitor, REFIID iid,
-                                                       void **result) = 0;
-};
-struct DxgiInterfaceAccess : ::IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void **object) = 0;
-};
+using WinRtInterop::CaptureItemInterop;
+using WinRtInterop::DxgiInterfaceAccess;
+
 constexpr GUID iidDxgiInterfaceAccess = {
     0xa9b3d012, 0x3df2, 0x4ee3, {0xb8, 0xd1, 0x86, 0x95, 0xf4, 0x57, 0xd3, 0xc1}};
 constexpr GUID iidGraphicsCaptureItemInterop = {

@@ -1,6 +1,7 @@
 #include "app/ProfileSession.h"
 
 #include "crypto/MlsClient.h"
+#include "diagnostics/StartupTrace.h"
 #include "domain/ProfileUpdate.h"
 #include "models/Contact.h"
 #include "network/MlsSyncSession.h"
@@ -201,19 +202,31 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::DatabaseMissing);
 
+  if (StartupTrace::enabled()) {
+    const QFileInfo databaseFile(paths.database);
+    const QFileInfo walFile(paths.database + QStringLiteral("-wal"));
+    StartupTrace::note(QStringLiteral("profile database: %1 KB, write-ahead log: %2 KB")
+                           .arg(databaseFile.size() / 1024)
+                           .arg(walFile.exists() ? walFile.size() / 1024 : 0));
+  }
+  std::optional<StartupTrace::Step> step;
+  step.emplace("reading the database key from the system keychain");
   auto databaseKey = vault.readProfileKey(profileId);
   if (!databaseKey.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         mapVaultError(databaseKey.error()));
+  step.emplace("reading the device key from the system keychain");
   auto wrappingKey = vault.readDeviceWrappingKey(profileId);
   if (!wrappingKey.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         mapVaultError(wrappingKey.error()));
+  step.emplace("opening the encrypted database");
   auto opened = SqlCipherDatabase::open(paths.database, databaseKey.value());
   if (!opened.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::DatabaseFailure);
   auto database = std::make_unique<SqlCipherDatabase>(std::move(opened).value());
+  step.emplace("loading and unwrapping the device identity");
   auto stored = database->loadDeviceIdentity(profileId, wrappingKey.value());
   if (!stored.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
@@ -224,6 +237,7 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
   if (!restored.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::IdentityFailure);
+  step.emplace("loading the account id and display name");
   auto storedAccount = database->loadAccountId(profileId);
   if (!storedAccount.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
@@ -233,6 +247,7 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::DatabaseFailure);
 
+  step.emplace("starting encryption (loading the saved MLS state)");
   auto session = std::unique_ptr<ProfileSession>(
       new ProfileSession(profileId, vault, paths, std::move(hooks)));
   auto identity = std::make_unique<DeviceIdentity>(std::move(restored).value());
@@ -244,6 +259,7 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         activated.error());
   session->m_displayName = std::move(storedDisplayName).value();
+  step.emplace("loading the local profile (status, picture)");
   // The profile columns arrived with migration 012; a row that predates it
   // reads back as the defaults, which is exactly an unset profile.
   if (auto storedProfile = session->m_database->loadLocalProfile(profileId);

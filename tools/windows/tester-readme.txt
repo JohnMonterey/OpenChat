@@ -18,9 +18,22 @@ Starting OpenChat again while it is open brings the open window to the front;
 it does not start a second copy. If OpenChat cannot start at all, it says why
 in a small window.
 
-If OpenChat takes ten seconds or more to show its window, it notes which step
-of starting up it was waiting on: a freeze-*.txt file appears in the crashes
-folder above. Please send it, even if OpenChat opened in the end.
+If OpenChat is slow to start
+----------------------------
+Close OpenChat, then double-click OpenChat-startup-trace.bat in this folder.
+It starts OpenChat with a window that shows every step of starting up as it
+happens, how long each took, and which ones were slow. Let OpenChat open and
+connect (or wait about half a minute), close it, and send the file the window
+names at the end:
+
+    %LOCALAPPDATA%\OpenChat\OpenChat\startup-trace.txt
+
+The trace holds no messages, contact names or passwords: only the steps, their
+times, and a few numbers such as the size of your OpenChat database.
+
+Even without the trace, a start that takes ten seconds or more leaves a
+freeze-*.txt file in the crashes folder above saying which step it was
+waiting on. Please send that too.
 
 To see what a crash report looks like without waiting for a real one, run
 this from a Command Prompt in this folder:

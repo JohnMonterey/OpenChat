@@ -272,6 +272,7 @@ add_test(NAME tst_appmetadata COMMAND tst_appmetadata)
 add_library(openchat_domain STATIC
     src/diagnostics/Logging.cpp
     src/diagnostics/BlackBox.cpp
+    src/diagnostics/StartupTrace.cpp
     src/domain/Identifiers.cpp
     src/domain/Handle.cpp
     src/domain/ProfileUpdate.cpp

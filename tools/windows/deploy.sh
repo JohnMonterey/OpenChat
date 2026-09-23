@@ -31,6 +31,9 @@ echo "Symbols kept as $build_dir/symbols/OpenChat-$link_stamp.exe"
 
 # What a tester needs to know: crash reports and the screen-share check.
 cp "$source_dir/tools/windows/tester-readme.txt" "$dist/README.txt"
+# cmd.exe wants CRLF line endings in a batch file.
+sed 's/\r*$/\r/' "$source_dir/tools/windows/OpenChat-startup-trace.bat" \
+    > "$dist/OpenChat-startup-trace.bat"
 
 cat > "$dist/qt.conf" <<'CONF'
 [Paths]

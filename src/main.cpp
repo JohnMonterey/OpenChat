@@ -8,6 +8,10 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QHostInfo>
+#include <QMediaDevices>
+#include <QNetworkProxyFactory>
+#include <QSGRendererInterface>
+#include <QSslSocket>
 #include <QIcon>
 #include <QPainter>
 #include <QPointer>
@@ -54,6 +58,7 @@
 #include "controllers/CrashReportController.h"
 #include "diagnostics/BlackBox.h"
 #include "diagnostics/CrashReporter.h"
+#include "diagnostics/StartupTrace.h"
 #include "controllers/OnboardingController.h"
 #include "controllers/VoiceDebugController.h"
 #include "domain/Identifiers.h"
@@ -286,6 +291,60 @@ QString messageForBootstrapError(OpenChat::AccountBootstrap::Error error)
     return QStringLiteral("Something went wrong. Please try again.");
 }
 
+// One step of starting up: named in the crash recorder, so a freeze report
+// says which step a slow start was stuck in, and timed for --startup-trace.
+class StartupStep final
+{
+public:
+    explicit StartupStep(const char *what) : m_activity("startup", what), m_step(what) {}
+    void setResult(const QString &result) { m_step.setResult(result); }
+
+private:
+    OpenChat::BlackBox::Activity m_activity;
+    OpenChat::StartupTrace::Step m_step;
+};
+
+// --startup-trace: when the first frame of `window` is on screen, and what
+// draws it.
+void traceFirstFrame(QQuickWindow *window)
+{
+    if (!OpenChat::StartupTrace::enabled())
+        return;
+    const auto once = static_cast<Qt::ConnectionType>(Qt::DirectConnection
+                                                      | Qt::SingleShotConnection);
+    // Both arrive on the render thread; the trace takes lines from any thread.
+    QObject::connect(window, &QQuickWindow::sceneGraphInitialized, window, [window] {
+        const QSGRendererInterface *renderer = window->rendererInterface();
+        QString api = QStringLiteral("something else");
+        switch (renderer ? renderer->graphicsApi() : QSGRendererInterface::Unknown) {
+        case QSGRendererInterface::Software:
+            api = QStringLiteral("software (no graphics card)");
+            break;
+        case QSGRendererInterface::OpenGL:
+            api = QStringLiteral("OpenGL");
+            break;
+        case QSGRendererInterface::Direct3D11:
+            api = QStringLiteral("Direct3D 11");
+            break;
+        case QSGRendererInterface::Direct3D12:
+            api = QStringLiteral("Direct3D 12");
+            break;
+        case QSGRendererInterface::Vulkan:
+            api = QStringLiteral("Vulkan");
+            break;
+        case QSGRendererInterface::Metal:
+            api = QStringLiteral("Metal");
+            break;
+        default:
+            break;
+        }
+        OpenChat::StartupTrace::mark(QStringLiteral("graphics ready, drawing with %1").arg(api));
+    }, once);
+    QObject::connect(window, &QQuickWindow::frameSwapped, window, [] {
+        OpenChat::StartupTrace::mark(QStringLiteral("first frame on screen"));
+    }, once);
+}
+
 QString messageForUnlockError(OpenChat::ProfileSessionError error)
 {
     using Error = OpenChat::ProfileSessionError;
@@ -344,7 +403,8 @@ public:
     {
         // Each step names itself in the crash recorder, so a start that stalls
         // long enough for the freeze detector says which step it stalled in.
-        OpenChat::BlackBox::Activity starting("startup", "checking the system keychain");
+        std::optional<StartupStep> step;
+        step.emplace("checking the system keychain");
         if (m_vault.availability() != OpenChat::KeyVaultAvailability::Available) {
             qWarning().noquote() << QStringLiteral(
                 "OpenChat: the OS keychain is unavailable; cannot open or create a "
@@ -356,6 +416,7 @@ public:
         }
         QDir().mkpath(m_profilesRoot);
 
+        step.emplace("looking for accounts from before usernames and passwords");
         // An account from before usernames and passwords cannot be signed in to
         // any more. Erase it, and everything cached alongside it, straight away
         // and fall through to onboarding.
@@ -375,12 +436,15 @@ public:
                 "data on this computer has been erased. Create your account to continue.");
         }
 
-        if (const std::optional<OpenChat::ProfileId> existing =
-                findExistingProfile(m_profilesRoot)) {
+        step.emplace("finding the profile");
+        const std::optional<OpenChat::ProfileId> existing = findExistingProfile(m_profilesRoot);
+        step->setResult(existing ? QStringLiteral("found one") : QStringLiteral("none: first run"));
+        step.reset();
+        if (existing) {
             const OpenChat::ProfilePaths paths =
                 OpenChat::ProfilePaths::forProfile(m_profilesRoot, *existing);
             {
-                OpenChat::BlackBox::Activity unlocking("startup", "opening the profile");
+                StartupStep unlocking("opening the profile");
                 auto unlocked = OpenChat::ProfileSession::unlock(*existing, m_vault, paths);
                 if (!unlocked.hasValue()) {
                     qWarning().noquote() << QStringLiteral(
@@ -394,15 +458,15 @@ public:
             // re-authenticates and opens the live stream (retrying with backoff
             // while offline), so restarts come back online without user action.
             {
-                OpenChat::BlackBox::Activity services("startup", "starting the contact services");
+                StartupStep services("starting the contact services");
                 enableContactServices(OpenChat::DeviceLink::Start::NeedsAuthentication);
             }
-            OpenChat::BlackBox::Activity loading("startup", "loading the main window");
+            StartupStep loading("loading the main window");
             loadMainWindow();
             return true;
         }
 
-        OpenChat::BlackBox::Activity onboarding("startup", "loading onboarding");
+        StartupStep onboarding("loading the sign-up window");
         startOnboarding();
         return true;
     }
@@ -438,6 +502,8 @@ private:
     // both on the unlock path and after onboarding completes.
     void loadMainWindow()
     {
+        std::optional<OpenChat::StartupTrace::Step> step;
+        step.emplace("creating the controllers");
         m_chatController = std::make_unique<OpenChat::ChatController>();
         m_chatController->setConversationVisible(false);
         if (m_session) {
@@ -457,6 +523,7 @@ private:
         // Install the live seams only when the contact services came up
         // (m_contactRequests implies a live relay/session/engine). Otherwise both
         // controllers stay in their harmless mock state.
+        step.emplace("loading chats and contacts from the profile");
         if (m_contactRequests) {
             m_contactController->setLiveServices(m_contactRequests.get(), m_relay.get(),
                                                  m_session.get(), m_session->syncEngine());
@@ -490,6 +557,11 @@ private:
             if (m_deviceLink->isRejected())
                 m_chatController->setSessionState(SessionState::SignedOut);
         }
+        if (OpenChat::StartupTrace::enabled() && m_chatController->contacts() != nullptr) {
+            OpenChat::StartupTrace::note(QStringLiteral("%1 conversations")
+                                             .arg(m_chatController->contacts()->rowCount()));
+        }
+        step.emplace("building the window from Main.qml");
         m_engine = std::make_unique<QQmlApplicationEngine>();
         QObject::connect(
             m_engine.get(), &QQmlApplicationEngine::objectCreationFailed, qApp,
@@ -505,9 +577,14 @@ private:
             QCoreApplication::exit(EXIT_FAILURE);
             return;
         }
+        step.reset();
         if (auto *window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().constFirst())) {
             configureWindow(window);
-            enableNotifications(window);
+            {
+                OpenChat::StartupTrace::Step notifications("setting up desktop notifications");
+                enableNotifications(window);
+            }
+            traceFirstFrame(window);
             startServicesAfterFirstFrame(window);
         }
         releaseFreedHeapLater(m_engine.get());
@@ -556,11 +633,80 @@ private:
         if (m_deferredServicesStarted)
             return;
         m_deferredServicesStarted = true;
+        OpenChat::StartupTrace::mark(
+            QStringLiteral("window is up; starting calls and the relay link"));
         enableCalls();
         if (m_deviceLink) {
-            OpenChat::BlackBox::Activity linking("startup", "starting the relay link");
+            if (OpenChat::StartupTrace::enabled())
+                traceNetwork();
+            StartupStep linking("starting the relay link (sending the sign-in request)");
             m_deviceLink->start(m_linkStart);
         }
+    }
+
+    // --startup-trace: the parts of connecting that happen on this thread or
+    // that nothing else times. The proxy lookup here is the one Qt makes for
+    // the first request anyway; the system answers the second from its cache.
+    void traceNetwork()
+    {
+        namespace Trace = OpenChat::StartupTrace;
+        {
+            Trace::Step tls("loading the TLS library");
+            tls.setResult(QStringLiteral("%1, %2").arg(QSslSocket::activeBackend(),
+                                                        QSslSocket::sslLibraryVersionString()));
+        }
+        {
+            Trace::Step proxy("looking up the system proxy (on Windows: WinHTTP, which may "
+                              "auto-detect)");
+            const QList<QNetworkProxy> proxies = QNetworkProxyFactory::proxyForQuery(
+                QNetworkProxyQuery(m_endpoints.authChallenge));
+            QStringList found;
+            for (const QNetworkProxy &candidate : proxies) {
+                found.append(candidate.type() == QNetworkProxy::NoProxy
+                                 ? QStringLiteral("no proxy")
+                                 : QStringLiteral("proxy %1:%2")
+                                       .arg(candidate.hostName())
+                                       .arg(candidate.port()));
+            }
+            proxy.setResult(found.isEmpty() ? QStringLiteral("no answer")
+                                            : found.join(QStringLiteral(", ")));
+        }
+        const QString host = m_endpoints.authChallenge.host();
+        auto timer = std::make_shared<QElapsedTimer>();
+        timer->start();
+        QHostInfo::lookupHost(host, m_relay.get(), [host, timer](const QHostInfo &info) {
+            Trace::mark(QStringLiteral("DNS: %1 answered in %2 ms (%3)")
+                            .arg(host)
+                            .arg(timer->elapsed())
+                            .arg(info.error() == QHostInfo::NoError
+                                     ? QStringLiteral("%1 addresses").arg(info.addresses().size())
+                                     : info.errorString()));
+        });
+        QObject::connect(m_relay.get(), &OpenChat::RelayClient::authenticated, m_relay.get(),
+                         [] { Trace::mark(QStringLiteral("relay: this device is signed in")); });
+        QObject::connect(m_relay.get(), &OpenChat::RelayClient::connected, m_relay.get(), [] {
+            Trace::mark(QStringLiteral("relay: live connection open"));
+            Trace::summarize(QStringLiteral("connected to the relay"));
+        });
+        QObject::connect(m_relay.get(), &OpenChat::RelayClient::transportError, m_relay.get(),
+                         [](OpenChat::RelayTransportError error) {
+                             Trace::mark(QStringLiteral("relay: connection problem (error %1)")
+                                             .arg(static_cast<int>(error)));
+                         });
+        QObject::connect(m_relay.get(), &OpenChat::RelayClient::deviceRejected, m_relay.get(), [] {
+            Trace::mark(
+                QStringLiteral("relay: this device was turned away (signed in elsewhere?)"));
+        });
+        QObject::connect(m_deviceLink.get(), &OpenChat::DeviceLink::authenticationFailed,
+                         m_relay.get(), [] {
+                             Trace::mark(QStringLiteral("relay: signing in failed; retrying"));
+                         });
+        QTimer::singleShot(std::chrono::seconds(30), m_relay.get(), [this] {
+            if (!m_relay->isConnected()) {
+                Trace::summarize(QStringLiteral(
+                    "30 s after the window appeared, still not connected to the relay"));
+            }
+        });
     }
 
     // Announces inbound messages on the desktop and brings the window back when
@@ -630,6 +776,8 @@ private:
     {
         if (!m_session || m_contactRequests)
             return;
+        std::optional<OpenChat::StartupTrace::Step> step;
+        step.emplace("creating the relay client");
         if (!m_relay) {
             const auto account = m_session->accountId();
             const auto credential = m_session->publicCredential();
@@ -643,6 +791,7 @@ private:
         }
         if (!m_transport)
             m_transport = std::make_unique<OpenChat::RelayTransport>(*m_relay);
+        step.emplace("starting the sync engine");
         if (!m_session->startNetworking(*m_transport).hasValue())
             return;
         OpenChat::SyncEngine *engine = m_session->syncEngine();
@@ -651,9 +800,11 @@ private:
         // The request service self-connects to the engine's handshake signals in its
         // ctor. The SEND path is owned per-attempt by ContactController (which builds
         // a fresh AddContactService on each add), so nothing is constructed here.
+        step.emplace("restoring pending contact requests");
         m_contactRequests =
             std::make_unique<OpenChat::ContactRequestService>(*m_session, *engine);
         m_contactRequests->reconcileOnStartup();
+        step.emplace("starting group chats and the device link");
         // Group chats claim KeyPackages over the relay and ride the same engine.
         m_groups = std::make_unique<OpenChat::GroupService>(
             *m_session, *engine, OpenChat::GroupService::relayClaimer(*m_relay));
@@ -665,6 +816,7 @@ private:
         const OpenChat::DeviceId localDevice = credential.hasValue()
             ? credential.value().deviceId
             : OpenChat::DeviceId::generate();
+        step.emplace("preparing call media and signalling");
         m_udpCallMediaPath = std::make_unique<OpenChat::UdpCallMediaPath>(localDevice);
         m_udpCallMediaPath->setRelayClient(m_relay.get());
         m_udpCallMediaPath->setSettings(m_transportSettings.get());
@@ -715,7 +867,7 @@ private:
         if (m_callsChecked || !m_callTransport || !m_session)
             return;
         m_callsChecked = true;
-        OpenChat::BlackBox::Activity checking("startup", "checking audio devices for calls");
+        StartupStep checking("checking audio devices for calls");
         // A machine with no usable microphone or speaker cannot carry a call at
         // all. Leaving the engine null makes the UI report calls as unavailable
         // up front rather than letting one fail after it has started ringing.
@@ -752,7 +904,13 @@ private:
                              });
             if (m_callController && m_chatController)
                 m_callController->setLiveEngine(m_callEngine.get(), m_chatController.get());
+            if (OpenChat::StartupTrace::enabled()) {
+                checking.setResult(QStringLiteral("calls available; %1 microphones, %2 speakers")
+                                       .arg(QMediaDevices::audioInputs().size())
+                                       .arg(QMediaDevices::audioOutputs().size()));
+            }
         } else {
+            checking.setResult(QStringLiteral("no usable microphone or speaker"));
             qWarning().noquote() << QStringLiteral(
                 "OpenChat: no usable audio input/output was found; voice calls are "
                 "disabled for this session.");
@@ -785,7 +943,14 @@ private:
         m_onboardingView->resize(OpenChat::AppMetadata::defaultWidth,
                                  OpenChat::AppMetadata::defaultHeight);
         configureWindow(m_onboardingView.get());
+        traceFirstFrame(m_onboardingView.get());
         m_onboardingView->show();
+        if (OpenChat::StartupTrace::enabled()) {
+            QTimer::singleShot(std::chrono::seconds(5), m_onboardingView.get(), [] {
+                OpenChat::StartupTrace::summarize(
+                    QStringLiteral("5 s after the sign-up window appeared"));
+            });
+        }
     }
 
     // The real onboarding Starter, part one. Stretching the password costs a few
@@ -1356,6 +1521,15 @@ void disableHardwareCodecProbing()
 // crash handlers are installed first thing and need to know whether this is
 // the report viewer. The path itself is read later through Qt, which decodes
 // the command line properly on Windows.
+bool hasRawOption(int argc, char *argv[], const char *option)
+{
+    for (int index = 1; index < argc; ++index) {
+        if (std::strcmp(argv[index], option) == 0)
+            return true;
+    }
+    return false;
+}
+
 bool isCrashReportViewer(int argc, char *argv[])
 {
     for (int index = 1; index < argc; ++index) {
@@ -1561,6 +1735,16 @@ int runScreenShareCheck(QGuiApplication &application)
 
 int main(int argc, char *argv[])
 {
+    // --startup-trace is read from the raw arguments: it has to be on before
+    // anything it times, the application object included.
+    if (hasRawOption(argc, argv, "--startup-trace"))
+        OpenChat::StartupTrace::enable();
+    // Whichever way main() returns, the trace ends with its summary.
+    struct TraceFinisher {
+        ~TraceFinisher() { OpenChat::StartupTrace::finish(); }
+    } traceFinisher;
+    std::optional<OpenChat::StartupTrace::Step> step;
+    step.emplace("installing the crash reporter");
     // Only environment variables: safe before anything else, and must precede
     // the first use of Qt Multimedia.
     disableHardwareCodecProbing();
@@ -1573,8 +1757,16 @@ int main(int argc, char *argv[])
     OpenChat::CrashReporter::Options crashOptions;
     crashOptions.viewer = isCrashReportViewer(argc, argv);
     OpenChat::CrashReporter::install(crashOptions);
+    if (OpenChat::StartupTrace::enabled()) {
+        const QString folder = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        QDir().mkpath(folder);
+        OpenChat::StartupTrace::saveTo(
+            QDir::toNativeSeparators(QDir(folder).filePath(QStringLiteral("startup-trace.txt"))));
+    }
 
+    step.emplace("creating the application (Qt's platform plugin, screens, fonts)");
     QGuiApplication application(argc, argv);
+    step.emplace("setting up logging");
     OpenChat::CrashReporter::attachToApplication();
     OpenChat::installFileLogging();
     // How the freedesktop desktops attribute this process: the basename of the
@@ -1585,6 +1777,7 @@ int main(int argc, char *argv[])
     QGuiApplication::setWindowIcon(
         QIcon(QStringLiteral(":/qt/qml/OpenChat/assets/icons/openchat-256.png")));
 
+    step.emplace("reading the command line and registering the QML types");
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("OpenChat secure chat client"));
     parser.addHelpOption();
@@ -1655,6 +1848,10 @@ int main(int argc, char *argv[])
         QStringLiteral("screen-share-check"),
         QStringLiteral("List what can be screen-shared on this machine, capture each screen for "
                        "a few seconds, save a picture of each, and print what happened."));
+    const QCommandLineOption startupTraceOption(
+        QStringLiteral("startup-trace"),
+        QStringLiteral("Print every step of starting up, and how long it took, to the terminal "
+                       "(also saved as startup-trace.txt next to the crash reports)."));
     const QCommandLineOption uglyVoiceDebugOption(
         {QStringLiteral("ugly-voice-debug"), QStringLiteral("voice-debug")},
         QStringLiteral("Launch verbose voice diagnostics & lag spike pinpointing overlay in a second window."));
@@ -1663,10 +1860,12 @@ int main(int argc, char *argv[])
                        onboardingFilledOption, addContactOption, verifyOption, callOption,
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
                        callPickerOption, callFullscreenOption, callZoomOption, crashReportOption,
-                       crashTestOption, screenCheckOption, uglyVoiceDebugOption});
+                       crashTestOption, screenCheckOption, uglyVoiceDebugOption,
+                       startupTraceOption});
     parser.process(application);
 
     registerQmlTypes();
+    step.reset();
 
     // The viewer a crashed OpenChat relaunches: nothing else runs in it.
     if (parser.isSet(crashReportOption)) {
@@ -1741,10 +1940,20 @@ int main(int argc, char *argv[])
     // It is also the only mode that is one per user: starting OpenChat while
     // it runs brings the running one forward, and a start that catches the
     // previous OpenChat still closing waits for it to finish.
+    step.emplace("checking whether OpenChat is already running");
     OpenChat::SingleInstance instance(
         QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation));
-    switch (instance.claim(std::chrono::seconds(10))) {
+    const OpenChat::SingleInstance::Claim claim = instance.claim(std::chrono::seconds(10));
+    step->setResult(claim == OpenChat::SingleInstance::Claim::Primary
+                        ? QStringLiteral("no")
+                        : QStringLiteral("yes"));
+    step.reset();
+    switch (claim) {
     case OpenChat::SingleInstance::Claim::HandedOver:
+        OpenChat::StartupTrace::summarize(QStringLiteral(
+            "OpenChat was already running, so this start only brought its window forward. To "
+            "trace a real start, close OpenChat completely (check the notification area and "
+            "Task Manager too) and run the trace again"));
         return EXIT_SUCCESS;
     case OpenChat::SingleInstance::Claim::StillRunning:
         return showStartupProblem(
@@ -1764,7 +1973,9 @@ int main(int argc, char *argv[])
     // of handing itself to it.
     QObject::connect(&application, &QCoreApplication::aboutToQuit, &instance,
                      &OpenChat::SingleInstance::stopAnswering);
+    step.emplace("starting the crash recorder (reading how the last session ended)");
     OpenChat::CrashReporter::startSession();
+    step.reset();
     const QString base = [] {
         const QString value = QString::fromUtf8(qgetenv("OPENCHAT_RELAY_BASE_URL")).trimmed();
         return value.isEmpty() ? QStringLiteral("https://chat.rigidstudios.de/v1") : value;
@@ -1784,15 +1995,22 @@ int main(int argc, char *argv[])
     // chosen before the first window exists, hence the restart to switch.
     if (OpenChat::MemorySettings::lowMemoryModeAtStartup())
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    OpenChat::StartupTrace::note(
+        QStringLiteral("low memory mode: %1")
+            .arg(OpenChat::MemorySettings::lowMemoryModeAtStartup()
+                     ? QStringLiteral("on (drawing without the graphics card)")
+                     : QStringLiteral("off")));
 
     int exitCode = EXIT_SUCCESS;
     {
+        step.emplace("creating the settings (microphone, voice effects, memory, connection)");
         AppRuntime runtime(profilesRoot, OpenChat::RelayEndpoints::fromBaseUrl(base),
                            buildDevCaTls(devCaPath),
                            OpenChat::AccountBootstrap::defaultKeyPackageCount,
                            widthValid ? std::optional<int>(requestedWidth) : std::nullopt,
                            heightValid ? std::optional<int>(requestedHeight) : std::nullopt,
                            uglyVoiceDebug);
+        step.reset();
         if (!runtime.start())
             return showStartupProblem(application, QStringLiteral("OpenChat couldn't start"),
                                       runtime.startupProblem());
@@ -1807,8 +2025,10 @@ int main(int argc, char *argv[])
         std::unique_ptr<QQmlApplicationEngine> crashNotice;
         const OpenChat::CrashReporter::PendingReport pending =
             OpenChat::CrashReporter::pendingReport();
-        if (pending.kind != OpenChat::CrashReporter::PendingReport::Kind::None)
+        if (pending.kind != OpenChat::CrashReporter::PendingReport::Kind::None) {
+            OpenChat::StartupTrace::Step notice("showing what happened to the last session");
             crashNotice = showCrashReport(pending.path, false);
+        }
 
         if (crashTest == QStringLiteral("screen-frame")) {
             OpenChat::QtScreenCapture::crashOnNextFrameForTesting();
@@ -1819,6 +2039,9 @@ int main(int argc, char *argv[])
                                [crashTest] { OpenChat::CrashReporter::runSelfTest(crashTest); });
         }
 
+        QTimer::singleShot(0, qApp, [] {
+            OpenChat::StartupTrace::mark(QStringLiteral("event loop running"));
+        });
         exitCode = application.exec();
     }
 

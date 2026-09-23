@@ -1,5 +1,7 @@
 #include "storage/SqlCipherDatabase.h"
 
+#include "diagnostics/StartupTrace.h"
+
 #include <QFile>
 #include <QFileInfo>
 
@@ -10,6 +12,7 @@
 #include <sqlite3.h>
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace OpenChat {
@@ -184,6 +187,8 @@ SqlCipherDatabase::open(const QString &path, const SecureBuffer &key) {
         StorageError::InvalidKey);
 
   const bool existed = QFileInfo::exists(path);
+  std::optional<StartupTrace::Step> step;
+  step.emplace("opening the database file");
   sqlite3 *handle = nullptr;
   const QByteArray nativePath = QFile::encodeName(path);
   const int flags =
@@ -198,6 +203,7 @@ SqlCipherDatabase::open(const QString &path, const SecureBuffer &key) {
 
   SqlCipherDatabase database(handle, path);
   sqlite3_busy_timeout(handle, busyTimeoutMs);
+  step.emplace("applying the key");
   if (sqlite3_key(handle, key.view().data(), static_cast<int>(key.size())) !=
       SQLITE_OK) {
     database.close();
@@ -207,6 +213,7 @@ SqlCipherDatabase::open(const QString &path, const SecureBuffer &key) {
         StorageError::InvalidKey);
   }
 
+  step.reset();
   auto configured = database.configure();
   if (!configured.hasValue()) {
     database.close();
@@ -216,6 +223,7 @@ SqlCipherDatabase::open(const QString &path, const SecureBuffer &key) {
         existed ? StorageError::WrongKeyOrCorrupt : configured.error());
   }
 
+  step.emplace("checking for schema updates");
   auto migrated = database.migrate();
   if (!migrated.hasValue()) {
     database.close();
@@ -228,6 +236,10 @@ SqlCipherDatabase::open(const QString &path, const SecureBuffer &key) {
 }
 
 Result<void, StorageError> SqlCipherDatabase::configure() {
+  std::optional<StartupTrace::Step> phase;
+  // The first statement is where SQLCipher turns the stored key into the page
+  // key (PBKDF2, 256,000 rounds) and decrypts page 1.
+  phase.emplace("deriving the page key and applying settings");
   auto result = execute("PRAGMA cipher_memory_security = ON;"
                         "PRAGMA foreign_keys = ON;"
                         "PRAGMA secure_delete = ON;"
@@ -236,6 +248,7 @@ Result<void, StorageError> SqlCipherDatabase::configure() {
   if (!result.hasValue())
     return Result<void, StorageError>::failure(StorageError::WrongKeyOrCorrupt);
 
+  phase.emplace("reading the schema");
   sqlite3_stmt *statement = nullptr;
   if (sqlite3_prepare_v2(m_database, "SELECT count(*) FROM sqlite_master", -1,
                          &statement, nullptr) != SQLITE_OK)
@@ -245,9 +258,18 @@ Result<void, StorageError> SqlCipherDatabase::configure() {
   if (step != SQLITE_ROW)
     return Result<void, StorageError>::failure(StorageError::WrongKeyOrCorrupt);
 
+  phase.emplace("verifying every page of the database");
+  if (StartupTrace::enabled()) {
+    sqlite3_stmt *pages = nullptr;
+    if (sqlite3_prepare_v2(m_database, "PRAGMA page_count", -1, &pages, nullptr) == SQLITE_OK &&
+        sqlite3_step(pages) == SQLITE_ROW)
+      StartupTrace::note(QStringLiteral("%1 pages").arg(sqlite3_column_int64(pages, 0)));
+    sqlite3_finalize(pages);
+  }
   if (!verifyCipherIntegrity().hasValue())
     return Result<void, StorageError>::failure(StorageError::WrongKeyOrCorrupt);
 
+  phase.emplace("switching to write-ahead logging");
   if (!execute("PRAGMA journal_mode = WAL;").hasValue())
     return Result<void, StorageError>::failure(StorageError::QueryFailed);
   return Result<void, StorageError>::success();

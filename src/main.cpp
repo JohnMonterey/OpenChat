@@ -1,3 +1,6 @@
+#include <atomic>
+#include <cmath>
+#include <cstdlib>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDebug>
@@ -45,6 +48,7 @@
 #include "call/CallEngine.h"
 #include "call/NativeScreenCapture.h"
 #include "call/ScreenVideoCodec.h"
+#include "call/ScreenAudioCapture.h"
 #include "call/QtAudioIo.h"
 #include "call/SyncCallTransport.h"
 #include "controllers/CallController.h"
@@ -1166,6 +1170,8 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         callController.setPreviewScreenShare(
             std::make_shared<OpenChat::ScreenCanvas>(std::move(desktop)),
             QStringLiteral("Jessica"));
+        // Shown arriving with sound, so the capture includes its controls.
+        callController.setPreviewRemoteScreenAudio(true);
     }
 
     QQmlApplicationEngine engine;
@@ -1429,6 +1435,53 @@ int runScreenShareCheck(QGuiApplication &application)
             out << '\n';
         }
         out.flush();
+    }
+    // The share's sound: the same capture a call uses, for three seconds.
+    out << "  sound (" << OpenChat::ScreenAudioCapturePlatform::backendName() << ")\n";
+    if (!OpenChat::ScreenAudioCapturePlatform::isSupported()) {
+        out << "    not available: " << OpenChat::ScreenAudioCapturePlatform::unsupportedReason()
+            << "\n\n";
+    } else if (auto sound = OpenChat::ScreenAudioCapturePlatform::create({})) {
+        std::atomic<int> soundFrames{0};
+        std::atomic<int> loudest{0};
+        sound->onFrame = [&](const OpenChat::StereoFrame &frame) {
+            ++soundFrames;
+            const auto *samples = reinterpret_cast<const qint16 *>(frame.constData());
+            int peak = 0;
+            for (qsizetype i = 0; i < frame.size() / 2; ++i)
+                peak = std::max(peak, std::abs(int(samples[i])));
+            int previous = loudest.load();
+            while (peak > previous && !loudest.compare_exchange_weak(previous, peak)) {
+            }
+        };
+        QString failure;
+        if (!sound->start(failure)) {
+            ++failures;
+            out << "    FAILED: " << failure << "\n\n";
+        } else {
+            out << "    capturing " << sound->describe() << " for 3 s; play something to see "
+                << "the level move\n";
+            out.flush();
+            QElapsedTimer listened;
+            listened.start();
+            while (listened.elapsed() < 3000)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            sound->stop();
+            const int peak = loudest.load();
+            out << "    ok: " << soundFrames.load() << " frames in 3 s (150 expected), loudest "
+                << (peak > 0 ? QString::number(20.0 * std::log10(peak / 32768.0), 'f', 1)
+                                   + QStringLiteral(" dBFS")
+                             : QStringLiteral("silence"))
+                << "\n";
+            if (soundFrames.load() < 120) {
+                ++failures;
+                out << "    WARNING: fewer frames than expected; shared sound will stutter.\n";
+            }
+            out << '\n';
+        }
+    } else {
+        ++failures;
+        out << "    FAILED: this computer's sound cannot be shared\n\n";
     }
     out << (failures == 0 ? "Everything captured.\n" : "Some captures failed; see above.\n");
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

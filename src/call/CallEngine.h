@@ -3,6 +3,7 @@
 #include "call/AudioIo.h"
 #include "call/CallSession.h"
 #include "call/CallScreenSession.h"
+#include "call/ScreenAudio.h"
 #include "call/ScreenVideoCodec.h"
 
 #include <deque>
@@ -290,6 +291,31 @@ public:
     // Development instrumentation for the one-to-one path.
     [[nodiscard]] ScreenShareStats screenShareStats() const;
 
+    // --- A shared screen's sound --------------------------------------------
+    //
+    // A stream of its own beside the picture (ScreenAudioSession): stereo,
+    // separately keyed, mixed into the speaker after the voices. Independent
+    // of the microphone: muting yourself does not mute what you share.
+
+    // Whether the share going out carries sound. Frames are refused while it
+    // does not, and a share that stops turns it off.
+    void setScreenAudioSharing(bool on);
+    [[nodiscard]] bool isScreenAudioSharing() const noexcept { return m_screenAudioSharing; }
+    // One 20 ms stereo frame of what this computer is playing, encoded once
+    // and sealed for every peer.
+    void sendScreenAudioFrame(const StereoFrame &frame);
+    // How loud other people's shared sound plays here, 0 (muted) to 1.
+    void setScreenAudioVolume(double volume);
+    [[nodiscard]] double screenAudioVolume() const;
+    // Whether the peer's share (one-to-one), or a member's (group), is
+    // arriving with sound right now.
+    [[nodiscard]] bool isRemoteScreenAudioActive() const;
+    [[nodiscard]] bool isParticipantScreenAudioActive(const DeviceId &device) const;
+    // One frame of shared sound exactly as the speaker is handed it, for a
+    // playback sink that does not mix stereo itself (and for tests).
+    [[nodiscard]] StereoFrame pullScreenAudioFrame();
+    [[nodiscard]] quint64 screenAudioFramesSent() const noexcept { return m_screenAudioFramesSent; }
+
     // Silences the call's own tones (ring, pick-up, hang-up, mute). The call
     // itself is unaffected; only the interface sounds stop.
     void setSoundsEnabled(bool enabled);
@@ -332,6 +358,8 @@ signals:
     void remoteScreenFrame(const OpenChat::ScreenCanvasPtr &canvas);
     void participantScreenFrame(const OpenChat::DeviceId &device,
                                 const OpenChat::ScreenCanvasPtr &canvas);
+    // Whether anybody's share is arriving with sound changed.
+    void screenAudioChanged();
     // Who is in a group call, or what they are doing, changed.
     void participantsChanged();
     // A call arrived and is ringing. The UI raises the incoming-call surface.
@@ -359,6 +387,8 @@ private:
         std::unique_ptr<CallSession> session;
         std::unique_ptr<CallVideoSession> video;
         std::unique_ptr<CallScreenSession> screen;
+        // Shared with the mixer, which pulls it on the speaker's thread.
+        std::shared_ptr<ScreenAudioSession> screenAudio;
         qint64 lastVideoMs = 0;
         qint64 lastScreenMs = 0;
         bool cameraOn = false;
@@ -452,6 +482,9 @@ private:
     struct ScreenPacketOutcome final {
         bool changed = false; // there is a new picture to show
         bool ended = false;   // the peer stopped sharing
+        // The peer's stop notice arrived, whether or not a picture ever did;
+        // its sound stops with it either way.
+        bool stopNotice = false;
         ScreenCanvasPtr canvas;
     };
     [[nodiscard]] ScreenPacketOutcome handleScreenPacket(CallScreenSession &session,
@@ -525,6 +558,16 @@ private:
     int m_calmLinkWindows = 0;
     quint64 m_screenFramesHeldBack = 0;
     std::unique_ptr<CallScreenSession> m_screenSession;
+    // The share's sound: the peer's session (one-to-one), the encoder that
+    // serves every peer, and the mixer the speaker pulls, which outlives any
+    // one session so a pull in flight never touches a freed one.
+    std::shared_ptr<ScreenAudioSession> m_screenAudio;
+    std::unique_ptr<ScreenAudioEncoder> m_screenAudioEncoder;
+    std::shared_ptr<ScreenAudioMixer> m_screenAudioMixer = std::make_shared<ScreenAudioMixer>();
+    bool m_screenAudioSharing = false;
+    bool m_screenAudioHeard = false;
+    quint64 m_screenAudioFramesSent = 0;
+    void refreshScreenAudioActivity();
     QTimer *m_screenTimeout = nullptr;
     QTimer *m_screenFeedbackTimer = nullptr;
     bool m_screenSharing = false;

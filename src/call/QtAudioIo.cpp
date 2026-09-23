@@ -206,6 +206,8 @@ protected:
                 m_pending = upmixToStereo(m_owner.pullFrame());
                 if (m_pending.isEmpty())
                     break;
+                if (m_owner.pullStereoOverlay)
+                    addStereo(m_pending, m_owner.pullStereoOverlay());
             }
             const qint64 chunk = std::min<qint64>(maxLength - written, m_pending.size());
             std::memcpy(data + written, m_pending.constData(), static_cast<size_t>(chunk));
@@ -229,6 +231,18 @@ protected:
     }
 
 private:
+    // Sums a stereo S16LE frame of the same length into `mix`, saturating.
+    static void addStereo(QByteArray &mix, const QByteArray &overlay)
+    {
+        if (overlay.size() != mix.size())
+            return;
+        auto *out = reinterpret_cast<qint16 *>(mix.data());
+        const auto *in = reinterpret_cast<const qint16 *>(overlay.constData());
+        const qsizetype count = mix.size() / qsizetype(sizeof(qint16));
+        for (qsizetype i = 0; i < count; ++i)
+            out[i] = qint16(std::clamp(int(out[i]) + int(in[i]), -32768, 32767));
+    }
+
     // Interleaves a mono S16LE frame as L R L R ..., the same sample in both.
     [[nodiscard]] static QByteArray upmixToStereo(const AudioFrame &mono)
     {

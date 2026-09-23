@@ -147,6 +147,21 @@ CallMediaKeySchedule::deriveScreenFeedback(QByteArrayView secret, const CallId &
     return schedule;
 }
 
+std::optional<CallMediaKeySchedule>
+CallMediaKeySchedule::deriveScreenAudio(QByteArrayView secret, const CallId &callId)
+{
+    if (secret.size() != callSecretBytes)
+        return std::nullopt;
+    CallMediaKeySchedule schedule;
+    schedule.fromCaller = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/screenaudio/caller"), derivedPerDirection));
+    schedule.fromCallee = splitKeys(hkdf(secret, callId.bytes(),
+        QByteArrayView("openchat/call/v1/screenaudio/callee"), derivedPerDirection));
+    if (!schedule.fromCaller.isValid() || !schedule.fromCallee.isValid())
+        return std::nullopt;
+    return schedule;
+}
+
 QByteArray deriveGroupPairSecret(QByteArrayView callSecret, const CallId &callId,
                                  const DeviceId &first, const DeviceId &second)
 {

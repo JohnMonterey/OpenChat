@@ -118,6 +118,50 @@ Item {
                     renderType: Text.NativeRendering
                 }
 
+                HoverHandler { id: remoteHover }
+
+                // The share's sound: a speaker that mutes it, and its volume
+                // while the pointer is over the share. Shown only while sound
+                // is actually arriving, and always while muted, so a muted
+                // share never looks like one that simply has no sound.
+                Rectangle {
+                    objectName: "remoteScreenSoundControls"
+                    visible: stage.controller.remoteScreenAudioActive === true
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 6
+                    width: soundControls.width + (volumeSlider.visible ? 8 : 0)
+                    height: 22
+                    radius: 5
+                    color: volumeSlider.visible ? Theme.mediaChip : "transparent"
+
+                    Row {
+                        id: soundControls
+                        spacing: 4
+
+                        MediaIconButton {
+                            objectName: "remoteScreenSoundButton"
+                            icon: stage.controller.screenAudioMuted === true ? "speakerMuted" : "speaker"
+                            tooltip: stage.controller.screenAudioMuted === true
+                                     ? "Unmute the shared sound" : "Mute the shared sound"
+                            onClicked: stage.controller.screenAudioMuted =
+                                       !(stage.controller.screenAudioMuted === true)
+                        }
+
+                        AeroSlider {
+                            id: volumeSlider
+                            objectName: "remoteScreenVolume"
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: remoteHover.hovered && stage.controller.screenAudioMuted !== true
+                            width: 90
+                            height: 22
+                            accessibleName: "Shared sound volume"
+                            value: stage.controller.screenAudioVolume
+                            onMoved: position => stage.controller.screenAudioVolume = position
+                        }
+                    }
+                }
+
                 MediaIconButton {
                     objectName: "remoteScreenZoomButton"
                     icon: "zoom"
@@ -188,8 +232,9 @@ Item {
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideRight
-                text: stage.controller.screenShareSourceName.length > 0
-                      ? stage.controller.screenShareSourceName : "Your screen"
+                text: (stage.controller.screenShareSourceName.length > 0
+                       ? stage.controller.screenShareSourceName : "Your screen")
+                      + (stage.controller.screenAudioSharing === true ? " · with sound" : "")
                 color: Theme.textSecondary
                 font.family: Theme.uiFont
                 font.pixelSize: 12

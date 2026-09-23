@@ -8,8 +8,9 @@ import OpenChat
 // reads over any video, light or dark, and over either theme's backdrop.
 Item {
     id: chip
-    // "zoom" (a magnifier with a plus), "expand" (four corners pointing out)
-    // or "collapse" (four corners pointing in).
+    // "zoom" (a magnifier with a plus), "expand" (four corners pointing out),
+    // "collapse" (four corners pointing in), "speaker" (a speaker with sound
+    // waves) or "speakerMuted" (a speaker crossed out).
     property string icon: "zoom"
     property string tooltip: ""
     // Tooltips normally open above the chip; a chip on a bottom edge can ask
@@ -51,8 +52,14 @@ Item {
                       ? "M 1 5 V 1 H 5 M 9 1 H 13 V 5 M 13 9 V 13 H 9 M 5 13 H 1 V 9"
                       : chip.icon === "collapse"
                         ? "M 5 1 V 5 H 1 M 13 5 H 9 V 1 M 9 13 V 9 H 13 M 1 9 H 5 V 13"
-                        : "M 1.5 6 A 4.5 4.5 0 1 0 10.5 6 A 4.5 4.5 0 1 0 1.5 6 "
-                          + "M 6 3.6 V 8.4 M 3.6 6 H 8.4 M 9.3 9.3 L 13 13"
+                        : chip.icon === "speaker"
+                          ? "M 1 5 H 3.8 L 7.5 1.8 V 12.2 L 3.8 9 H 1 Z "
+                            + "M 9.8 5 A 2.8 2.8 0 0 1 9.8 9 M 11.4 2.8 A 5.6 5.6 0 0 1 11.4 11.2"
+                          : chip.icon === "speakerMuted"
+                            ? "M 1 5 H 3.8 L 7.5 1.8 V 12.2 L 3.8 9 H 1 Z "
+                              + "M 9.6 5 L 13 9 M 13 5 L 9.6 9"
+                            : "M 1.5 6 A 4.5 4.5 0 1 0 10.5 6 A 4.5 4.5 0 1 0 1.5 6 "
+                              + "M 6 3.6 V 8.4 M 3.6 6 H 8.4 M 9.3 9.3 L 13 13"
             }
         }
     }

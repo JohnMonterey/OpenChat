@@ -1,10 +1,13 @@
 #include <QRandomGenerator>
+
+#include <cmath>
 #include <QtTest>
 
 #include "AudioTestSupport.h"
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
 #include "call/CallScreenSession.h"
+#include "call/ScreenAudio.h"
 #include "call/ScreenVideoCodec.h"
 #include "call/CallSignal.h"
 #include "call/CallSounds.h"
@@ -407,6 +410,82 @@ private slots:
         const ScreenCanvasPtr canvas = settleShare(m_alice, m_bob, desktop, bobScreen);
         QVERIFY2(canvas, "the share never arrived once the socket had room");
         QCOMPARE(canvas->size(), desktop.size());
+    }
+
+    // A share's sound: stereo, on its own wire version, heard on the far
+    // side's speaker in stereo, independent of the sharer's microphone, and
+    // gone with the share.
+    void aSharesSoundReachesThePeerInStereoAndStopsWithIt()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy heard(m_bob.engine.get(), &CallEngine::screenAudioChanged);
+
+        // A tone on the left only.
+        const auto leftTone = [](qint64 phase) {
+            StereoFrame frame(ScreenAudioFormat::bytesPerFrame, '\0');
+            auto *samples = reinterpret_cast<qint16 *>(frame.data());
+            for (int i = 0; i < ScreenAudioFormat::samplesPerFrame; ++i)
+                samples[2 * i] = qint16(14000 * std::sin(2 * 3.141592653589793 * 440.0
+                                                         * double(phase + i) / 48000.0));
+            return frame;
+        };
+        const auto countVersion = [this](quint8 version) {
+            return int(std::count(m_alice.transport.sentVersions.cbegin(),
+                                  m_alice.transport.sentVersions.cend(), version));
+        };
+
+        // Not sharing, or sharing without sound: nothing goes out.
+        m_alice.engine->sendScreenAudioFrame(leftTone(0));
+        QVERIFY(m_alice.engine->startScreenShare());
+        m_alice.engine->sendScreenAudioFrame(leftTone(0));
+        QCOMPARE(countVersion(ScreenAudioSession::wireVersion), 0);
+
+        m_alice.engine->setScreenAudioSharing(true);
+        QVERIFY(m_alice.engine->isScreenAudioSharing());
+        // Muting the microphone does not mute what is shared.
+        m_alice.engine->setMuted(true);
+        double left = 0.0;
+        double right = 0.0;
+        int counted = 0;
+        for (int i = 0; i < 60; ++i) {
+            m_alice.engine->sendScreenAudioFrame(leftTone(qint64(i) * 960));
+            m_bob.nowMs += 20;
+            const StereoFrame frame = m_bob.engine->pullScreenAudioFrame();
+            if (i < 20 || frame.isEmpty())
+                continue;
+            const auto *samples = reinterpret_cast<const qint16 *>(frame.constData());
+            for (int s = 0; s < ScreenAudioFormat::samplesPerFrame; ++s) {
+                left += std::abs(double(samples[2 * s]));
+                right += std::abs(double(samples[2 * s + 1]));
+            }
+            ++counted;
+        }
+        QCOMPARE(countVersion(ScreenAudioSession::wireVersion), 60);
+        QCOMPARE(m_alice.engine->screenAudioFramesSent(), quint64(60));
+        QVERIFY2(counted > 30, qPrintable(QString::number(counted)));
+        QVERIFY2(left > 20.0 * right, qPrintable(QStringLiteral("left %1 right %2").arg(left).arg(right)));
+        QVERIFY(m_bob.engine->isRemoteScreenAudioActive());
+
+        // Bob turns it down to nothing: still received, not mixed.
+        m_bob.engine->setScreenAudioVolume(0.0);
+        m_alice.engine->sendScreenAudioFrame(leftTone(60 * 960));
+        m_bob.nowMs += 20;
+        QVERIFY(m_bob.engine->pullScreenAudioFrame().isEmpty());
+        m_bob.engine->setScreenAudioVolume(1.0);
+
+        // The share stops: the sound goes with it, straight away.
+        m_alice.engine->stopScreenShare();
+        QVERIFY(!m_alice.engine->isScreenAudioSharing());
+        m_alice.engine->sendScreenAudioFrame(leftTone(61 * 960));
+        QCOMPARE(countVersion(ScreenAudioSession::wireVersion), 61);
+        m_bob.nowMs += 20;
+        const StereoFrame after = m_bob.engine->pullScreenAudioFrame();
+        QVERIFY2(after.isEmpty() || after == silentStereoFrame(), "sound played on after the share stopped");
+        m_bob.nowMs += ScreenAudioSession::activeWindowMs + 20;
+        QVERIFY(!m_bob.engine->isRemoteScreenAudioActive());
     }
 
     void aSharedScreenReachesThePeerAndDisappearsWhenItStops_data()

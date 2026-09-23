@@ -1,9 +1,12 @@
 #include <QtTest>
 
+#include <cmath>
+
 #include "AudioTestSupport.h"
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
 #include "call/CallScreenSession.h"
+#include "call/ScreenAudio.h"
 #include "call/ScreenVideoCodec.h"
 #include "call/CallSignal.h"
 #include "call/CallTransport.h"
@@ -955,6 +958,48 @@ private slots:
         QVERIFY(!carolScreen.last().second);
         QCOMPARE(m_bob.engine->state(), CallState::Active);
         QCOMPARE(m_carol.engine->state(), CallState::Active);
+    }
+
+    // A share's sound in a group: encoded once, sealed for each member, and
+    // heard by all of them, each on their own keys.
+    void aSharesSoundIsEncodedOnceAndHeardByEveryMember()
+    {
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeGroupCall(routeFrom(m_alice)));
+        m_bob.engine->acceptCall();
+        m_carol.engine->acceptCall();
+        exchangeMedia();
+        QVERIFY(m_alice.engine->startScreenShare());
+        m_alice.engine->setScreenAudioSharing(true);
+
+        const qsizetype before = m_alice.transport.mediaRecipients.size();
+        int bobHeard = 0;
+        int carolHeard = 0;
+        for (int i = 0; i < 40; ++i) {
+            StereoFrame frame(ScreenAudioFormat::bytesPerFrame, '\0');
+            auto *samples = reinterpret_cast<qint16 *>(frame.data());
+            for (int n = 0; n < ScreenAudioFormat::samplesPerFrame; ++n) {
+                const qint16 value = qint16(12000 * std::sin(2 * 3.141592653589793 * 330.0
+                                                             * double(i * 960 + n) / 48000.0));
+                samples[2 * n] = value;
+                samples[2 * n + 1] = value;
+            }
+            m_alice.engine->sendScreenAudioFrame(frame);
+            m_bob.nowMs += 20;
+            m_carol.nowMs += 20;
+            const StereoFrame bob = m_bob.engine->pullScreenAudioFrame();
+            const StereoFrame carol = m_carol.engine->pullScreenAudioFrame();
+            bobHeard += !bob.isEmpty() && bob != silentStereoFrame() ? 1 : 0;
+            carolHeard += !carol.isEmpty() && carol != silentStereoFrame() ? 1 : 0;
+        }
+        // One encode per frame, one sealed packet per member per frame.
+        QCOMPARE(m_alice.engine->screenAudioFramesSent(), quint64(40));
+        QCOMPARE(m_alice.transport.mediaRecipients.size() - before, qsizetype(80));
+        QVERIFY2(bobHeard > 20, qPrintable(QString::number(bobHeard)));
+        QVERIFY2(carolHeard > 20, qPrintable(QString::number(carolHeard)));
+        QVERIFY(m_bob.engine->isParticipantScreenAudioActive(m_alice.transport.localDevice));
+        QVERIFY(m_carol.engine->isParticipantScreenAudioActive(m_alice.transport.localDevice));
+        QVERIFY(!m_bob.engine->isParticipantScreenAudioActive(m_carol.transport.localDevice));
     }
 
     void aMemberLeavingMidShareTakesTheirViewOfItWithThem_data()

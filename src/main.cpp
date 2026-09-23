@@ -51,6 +51,7 @@
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
 #include "call/ScreenCanvas.h"
+#include "case/DailyCaseController.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "security/KeyVault.h"
@@ -64,6 +65,7 @@ namespace {
 // process, so every engine and view created below resolves the same types.
 void registerQmlTypes()
 {
+    qmlRegisterType<OpenChat::DailyCaseController>("OpenChat.Native", 1, 0, "DailyCaseController");
     qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
         "OpenChat.Native", 1, 0, "AppearanceSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
@@ -382,6 +384,8 @@ private:
             [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
         m_engine->setInitialProperties(
             {{QStringLiteral("chatController"), QVariant::fromValue(m_chatController.get())},
+             {QStringLiteral("dailyCaseAccount"), m_session && m_session->accountId()
+                  ? m_session->accountId().value().toHex() : QStringLiteral("preview")},
              {QStringLiteral("contactController"), QVariant::fromValue(m_contactController.get())},
              {QStringLiteral("callController"), QVariant::fromValue(m_callController.get())}});
         m_engine->loadFromModule("OpenChat", "Main");

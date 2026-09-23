@@ -25,6 +25,15 @@ include(cmake/OpenChatRust.cmake)
 add_openchat_rust_library()
 
 qt_standard_project_setup(REQUIRES 6.5)
+add_library(openchat_case STATIC
+    src/case/DailyCaseService.cpp
+    src/case/DailyCaseController.cpp
+    src/case/CaseAudio.cpp
+)
+target_include_directories(openchat_case PUBLIC src)
+# CaseAudio decodes its bundled crate samples with the defensive WavFile reader.
+target_link_libraries(openchat_case PUBLIC Qt6::Core Qt6::Multimedia
+    PRIVATE openchat_media)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
     qt_policy(SET QTP0004 NEW)
 endif()
@@ -107,6 +116,10 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
+        qml/OpenChat/components/DailyCaseButton.qml
+        qml/OpenChat/components/DailyCaseModal.qml
+        qml/OpenChat/components/CaseReel.qml
+        qml/OpenChat/components/CaseTile.qml
     RESOURCES
         assets/Jessica.png
         assets/alex.png
@@ -122,10 +135,14 @@ qt_add_qml_module(OpenChat
         assets/icons/chevron-down.svg
         assets/icons/chevron-down-dark.svg
         assets/icons/openchat.png
+        assets/sounds/crate-display.wav
+        assets/sounds/crate-item-scroll.wav
+        assets/sounds/crate-open.wav
 )
 
 target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
+    openchat_case
     openchat_app
     openchat_avatar
     openchat_call
@@ -195,6 +212,9 @@ target_link_libraries(openchat-call-check PRIVATE
 )
 
 enable_testing()
+add_executable(tst_dailycase tests/tst_dailycase.cpp)
+target_link_libraries(tst_dailycase PRIVATE openchat_case Qt6::Test)
+add_test(NAME tst_dailycase COMMAND tst_dailycase)
 
 add_executable(tst_voiceeffects tests/tst_voiceeffects.cpp src/media/VoiceEffects.cpp)
 target_include_directories(tst_voiceeffects PRIVATE src)
@@ -929,6 +949,7 @@ target_compile_definitions(tst_qmlload PRIVATE
     OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_link_libraries(tst_qmlload PRIVATE
+    openchat_case
     openchat_app
     openchat_avatar
     openchat_call

@@ -11,6 +11,9 @@ Item {
     // absent the requests panel below collapses and the favorites category renders
     // exactly as before.
     property var contactController: null
+    property var dailyCaseController: null
+    property alias caseButton: caseEntry
+    signal caseClicked()
     readonly property real contactRowHeight: Math.max(44, Math.min(65, (height - 290) / 6))
 
     // Navigation artwork uses a fixed slot, independent of font glyph metrics.
@@ -50,8 +53,21 @@ Item {
         // gap the contact rows below use, so names and status lines line up.
         readonly property int textLeft: localAvatar.x + localAvatar.width + 14
         // The right edge the status field may grow to: clear of the add-contact
-        // "+" when it is shown, otherwise of the sidebar's own margin.
-        readonly property int statusRight: width - 48
+        // "+" when it is shown, otherwise of the sidebar's own margin, and of the
+        // daily-case button beside it.
+        readonly property int statusRight: caseEntry.visible ? caseEntry.x - 10 : width - 48
+
+        // On the "+" row, just left of the "+", or in its slot when it is hidden:
+        // the block is too short to stack a second button under it.
+        DailyCaseButton {
+            id: caseEntry
+            anchors.right: parent.right
+            anchors.rightMargin: addContact.visible ? 42 : 13
+            anchors.verticalCenter: addContact.verticalCenter
+            controller: sidebar.dailyCaseController
+            visible: controller !== null
+            onClicked: sidebar.caseClicked()
+        }
 
         Avatar {
             id: localAvatar
@@ -301,6 +317,7 @@ Item {
         // Primitive "+" affordance drawn from two crossed strokes, opening the
         // add-contact dialog (invite codes). Present only with a contact bridge.
         Item {
+            id: addContact
             objectName: "addContactButton"
             anchors.right: parent.right
             anchors.rightMargin: 18

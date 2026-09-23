@@ -7,6 +7,14 @@ Window {
     id: root
     objectName: "openChatWindow"
     required property var chatController
+    property string dailyCaseAccount: "preview"
+    property bool caseRequested: false
+    DailyCaseController {
+        id: dailyCase
+        objectName: "dailyCaseController"
+        accountKey: root.dailyCaseAccount
+    }
+    onActiveChanged: { if (active) dailyCase.refresh(); }
     // Optional add-contact bridge; null in the default/capture paths. The visible
     // add-contact surface binds to it in a later change; declaring it here keeps the
     // live and --add-contact initial properties valid with no rendering change.
@@ -55,11 +63,17 @@ Window {
         clip: true
 
         ContactSidebar {
+            id: sidebar
             width: root.sidebarWidth
             height: parent.height
             visible: !root.callFullscreen
             controller: root.chatController
             contactController: root.contactController
+            dailyCaseController: dailyCase
+            onCaseClicked: {
+                dailyCase.refresh()
+                root.caseRequested = true
+            }
         }
 
         // The three navigation sections share the pane to the right of the
@@ -479,6 +493,16 @@ Window {
                 }
             }
         }
+    }
+
+    Loader {
+        active: root.caseRequested
+        sourceComponent: DailyCaseModal {
+            controller: dailyCase
+            returnFocus: sidebar.caseButton
+            onClosed: root.caseRequested = false
+        }
+        onLoaded: item.open()
     }
 
     // Add-contact overlay: floats above every section, filling the window. It binds

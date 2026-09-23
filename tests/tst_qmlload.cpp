@@ -29,6 +29,7 @@
 #include <QQmlExpression>
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
+#include "case/DailyCaseController.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 
@@ -62,6 +63,125 @@ class QmlLoadTest final : public QObject
 
 private slots:
     void init() { QSettings().setValue(QStringLiteral("Appearance/darkMode"), false); }
+
+    void dailyCaseInteraction()
+    {
+        OpenChat::ChatController chat;
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.setInitialProperties({{"chatController", QVariant::fromValue(&chat)},
+            {"dailyCaseAccount", QUuid::createUuid().toString()}});
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QTest::qWait(100);
+        auto *entry = window->findChild<QQuickItem *>("dailyCaseButton");
+        auto *controller = window->findChild<OpenChat::DailyCaseController *>("dailyCaseController");
+        QVERIFY(entry && controller);
+        controller->setProperty("muted", true);
+        controller->setProperty("reducedMotion", false);
+        const auto click = [window](QQuickItem *item) {
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                item->mapToScene(QPointF(item->width()/2, item->height()/2)).toPoint());
+        };
+        click(entry);
+        QVERIFY(window->property("caseRequested").toBool());
+        QQuickItem *reel = nullptr;
+        QTRY_VERIFY((reel = findVisualItem(window->contentItem(), "caseReel")));
+        auto *open = findVisualItem(window->contentItem(), "caseOpenButton");
+        QVERIFY(open);
+        const auto capture = [window](const QString &name) {
+            const auto dir = qEnvironmentVariable("OPENCHAT_CASE_CAPTURES");
+            if (!dir.isEmpty()) window->grabWindow().save(dir + '/' + name + ".png");
+        };
+        QTest::qWait(100);
+        capture("available");
+        QSignalSpy reveal(controller, &OpenChat::DailyCaseController::revealed);
+        QSignalSpy ticks(controller, &OpenChat::DailyCaseController::crossed);
+        click(open);
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::Opening);
+        QVERIFY(!open->isEnabled());
+        click(open);
+        QTest::qWait(450);
+        window->resize(1200, 720);
+        QTest::qWait(150);
+        window->resize(720, 560);
+        // Every frame: center stays fixed and both ends are outside the viewport.
+        int frames = 0;
+        const auto connection = connect(controller, &OpenChat::DailyCaseController::positionChanged,
+            window, [&] {
+                ++frames;
+                const auto tile = reel->property("tileWidth").toDouble();
+                const auto stride = reel->property("stride").toDouble();
+                const auto left = reel->width()/2 - tile/2 - controller->position()*stride;
+                QVERIFY(left <= 0);
+                QVERIFY(left + (controller->tileCount()-1)*stride + tile >= reel->width());
+                auto *selector = reel->findChild<QQuickItem *>("caseSelector");
+                QVERIFY(selector);
+                QCOMPARE(selector->x() + selector->width()/2, reel->width()/2);
+            });
+        QTRY_COMPARE_WITH_TIMEOUT(controller->state(), OpenChat::DailyCaseController::OpenedToday, 8500);
+        disconnect(connection);
+        QVERIFY(frames > 100);
+        QVERIFY(ticks.size() > 35);
+        QCOMPARE(reveal.size(), 1);
+        QCOMPARE(controller->position(), double(controller->winnerIndex()));
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        QTest::qWait(700);
+        capture("opened");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        QTRY_VERIFY(entry->hasActiveFocus());
+        const int tickCount = ticks.size();
+        QTest::qWait(100);
+        QCOMPARE(ticks.size(), tickCount);
+        click(entry);
+        QTRY_VERIFY((reel = findVisualItem(window->contentItem(), "caseReel")));
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        QCOMPARE(reveal.size(), 1);
+        // Exercise a narrow popup independently of the app's desktop minimum.
+        window->setMinimumWidth(320);
+        window->resize(392, 560);
+        QTest::qWait(100);
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        capture("narrow");
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            qmlTypeId("OpenChat.Native", 1, 0, "AppearanceSettings"));
+        QVERIFY(appearance);
+        appearance->setDarkMode(true);
+        QTest::qWait(100);
+        capture("narrow-dark");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        window->resize(860, 680);
+        controller->setAccountKey(QUuid::createUuid().toString());
+        click(entry);
+        QTRY_VERIFY(findVisualItem(window->contentItem(), "caseReel"));
+        open = findVisualItem(window->contentItem(), "caseOpenButton");
+        QVERIFY(open);
+        click(open);
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::Opening);
+        QTest::qWait(160);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::OpenedToday);
+        QSignalSpy stopped(controller, &OpenChat::DailyCaseController::positionChanged);
+        QTest::qWait(160);
+        QCOMPARE(stopped.size(), 0);
+        QCOMPARE(reveal.size(), 1);
+        click(entry);
+        QTRY_VERIFY((reel = findVisualItem(window->contentItem(), "caseReel")));
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        QTest::qWait(100);
+        capture("dark");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        appearance->setDarkMode(false);
+        QCOMPARE(warnings.size(), 0);
+    }
 
     void requiredStructure()
     {
@@ -2576,8 +2696,10 @@ int main(int argc, char **argv)
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChatTests"));
     QCoreApplication::setApplicationName(QStringLiteral("qml-appearance"));
     QTemporaryDir settingsDirectory;
+    qputenv("XDG_DATA_HOME", settingsDirectory.path().toUtf8());
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDirectory.path());
+    qmlRegisterType<OpenChat::DailyCaseController>("OpenChat.Native", 1, 0, "DailyCaseController");
     qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
         "OpenChat.Native", 1, 0, "AppearanceSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });

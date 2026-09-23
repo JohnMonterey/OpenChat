@@ -330,7 +330,10 @@ bool ChatController::renameCurrentGroup(const QString &title)
         return false;
     const QString normalized = normalizeGroupTitle(title);
     if (m_live) {
-        if (m_groups == nullptr || !m_groups->rename(group->conversation, normalized)) {
+        // A copy, as in leaveCurrentGroup: groupChanged re-reads the roster
+        // while GroupService still holds the id.
+        const ConversationId conversation = group->conversation;
+        if (m_groups == nullptr || !m_groups->rename(conversation, normalized)) {
             setGroupNotice(QStringLiteral("The group could not be renamed."));
             return false;
         }
@@ -357,7 +360,10 @@ void ChatController::leaveCurrentGroup()
     if (group == m_liveGroups.cend())
         return;
     if (m_live) {
-        if (m_groups != nullptr && !m_groups->leave(group->conversation))
+        // A copy: leaving re-reads the roster (and m_liveGroups with it)
+        // before GroupService is done with the id.
+        const ConversationId conversation = group->conversation;
+        if (m_groups != nullptr && !m_groups->leave(conversation))
             setGroupNotice(QStringLiteral("The group could not be left."));
         return;
     }

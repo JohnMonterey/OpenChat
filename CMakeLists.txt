@@ -145,6 +145,7 @@ target_link_libraries(OpenChat PRIVATE
     openchat_case
     openchat_app
     openchat_avatar
+    openchat_cosmetics
     openchat_call
     openchat_notify
     Qt6::Core
@@ -247,6 +248,34 @@ add_library(openchat_avatar STATIC
 )
 target_include_directories(openchat_avatar PUBLIC src)
 target_link_libraries(openchat_avatar PUBLIC openchat_domain Qt6::Core Qt6::Gui)
+
+# Collectible cosmetics: the chat-bubble skin catalogue and the procedural
+# textures its skins are painted from (generated once per process, then tiled).
+add_library(openchat_cosmetics STATIC
+    src/cosmetics/ProceduralNoise.cpp
+    src/cosmetics/BubbleSkins.cpp
+)
+target_include_directories(openchat_cosmetics PUBLIC src)
+target_link_libraries(openchat_cosmetics PUBLIC Qt6::Core Qt6::Gui)
+
+# Renders every bubble skin through the real MessageDelegate to a contact sheet
+# (light and dark PNGs under cosmetics-shots/). Not part of the application: it
+# is how the skins are reviewed. Runs headless on the offscreen platform.
+add_executable(openchat-cosmetics-gallery
+    tools/cosmetics_gallery.cpp
+    src/render/BubbleBackground.cpp
+    src/app/AppearanceSettings.cpp
+)
+target_include_directories(openchat-cosmetics-gallery PRIVATE src)
+target_compile_definitions(openchat-cosmetics-gallery PRIVATE
+    OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(openchat-cosmetics-gallery PRIVATE
+    openchat_cosmetics
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Quick
+)
 
 # Desktop notifications. The policy (what is worth announcing, and what it says)
 # is platform-neutral and tested on its own; exactly one backend is compiled in,
@@ -924,7 +953,7 @@ add_executable(tst_bubblebackground
     src/render/AvatarArtwork.cpp
 )
 target_include_directories(tst_bubblebackground PRIVATE src)
-target_link_libraries(tst_bubblebackground PRIVATE openchat_avatar Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
+target_link_libraries(tst_bubblebackground PRIVATE openchat_avatar openchat_cosmetics Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
 add_test(NAME tst_bubblebackground COMMAND tst_bubblebackground)
 
 add_executable(tst_qmlload
@@ -952,6 +981,7 @@ target_link_libraries(tst_qmlload PRIVATE
     openchat_case
     openchat_app
     openchat_avatar
+    openchat_cosmetics
     openchat_call
     openchat_network
     openchat_crypto

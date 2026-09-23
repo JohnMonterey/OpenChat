@@ -9,8 +9,21 @@ namespace OpenChat {
 
 AppearanceSettings::AppearanceSettings(QObject *parent) : QObject(parent)
 {
-    m_darkMode = QSettings().value(QStringLiteral("Appearance/darkMode"), false).toBool();
+    const QSettings settings;
+    m_darkMode = settings.value(QStringLiteral("Appearance/darkMode"), false).toBool();
+    m_bubbleSkin = settings.value(QStringLiteral("Appearance/bubbleSkin")).toString();
     applyPalette();
+}
+
+void AppearanceSettings::setBubbleSkin(const QString &skin)
+{
+    if (skin == m_bubbleSkin)
+        return;
+    m_bubbleSkin = skin;
+    QSettings settings;
+    settings.setValue(QStringLiteral("Appearance/bubbleSkin"), skin);
+    settings.sync();
+    emit bubbleSkinChanged();
 }
 
 void AppearanceSettings::setDarkMode(bool enabled)

@@ -19,6 +19,10 @@ Item {
     readonly property bool eventRow: kind === 2 || kind === 3
     readonly property bool callEvent: kind === 3
     readonly property bool showSender: !eventRow && !outgoing && senderName.length > 0
+    // The collectible skin this bubble wears. The local user's own messages
+    // wear the equipped one; everyone else's stay classic (skins are local
+    // only for now). Empty means the classic bubble.
+    property string bubbleSkin: outgoing ? AppearanceSettings.bubbleSkin : ""
     readonly property real senderHeight: showSender ? 18 : 0
     readonly property real maximumBubbleWidth: Math.min(360, width * 0.68)
     readonly property real directionalLimit: outgoing
@@ -168,6 +172,7 @@ Item {
 
     BubbleBackground {
         id: bubble
+        objectName: "messageBubble"
         visible: !delegateRoot.eventRow
         x: delegateRoot.outgoing ? delegateRoot.width - bubble.width - 17 : 16
         y: delegateRoot.dateSectionHeight + delegateRoot.senderHeight
@@ -180,10 +185,12 @@ Item {
         fillTop: delegateRoot.outgoing ? Theme.outgoingTop : Theme.incomingTop
         fillBottom: delegateRoot.outgoing ? Theme.outgoingBottom : Theme.incomingBottom
         strokeColor: delegateRoot.outgoing ? Theme.outgoingBorder : Theme.incomingBorder
+        skin: delegateRoot.bubbleSkin
     }
 
     Text {
         id: messageBody
+        objectName: "messageBody"
         visible: !delegateRoot.eventRow
         x: delegateRoot.kind === 1
             ? bubble.x + delegateRoot.contentLeftInset
@@ -195,7 +202,7 @@ Item {
             : Math.min(naturalMessageBody.implicitWidth,
                        bubble.width - delegateRoot.horizontalContentInset)
         text: delegateRoot.body
-        color: Theme.textPrimary
+        color: bubble.skinned ? bubble.skinTextColor : Theme.textPrimary
         font.family: Theme.uiFont
         font.pixelSize: delegateRoot.kind === 1 ? 22 : 16
         lineHeight: 1.18
@@ -217,7 +224,7 @@ Item {
             ? implicitWidth
             : bubble.width - delegateRoot.horizontalContentInset
         text: String(delegateRoot.timestamp)
-        color: Theme.timestampText
+        color: bubble.skinned ? bubble.skinSecondaryTextColor : Theme.timestampText
         font.family: Theme.uiFont
         font.pixelSize: 12
         horizontalAlignment: Text.AlignRight

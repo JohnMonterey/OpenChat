@@ -1,7 +1,10 @@
 #include "render/BubbleBackground.h"
 
+#include "cosmetics/BubbleSkins.h"
+
 #include <QLinearGradient>
 #include <QPainter>
+#include <QQuickWindow>
 #include <QTransform>
 
 #include <algorithm>
@@ -150,8 +153,42 @@ void BubbleBackground::setStrokeColor(const QColor &color)
     repaint();
 }
 
+QString BubbleBackground::skin() const
+{
+    return m_skin;
+}
+
+void BubbleBackground::setSkin(const QString &skin)
+{
+    if (m_skin == skin)
+        return;
+    m_skin = skin;
+    emit skinChanged();
+    repaint();
+}
+
+bool BubbleBackground::skinned() const
+{
+    return BubbleSkins::isSkin(m_skin);
+}
+
+QColor BubbleBackground::skinTextColor() const
+{
+    return BubbleSkins::textColor(m_skin);
+}
+
+QColor BubbleBackground::skinSecondaryTextColor() const
+{
+    return BubbleSkins::secondaryTextColor(m_skin);
+}
+
 void BubbleBackground::paint(QPainter *painter)
 {
+    if (BubbleSkins::isSkin(m_skin)) {
+        paintSkin(painter);
+        return;
+    }
+
     painter->setRenderHint(QPainter::Antialiasing, true);
     const QPainterPath path = makePath(boundingRect(), m_outgoing, m_radius, m_tailWidth,
                                        m_tailHeight);
@@ -164,6 +201,29 @@ void BubbleBackground::paint(QPainter *painter)
     outline.setCosmetic(true);
     painter->setPen(outline);
     painter->drawPath(path);
+}
+
+void BubbleBackground::paintSkin(QPainter *painter)
+{
+    const QRectF bounds = boundingRect();
+    // The body is the rounded rectangle without the tail column, measured the
+    // way makePath measures it.
+    const QRectF strokeSafeBounds = bounds.normalized().adjusted(0.5, 0.5, -0.5, -0.5);
+    const qreal tail = std::clamp(m_tailWidth, 0.0, strokeSafeBounds.width() / 3.0);
+    const QRectF body = m_outgoing ? strokeSafeBounds.adjusted(0.0, 0.0, -tail, 0.0)
+                                   : strokeSafeBounds.adjusted(tail, 0.0, 0.0, 0.0);
+
+    BubbleShape shape;
+    shape.path = makePath(bounds, m_outgoing, m_radius, m_tailWidth, m_tailHeight);
+    shape.bounds = bounds;
+    shape.body = body;
+    shape.outgoing = m_outgoing;
+    shape.radius = std::clamp(m_radius, 0.0, std::min(body.width(), body.height()) / 2.0);
+
+    qreal devicePixelRatio = painter->device() ? painter->device()->devicePixelRatio() : 1.0;
+    if (const QQuickWindow *view = window())
+        devicePixelRatio = std::max(devicePixelRatio, view->effectiveDevicePixelRatio());
+    BubbleSkins::paint(painter, m_skin, shape, devicePixelRatio);
 }
 
 QPainterPath BubbleBackground::makePath(const QRectF &bounds, bool outgoing, qreal radius,

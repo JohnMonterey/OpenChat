@@ -32,6 +32,7 @@
 #include "case/DailyCaseController.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
+#include "cosmetics/BubbleSkins.h"
 
 namespace {
 
@@ -62,7 +63,12 @@ class QmlLoadTest final : public QObject
     Q_OBJECT
 
 private slots:
-    void init() { QSettings().setValue(QStringLiteral("Appearance/darkMode"), false); }
+    void init()
+    {
+        QSettings settings;
+        settings.setValue(QStringLiteral("Appearance/darkMode"), false);
+        settings.remove(QStringLiteral("Appearance/bubbleSkin"));
+    }
 
     void dailyCaseInteraction()
     {
@@ -720,6 +726,65 @@ private slots:
         QVERIFY(retry->property("y").toDouble() >= item->property("bubbleHeight").toDouble());
         item->setProperty("deliveryState", 3);
         QVERIFY(!retry->property("visible").toBool());
+    }
+
+    void outgoingBubblesWearTheEquippedSkin()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            "OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QCOMPARE(appearance->bubbleSkin(), QString());
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        const auto message = [&component](int direction) {
+            return component.createWithInitialProperties({
+                {"direction", direction}, {"deliveryState", 3}, {"body", "hello"},
+                {"timestamp", "10:15 AM"}, {"kind", 0}, {"dateLabel", ""},
+                {"showDateDivider", false}, {"senderName", ""}, {"width", 540}});
+        };
+        QScopedPointer<QObject> mine(message(1));
+        QScopedPointer<QObject> theirs(message(0));
+        QVERIFY(mine && theirs);
+        auto *myBubble = mine->findChild<QObject *>(QStringLiteral("messageBubble"));
+        auto *myBody = mine->findChild<QObject *>(QStringLiteral("messageBody"));
+        auto *myTime = mine->findChild<QObject *>(QStringLiteral("messageTimestamp"));
+        auto *theirBubble = theirs->findChild<QObject *>(QStringLiteral("messageBubble"));
+        auto *theirBody = theirs->findChild<QObject *>(QStringLiteral("messageBody"));
+        QVERIFY(myBubble && myBody && myTime && theirBubble && theirBody);
+
+        // Nothing equipped: the classic bubble and the theme's text colours.
+        QCOMPARE(myBubble->property("skin").toString(), QString());
+        QVERIFY(!myBubble->property("skinned").toBool());
+        const QColor classicText = myBody->property("color").value<QColor>();
+        const QColor classicTime = myTime->property("color").value<QColor>();
+        QCOMPARE(classicText, QColor("#2b3b53"));
+
+        const QString nebula = QStringLiteral("bubble.nebula");
+        appearance->setBubbleSkin(nebula);
+        QCOMPARE(myBubble->property("skin").toString(), nebula);
+        QVERIFY(myBubble->property("skinned").toBool());
+        QCOMPARE(myBody->property("color").value<QColor>(), OpenChat::BubbleSkins::textColor(nebula));
+        QCOMPARE(myTime->property("color").value<QColor>(),
+                 OpenChat::BubbleSkins::secondaryTextColor(nebula));
+        // Skins are local only: other people's bubbles stay classic.
+        QCOMPARE(theirBubble->property("skin").toString(), QString());
+        QCOMPARE(theirBody->property("color").value<QColor>(), classicText);
+
+        // The choice is remembered.
+        QCOMPARE(QSettings().value(QStringLiteral("Appearance/bubbleSkin")).toString(), nebula);
+        OpenChat::AppearanceSettings reloaded;
+        QCOMPARE(reloaded.bubbleSkin(), nebula);
+
+        // A skin this build does not know (retired, or from a newer build)
+        // falls back to the classic bubble rather than an unreadable one.
+        appearance->setBubbleSkin(QStringLiteral("bubble.retired"));
+        QVERIFY(!myBubble->property("skinned").toBool());
+        QCOMPARE(myBody->property("color").value<QColor>(), classicText);
+        QCOMPARE(myTime->property("color").value<QColor>(), classicTime);
+        appearance->setBubbleSkin(QString());
     }
 
     void chatRowsShowUnreadCountBadges()

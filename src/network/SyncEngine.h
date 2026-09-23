@@ -196,8 +196,10 @@ public:
     void stop();
 
     // Encrypts, durably persists, and queues a text message to a recipient
-    // device. Offline attempts are stored as Failed for manual retry. Online
-    // attempts reach Queued only after the durable commit.
+    // device. UI state reaches Queued only after the durable commit, whether or
+    // not the relay link is up: a send made offline leaves once it reconnects
+    // (even after a restart), and the relay then holds it until the recipient
+    // device next connects.
     void enqueueText(const ConversationId &conversation, const DeviceId &recipientDevice,
                      const QString &text);
 
@@ -282,7 +284,7 @@ public:
 signals:
     void callSignalSent(const OpenChat::ConversationId &conversation,
                         const OpenChat::DeviceId &sender, const QByteArray &payload);
-    // An outgoing text was durably committed (Queued or Failed) and is the exact row the
+    // An outgoing text was durably committed (Queued) and is the exact row the
     // store holds, so the UI can show it before relay acceptance.
     void messageQueued(const MessageRecord &message);
     void messageStateChanged(const MessageId &messageId, DeliveryState state);

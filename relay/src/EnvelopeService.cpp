@@ -82,8 +82,7 @@ EnvelopeService::validate(const AuthenticatedDevice &authenticatedDevice,
 }
 
 Result<SubmitResult, RelayError>
-EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes,
-                        bool recipientAvailable)
+EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes)
 {
     const auto validated = validate(authenticatedDevice, envelopeBytes);
     if (!validated.hasValue())
@@ -108,8 +107,6 @@ EnvelopeService::submit(const AuthenticatedDevice &authenticatedDevice, QByteArr
         return Result<SubmitResult, RelayError>::success(
             {static_cast<quint64>(accepted.value(0).toLongLong()), accepted.value(1).toLongLong(), true});
     }
-    if (!recipientAvailable && envelope.messageKind == EnvelopeMessageKind::MlsPrivateMessage)
-        return Result<SubmitResult, RelayError>::failure(RelayError::RecipientUnavailable);
     QSqlQuery insert(db);
     insert.prepare(QStringLiteral(
         "WITH inserted AS (INSERT INTO inbox_messages (recipient_device_id, envelope_id, idempotency_key, "
@@ -251,6 +248,26 @@ Result<void, RelayError> EnvelopeService::acknowledge(const DeviceId &deviceId, 
     if (!pruneAcceptances.exec())
         return Result<void, RelayError>::failure(RelayError::Internal);
     return Result<void, RelayError>::success();
+}
+
+Result<qint64, RelayError> EnvelopeService::pruneExpired()
+{
+    QSqlDatabase &db = m_store.database();
+    const qint64 now = m_store.nowMs();
+    QSqlQuery inbox(db);
+    inbox.prepare(QStringLiteral(
+        "DELETE FROM inbox_messages WHERE expires_at_ms < ? OR recipient_device_id IN "
+        "(SELECT device_id FROM devices WHERE revoked_at_ms IS NOT NULL)"));
+    inbox.addBindValue(now);
+    if (!inbox.exec())
+        return Result<qint64, RelayError>::failure(RelayError::Internal);
+    const qint64 removed = inbox.numRowsAffected();
+    QSqlQuery acceptances(db);
+    acceptances.prepare(QStringLiteral("DELETE FROM envelope_acceptances WHERE expires_at_ms < ?"));
+    acceptances.addBindValue(now);
+    if (!acceptances.exec())
+        return Result<qint64, RelayError>::failure(RelayError::Internal);
+    return Result<qint64, RelayError>::success(removed);
 }
 
 quint64 EnvelopeService::watermarkFor(const DeviceId &deviceId)

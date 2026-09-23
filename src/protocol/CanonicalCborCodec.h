@@ -11,6 +11,10 @@ namespace OpenChat {
 inline constexpr qsizetype maxEnvelopeBytes = 1024 * 1024;
 inline constexpr qsizetype maxCiphertextBytes = 960 * 1024;
 inline constexpr int maxCborDepth = 8;
+// The longest expiry - creation span an envelope may declare. The relay keeps an
+// envelope for an offline recipient until it expires, so this bounds how long a
+// message can wait for its recipient to come back.
+inline constexpr qint64 maxEnvelopeLifetimeMs = 30LL * 24 * 60 * 60 * 1000;
 
 struct DecodeLimits final {
     qsizetype envelopeBytes = maxEnvelopeBytes;

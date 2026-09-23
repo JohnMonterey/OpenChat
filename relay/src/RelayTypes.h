@@ -21,7 +21,6 @@ enum class RelayError {
     TokenReuse,
     RateLimited,
     Internal,
-    RecipientUnavailable,
 };
 
 // Opaque token bundle. Tokens are random strings the client echoes back; the

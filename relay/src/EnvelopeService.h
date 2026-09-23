@@ -47,10 +47,11 @@ public:
 
     // Validates and idempotently stores an envelope for its recipient device.
     // authenticatedDevice is the device resolved from the bearer token; the
-    // envelope's sender must equal it.
+    // envelope's sender must equal it. Whether the recipient is connected does
+    // not matter: an offline device finds the envelope in its inbox when it
+    // next connects, until the envelope's own expiry.
     [[nodiscard]] Result<SubmitResult, RelayError>
-    submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes,
-           bool recipientAvailable = true);
+    submit(const AuthenticatedDevice &authenticatedDevice, QByteArrayView envelopeBytes);
 
     // Every check submit() makes before it writes anything: canonical decode,
     // sender identity, expiry, the sender's Ed25519 signature over the canonical
@@ -71,6 +72,13 @@ public:
     [[nodiscard]] Result<void, RelayError> acknowledge(const DeviceId &deviceId, quint64 watermark);
 
     [[nodiscard]] quint64 watermarkFor(const DeviceId &deviceId);
+
+    // Relay-wide retention sweep. acknowledge() only prunes the acknowledging
+    // device's own inbox, so envelopes waiting for a device that never comes
+    // back would otherwise stay forever: this drops every expired envelope and
+    // the inbox of every revoked device (which can never fetch it), plus
+    // expired acceptance records. Returns the number of inbox rows removed.
+    [[nodiscard]] Result<qint64, RelayError> pruneExpired();
 
 private:
     PostgresStore &m_store;

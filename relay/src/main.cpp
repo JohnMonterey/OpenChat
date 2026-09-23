@@ -8,6 +8,7 @@
 #include <QCoreApplication>
 #include <QHostAddress>
 #include <QLoggingCategory>
+#include <QTimer>
 
 // openchat-relay: a ciphertext-only relay. Configuration comes from the
 // environment so no secrets appear on the command line. TLS is terminated by a
@@ -76,6 +77,20 @@ int main(int argc, char **argv)
     KeyPackageService keyPackages(*store);
     DirectoryService directory(*store);
     RelayServer server(*store, auth, envelopes, keyPackages, directory);
+
+    // Inboxes hold envelopes for devices that are offline, so storage no longer
+    // drains just because recipients connect: sweep what has expired or can no
+    // longer be fetched, once now and then hourly.
+    const auto sweep = [&envelopes] {
+        const auto pruned = envelopes.pruneExpired();
+        if (!pruned.hasValue())
+            qWarning("inbox retention sweep failed");
+    };
+    sweep();
+    QTimer retention;
+    retention.setInterval(60 * 60 * 1000);
+    QObject::connect(&retention, &QTimer::timeout, &app, sweep);
+    retention.start();
 
     const QString bindAddress =
         qEnvironmentVariable("OPENCHAT_RELAY_BIND", QStringLiteral("127.0.0.1"));

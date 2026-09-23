@@ -45,8 +45,6 @@ StatusCode statusFor(RelayError error)
         return StatusCode::Unauthorized;
     case RelayError::RateLimited:
         return StatusCode::TooManyRequests;
-    case RelayError::RecipientUnavailable:
-        return StatusCode::ServiceUnavailable;
     case RelayError::Internal:
         break;
     }
@@ -582,25 +580,20 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
         const auto decoded = decodeEnvelope(message);
         if (!decoded.hasValue())
             return;
-        const auto submitted = m_envelopes.submit(device, message,
-            m_liveByDevice.contains(decoded.value().recipientDeviceId.bytes().toHex()));
-        if (!submitted.hasValue()) {
-            if (submitted.error() == RelayError::RecipientUnavailable) {
-                QCborArray rejected;
-                rejected.append(9);
-                rejected.append(decoded.value().envelopeId.bytes());
-                socket->sendBinaryMessage(rejected.toCborValue().toCbor());
-            }
+        // Stored whether or not the recipient is connected: an offline device
+        // receives it from its inbox replay when it next connects.
+        const auto submitted = m_envelopes.submit(device, message);
+        if (!submitted.hasValue())
             return;
-        }
         QCborArray ack;
         ack.append(1); // RelayAccepted
         ack.append(decoded.value().envelopeId.bytes());
         ack.append(static_cast<qint64>(submitted.value().serverSequence));
         socket->sendBinaryMessage(ack.toCborValue().toCbor());
 
-        // Best-effort real-time delivery to a connected recipient, carrying the
-        // recipient's inbox sequence: [4 (Delivery), seq, envelope].
+        // Real-time delivery to a connected recipient, carrying the recipient's
+        // inbox sequence: [4 (Delivery), seq, envelope]. Best-effort only; the
+        // stored row is the delivery guarantee.
         const QByteArray recipientKey = decoded.value().recipientDeviceId.bytes().toHex();
         if (QWebSocket *recipient = m_liveByDevice.value(recipientKey)) {
             QCborArray delivery;

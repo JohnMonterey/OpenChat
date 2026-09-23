@@ -11,7 +11,6 @@ namespace OpenChat {
 namespace {
 
 constexpr quint64 criticalFieldLimit = 128;
-constexpr qint64 maxEnvelopeLifetimeMs = 30LL * 24 * 60 * 60 * 1000;
 constexpr quint64 requiredFieldCount = 13;
 
 enum Field : quint64 {

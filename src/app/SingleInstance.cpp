@@ -1,9 +1,11 @@
 #include "app/SingleInstance.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QSet>
 
 #ifdef Q_OS_WIN
 #    ifndef NOMINMAX
@@ -31,12 +33,21 @@ QString serverNameFor(const QString &directory)
     return QStringLiteral("OpenChat-") + QString::fromLatin1(digest.toHex().left(24));
 }
 
+// The locks SingleInstance objects in this process hold. One in the
+// application; tests hold two to play both launches.
+QSet<QString> &locksHeldHere()
+{
+    static QSet<QString> held;
+    return held;
+}
+
 } // namespace
 
 SingleInstance::SingleInstance(const QString &directory, QObject *parent)
     : QObject(parent)
     , m_serverName(serverNameFor(directory))
-    , m_lock(QDir(directory).filePath(QStringLiteral("instance.lock")))
+    , m_lockPath(QDir(directory).filePath(QStringLiteral("instance.lock")))
+    , m_lock(m_lockPath)
 {
     QDir().mkpath(directory);
     // Never stale by age: an OpenChat can run for weeks. A holder that died
@@ -51,8 +62,8 @@ SingleInstance::~SingleInstance()
 
 SingleInstance::Claim SingleInstance::claim(std::chrono::milliseconds waitForPrevious)
 {
-    if (m_lock.tryLock(0)) {
-        listen();
+    if (m_lock.tryLock(0) || takeOverLeftoverLock()) {
+        becomePrimary();
         return Claim::Primary;
     }
     // A lock that cannot be taken for any other reason (a read-only or full
@@ -65,12 +76,37 @@ SingleInstance::Claim SingleInstance::claim(std::chrono::milliseconds waitForPre
     // Held, but nobody answering: the previous OpenChat is closing (it stops
     // answering first), or has only just started and is not listening yet.
     if (m_lock.tryLock(int(waitForPrevious.count()))) {
-        listen();
+        becomePrimary();
         return Claim::Primary;
     }
     if (askRunningInstanceToShowItself())
         return Claim::HandedOver;
     return Claim::StillRunning;
+}
+
+bool SingleInstance::takeOverLeftoverLock()
+{
+    // QLockFile recognises a lock whose owner has died by its process id. A
+    // lock left by an OpenChat that had this process's id, which the system
+    // has since handed to us, looks held by a live process: this one. Process
+    // ids are reused on Windows, and under Wine after every wineserver restart.
+    // Nothing else in this process holds it, so it is a leftover.
+    if (m_lock.error() != QLockFile::LockFailedError || locksHeldHere().contains(m_lockPath))
+        return false;
+    qint64 owner = 0;
+    QString host;
+    QString application;
+    if (!m_lock.getLockInfo(&owner, &host, &application)
+        || owner != QCoreApplication::applicationPid()) {
+        return false;
+    }
+    return m_lock.removeStaleLockFile() && m_lock.tryLock(0);
+}
+
+void SingleInstance::becomePrimary()
+{
+    locksHeldHere().insert(m_lockPath);
+    listen();
 }
 
 bool SingleInstance::askRunningInstanceToShowItself()
@@ -147,8 +183,10 @@ void SingleInstance::stopAnswering()
 void SingleInstance::release()
 {
     stopAnswering();
-    if (m_lock.isLocked())
+    if (m_lock.isLocked()) {
         m_lock.unlock();
+        locksHeldHere().remove(m_lockPath);
+    }
 }
 
 } // namespace OpenChat

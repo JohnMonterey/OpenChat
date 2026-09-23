@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QLockFile>
 #include <QProcess>
@@ -13,6 +14,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -21,10 +23,11 @@ using namespace std::chrono_literals;
 
 namespace {
 
-// `tst_singleinstance --hold-lock <directory>`: takes the instance lock the
-// way a running OpenChat does and waits to be killed, so a test can leave a
-// lock behind whose owner has died.
-int holdLockUntilKilled(const char *directory)
+// `tst_singleinstance --hold-lock <directory> <milliseconds>`: another
+// process holding the instance lock the way a running OpenChat does, without
+// answering. It lets go after the given time, or waits to be killed, so a
+// test can leave a lock behind whose owner has died.
+int holdLock(const char *directory, const char *milliseconds)
 {
     QLockFile lock(QDir(QString::fromLocal8Bit(directory)).filePath(QStringLiteral("instance.lock")));
     lock.setStaleLockTime(0);
@@ -32,13 +35,22 @@ int holdLockUntilKilled(const char *directory)
         return 1;
     std::printf("locked\n");
     std::fflush(stdout);
-    std::this_thread::sleep_for(60s);
+    std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(milliseconds)));
     return 0;
 }
 
 QString lockPath(const QTemporaryDir &directory)
 {
     return directory.filePath(QStringLiteral("instance.lock"));
+}
+
+// Starts the holder and waits until it has the lock.
+bool startHolder(QProcess &holder, const QTemporaryDir &directory, int milliseconds)
+{
+    holder.start(QCoreApplication::applicationFilePath(),
+                 {QStringLiteral("--hold-lock"), directory.path(), QString::number(milliseconds)});
+    return holder.waitForStarted() && holder.waitForReadyRead(10000)
+        && holder.readLine().trimmed() == "locked";
 }
 
 } // namespace
@@ -80,22 +92,17 @@ private slots:
         QVERIFY(directory.isValid());
         // The previous OpenChat, closing: it holds the lock but has stopped
         // answering, and lets go a moment later.
-        QLockFile closing(lockPath(directory));
-        closing.setStaleLockTime(0);
-        QVERIFY(closing.tryLock(0));
-        std::thread finish([&closing] {
-            std::this_thread::sleep_for(400ms);
-            closing.unlock();
-        });
+        QProcess closing;
+        QVERIFY(startHolder(closing, directory, 600));
 
         SingleInstance next(directory.path());
         QElapsedTimer timer;
         timer.start();
-        const SingleInstance::Claim claim = next.claim(5s);
+        const SingleInstance::Claim claim = next.claim(10s);
         const qint64 waited = timer.elapsed();
-        finish.join();
+        closing.waitForFinished();
         QCOMPARE(claim, SingleInstance::Claim::Primary);
-        QVERIFY2(waited >= 300, qPrintable(QString::number(waited)));
+        QVERIFY2(waited >= 200, qPrintable(QString::number(waited)));
     }
 
     void aClosingInstanceNoLongerTakesLaunches()
@@ -122,15 +129,18 @@ private slots:
     {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
-        QLockFile stuck(lockPath(directory));
-        stuck.setStaleLockTime(0);
-        QVERIFY(stuck.tryLock(0));
+        QProcess stuck;
+        QVERIFY(startHolder(stuck, directory, 60000));
 
         SingleInstance next(directory.path());
         QElapsedTimer timer;
         timer.start();
-        QCOMPARE(next.claim(300ms), SingleInstance::Claim::StillRunning);
-        QVERIFY2(timer.elapsed() < 5000, qPrintable(QString::number(timer.elapsed())));
+        const SingleInstance::Claim claim = next.claim(300ms);
+        const qint64 elapsed = timer.elapsed();
+        stuck.kill();
+        stuck.waitForFinished();
+        QCOMPARE(claim, SingleInstance::Claim::StillRunning);
+        QVERIFY2(elapsed < 5000, qPrintable(QString::number(elapsed)));
     }
 
     void anInstanceThatDiedIsTakenOver()
@@ -138,17 +148,40 @@ private slots:
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
         QProcess holder;
-        holder.start(QCoreApplication::applicationFilePath(),
-                     {QStringLiteral("--hold-lock"), directory.path()});
-        QVERIFY(holder.waitForStarted());
-        QVERIFY(holder.waitForReadyRead(10000));
-        QCOMPARE(holder.readLine().trimmed(), QByteArray("locked"));
+        QVERIFY(startHolder(holder, directory, 60000));
         holder.kill();
         QVERIFY(holder.waitForFinished());
         QVERIFY(QFileInfo::exists(lockPath(directory)));
 
         SingleInstance next(directory.path());
         QCOMPARE(next.claim(0ms), SingleInstance::Claim::Primary);
+    }
+
+    // A lock left by an OpenChat whose process id the system has since given
+    // to this launch names a live owner: us. It is a leftover all the same.
+    void aLeftoverLockNamingThisProcessIsTakenOver()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QByteArray contents;
+        {
+            QLockFile earlier(lockPath(directory));
+            QVERIFY(earlier.tryLock(0));
+            QFile file(lockPath(directory));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            contents = file.readAll();
+        }
+        QFile leftover(lockPath(directory));
+        QVERIFY(leftover.open(QIODevice::WriteOnly));
+        leftover.write(contents);
+        leftover.close();
+
+        SingleInstance next(directory.path());
+        QElapsedTimer timer;
+        timer.start();
+        QCOMPARE(next.claim(10s), SingleInstance::Claim::Primary);
+        // Taken over at once, not after waiting out the lock.
+        QVERIFY2(timer.elapsed() < 3000, qPrintable(QString::number(timer.elapsed())));
     }
 
     // The whole thing, with the real application: start OpenChat, start it
@@ -205,8 +238,8 @@ private slots:
 
 int main(int argc, char *argv[])
 {
-    if (argc == 3 && std::strcmp(argv[1], "--hold-lock") == 0)
-        return holdLockUntilKilled(argv[2]);
+    if (argc == 4 && std::strcmp(argv[1], "--hold-lock") == 0)
+        return holdLock(argv[2], argv[3]);
     QCoreApplication application(argc, argv);
     SingleInstanceTest test;
     return QTest::qExec(&test, argc, argv);

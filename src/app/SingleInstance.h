@@ -66,10 +66,13 @@ signals:
 
 private:
     [[nodiscard]] bool askRunningInstanceToShowItself();
+    [[nodiscard]] bool takeOverLeftoverLock();
+    void becomePrimary();
     void listen();
     void readRequest();
 
     QString m_serverName;
+    QString m_lockPath;
     QLockFile m_lock;
     QLocalServer *m_server = nullptr;
 };

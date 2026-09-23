@@ -20,7 +20,7 @@ root="${OPENCHAT_MINGW_ROOT:-$HOME/.local/share/openchat-mingw}"
 packages="mingw-w64-gcc mingw-w64-cmake mingw-w64-pkg-config
     mingw-w64-qt6-base mingw-w64-qt6-declarative mingw-w64-qt6-multimedia
     mingw-w64-qt6-svg mingw-w64-qt6-websockets mingw-w64-qt6-httpserver
-    mingw-w64-openssl mingw-w64-opus mingw-w64-wine"
+    mingw-w64-openssl mingw-w64-opus mingw-w64-libvpx mingw-w64-wine"
 
 pacman_here() {
     unshare -r pacman --config "$root/etc/pacman.conf" --root "$root" \

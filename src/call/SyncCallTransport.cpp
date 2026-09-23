@@ -40,6 +40,11 @@ void SyncCallTransport::sendMedia(const ConversationId &conversation,
     m_engine.sendCallMedia(conversation, recipientDevice, packet);
 }
 
+qint64 SyncCallTransport::pendingMediaBytes() const
+{
+    return m_engine.pendingSendBytes();
+}
+
 bool SyncCallTransport::isConnected() const
 {
     return m_connected;

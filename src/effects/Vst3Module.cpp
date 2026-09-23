@@ -10,8 +10,11 @@
 #include <QDir>
 #include <QFileInfo>
 
-#include <dlfcn.h>
+#include "effects/PluginHostingPlatform.h"
+
+#if OPENCHAT_PLUGIN_HOSTING
 #include <sys/utsname.h>
+#endif
 
 using namespace Steinberg;
 
@@ -53,6 +56,10 @@ QString Vst3Module::resolveBinaryPath(const QString &bundlePath)
     if (!info.isDir())
         return {};
 
+#if !OPENCHAT_PLUGIN_HOSTING
+    // No bundle is ever opened where hosting is unavailable.
+    return {};
+#else
     // The architecture directory is uname().machine + "-linux". Computed rather
     // than hardcoded so an aarch64 or riscv64 build finds its own subdirectory
     // in a bundle that also carries x86_64.
@@ -73,6 +80,7 @@ QString Vst3Module::resolveBinaryPath(const QString &bundlePath)
     if (objects.size() == 1)
         return contents.filePath(objects.first());
     return {};
+#endif
 }
 
 Vst3Module::~Vst3Module()

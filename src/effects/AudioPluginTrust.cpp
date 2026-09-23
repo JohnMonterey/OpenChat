@@ -6,8 +6,12 @@
 #include <QFile>
 #include <QFileInfo>
 
+#include "effects/PluginHostingPlatform.h"
+
+#if OPENCHAT_PLUGIN_HOSTING
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace OpenChat {
 
@@ -18,6 +22,7 @@ QString tr(const char *text)
     return QCoreApplication::translate("AudioPluginTrust", text);
 }
 
+#if OPENCHAT_PLUGIN_HOSTING
 // True when an account other than the owner (when the owner is this user or
 // root) can write this inode.
 //
@@ -31,6 +36,7 @@ bool isWritableByOthers(const struct stat &info)
     // S_IWGRP even for a group we are in: membership is not exclusivity.
     return (info.st_mode & (S_IWGRP | S_IWOTH)) != 0;
 }
+#endif
 
 } // namespace
 
@@ -72,6 +78,14 @@ QString resolve(const QString &path)
 
 PluginError checkPluginPath(const QString &resolvedPath)
 {
+#if !OPENCHAT_PLUGIN_HOSTING
+    // See PluginHostingPlatform.h: without a way to tell who else can replace
+    // this file, no path can be trusted, so every one is refused.
+    Q_UNUSED(resolvedPath);
+    return makePluginError(
+        PluginErrorCode::UntrustedPath,
+        tr("Voice effect plugins are not available on this operating system yet."));
+#else
     if (resolvedPath.isEmpty() || !QDir::isAbsolutePath(resolvedPath)) {
         return makePluginError(PluginErrorCode::UntrustedPath,
                                tr("The plugin path could not be resolved."));
@@ -118,6 +132,7 @@ PluginError checkPluginPath(const QString &resolvedPath)
     }
 
     return {};
+#endif
 }
 
 QString sha256OfFile(const QString &resolvedPath)

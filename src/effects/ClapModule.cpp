@@ -8,7 +8,7 @@
 #include <QCoreApplication>
 #include <QFileInfo>
 
-#include <dlfcn.h>
+#include "effects/PluginHostingPlatform.h"
 
 namespace OpenChat {
 

@@ -944,6 +944,11 @@ void SyncEngine::sendGroupChange(const ConversationId &conversation,
     });
 }
 
+qint64 SyncEngine::pendingSendBytes() const
+{
+    return d->transport.pendingSendBytes();
+}
+
 void SyncEngine::sendCallMedia(const ConversationId &conversation,
                                const DeviceId &recipientDevice, const QByteArray &payload)
 {

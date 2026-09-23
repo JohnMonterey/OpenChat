@@ -473,8 +473,8 @@ private slots:
     void aFrameStillInFlightIsNotMistakenForALostOne()
     {
         // The case a real network path turned up. A near-motionless desktop
-        // sends only a heartbeat a second, so at any moment one of the handful
-        // of frames in a reporting window is still on the wire. Counting that
+        // sends only a handful of frames per reporting window, so at any moment
+        // one of them is still on the wire. Counting that
         // against what was sent reads as catastrophic loss and walks a
         // perfectly good link all the way down the ladder.
         SharePair pair;
@@ -489,7 +489,11 @@ private slots:
             for (int i = 0; i < 6; ++i) {
                 now += 200;
                 QPainter painter(&desktop);
-                painter.fillRect(QRect(100 + (i * 5), 700, 5, 5), QColor(30, i * 30, 90));
+                // A different small change every time, so a frame goes out on
+                // every capture and "one behind" means one capture's worth of
+                // latency, not a second of it.
+                painter.fillRect(QRect(100 + (i * 5), 700 + (round % 40), 5, 5),
+                                 QColor(30, (i * 30 + round * 7) % 256, 90));
                 painter.end();
                 // Everything is delivered, but always one packet behind: there
                 // is permanently one frame in flight, exactly as on a real link.
@@ -500,7 +504,10 @@ private slots:
                     QVERIFY(pair.receiver->decode(inFlight, now).has_value());
                 inFlight = packet;
             }
-            now += 600;
+            // Reported the moment the round ends, with its last frame still on
+            // the wire. (Waiting before the report would also hold that frame
+            // back, which is real latency — and latency, unlike a frame in
+            // flight, is congestion the sender is right to back off from.)
             QVERIFY(pair.report(now));
         }
         QVERIFY2(pair.sender->stats().lossRatio < 0.05,

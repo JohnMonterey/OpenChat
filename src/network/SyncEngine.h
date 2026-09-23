@@ -161,6 +161,10 @@ public:
     // durable path above.
     virtual void sendDatagram(const CiphertextEnvelopeV1 &envelope) = 0;
 
+    // Bytes handed to the connection and not yet written to the network, or
+    // -1 when the transport cannot say. Real-time media paces itself on it.
+    [[nodiscard]] virtual qint64 pendingSendBytes() const { return -1; }
+
     // Set by the engine before use.
     std::function<void(const EnvelopeId &, quint64 serverSequence)> onRelayAccepted;
     std::function<void(const EnvelopeId &)> onRecipientUnavailable;
@@ -271,6 +275,8 @@ public:
     // to play. Dropped silently when the link is down.
     void sendCallMedia(const ConversationId &conversation, const DeviceId &recipientDevice,
                        const QByteArray &payload);
+    // What the transport has queued and not yet written, or -1 if unknown.
+    [[nodiscard]] qint64 pendingSendBytes() const;
 
     // Processes an inbound envelope with its relay sequence.
     void handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);

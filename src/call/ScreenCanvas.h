@@ -5,6 +5,7 @@
 #include <QRect>
 #include <QSize>
 
+#include <atomic>
 #include <memory>
 
 namespace OpenChat {
@@ -25,9 +26,9 @@ namespace OpenChat {
 // be left pointing at freed pixels.
 //
 // Ownership is single-threaded by construction: the canvas is written on the GUI
-// thread (the call engine's thread) and read in QQuickPaintedItem::paint(),
-// which Qt runs with the GUI thread blocked in the scene-graph sync. Nothing
-// else may touch it.
+// thread (the call engine's thread) and read by CallVideoItem during the
+// scene-graph sync, which Qt runs with the GUI thread blocked. Nothing else may
+// touch it.
 class ScreenCanvas final
 {
 public:
@@ -54,13 +55,37 @@ public:
     ScreenCanvas(const ScreenCanvas &) = delete;
     ScreenCanvas &operator=(const ScreenCanvas &) = delete;
 
+    // A canvas for a video stream, holding one decoded picture. Unlike the
+    // tile path nothing is ever written into it in place — each new picture
+    // replaces the last whole (adoptFrame) — so the picture is taken as it is,
+    // shared with the decoder's recycling pool, without a copy.
+    [[nodiscard]] static std::shared_ptr<ScreenCanvas> forVideo(QImage picture)
+    {
+        auto canvas = std::shared_ptr<ScreenCanvas>(new ScreenCanvas(QSize()));
+        canvas->m_image = std::move(picture);
+        canvas->m_complete = !canvas->m_image.isNull();
+        canvas->m_dirty = canvas->m_image.rect();
+        canvas->m_revision = nextRevision();
+        return canvas;
+    }
+
+    // Replaces the picture of a video canvas with the next, same size.
+    void adoptFrame(QImage picture)
+    {
+        m_image = std::move(picture);
+        m_dirty = m_image.rect();
+        m_complete = true;
+        m_revision = nextRevision();
+    }
+
     [[nodiscard]] const QImage &image() const noexcept { return m_image; }
     [[nodiscard]] QSize size() const { return m_image.size(); }
     [[nodiscard]] bool isEmpty() const { return m_image.isNull(); }
 
-    // Bumped once per applied update. A view that painted revision N and is
-    // asked to paint N+1 only has to repaint dirtyRect(); any other jump means
-    // it missed an update and must repaint everything.
+    // Changes with every applied update, and is never the same for two
+    // canvases: a view that showed revision N is up to date exactly when the
+    // canvas it now holds is still at N, even if that canvas is a new one that
+    // happens to sit at the old one's address.
     [[nodiscard]] quint64 revision() const noexcept { return m_revision; }
     [[nodiscard]] QRect dirtyRect() const noexcept { return m_dirty; }
 
@@ -81,12 +106,18 @@ private:
     void endUpdate(bool complete)
     {
         m_complete = m_complete || complete;
-        ++m_revision;
+        m_revision = nextRevision();
+    }
+
+    [[nodiscard]] static quint64 nextRevision() noexcept
+    {
+        static std::atomic<quint64> counter{0};
+        return counter.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
     QImage m_image;
     QRect m_dirty;
-    quint64 m_revision = 0;
+    quint64 m_revision = nextRevision();
     bool m_complete = false;
 };
 

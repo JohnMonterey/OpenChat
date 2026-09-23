@@ -3,6 +3,9 @@
 #include "call/AudioIo.h"
 #include "call/CallSession.h"
 #include "call/CallScreenSession.h"
+#include "call/ScreenVideoCodec.h"
+
+#include <deque>
 #include "call/CallVideoSession.h"
 #include "call/CallSounds.h"
 #include "call/CallSignal.h"
@@ -445,6 +448,34 @@ private:
     [[nodiscard]] ScreenPacketOutcome handleScreenPacket(CallScreenSession &session,
                                                          const QByteArray &packet,
                                                          bool &activeFlag, qint64 &lastSeenMs);
+    // A picture decoded off the GUI thread for the one-to-one peer (no
+    // device) or a group member.
+    void onAsyncScreenUpdate(const std::optional<DeviceId> &member,
+                             const CallScreenSession::Update &update);
+    // The call's one screen encoder: VP9 when this build and machine have it
+    // (OPENCHAT_SCREEN_CODEC=tiles forces the tile encoder), tiles otherwise.
+    void ensureScreenEncoder();
+    void fallBackToTileEncoder();
+    [[nodiscard]] std::unique_ptr<CallScreenSession>
+    createScreenSession(CallDirection direction, QByteArrayView secret,
+                        std::optional<DeviceId> member);
+    void onScreenVideoEncoded(const EncodedScreenFrame &frame);
+    // The pacer. Screen packets wait here, not in the socket, and go out only
+    // while the socket has room: a voice packet never queues behind more than
+    // a fragment of a desktop, and nothing is dropped for arriving at a full
+    // socket (which, in a video stream, would break every frame after it).
+    void enqueueScreenPacket(const ConversationId &conversation, const DeviceId &device,
+                             QByteArray packet);
+    void drainScreenOutbox();
+    void clearScreenOutbox();
+    // Whether a new frame may be encoded: not while the pacer still holds more
+    // than a fraction of a second of the last ones.
+    // How many copies of each screen frame go out: one per peer it is sealed for.
+    [[nodiscard]] int screenDestinations() const;
+    [[nodiscard]] bool screenOutboxHasRoom() const;
+    // What the pacer measured the link carrying while it was the bottleneck,
+    // applied to the encoder as a bitrate cap and lifted again when it clears.
+    void updateLinkEstimate(qint64 nowMs);
     // Sends each receiving session's periodic report back to its sender, and
     // folds every peer's reported capability into the one shared encoder.
     void pumpScreenFeedback();
@@ -463,9 +494,27 @@ private:
     std::unique_ptr<CallVideoSession> m_videoSession;
     QTimer *m_videoTimeout = nullptr;
     // One encoder for the whole call: a mesh has one desktop and several peers,
-    // so the pixels are hashed and the tiles encoded once, and only the AES
-    // seal is repeated for each of them.
-    std::shared_ptr<ScreenTileEncoder> m_screenEncoder;
+    // so the desktop is encoded once, and only the AES seal is repeated for
+    // each of them. m_screenEncoder is whichever of the two is in use.
+    std::shared_ptr<ScreenEncoderControl> m_screenEncoder;
+    std::shared_ptr<ScreenTileEncoder> m_tileEncoder;
+    std::shared_ptr<ScreenVideoEncoder> m_videoEncoder;
+    struct PacedPacket final {
+        ConversationId conversation;
+        DeviceId device;
+        QByteArray packet;
+    };
+    std::deque<PacedPacket> m_screenOutbox;
+    qint64 m_screenOutboxBytes = 0;
+    QTimer *m_pacerTimer = nullptr;
+    qint64 m_pacerWindowStartMs = 0;
+    qint64 m_pacerWindowBytes = 0;
+    qint64 m_pacerBackloggedMs = 0;
+    qint64 m_pacerLastTickMs = 0;
+    bool m_pacerWasBacklogged = false;
+    int m_linkCapKbps = 0;
+    int m_calmLinkWindows = 0;
+    quint64 m_screenFramesHeldBack = 0;
     std::unique_ptr<CallScreenSession> m_screenSession;
     QTimer *m_screenTimeout = nullptr;
     QTimer *m_screenFeedbackTimer = nullptr;

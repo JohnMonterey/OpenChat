@@ -1,9 +1,11 @@
+#include <QRandomGenerator>
 #include <QtTest>
 
 #include "AudioTestSupport.h"
 #include "CallTestSupport.h"
 #include "call/CallEngine.h"
 #include "call/CallScreenSession.h"
+#include "call/ScreenVideoCodec.h"
 #include "call/CallSignal.h"
 #include "call/CallSounds.h"
 #include "call/CallTransport.h"
@@ -35,6 +37,7 @@ public:
                    const QByteArray &packet) override
     {
         ++mediaSent;
+        sentVersions.append(packet.isEmpty() ? quint8(0) : quint8(packet[0]));
         if (dropMedia)
             return;
         if (peer != nullptr && peer->onMedia)
@@ -42,6 +45,7 @@ public:
     }
 
     [[nodiscard]] bool isConnected() const override { return connected; }
+    [[nodiscard]] qint64 pendingMediaBytes() const override { return pendingBytes; }
 
     // Decodes the signals this end put on the wire, so a test can assert what
     // was said rather than only what state was reached.
@@ -68,6 +72,11 @@ public:
     bool blockSignals = false;
     bool dropMedia = false;
     int mediaSent = 0;
+    // What the pretend socket says is still waiting to be written; -1 is a
+    // transport that cannot tell, which the pacer never holds anything for.
+    qint64 pendingBytes = -1;
+    // The wire version of every media packet sent, in order.
+    QList<quint8> sentVersions;
     QList<QByteArray> sentSignals;
 };
 
@@ -107,6 +116,31 @@ struct Endpoint final {
     for (int i = 0; i < frames; ++i)
         peak = std::max(peak, OpenChat::AudioConvert::frameRms(endpoint.listen()));
     return peak;
+}
+
+// Whether a received picture is the desktop: exactly, from the tile encoder;
+// within a few levels on average, from VP9, which is lossy by design.
+[[nodiscard]] bool resembles(const QImage &picture, const QImage &desktop)
+{
+    if (picture.size() != desktop.size())
+        return false;
+    qint64 error = 0;
+    qint64 samples = 0;
+    for (int y = 0; y < desktop.height(); y += 4) {
+        for (int x = 0; x < desktop.width(); x += 4) {
+            const QRgb a = picture.pixel(x, y);
+            const QRgb b = desktop.pixel(x, y);
+            error += qAbs(qRed(a) - qRed(b)) + qAbs(qGreen(a) - qGreen(b)) + qAbs(qBlue(a) - qBlue(b));
+            samples += 3;
+        }
+    }
+    return samples > 0 && double(error) / double(samples) < 3.0;
+}
+
+[[nodiscard]] bool nearly(QRgb a, QRgb b, int tolerance)
+{
+    return qAbs(qRed(a) - qRed(b)) <= tolerance && qAbs(qGreen(a) - qGreen(b)) <= tolerance
+        && qAbs(qBlue(a) - qBlue(b)) <= tolerance;
 }
 
 // A desktop with flat regions and hard edges, which is what a screen share is
@@ -172,12 +206,35 @@ private:
         return peerFor(m_conversation, m_bob.transport.localDevice, QStringLiteral("Bob"));
     }
 
+    // Which encoder a share test runs on: both are exercised, the tile
+    // encoder exactly and VP9 within a tolerance, since the engine falls back
+    // to tiles wherever VP9 is unavailable. False when VP9 is not in this build.
+    int m_pixelTolerance = 0;
+    [[nodiscard]] bool useScreenCodec()
+    {
+        QFETCH(QString, codec);
+        if (codec == QStringLiteral("vp9") && !ScreenVideoEncoder::isAvailable())
+            return false;
+        qputenv("OPENCHAT_SCREEN_CODEC", codec.toUtf8());
+        m_pixelTolerance = codec == QStringLiteral("tiles") ? 0 : 12;
+        return true;
+    }
+    static void screenCodecs()
+    {
+        QTest::addColumn<QString>("codec");
+        QTest::newRow("tiles") << QStringLiteral("tiles");
+        QTest::newRow("vp9") << QStringLiteral("vp9");
+    }
+
     // Pushes one desktop frame from `from`, advancing its media clock past the
-    // encoder's pacing gate so the frame is actually looked at.
+    // encoder's pacing gate so the frame is actually looked at. VP9 encodes and
+    // decodes on threads of their own, so their results are given a moment to
+    // come back.
     void shareScreen(Endpoint &from, const QImage &desktop)
     {
         from.nowMs += 200;
         from.engine->sendScreenFrame(ScreenFrameView::fromImage(desktop));
+        QTest::qWait(m_pixelTolerance > 0 ? 3 : 0);
     }
 
     // Arms a share and pushes its first frame, the way the app does.
@@ -203,7 +260,7 @@ private:
             if (spy.isEmpty())
                 continue;
             const auto canvas = qvariant_cast<ScreenCanvasPtr>(spy.last().first());
-            if (canvas && canvas->isComplete())
+            if (canvas && canvas->isComplete() && resembles(canvas->image(), desktop))
                 return canvas;
         }
         return {};
@@ -224,6 +281,8 @@ private slots:
     {
         m_alice = Endpoint{};
         m_bob = Endpoint{};
+        qunsetenv("OPENCHAT_SCREEN_CODEC");
+        m_pixelTolerance = 0;
     }
 
     void aCallGoesFromOfferToAudioFlowing()
@@ -290,8 +349,75 @@ private slots:
         QCOMPARE(bobVideo.count(), frames);
     }
 
+    // The socket is shared with the call's voice, and a screen share can
+    // produce more than the uplink carries. So screen packets wait in the
+    // engine, not the socket, and go out only while the socket has room: voice
+    // never queues behind a desktop, nothing is dropped for arriving at a full
+    // socket (a dropped fragment would break the video stream until the next
+    // keyframe), and a link that cannot keep up gets fewer frames, not more lag.
+    void screenDataWaitsForRoomWhileVoiceGoesStraightThrough()
+    {
+        if (!ScreenVideoEncoder::isAvailable())
+            QSKIP("this build has no VP9");
+        m_pixelTolerance = 12;
+        connectEndpoints();
+        QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
+        m_bob.engine->acceptCall();
+        exchangeMedia();
+        QSignalSpy bobScreen(m_bob.engine.get(), &CallEngine::remoteScreenFrame);
+
+        // The socket is full.
+        m_alice.transport.pendingBytes = 10 * 1024 * 1024;
+        const auto screenPackets = [this] {
+            return int(std::count_if(m_alice.transport.sentVersions.cbegin(),
+                                     m_alice.transport.sentVersions.cend(), [](quint8 version) {
+                                         return version == CallScreenSession::videoWireVersion;
+                                     }));
+        };
+        // Moving, detailed content, so every frame costs the full rate.
+        QImage moving = desktopImage(QSize(1280, 800));
+        QRandomGenerator noise(3);
+        QVERIFY(m_alice.engine->startScreenShare());
+        for (int i = 0; i < 40; ++i) {
+            for (int y = 400; y < 800; ++y) {
+                auto *pixels = reinterpret_cast<QRgb *>(moving.scanLine(y));
+                for (int x = 640; x < 1280; ++x)
+                    pixels[x] = noise.generate() | 0xff000000u;
+            }
+            shareScreen(m_alice, moving);
+        }
+        const QImage desktop = desktopImage(QSize(1280, 800));
+        QTRY_VERIFY(m_alice.engine->screenShareStats().queuedBytes > 0);
+        QCOMPARE(screenPackets(), 0);
+        // Frames are held back, not piled up behind the backlog without end.
+        QVERIFY(m_alice.engine->screenShareStats().framesHeldBack > 0);
+        QVERIFY(m_alice.engine->screenShareStats().queuedBytes < 1024 * 1024);
+
+        // Voice is not paced: it goes out at once, full socket or not.
+        const int sentBefore = m_alice.transport.mediaSent;
+        m_alice.speak(AudioConvert::toFrames(OpenChat::AudioTest::tone(20, 440.0, 0.5)).first());
+        QCOMPARE(m_alice.transport.mediaSent, sentBefore + 1);
+        QCOMPARE(m_alice.transport.sentVersions.last(), quint8(1));
+
+        // Room again: everything held goes out, in order, and the picture
+        // arrives whole — nothing was dropped along the way.
+        m_alice.transport.pendingBytes = 0;
+        QTRY_COMPARE(m_alice.engine->screenShareStats().queuedBytes, qint64(0));
+        QVERIFY(screenPackets() > 0);
+        const ScreenCanvasPtr canvas = settleShare(m_alice, m_bob, desktop, bobScreen);
+        QVERIFY2(canvas, "the share never arrived once the socket had room");
+        QCOMPARE(canvas->size(), desktop.size());
+    }
+
+    void aSharedScreenReachesThePeerAndDisappearsWhenItStops_data()
+    {
+        screenCodecs();
+    }
+
     void aSharedScreenReachesThePeerAndDisappearsWhenItStops()
     {
+        if (!useScreenCodec())
+            QSKIP("this build has no VP9");
         connectEndpoints();
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         m_bob.engine->acceptCall();
@@ -308,8 +434,8 @@ private slots:
         // Receiving a share never turns our own on.
         QCOMPARE(aliceScreen.count(), 0);
         // The flat backdrop crosses the engine untouched.
-        QCOMPARE(canvas->image().pixel(600, 600), desktop.pixel(600, 600));
-        QCOMPARE(canvas->image().pixel(40, 26), desktop.pixel(40, 26));
+        QVERIFY(nearly(canvas->image().pixel(600, 600), desktop.pixel(600, 600), m_pixelTolerance));
+        QVERIFY(nearly(canvas->image().pixel(40, 26), desktop.pixel(40, 26), m_pixelTolerance));
 
         // Stopping clears the far end at once, rather than on a timeout.
         m_alice.engine->stopScreenShare();
@@ -327,8 +453,15 @@ private slots:
         QVERIFY(!m_alice.engine->isScreenSharing());
     }
 
+    void aScreenAndACameraRunAtTheSameTimeWithoutDisturbingVoice_data()
+    {
+        screenCodecs();
+    }
+
     void aScreenAndACameraRunAtTheSameTimeWithoutDisturbingVoice()
     {
+        if (!useScreenCodec())
+            QSKIP("this build has no VP9");
         connectEndpoints();
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         m_bob.engine->acceptCall();
@@ -367,8 +500,15 @@ private slots:
         QVERIFY(!qvariant_cast<QImage>(bobCamera.last().first()).isNull());
     }
 
+    void sharesCanBeStartedAndStoppedRepeatedly_data()
+    {
+        screenCodecs();
+    }
+
     void sharesCanBeStartedAndStoppedRepeatedly()
     {
+        if (!useScreenCodec())
+            QSKIP("this build has no VP9");
         connectEndpoints();
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         m_bob.engine->acceptCall();
@@ -381,8 +521,8 @@ private slots:
             const ScreenCanvasPtr canvas = settleShare(m_alice, m_bob, desktop, bobScreen);
             QVERIFY2(canvas, qPrintable(QStringLiteral("cycle %1 never delivered").arg(cycle)));
             QCOMPARE(canvas->size(), desktop.size());
-            QCOMPARE(canvas->image().pixel(400, 500 % desktop.height()),
-                     desktop.pixel(400, 500 % desktop.height()));
+            QVERIFY(nearly(canvas->image().pixel(400, 500 % desktop.height()),
+                           desktop.pixel(400, 500 % desktop.height()), m_pixelTolerance));
             m_alice.engine->stopScreenShare();
             QVERIFY(!qvariant_cast<ScreenCanvasPtr>(bobScreen.last().first()));
             bobScreen.clear();
@@ -391,8 +531,15 @@ private slots:
         QCOMPARE(m_bob.engine->state(), CallState::Active);
     }
 
+    void aShareIsNotSentWhileTheLinkIsDownAndLosesNothingWhenItReturns_data()
+    {
+        screenCodecs();
+    }
+
     void aShareIsNotSentWhileTheLinkIsDownAndLosesNothingWhenItReturns()
     {
+        if (!useScreenCodec())
+            QSKIP("this build has no VP9");
         connectEndpoints();
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         m_bob.engine->acceptCall();
@@ -416,12 +563,19 @@ private slots:
         m_alice.transport.connected = true;
         const ScreenCanvasPtr repaired = settleShare(m_alice, m_bob, desktop, bobScreen);
         QVERIFY2(repaired, "the share never recovered after the link returned");
-        QCOMPARE(repaired->image().pixel(40, 30), desktop.pixel(40, 30));
+        QVERIFY(nearly(repaired->image().pixel(40, 30), desktop.pixel(40, 30), m_pixelTolerance));
         QCOMPARE(m_alice.engine->state(), CallState::Active);
+    }
+
+    void endingACallReleasesEverythingTheShareHeld_data()
+    {
+        screenCodecs();
     }
 
     void endingACallReleasesEverythingTheShareHeld()
     {
+        if (!useScreenCodec())
+            QSKIP("this build has no VP9");
         connectEndpoints();
         QVERIFY(m_alice.engine->placeCall(aliceCallsBob()));
         m_bob.engine->acceptCall();

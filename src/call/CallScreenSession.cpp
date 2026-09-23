@@ -1,6 +1,8 @@
 #include "call/CallScreenSession.h"
 
 #include "call/CallMediaPacket.h"
+#include "call/ScreenVideoCodec.h"
+#include "diagnostics/BlackBox.h"
 
 #include <QBuffer>
 #include <QElapsedTimer>
@@ -54,6 +56,25 @@ constexpr qint64 motionDwellMs = 1000;
 // Geometry cannot change more often than this, so a viewer dragging their
 // window edge cannot force a full resend on every frame.
 constexpr qint64 geometryHoldMs = 3000;
+
+// Round trip above the uncongested baseline that costs a rung, and the margin
+// within which the link counts as calm. The path is TCP end to end — our
+// uplink, the relay, the viewer's downlink — so congestion shows up as delay,
+// not loss.
+constexpr int delayDegradeMs = 350;
+constexpr int delayCalmMs = 120;
+// How many recent round trips the baseline is the minimum of: at one report
+// every half second, the last half minute, so a route change is adopted.
+constexpr size_t rttWindow = 60;
+// The most a reassembled video frame may claim to be.
+constexpr qsizetype maxVideoFrameBytes = 32 * 1024 * 1024;
+// Urgent reports (a keyframe request) still no more than this often.
+constexpr qint64 urgentReportGapMs = 100;
+// A keyframe request is repeated this long after the last one while frames
+// keep arriving that cannot be decoded without it: the request, or the
+// keyframe that answered it, was dropped on the way. Long enough that a
+// keyframe still in flight on a slow link is not asked for twice.
+constexpr qint64 keyframeRetryMs = 1500;
 
 [[nodiscard]] bool isSupportedSourceFormat(QImage::Format format) noexcept
 {
@@ -181,6 +202,16 @@ int ScreenTileEncoder::targetFps() const noexcept
     // Moving content buys frames with detail, never with bandwidth: the rung's
     // byte ceiling is unchanged, so each frame simply gets a smaller share.
     return m_motionMode ? std::min(60, level.targetFps * 2) : level.targetFps;
+}
+
+int ScreenTileEncoder::levelCount() const noexcept
+{
+    return int(screenShareLevels().size());
+}
+
+int ScreenTileEncoder::bytesPerSecondAt(int level) const noexcept
+{
+    return screenShareLevels().at(size_t(std::clamp(level, 0, levelCount() - 1))).bytesPerSecond;
 }
 
 void ScreenTileEncoder::setLevel(int level)
@@ -630,7 +661,7 @@ void ScreenTileEncoder::reset()
 // --- CallScreenSession -------------------------------------------------------
 
 CallScreenSession::CallScreenSession(CallId id, ScreenShareTuning tuning,
-                                     std::shared_ptr<ScreenTileEncoder> encoder,
+                                     std::shared_ptr<ScreenEncoderControl> encoder,
                                      CallMediaKeys frameSend, CallMediaKeys frameReceive,
                                      CallMediaKeys feedbackSend, CallMediaKeys feedbackReceive)
     : m_id(id)
@@ -646,7 +677,7 @@ CallScreenSession::CallScreenSession(CallId id, ScreenShareTuning tuning,
 
 std::unique_ptr<CallScreenSession> CallScreenSession::create(
     const CallId &id, CallDirection direction, QByteArrayView secret,
-    std::shared_ptr<ScreenTileEncoder> encoder, ScreenShareTuning tuning)
+    std::shared_ptr<ScreenEncoderControl> encoder, ScreenShareTuning tuning)
 {
     const auto frames = CallMediaKeySchedule::deriveScreen(secret, id);
     const auto reports = CallMediaKeySchedule::deriveScreenFeedback(secret, id);
@@ -679,6 +710,50 @@ QByteArray CallScreenSession::sealUpdate(QByteArrayView payload, qint64 nowMs)
     return encoded;
 }
 
+std::vector<QByteArray> CallScreenSession::sealVideoFrame(const EncodedScreenFrame &frame,
+                                                          qint64 nowMs)
+{
+    std::vector<QByteArray> packets;
+    if (frame.data.isEmpty() || frame.size.isEmpty())
+        return packets;
+    const int count = int((frame.data.size() + maxVideoFragmentBytes - 1) / maxVideoFragmentBytes);
+    if (count > maxVideoFragments)
+        return packets;
+    packets.reserve(size_t(count));
+    QByteArray payload;
+    payload.reserve(videoFragmentHeaderBytes + maxVideoFragmentBytes);
+    for (int index = 0; index < count; ++index) {
+        if (m_frameSequence > std::numeric_limits<quint32>::max())
+            return {};
+        const qsizetype offset = qsizetype(index) * maxVideoFragmentBytes;
+        const qsizetype length = std::min<qsizetype>(maxVideoFragmentBytes, frame.data.size() - offset);
+        payload.resize(0);
+        payload.append(char(1)); // a video fragment
+        payload.append(char(frame.keyframe ? 0x01 : 0x00));
+        appendBigEndian16(payload, quint16(frame.size.width()));
+        appendBigEndian16(payload, quint16(frame.size.height()));
+        appendBigEndian32(payload, frame.number);
+        appendBigEndian32(payload, quint32(frame.captureMs));
+        appendBigEndian16(payload, quint16(index));
+        appendBigEndian16(payload, quint16(count));
+        payload.append(frame.data.constData() + offset, length);
+
+        CallMediaPacket packet;
+        packet.version = videoWireVersion;
+        packet.callId = m_id;
+        packet.flags = flagContent;
+        packet.sequence = quint32(m_frameSequence++);
+        packet.sealed = m_frameSealer.seal(packet.sequence, payload, packet.header());
+        if (packet.sealed.isEmpty())
+            return {};
+        QByteArray encoded = packet.encode();
+        m_sentAt[packet.sequence % rttRingSize] = {packet.sequence, nowMs};
+        m_windowBytesSent += quint64(encoded.size());
+        packets.push_back(std::move(encoded));
+    }
+    return packets;
+}
+
 QByteArray CallScreenSession::encodeStop()
 {
     if (m_frameSequence > std::numeric_limits<quint32>::max())
@@ -692,9 +767,20 @@ QByteArray CallScreenSession::encodeStop()
     return packet.sealed.isEmpty() ? QByteArray() : packet.encode();
 }
 
+CallScreenSession::~CallScreenSession() = default;
+
+void CallScreenSession::setAsyncUpdateHandler(QObject *context,
+                                              std::function<void(const Update &)> handler)
+{
+    m_context = context;
+    m_asyncHandler = std::move(handler);
+}
+
 void CallScreenSession::resetSendState()
 {
     m_desiredLevel = 2;
+    m_recentRtts.clear();
+    m_baseRttMs = -1;
     m_cleanReports = 0;
     m_remoteView = QSize();
     m_remoteViewHidden = false;
@@ -723,6 +809,9 @@ void CallScreenSession::resetReceiver()
     m_receiving = false;
     m_windowFramesApplied = 0;
     m_windowBytesReceived = 0;
+    m_assembly = Assembly();
+    if (m_videoDecoder)
+        m_videoDecoder->reset();
 }
 
 std::optional<CallScreenSession::Update> CallScreenSession::decode(QByteArrayView packet,
@@ -732,11 +821,16 @@ std::optional<CallScreenSession::Update> CallScreenSession::decode(QByteArrayVie
     if (packet.size() < headerSize + CallMediaSealer::tagBytes)
         return std::nullopt;
     const auto *data = reinterpret_cast<const uchar *>(packet.data());
-    if (data[0] != wireVersion
+    const bool video = data[0] == videoWireVersion;
+    if ((data[0] != wireVersion && !video)
         || packet.sliced(2, CallId::byteCount) != QByteArrayView(m_id.bytes()))
         return std::nullopt;
     const quint8 flags = data[1];
     if ((flags & ~(flagContent | flagFeedback)) != 0)
+        return std::nullopt;
+    // Version 4 carries picture fragments only; reports and the stop notice
+    // are version 3 whichever encoder is in use.
+    if (video && flags != flagContent)
         return std::nullopt;
     const quint32 sequence = qFromBigEndian<quint32>(data + 18);
     const QByteArrayView sealed = packet.sliced(headerSize);
@@ -771,8 +865,15 @@ std::optional<CallScreenSession::Update> CallScreenSession::decode(QByteArrayVie
         // until they happen to change.
         m_resyncNeeded = true;
         qCDebug(lcScreenShare) << "sequence gap" << *m_lastAppliedSequence << "->" << sequence;
+        // A video stream cannot skip anything: whatever was lost is needed by
+        // every frame after it, until a keyframe starts afresh.
+        if (video || m_videoDecoder)
+            breakVideoStream();
     }
-    m_highestSequenceSeen = std::max(m_highestSequenceSeen, sequence);
+    if (sequence >= m_highestSequenceSeen) {
+        m_highestSequenceSeen = sequence;
+        m_highestSeenAtMs = nowMs;
+    }
 
     if ((flags & flagContent) == 0) {
         if (!payload->isEmpty())
@@ -784,7 +885,125 @@ std::optional<CallScreenSession::Update> CallScreenSession::decode(QByteArrayVie
         return update;
     }
     m_windowBytesReceived += quint32(packet.size());
+    if (video) {
+        m_lastAppliedSequence = sequence;
+        return decodeVideoFragment(*payload, nowMs);
+    }
     return decodeFrame(sequence, *payload);
+}
+
+std::optional<CallScreenSession::Update> CallScreenSession::decodeVideoFragment(QByteArrayView payload,
+                                                                               qint64 nowMs)
+{
+    if (payload.size() < videoFragmentHeaderBytes) {
+        ++m_framesRejected;
+        return std::nullopt;
+    }
+    const auto *header = reinterpret_cast<const uchar *>(payload.data());
+    const int kind = header[0];
+    const bool keyframe = (header[1] & 0x01) != 0;
+    const int width = qFromBigEndian<quint16>(header + 2);
+    const int height = qFromBigEndian<quint16>(header + 4);
+    const quint32 number = qFromBigEndian<quint32>(header + 6);
+    const int index = qFromBigEndian<quint16>(header + 14);
+    const int count = qFromBigEndian<quint16>(header + 16);
+    // Everything declared is checked before anything is kept for it.
+    if (kind != 1 || width < 2 || height < 2 || width > ScreenTileEncoder::maxCanvasEdge
+        || height > ScreenTileEncoder::maxCanvasEdge || count < 1 || count > maxVideoFragments
+        || index >= count) {
+        ++m_framesRejected;
+        return std::nullopt;
+    }
+    m_receiving = true;
+    ++m_windowFramesApplied;
+    m_bytesReceived += quint64(payload.size());
+
+    if (!m_assembly.active || m_assembly.number != number) {
+        // A new frame while the last is still missing pieces: the ordered
+        // connection lost something after all, and the stream is broken.
+        if (m_assembly.active)
+            breakVideoStream();
+        m_assembly = Assembly();
+        // The middle of a frame whose start was lost (the gap that lost it
+        // has already broken the stream): nothing to assemble, and nothing
+        // more to report.
+        if (index != 0)
+            return Update{Update::Kind::Pending, {}, {}, false};
+        m_assembly.active = true;
+        m_assembly.number = number;
+        m_assembly.count = count;
+        m_assembly.keyframe = keyframe;
+        m_assembly.parts.assign(size_t(count), QByteArray());
+    } else if (count != m_assembly.count) {
+        ++m_framesRejected;
+        breakVideoStream();
+        return std::nullopt;
+    }
+    QByteArray &part = m_assembly.parts[size_t(index)];
+    if (!part.isEmpty())
+        return Update{Update::Kind::Pending, {}, {}, false};
+    part = QByteArray(payload.constData() + videoFragmentHeaderBytes,
+                      payload.size() - videoFragmentHeaderBytes);
+    m_assembly.bytes += part.size();
+    if (part.isEmpty() || m_assembly.bytes > maxVideoFrameBytes) {
+        ++m_framesRejected;
+        breakVideoStream();
+        return std::nullopt;
+    }
+    if (++m_assembly.received < m_assembly.count)
+        return Update{Update::Kind::Pending, {}, {}, false};
+
+    QByteArray frame;
+    frame.reserve(m_assembly.bytes);
+    for (const QByteArray &piece : m_assembly.parts)
+        frame.append(piece);
+    const bool frameIsKey = m_assembly.keyframe;
+    m_assembly = Assembly();
+    ++m_framesReceived;
+    if (!m_videoDecoder) {
+        m_videoDecoder = std::make_unique<ScreenVideoDecoder>(m_context);
+        m_videoDecoder->setOnPicture([this](QImage picture) { applyVideoPicture(std::move(picture)); });
+        m_videoDecoder->setOnKeyframeNeeded([this] {
+            m_resyncNeeded = true;
+            m_urgentFeedback = true;
+        });
+    }
+    if (!m_videoDecoder->submit(std::move(frame), frameIsKey) && !m_resyncNeeded
+        && nowMs - m_lastResyncAskMs >= keyframeRetryMs) {
+        // Still waiting for a keyframe long after asking for one.
+        m_resyncNeeded = true;
+        m_urgentFeedback = true;
+    }
+    return Update{Update::Kind::Pending, {}, {}, false};
+}
+
+void CallScreenSession::breakVideoStream()
+{
+    m_assembly = Assembly();
+    if (m_videoDecoder)
+        m_videoDecoder->reset();
+    m_resyncNeeded = true;
+    m_urgentFeedback = true;
+}
+
+void CallScreenSession::applyVideoPicture(QImage picture)
+{
+    if (picture.isNull())
+        return;
+    Update update;
+    update.kind = Update::Kind::Frame;
+    if (!m_canvas || m_canvas->size() != picture.size()) {
+        // A new size gets a new canvas, as on the tile path, so a view still
+        // holding the old one is never left with a surface that changed shape.
+        m_canvas = ScreenCanvas::forVideo(std::move(picture));
+        update.canvasReplaced = true;
+    } else {
+        m_canvas->adoptFrame(std::move(picture));
+    }
+    update.canvas = m_canvas;
+    update.dirty = m_canvas->dirtyRect();
+    if (m_asyncHandler)
+        m_asyncHandler(update);
 }
 
 std::optional<CallScreenSession::Update> CallScreenSession::decodeFrame(quint32 sequence,
@@ -942,8 +1161,11 @@ QByteArray CallScreenSession::encodeFeedback(qint64 nowMs)
 {
     if (!m_receiving)
         return {};
-    if (m_lastReportMs != 0 && nowMs - m_lastReportMs < m_tuning.feedbackIntervalMs)
+    const bool urgent = m_urgentFeedback && m_resyncNeeded;
+    if (m_lastReportMs != 0 && nowMs - m_lastReportMs < m_tuning.feedbackIntervalMs
+        && !(urgent && nowMs - m_lastReportMs >= urgentReportGapMs)) {
         return {};
+    }
     if (m_feedbackSequence > std::numeric_limits<quint32>::max())
         return {};
     const qint64 interval = m_lastReportMs == 0
@@ -963,6 +1185,11 @@ QByteArray CallScreenSession::encodeFeedback(qint64 nowMs)
     const bool askingForResend = m_resyncNeeded;
     payload.append(char(askingForResend ? 0x01 : 0x00));
     payload.append(char(0));
+    // How long the newest packet waited here for this report. Reports are
+    // periodic, so without it a round trip would include up to a whole report
+    // interval of nothing but waiting. Appended after the original twenty
+    // bytes, which older senders read and stop at.
+    appendBigEndian16(payload, quint16(std::clamp<qint64>(nowMs - m_highestSeenAtMs, 0, 65535)));
 
     CallMediaPacket packet;
     packet.version = wireVersion;
@@ -977,10 +1204,15 @@ QByteArray CallScreenSession::encodeFeedback(qint64 nowMs)
     m_windowFramesApplied = 0;
     m_windowBytesReceived = 0;
     // Asked once. If the resend that answers it is lost too, the gap that
-    // creates will raise the request again; repeating it every half second
-    // while the answer is still in flight would only restart it.
-    if (askingForResend)
+    // creates will raise the request again, and on the video path so do
+    // frames that still cannot be decoded keyframeRetryMs later; repeating it
+    // every half second while the answer is still in flight would only
+    // restart it.
+    if (askingForResend) {
         m_resyncNeeded = false;
+        m_lastResyncAskMs = nowMs;
+    }
+    m_urgentFeedback = false;
     return packet.encode();
 }
 
@@ -1000,8 +1232,22 @@ void CallScreenSession::applyFeedback(QByteArrayView payload, qint64 nowMs)
     m_remoteViewHidden = viewWidth <= 0 || viewHeight <= 0;
 
     const auto &slot = m_sentAt[highest % rttRingSize];
-    if (slot.first == highest && slot.second > 0)
-        m_rttMs = int(std::clamp<qint64>(nowMs - slot.second, 0, 60'000));
+    bool freshRtt = false;
+    if (slot.first == highest && slot.second > 0) {
+        // A report from a receiver that says how long it held the packet
+        // gives a true network round trip; an older one only an upper bound,
+        // which is shown but never adapted on.
+        const bool holdKnown = payload.size() >= feedbackBytes + 2;
+        const qint64 hold = holdKnown ? qFromBigEndian<quint16>(data + feedbackBytes) : 0;
+        m_rttMs = int(std::clamp<qint64>(nowMs - slot.second - hold, 0, 60'000));
+        freshRtt = holdKnown;
+        if (holdKnown) {
+            m_recentRtts.push_back(m_rttMs);
+            while (m_recentRtts.size() > rttWindow)
+                m_recentRtts.pop_front();
+            m_baseRttMs = *std::min_element(m_recentRtts.begin(), m_recentRtts.end());
+        }
+    }
 
     if ((flags & 0x01) != 0 && m_encoder) {
         // The far end lost its canvas — it reconnected, or the view was rebuilt.
@@ -1027,10 +1273,11 @@ void CallScreenSession::applyFeedback(QByteArrayView payload, qint64 nowMs)
         m_lastAckedSequence = highest;
     // "Starved" means the encoder actually wanted the whole ceiling: climbing
     // back up is only earned when the link was being asked for something.
-    const ScreenShareLevel &level = screenShareLevels().at(size_t(m_desiredLevel));
+    const int ceiling = m_encoder ? m_encoder->bytesPerSecondAt(m_desiredLevel)
+                                  : screenShareLevels().at(size_t(m_desiredLevel)).bytesPerSecond;
     const qint64 window = std::max<qint64>(interval, 1);
     const double sentPerSecond = double(m_windowBytesSent) * 1000.0 / double(window);
-    const bool starved = sentPerSecond > level.bytesPerSecond * 0.8;
+    const bool starved = sentPerSecond > ceiling * 0.8;
 
     m_windowBytesSent = 0;
     // A report that covers no new frames says nothing about the link, so it
@@ -1038,22 +1285,30 @@ void CallScreenSession::applyFeedback(QByteArrayView payload, qint64 nowMs)
     if (!measured)
         return;
     m_lossRatio = lossRatio;
-    adapt(lossRatio, starved);
+    const int queued = freshRtt && m_baseRttMs >= 0 ? m_rttMs - m_baseRttMs : 0;
+    adapt(lossRatio, starved, queued > delayDegradeMs, queued <= delayCalmMs);
 }
 
-void CallScreenSession::adapt(double lossRatio, bool starved)
+void CallScreenSession::adapt(double lossRatio, bool starved, bool delayed, bool calm)
 {
-    const int lastLevel = int(screenShareLevels().size()) - 1;
-    if (lossRatio > lossDegradeThreshold) {
+    const int lastLevel = (m_encoder ? m_encoder->levelCount() : int(screenShareLevels().size())) - 1;
+    if (lossRatio > lossDegradeThreshold || delayed) {
         m_cleanReports = 0;
         if (m_desiredLevel < lastLevel) {
             ++m_desiredLevel;
             qCDebug(lcScreenShare) << "quality down to level" << m_desiredLevel << "loss"
-                                   << lossRatio;
+                                   << lossRatio << "rtt" << m_rttMs << "base" << m_baseRttMs;
+            BlackBox::record("screen share",
+                             QStringLiteral("quality down to rung %1 (loss %2%, round trip %3 ms, "
+                                            "baseline %4 ms)")
+                                 .arg(m_desiredLevel)
+                                 .arg(int(lossRatio * 100))
+                                 .arg(m_rttMs)
+                                 .arg(m_baseRttMs));
         }
         return;
     }
-    if (lossRatio > lossCleanThreshold) {
+    if (lossRatio > lossCleanThreshold || !calm) {
         m_cleanReports = 0;
         return;
     }

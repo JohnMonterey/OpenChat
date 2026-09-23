@@ -28,6 +28,7 @@ public:
     void sendMedia(const ConversationId &conversation, const DeviceId &recipientDevice,
                    const QByteArray &packet) override;
     [[nodiscard]] bool isConnected() const override;
+    [[nodiscard]] qint64 pendingMediaBytes() const override;
 
     // Media only flows while the app believes the link is up. The engine does
     // not expose its transport's connectivity, so the app that owns both tells

@@ -34,6 +34,12 @@ public:
     // this is false; media is simply dropped.
     [[nodiscard]] virtual bool isConnected() const = 0;
 
+    // Media bytes handed over and not yet on the wire, or -1 when the
+    // transport cannot say. The engine paces bulky media (screen shares) on
+    // it, so audio is never stuck behind a desktop's worth of data and nothing
+    // is dropped for arriving at a full socket.
+    [[nodiscard]] virtual qint64 pendingMediaBytes() const { return -1; }
+
     // Installed by the call engine.
     std::function<void(const ConversationId &, const DeviceId &, const QByteArray &)> onSignal;
     std::function<void(const ConversationId &, const DeviceId &, const QByteArray &)> onMedia;

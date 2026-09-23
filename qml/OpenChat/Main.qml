@@ -54,6 +54,56 @@ Window {
             callFullscreen = false;
     }
 
+    // OpenChat's icon in the notification area (a TrayIcon), when the
+    // application has one; null in the previews and tests. Closing the
+    // window then only hides it there (see CloseToTray).
+    property var tray: null
+    // What the notification-area icon shows: "" outside a call (the
+    // application's icon), otherwise the orb for this user's microphone.
+    // Deafened outranks muted, which outranks talking. There is no deafen yet:
+    // `deafened` reads as undefined until CallController has one, and the grey
+    // orb is ready for it.
+    readonly property string trayCallState: {
+        const calls = root.callController;
+        if (calls === null || !calls.isActive)
+            return "";
+        if (calls.deafened === true)
+            return "deafened";
+        if (calls.muted)
+            return "muted";
+        return calls.localSpeaking ? "talking" : "call";
+    }
+
+    // Whether the window was maximised when last on screen, so that bringing
+    // it back from the notification area or the taskbar keeps it that way.
+    property bool shownMaximized: false
+    onVisibilityChanged: {
+        if (root.visibility === Window.Windowed || root.visibility === Window.Maximized)
+            shownMaximized = root.visibility === Window.Maximized;
+    }
+
+    // Brings the window back from the notification area or the taskbar, in
+    // front of the others. The tray, a clicked notification and a call that
+    // rings while the window is hidden all come here.
+    function bringToFront() {
+        if (!root.visible || root.visibility === Window.Minimized) {
+            if (root.shownMaximized)
+                root.showMaximized();
+            else
+                root.showNormal();
+        }
+        root.raise();
+        root.requestActivate();
+    }
+
+    // A call ringing while the window is in the notification area would
+    // otherwise only be heard.
+    readonly property bool callRinging: callController !== null && callController.isRinging
+    onCallRingingChanged: {
+        if (root.callRinging && !root.visible)
+            root.bringToFront();
+    }
+
     width: 860
     height: 680
     minimumWidth: 720
@@ -380,6 +430,25 @@ Window {
     MediaZoomOverlay {
         id: mediaZoom
         z: 30
+    }
+
+    Binding {
+        target: root.tray
+        property: "callState"
+        value: root.trayCallState
+        when: root.tray !== null
+    }
+
+    Connections {
+        target: root.tray
+
+        function onOpenRequested() {
+            root.bringToFront();
+        }
+
+        function onCloseRequested() {
+            Qt.quit();
+        }
     }
 
     // Escape hands the window back when the call fills it. The enlarged

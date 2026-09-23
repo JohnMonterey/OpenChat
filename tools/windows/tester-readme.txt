@@ -3,6 +3,14 @@ OpenChat test build for Windows
 
 Run OpenChat.exe from this folder. Keep the whole folder together.
 
+Closing OpenChat
+----------------
+Closing the window keeps OpenChat running in the notification area (the
+icons by the clock; Windows may tuck it under the ^ arrow), so messages and
+calls still reach you. Click the icon to bring the window back, or
+right-click it and choose Close to quit. During a call the icon is a green
+light that brightens while you talk, and turns red when you are muted.
+
 If OpenChat crashes
 -------------------
 OpenChat restarts itself and shows what happened. Press "Copy report" and send
@@ -29,9 +37,10 @@ If screen sharing does not work
 -------------------------------
 Open a Command Prompt in this folder and run:
 
-    OpenChat.exe --screen-share-check
+    start /wait OpenChat.exe --screen-share-check
 
-It lists what can be shared, captures each screen for a few seconds, and
+("start /wait" keeps the prompt from coming back before the check has
+finished printing.) It lists what can be shared, captures each screen for a few seconds, and
 says how fast this computer can encode the share. Send
 what it prints, and the capture-*.png pictures it names, to whoever gave you
 this build. The check never prints window titles; the pictures show your

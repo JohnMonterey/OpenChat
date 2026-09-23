@@ -261,6 +261,9 @@ public:
     void setPreviewWaiting(bool waiting, qint64 remainingMs, const QString &peerStateText);
     void setPreviewCanRejoin(bool canRejoin);
     void setPreviewOngoingCall(const QString &text);
+    // Preview seam for the microphone's mute, which a live call takes from
+    // the engine. Never reachable from a live session.
+    void setPreviewMuted(bool muted);
     // Whether the previewed call is on the open conversation (true by default,
     // so every existing preview shows the surface).
     void setPreviewCallInCurrentChat(bool inCurrentChat);

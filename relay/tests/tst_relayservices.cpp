@@ -7,12 +7,14 @@
 #include <QCborMap>
 #include <QSignalSpy>
 #include "AuthService.h"
+#include "CosmeticsService.h"
 #include "DirectoryService.h"
 #include "EnvelopeService.h"
 #include "KeyPackageService.h"
 #include "PostgresStore.h"
 #include "RelayCrypto.h"
 
+#include "domain/CosmeticRules.h"
 #include "protocol/CanonicalCborCodec.h"
 #include "protocol/CiphertextEnvelope.h"
 
@@ -127,6 +129,13 @@ private slots:
     void init(); // reset DB before each test
 
     void schemaIsCiphertextOnly();
+    void cosmeticsStartWithOneCaseAndDropFromConnectedTime();
+    void claimingIsIdempotentAndGrantsTheReward();
+    void onlyOwnedItemsCanBeWornInTheirSlot();
+    void loadoutsArePublicAndBounded();
+    void aDeviceCollectionIsImportedOnce();
+    void operatorGrantsReachEveryAccount();
+    void connectedTimeDropsCasesOverTheWire();
     void challengeAuthenticationRoundTrip();
     void challengeReplayRejected();
     void challengeExpiryRejected();
@@ -226,7 +235,8 @@ void RelayServicesTest::initTestCase()
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
                                  QStringLiteral(":/relay/004_invites.sql"),
                                  QStringLiteral(":/relay/005_envelope_acceptances.sql"),
-                                 QStringLiteral(":/relay/006_account_passwords.sql")};
+                                 QStringLiteral(":/relay/006_account_passwords.sql"),
+                                 QStringLiteral(":/relay/007_cosmetics.sql")};
     QVERIFY2(m_store->applyMigrations(migrations, &error), qPrintable(error));
     m_available = true;
 }
@@ -245,7 +255,8 @@ void RelayServicesTest::init()
     QVERIFY(truncate.exec(QStringLiteral(
         "TRUNCATE accounts, devices, auth_challenges, token_families, refresh_tokens, "
         "access_tokens, key_packages, inbox_messages, device_watermarks, attachments, "
-        "rate_limits, invites, envelope_acceptances RESTART IDENTITY CASCADE")));
+        "rate_limits, invites, envelope_acceptances, cosmetic_claims, cosmetic_cases, "
+        "cosmetic_items, cosmetic_loadouts RESTART IDENTITY CASCADE")));
 }
 
 RelayServicesTest::Registered RelayServicesTest::registerDevice(const QString &handle)
@@ -1425,6 +1436,265 @@ void RelayServicesTest::passwordHashCostIsUpgradedOnLogin()
     QVERIFY(!PasswordHashParams::parse("argon2id$m=99999999,t=2").has_value());
     QVERIFY(!PasswordHashParams::parse("argon2id$m=19456,t=0").has_value());
     QVERIFY(!PasswordHashParams::parse("scrypt$n=1").has_value());
+}
+
+void RelayServicesTest::cosmeticsStartWithOneCaseAndDropFromConnectedTime()
+{
+    const auto alice = registerDevice(QStringLiteral("cosmetic_alice"));
+    CosmeticsService cosmetics(*m_store);
+    const qint64 interval = cosmetics.dropIntervalMs();
+    QCOMPARE(interval, qint64(30 * 60'000));
+
+    // A new account has one case waiting, nothing owned or worn, and nothing
+    // opened: the case on offer is the first.
+    const auto fresh = cosmetics.state(alice.account);
+    QVERIFY(fresh.hasValue());
+    QCOMPARE(fresh.value().drops, 1);
+    QCOMPARE(fresh.value().progressMs, 0);
+    QCOMPARE(fresh.value().dropIntervalMs, interval);
+    QVERIFY(fresh.value().owned.isEmpty());
+    QVERIFY(fresh.value().loadout.isEmpty());
+    QVERIFY(!fresh.value().last);
+    QCOMPARE(fresh.value().nextCaseKey, QStringLiteral("first"));
+    QVERIFY(!fresh.value().imported);
+
+    // Connected time counts toward the next case; every full interval drops
+    // one and the remainder carries on.
+    QCOMPARE(cosmetics.accrue(alice.account, interval / 2).value().progressMs, interval / 2);
+    const auto dropped = cosmetics.accrue(alice.account, interval + interval * 3 / 4);
+    QCOMPARE(dropped.value().drops, 3);
+    QCOMPARE(dropped.value().progressMs, interval / 4);
+    QCOMPARE(cosmetics.accrue(alice.account, 0).value().drops, 3);
+
+    // An account the relay does not know has no cases.
+    QCOMPARE(cosmetics.state(AccountId::generate()).error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::claimingIsIdempotentAndGrantsTheReward()
+{
+    const auto alice = registerDevice(QStringLiteral("cosmetic_claimer"));
+    CosmeticsService cosmetics(*m_store);
+    const QByteArray request = QByteArray(16, 'a');
+    const auto first = cosmetics.claim(alice.account, request);
+    QVERIFY(first.hasValue());
+    QVERIFY(first.value().newlyClaimed);
+    const CosmeticClaim claim = first.value().claim;
+    QVERIFY(CosmeticRules::find(claim.rewardId));
+    QCOMPARE(claim.claimId.size(), 16);
+    QCOMPARE(claim.caseKey, QStringLiteral("first"));
+    // The case is spent, the reward owned, and it is the last one opened.
+    QCOMPARE(first.value().state.drops, 0);
+    QCOMPARE(first.value().state.owned, QStringList{claim.rewardId});
+    QCOMPARE(first.value().state.last->claimId, claim.claimId);
+    QCOMPARE(first.value().state.nextCaseKey,
+             QStringLiteral("after ") + QString::fromLatin1(claim.claimId.toHex()));
+
+    // A retry after a lost response returns the same claim and spends nothing.
+    const auto retry = cosmetics.claim(alice.account, request);
+    QVERIFY(retry.hasValue());
+    QVERIFY(!retry.value().newlyClaimed);
+    QCOMPARE(retry.value().claim.claimId, claim.claimId);
+    QCOMPARE(retry.value().claim.rewardId, claim.rewardId);
+    QCOMPARE(retry.value().claim.seed, claim.seed);
+    QCOMPARE(retry.value().state.drops, 0);
+
+    // With nothing waiting, a new claim is refused; malformed ids are rejected.
+    QCOMPARE(cosmetics.claim(alice.account, QByteArray(16, 'b')).error(), RelayError::Conflict);
+    QCOMPARE(cosmetics.claim(alice.account, QByteArray(4, 'c')).error(), RelayError::InvalidRequest);
+
+    // The next case is offered under the last one's key.
+    QVERIFY(cosmetics.accrue(alice.account, cosmetics.dropIntervalMs()).hasValue());
+    const auto second = cosmetics.claim(alice.account, QByteArray(16, 'b'));
+    QVERIFY(second.value().newlyClaimed);
+    QCOMPARE(second.value().claim.caseKey, first.value().state.nextCaseKey);
+    QVERIFY(second.value().state.owned.contains(second.value().claim.rewardId));
+}
+
+void RelayServicesTest::onlyOwnedItemsCanBeWornInTheirSlot()
+{
+    const auto alice = registerDevice(QStringLiteral("cosmetic_wearer"));
+    CosmeticsService cosmetics(*m_store);
+    QVERIFY(cosmetics.grantDrops(1, alice.account).hasValue());
+    QVERIFY(cosmetics.importCollection(alice.account, {QStringLiteral("frame.neon"),
+                                                       QStringLiteral("bead.gem")}, 0).hasValue());
+    // Not owned: refused.
+    QCOMPARE(cosmetics.equip(alice.account, QStringLiteral("frame"), QStringLiteral("frame.inferno")).error(),
+             RelayError::NotFound);
+    // Owned, but not a frame; an unknown slot or item: invalid.
+    QCOMPARE(cosmetics.equip(alice.account, QStringLiteral("frame"), QStringLiteral("bead.gem")).error(),
+             RelayError::InvalidRequest);
+    QCOMPARE(cosmetics.equip(alice.account, QStringLiteral("hat"), QStringLiteral("frame.neon")).error(),
+             RelayError::InvalidRequest);
+    QCOMPARE(cosmetics.equip(alice.account, QStringLiteral("frame"), QStringLiteral("frame.retired")).error(),
+             RelayError::InvalidRequest);
+    // Owned and in its slot: worn, then cleared.
+    const auto worn = cosmetics.equip(alice.account, QStringLiteral("frame"), QStringLiteral("frame.neon"));
+    QVERIFY(worn.hasValue());
+    QCOMPARE(worn.value().loadout.value(QStringLiteral("frame")), QStringLiteral("frame.neon"));
+    QVERIFY(cosmetics.equip(alice.account, QStringLiteral("bead"), QStringLiteral("bead.gem")).hasValue());
+    const auto cleared = cosmetics.equip(alice.account, QStringLiteral("frame"), QString());
+    QVERIFY(!cleared.value().loadout.contains(QStringLiteral("frame")));
+    QCOMPARE(cleared.value().loadout.value(QStringLiteral("bead")), QStringLiteral("bead.gem"));
+}
+
+void RelayServicesTest::loadoutsArePublicAndBounded()
+{
+    const auto alice = registerDevice(QStringLiteral("cosmetic_shown"));
+    const auto bob = registerDevice(QStringLiteral("cosmetic_viewer"));
+    CosmeticsService cosmetics(*m_store);
+    QVERIFY(cosmetics.importCollection(alice.account, {QStringLiteral("scene.aurora")}, 0).hasValue());
+    QVERIFY(cosmetics.equip(alice.account, QStringLiteral("scene"), QStringLiteral("scene.aurora")).hasValue());
+    // Anyone may read what others wear; those wearing nothing are absent.
+    const auto read = cosmetics.loadouts({alice.account, bob.account, AccountId::generate()});
+    QVERIFY(read.hasValue());
+    QCOMPARE(read.value().size(), 1);
+    QCOMPARE(read.value().value(alice.account).value(QStringLiteral("scene")), QStringLiteral("scene.aurora"));
+    QVERIFY(cosmetics.loadouts({}).value().isEmpty());
+    QList<AccountId> tooMany;
+    for (int i = 0; i < 257; ++i)
+        tooMany.append(AccountId::generate());
+    QCOMPARE(cosmetics.loadouts(tooMany).error(), RelayError::InvalidRequest);
+}
+
+void RelayServicesTest::aDeviceCollectionIsImportedOnce()
+{
+    const auto alice = registerDevice(QStringLiteral("cosmetic_importer"));
+    CosmeticsService cosmetics(*m_store);
+    // Known items come across, unknown ones do not, and waiting cases are
+    // capped (never below what the account already has).
+    const auto imported = cosmetics.importCollection(
+        alice.account, {QStringLiteral("bubble.magma"), QStringLiteral("frame.orbit"),
+                        QStringLiteral("frame.retired"), QStringLiteral("bubble.magma")}, 50);
+    QVERIFY(imported.hasValue());
+    QVERIFY(imported.value().imported);
+    QCOMPARE(imported.value().drops, 10);
+    QCOMPARE(imported.value().owned.size(), 2);
+    QVERIFY(imported.value().owned.contains(QStringLiteral("bubble.magma")));
+    // A second import changes nothing.
+    const auto again = cosmetics.importCollection(alice.account, {QStringLiteral("scene.sakura")}, 5);
+    QCOMPARE(again.value().drops, 10);
+    QCOMPARE(again.value().owned.size(), 2);
+    // An import with nothing waiting keeps the welcome case.
+    const auto bob = registerDevice(QStringLiteral("cosmetic_importer_two"));
+    QCOMPARE(cosmetics.importCollection(bob.account, {}, 0).value().drops, 1);
+}
+
+void RelayServicesTest::operatorGrantsReachEveryAccount()
+{
+    const auto alice = registerDevice(QStringLiteral("cosmetic_granted_one"));
+    const auto bob = registerDevice(QStringLiteral("cosmetic_granted_two"));
+    CosmeticsService cosmetics(*m_store);
+    // Alice has spent her welcome case; Bob has never asked.
+    QVERIFY(cosmetics.claim(alice.account, QByteArray(16, 'g')).hasValue());
+    const auto everyone = cosmetics.grantDrops(5);
+    QVERIFY(everyone.hasValue());
+    QCOMPARE(everyone.value(), 2);
+    QCOMPARE(cosmetics.state(alice.account).value().drops, 5);
+    QCOMPARE(cosmetics.state(bob.account).value().drops, 6);
+    // One account by id; bounds are enforced.
+    QCOMPARE(cosmetics.grantDrops(2, bob.account).value(), 1);
+    QCOMPARE(cosmetics.state(bob.account).value().drops, 8);
+    QCOMPARE(cosmetics.grantDrops(0).error(), RelayError::InvalidRequest);
+    QCOMPARE(cosmetics.grantDrops(1001).error(), RelayError::InvalidRequest);
+    QCOMPARE(cosmetics.grantDrops(1, AccountId::generate()).error(), RelayError::NotFound);
+}
+
+void RelayServicesTest::connectedTimeDropsCasesOverTheWire()
+{
+    const auto alice = registerDevice(QStringLiteral("cosmetic_online"));
+    const auto bob = registerDevice(QStringLiteral("cosmetic_onlooker"));
+    AuthService auth(*m_store);
+    EnvelopeService envelopes(*m_store);
+    KeyPackageService packages(*m_store);
+    DirectoryService directory(*m_store);
+    CosmeticsService::Policy policy;
+    policy.dropIntervalMs = 400;
+    CosmeticsService cosmetics(*m_store, policy);
+    RelayServer server(*m_store, auth, envelopes, packages, directory);
+    server.setCosmetics(&cosmetics);
+    const auto port = server.start(QHostAddress::LocalHost, 0);
+    QVERIFY(port);
+
+    const auto http = [port](const QString &path, const QByteArray &token) {
+        QNetworkRequest req(QUrl(QStringLiteral("http://127.0.0.1:%1/v1/").arg(port) + path));
+        req.setRawHeader("Authorization", "Bearer " + token);
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/cbor");
+        return req;
+    };
+    QNetworkAccessManager network;
+    const auto finish = [](QNetworkReply *reply) {
+        QTest::qWaitFor([reply] { return reply->isFinished(); }, 5000);
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QCborMap body = QCborValue::fromCbor(reply->readAll()).toMap();
+        reply->deleteLater();
+        return std::pair{status, body};
+    };
+
+    // Unauthenticated callers get nothing.
+    QCOMPARE(finish(network.get(http(QStringLiteral("cosmetics"), "invalid"))).first, 401);
+
+    // Connected, an opted-in client hears where it stands at once...
+    QWebSocket socket;
+    QSignalSpy frames(&socket, &QWebSocket::binaryMessageReceived);
+    QNetworkRequest live(QUrl(QStringLiteral("ws://127.0.0.1:%1/v1/live?cosmetics=1").arg(port)));
+    live.setRawHeader("Authorization", "Bearer " + alice.tokens.accessToken);
+    socket.open(live);
+    QTRY_COMPARE(frames.size(), 1);
+    auto frame = QCborValue::fromCbor(frames.takeFirst().at(0).toByteArray()).toArray();
+    QCOMPARE(frame.at(0).toInteger(), 14);
+    QCOMPARE(frame.at(1).toMap().value(QLatin1StringView("drops")).toInteger(), 1);
+    QCOMPARE(frame.at(1).toMap().value(QLatin1StringView("interval_ms")).toInteger(), 400);
+    // ...and a case drops, and is pushed, for each interval it stays.
+    QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 3000);
+    frame = QCborValue::fromCbor(frames.takeFirst().at(0).toByteArray()).toArray();
+    QCOMPARE(frame.at(0).toInteger(), 14);
+    QCOMPARE(frame.at(1).toMap().value(QLatin1StringView("drops")).toInteger(), 2);
+    QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 3000);
+    frame = QCborValue::fromCbor(frames.takeFirst().at(0).toByteArray()).toArray();
+    QCOMPARE(frame.at(1).toMap().value(QLatin1StringView("drops")).toInteger(), 3);
+
+    // Opening one over HTTP is pushed too.
+    QCborMap claim;
+    claim.insert(QLatin1StringView("request_id"), QByteArray(16, 'w'));
+    auto [claimStatus, claimed] = finish(network.post(http(QStringLiteral("cosmetics/claim"),
+                                                           alice.tokens.accessToken),
+                                                      claim.toCborValue().toCbor()));
+    QCOMPARE(claimStatus, 200);
+    QVERIFY(claimed.value(QLatin1StringView("newly_claimed")).toBool());
+    const QString reward = claimed.value(QLatin1StringView("claim")).toMap()
+                               .value(QLatin1StringView("reward_id")).toString();
+    QVERIFY(CosmeticRules::find(reward));
+    QTRY_VERIFY(!frames.isEmpty());
+    frames.clear();
+
+    // Wearing it, and another account seeing it.
+    QCborMap equip;
+    equip.insert(QLatin1StringView("slot"), QString::fromLatin1(CosmeticRules::find(reward)->slot));
+    equip.insert(QLatin1StringView("item_id"), reward);
+    auto [equipStatus, equipped] = finish(network.post(http(QStringLiteral("cosmetics/equip"),
+                                                            alice.tokens.accessToken),
+                                                       equip.toCborValue().toCbor()));
+    QCOMPARE(equipStatus, 200);
+    QCborMap lookup;
+    lookup.insert(QLatin1StringView("accounts"), QCborArray{alice.account.bytes()});
+    auto [lookupStatus, loadouts] = finish(network.post(http(QStringLiteral("cosmetics/loadouts"),
+                                                             bob.tokens.accessToken),
+                                                        lookup.toCborValue().toCbor()));
+    QCOMPARE(lookupStatus, 200);
+    const auto entry = loadouts.value(QLatin1StringView("loadouts")).toArray().first().toMap();
+    QCOMPARE(entry.value(QLatin1StringView("account_id")).toByteArray(), alice.account.bytes());
+    QCOMPARE(entry.value(QLatin1StringView("slots")).toMap()
+                 .value(QString::fromLatin1(CosmeticRules::find(reward)->slot)).toString(), reward);
+
+    // Closed, the account earns nothing however long it stays away.
+    socket.close();
+    QTRY_COMPARE(socket.state(), QAbstractSocket::UnconnectedState);
+    QTest::qWait(200);
+    const auto closed = cosmetics.state(alice.account).value();
+    QTest::qWait(1000);
+    const auto later = cosmetics.state(alice.account).value();
+    QCOMPARE(later.drops, closed.drops);
+    QCOMPARE(later.progressMs, closed.progressMs);
 }
 
 QTEST_GUILESS_MAIN(RelayServicesTest)

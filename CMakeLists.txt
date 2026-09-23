@@ -60,7 +60,7 @@ add_library(openchat_cosmetics STATIC
     src/cosmetics/BubbleSkins.cpp
 )
 target_include_directories(openchat_cosmetics PUBLIC src)
-target_link_libraries(openchat_cosmetics PUBLIC Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
+target_link_libraries(openchat_cosmetics PUBLIC openchat_domain Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
     qt_policy(SET QTP0004 NEW)
 endif()
@@ -293,6 +293,7 @@ add_library(openchat_domain STATIC
     src/diagnostics/BlackBox.cpp
     src/domain/Identifiers.cpp
     src/domain/Handle.cpp
+    src/domain/CosmeticRules.cpp
     src/domain/ProfileUpdate.cpp
     src/domain/GroupUpdate.cpp
     src/domain/MessageContent.cpp

@@ -1,4 +1,5 @@
 #include "AuthService.h"
+#include "CosmeticsService.h"
 #include "DirectoryService.h"
 #include "EnvelopeService.h"
 #include "KeyPackageService.h"
@@ -10,6 +11,8 @@
 #include <QHostAddress>
 #include <QLoggingCategory>
 #include <QTimer>
+
+#include <cstdio>
 
 // openchat-relay: a ciphertext-only relay. Configuration comes from the
 // environment so no secrets appear on the command line. TLS is terminated by a
@@ -26,11 +29,24 @@
 //   OPENCHAT_RELAY_PORT         (default 8443)
 //   OPENCHAT_RELAY_MEDIA_BIND   (default off)
 //   OPENCHAT_RELAY_MEDIA_PORT   (default 8444)
+//
+// Operator command, run against the same database and then exiting:
+//   openchat-relay grant-cases <count> --all        every account
+//   openchat-relay grant-cases <count> <handle>     one account
+// adds <count> waiting cases (1-1000). Connected clients see them the next
+// time they ask (opening the case popup, or reconnecting).
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
 
     using namespace OpenChat::Relay;
+
+    const QStringList args = QCoreApplication::arguments();
+    const bool grantCommand = args.size() >= 2 && args.at(1) == QLatin1String("grant-cases");
+    if (grantCommand && args.size() != 4) {
+        std::fprintf(stderr, "usage: openchat-relay grant-cases <count> (--all | <handle>)\n");
+        return 2;
+    }
 
     PostgresStore::Config config;
     config.host = qEnvironmentVariable("OPENCHAT_RELAY_PG_HOST", QStringLiteral("127.0.0.1"));
@@ -58,7 +74,8 @@ int main(int argc, char **argv)
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
                                  QStringLiteral(":/relay/004_invites.sql"),
                                  QStringLiteral(":/relay/005_envelope_acceptances.sql"),
-                                 QStringLiteral(":/relay/006_account_passwords.sql")};
+                                 QStringLiteral(":/relay/006_account_passwords.sql"),
+                                 QStringLiteral(":/relay/007_cosmetics.sql")};
     if (!store->applyMigrations(migrations, &error)) {
         qCritical("migration failed");
         return 4;
@@ -79,7 +96,32 @@ int main(int argc, char **argv)
     EnvelopeService envelopes(*store);
     KeyPackageService keyPackages(*store);
     DirectoryService directory(*store);
+    CosmeticsService cosmetics(*store);
+
+    if (grantCommand) {
+        bool numeric = false;
+        const int count = args.at(2).toInt(&numeric);
+        std::optional<OpenChat::AccountId> account;
+        if (args.at(3) != QLatin1String("--all")) {
+            const auto resolved = directory.resolveHandle(args.at(3));
+            if (!resolved.hasValue()) {
+                std::fprintf(stderr, "no account has that handle\n");
+                return 7;
+            }
+            account = resolved.value().accountId;
+        }
+        const auto granted = numeric ? cosmetics.grantDrops(count, account)
+                                     : OpenChat::Result<int, RelayError>::failure(RelayError::InvalidRequest);
+        if (!granted.hasValue()) {
+            std::fprintf(stderr, "grant failed: the count must be 1-1000\n");
+            return 8;
+        }
+        std::printf("granted %d case(s) to %d account(s)\n", count, granted.value());
+        return 0;
+    }
+
     RelayServer server(*store, auth, envelopes, keyPackages, directory);
+    server.setCosmetics(&cosmetics);
 
     // Inboxes hold envelopes for devices that are offline, so storage no longer
     // drains just because recipients connect: sweep what has expired or can no

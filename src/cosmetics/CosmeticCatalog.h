@@ -7,16 +7,15 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include "domain/CosmeticRules.h"
+
 namespace OpenChat {
 
-// How rare a collectible is, lowest first. The case rolls a tier by its
-// weight, then one item of that tier uniformly, so an item's odds are its
-// tier's share divided by the tier's size.
-enum class Rarity { Common, Rare, Epic, Legendary, Exotic };
-
-// Every collectible cosmetic the client can draw, by stable id. The ids are
-// what settings (and later the inventory and the case) store, so they
-// never change once shipped; names, descriptions and rarity are presentation.
+// Every collectible cosmetic the client can draw, by stable id: the shared
+// rules (domain/CosmeticRules: slot, tier, animation, odds), which the relay
+// holds too, dressed with the names and descriptions only the client shows.
+// The ids are what the relay and settings store, so they never change once
+// shipped.
 struct CosmeticInfo
 {
     QString id;
@@ -31,7 +30,7 @@ class CosmeticCatalog
 {
   public:
     // Tier weights are out of this total (parts per thousand).
-    static constexpr int totalWeight = 1000;
+    static constexpr int totalWeight = CosmeticRules::totalWeight;
 
     static const QList<CosmeticInfo> &all();
     static QList<CosmeticInfo> inCategory(const QString &category);

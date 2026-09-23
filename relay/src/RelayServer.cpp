@@ -18,6 +18,7 @@
 #include <QWebSocket>
 #include <QTimer>
 
+#include <algorithm>
 #include <optional>
 
 namespace OpenChat::Relay {
@@ -137,6 +138,42 @@ QCborValue directoryCbor(const AccountDirectoryEntry &entry)
     return response.toCborValue();
 }
 
+// { claim_id, reward_id, seed, case_key }
+QCborMap claimCbor(const CosmeticClaim &claim)
+{
+    QCborMap map;
+    map.insert(QLatin1StringView("claim_id"), claim.claimId);
+    map.insert(QLatin1StringView("reward_id"), claim.rewardId);
+    map.insert(QLatin1StringView("seed"), static_cast<qint64>(claim.seed));
+    map.insert(QLatin1StringView("case_key"), claim.caseKey);
+    return map;
+}
+
+QCborMap slotsCbor(const QHash<QString, QString> &loadout)
+{
+    QCborMap map;
+    for (auto it = loadout.cbegin(); it != loadout.cend(); ++it)
+        map.insert(it.key(), it.value());
+    return map;
+}
+
+// An account's own cosmetics: { drops, progress_ms, interval_ms, next_case_key,
+// owned: [id...], loadout: { slot: id }, imported, last?: claim }.
+QCborMap cosmeticStateCbor(const CosmeticState &state)
+{
+    QCborMap map;
+    map.insert(QLatin1StringView("drops"), state.drops);
+    map.insert(QLatin1StringView("progress_ms"), state.progressMs);
+    map.insert(QLatin1StringView("interval_ms"), state.dropIntervalMs);
+    map.insert(QLatin1StringView("next_case_key"), state.nextCaseKey);
+    map.insert(QLatin1StringView("owned"), QCborArray::fromStringList(state.owned));
+    map.insert(QLatin1StringView("loadout"), slotsCbor(state.loadout));
+    map.insert(QLatin1StringView("imported"), state.imported);
+    if (state.last)
+        map.insert(QLatin1StringView("last"), claimCbor(*state.last));
+    return map;
+}
+
 } // namespace
 
 RelayServer::RelayServer(PostgresStore &store, AuthService &auth, EnvelopeService &envelopes,
@@ -159,7 +196,17 @@ RelayServer::RelayServer(PostgresStore &store, AuthService &auth, EnvelopeServic
 {
 }
 
-RelayServer::~RelayServer() = default;
+RelayServer::~RelayServer()
+{
+    // Shutting down: every connected account keeps the time it was here.
+    if (m_cosmetics) {
+        const auto sessions = m_cosmeticSessions.keys();
+        for (const QByteArray &key : sessions) {
+            if (const auto account = AccountId::fromBytes(QByteArray::fromHex(key)))
+                creditCosmeticSession(*account, false);
+        }
+    }
+}
 
 quint16 RelayServer::start(const QHostAddress &address, quint16 port)
 {
@@ -205,6 +252,8 @@ void RelayServer::registerTestToken(const QByteArray &token, const Authenticated
 
 void RelayServer::registerRoutes()
 {
+    registerCosmeticRoutes();
+
     m_http.route(
         QStringLiteral("/v1/accounts"), QHttpServerRequest::Method::Post,
         [this](const QHttpServerRequest &request) -> QHttpServerResponse {
@@ -534,6 +583,11 @@ void RelayServer::onWebSocketConnection()
         raw->setProperty("keyPackageSupply", QUrlQuery(raw->requestUrl())
             .queryItemValue(QStringLiteral("keyPackageSupply")) == QStringLiteral("1"));
         sendKeyPackageSupply(identity->deviceId);
+        // Opted-in clients hear their cosmetics on connect and whenever they
+        // change; every connection counts toward the account's case drops.
+        raw->setProperty("cosmetics", QUrlQuery(raw->requestUrl())
+            .queryItemValue(QStringLiteral("cosmetics")) == QStringLiteral("1"));
+        beginCosmeticSession(identity->accountId, raw);
         // Detect vanished clients even when TCP has not reported a disconnect.
         auto *heartbeat = new QTimer(raw);
         raw->setProperty("awaitingPong", false);
@@ -575,13 +629,228 @@ void RelayServer::onWebSocketConnection()
             raw->close(QWebSocketProtocol::CloseCodeDatatypeNotSupported,
                        QStringLiteral("binary only"));
         });
-        connect(raw, &QWebSocket::disconnected, this, [this, raw, key, devId = identity->deviceId]() {
+        connect(raw, &QWebSocket::disconnected, this,
+                [this, raw, key, devId = identity->deviceId, account = identity->accountId]() {
             if (m_liveByDevice.value(key) == raw)
                 m_liveByDevice.remove(key);
+            endCosmeticSession(account, raw);
             if (m_udpMedia)
                 m_udpMedia->clearBinding(devId);
             raw->deleteLater();
         });
+    }
+}
+
+void RelayServer::registerCosmeticRoutes()
+{
+    // Collectible cosmetics (migration 007). Every route needs a signed-in
+    // device; an account only ever reads or changes its own state, except for
+    // loadouts, which any signed-in account may read, like the directory.
+    const auto authenticated = [this](const QHttpServerRequest &request) {
+        return m_cosmetics ? m_auth.authenticate(bearerToken(request)) : std::nullopt;
+    };
+
+    m_http.route(
+        QStringLiteral("/v1/cosmetics"), QHttpServerRequest::Method::Get,
+        [this, authenticated](const QHttpServerRequest &request) -> QHttpServerResponse {
+            if (!m_cosmetics)
+                return QHttpServerResponse(StatusCode::NotFound);
+            const auto identity = authenticated(request);
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const auto state = m_cosmetics->state(identity->accountId);
+            if (!state.hasValue())
+                return errorResponse(state.error());
+            return cbor(cosmeticStateCbor(state.value()).toCborValue());
+        });
+
+    m_http.route(
+        QStringLiteral("/v1/cosmetics/claim"), QHttpServerRequest::Method::Post,
+        [this, authenticated](const QHttpServerRequest &request) -> QHttpServerResponse {
+            if (!m_cosmetics)
+                return QHttpServerResponse(StatusCode::NotFound);
+            const auto identity = authenticated(request);
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const auto map = boundedCborMap(request, m_limits.maxRequestBytes);
+            if (!map || !map->value(QLatin1StringView("request_id")).isByteArray())
+                return QHttpServerResponse(StatusCode::BadRequest);
+            const auto claimed = m_cosmetics->claim(
+                identity->accountId, map->value(QLatin1StringView("request_id")).toByteArray());
+            if (!claimed.hasValue())
+                return errorResponse(claimed.error());
+            pushCosmetics(identity->accountId, claimed.value().state);
+            QCborMap response;
+            response.insert(QLatin1StringView("state"), cosmeticStateCbor(claimed.value().state));
+            response.insert(QLatin1StringView("claim"), claimCbor(claimed.value().claim));
+            response.insert(QLatin1StringView("newly_claimed"), claimed.value().newlyClaimed);
+            return cbor(response.toCborValue());
+        });
+
+    m_http.route(
+        QStringLiteral("/v1/cosmetics/equip"), QHttpServerRequest::Method::Post,
+        [this, authenticated](const QHttpServerRequest &request) -> QHttpServerResponse {
+            if (!m_cosmetics)
+                return QHttpServerResponse(StatusCode::NotFound);
+            const auto identity = authenticated(request);
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const auto map = boundedCborMap(request, m_limits.maxRequestBytes);
+            if (!map || !map->value(QLatin1StringView("slot")).isString()
+                || !map->value(QLatin1StringView("item_id")).isString())
+                return QHttpServerResponse(StatusCode::BadRequest);
+            const auto state = m_cosmetics->equip(identity->accountId,
+                                                  map->value(QLatin1StringView("slot")).toString(),
+                                                  map->value(QLatin1StringView("item_id")).toString());
+            if (!state.hasValue())
+                return errorResponse(state.error());
+            pushCosmetics(identity->accountId, state.value());
+            return cbor(cosmeticStateCbor(state.value()).toCborValue());
+        });
+
+    m_http.route(
+        QStringLiteral("/v1/cosmetics/import"), QHttpServerRequest::Method::Post,
+        [this, authenticated](const QHttpServerRequest &request) -> QHttpServerResponse {
+            if (!m_cosmetics)
+                return QHttpServerResponse(StatusCode::NotFound);
+            const auto identity = authenticated(request);
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const auto map = boundedCborMap(request, m_limits.maxRequestBytes);
+            if (!map || !map->value(QLatin1StringView("owned")).isArray()
+                || !map->value(QLatin1StringView("drops")).isInteger())
+                return QHttpServerResponse(StatusCode::BadRequest);
+            QStringList owned;
+            for (const QCborValue &id : map->value(QLatin1StringView("owned")).toArray()) {
+                if (!id.isString())
+                    return QHttpServerResponse(StatusCode::BadRequest);
+                owned.append(id.toString());
+            }
+            const qint64 drops = map->value(QLatin1StringView("drops")).toInteger();
+            const auto state = m_cosmetics->importCollection(
+                identity->accountId, owned, static_cast<int>(std::clamp<qint64>(drops, -1, 1'000'000)));
+            if (!state.hasValue())
+                return errorResponse(state.error());
+            pushCosmetics(identity->accountId, state.value());
+            return cbor(cosmeticStateCbor(state.value()).toCborValue());
+        });
+
+    m_http.route(
+        QStringLiteral("/v1/cosmetics/loadouts"), QHttpServerRequest::Method::Post,
+        [this, authenticated](const QHttpServerRequest &request) -> QHttpServerResponse {
+            if (!m_cosmetics)
+                return QHttpServerResponse(StatusCode::NotFound);
+            const auto identity = authenticated(request);
+            if (!identity)
+                return QHttpServerResponse(StatusCode::Unauthorized);
+            const auto map = boundedCborMap(request, m_limits.maxRequestBytes);
+            if (!map || !map->value(QLatin1StringView("accounts")).isArray())
+                return QHttpServerResponse(StatusCode::BadRequest);
+            QList<AccountId> accounts;
+            for (const QCborValue &value : map->value(QLatin1StringView("accounts")).toArray()) {
+                const auto account = value.isByteArray() ? AccountId::fromBytes(value.toByteArray())
+                                                         : std::nullopt;
+                if (!account)
+                    return QHttpServerResponse(StatusCode::BadRequest);
+                accounts.append(*account);
+            }
+            const auto worn = m_cosmetics->loadouts(accounts);
+            if (!worn.hasValue())
+                return errorResponse(worn.error());
+            // { loadouts: [ { account_id, slots: { slot: id } }, ... ] }
+            QCborArray loadouts;
+            for (auto it = worn.value().cbegin(); it != worn.value().cend(); ++it) {
+                QCborMap entry;
+                entry.insert(QLatin1StringView("account_id"), it.key().bytes());
+                entry.insert(QLatin1StringView("slots"), slotsCbor(it.value()));
+                loadouts.append(entry);
+            }
+            QCborMap response;
+            response.insert(QLatin1StringView("loadouts"), loadouts);
+            return cbor(response.toCborValue());
+        });
+}
+
+void RelayServer::beginCosmeticSession(const AccountId &account, QWebSocket *socket)
+{
+    if (!m_cosmetics)
+        return;
+    const QByteArray key = account.bytes().toHex();
+    CosmeticSession &session = m_cosmeticSessions[key];
+    session.sockets.append(socket);
+    if (session.sockets.size() == 1) {
+        // The account just came online: its connected time counts from now.
+        session.uncredited.start();
+        session.nextDrop = new QTimer(this);
+        session.nextDrop->setSingleShot(true);
+        // A coarse timer may fire a little early, short of the drop it waits for.
+        session.nextDrop->setTimerType(Qt::PreciseTimer);
+        connect(session.nextDrop, &QTimer::timeout, this,
+                [this, account] { creditCosmeticSession(account, true); });
+        creditCosmeticSession(account, false);
+    }
+    // Tell the new connection where it stands.
+    if (socket->property("cosmetics").toBool()) {
+        if (const auto state = m_cosmetics->state(account); state.hasValue())
+            socket->sendBinaryMessage(
+                QCborArray{14, cosmeticStateCbor(state.value())}.toCborValue().toCbor());
+    }
+}
+
+void RelayServer::endCosmeticSession(const AccountId &account, QWebSocket *socket)
+{
+    const QByteArray key = account.bytes().toHex();
+    auto it = m_cosmeticSessions.find(key);
+    if (it == m_cosmeticSessions.end())
+        return;
+    it->sockets.removeAll(socket);
+    if (!it->sockets.isEmpty())
+        return;
+    // The last connection closed: credit the time it ran, and stop counting.
+    creditCosmeticSession(account, false);
+    it = m_cosmeticSessions.find(key);
+    if (it == m_cosmeticSessions.end())
+        return;
+    if (it->nextDrop)
+        it->nextDrop->deleteLater();
+    m_cosmeticSessions.erase(it);
+}
+
+void RelayServer::creditCosmeticSession(const AccountId &account, bool push)
+{
+    if (!m_cosmetics)
+        return;
+    auto it = m_cosmeticSessions.find(account.bytes().toHex());
+    if (it == m_cosmeticSessions.end())
+        return;
+    const auto state = m_cosmetics->accrue(account, it->uncredited.elapsed());
+    if (!state.hasValue()) {
+        // The time keeps counting and is offered again a minute on.
+        if (it->nextDrop)
+            it->nextDrop->start(60'000);
+        qWarning("relay: could not credit an account's connected time toward its cases");
+        return;
+    }
+    it->uncredited.restart();
+    if (it->nextDrop) {
+        const qint64 remaining = state.value().dropIntervalMs - state.value().progressMs;
+        it->nextDrop->start(static_cast<int>(std::clamp<qint64>(remaining, 1, state.value().dropIntervalMs)));
+    }
+    const bool dropped = state.value().drops != it->drops;
+    it->drops = state.value().drops;
+    if (push && dropped)
+        pushCosmetics(account, state.value());
+}
+
+void RelayServer::pushCosmetics(const AccountId &account, const CosmeticState &state)
+{
+    const auto it = m_cosmeticSessions.constFind(account.bytes().toHex());
+    if (it == m_cosmeticSessions.cend())
+        return;
+    const QByteArray frame = QCborArray{14, cosmeticStateCbor(state)}.toCborValue().toCbor();
+    for (QWebSocket *socket : it->sockets) {
+        if (socket->property("cosmetics").toBool())
+            socket->sendBinaryMessage(frame);
     }
 }
 

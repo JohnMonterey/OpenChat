@@ -1,20 +1,24 @@
 #pragma once
 
 #include "AuthService.h"
+#include "CosmeticsService.h"
 #include "DirectoryService.h"
 #include "EnvelopeService.h"
 #include "KeyPackageService.h"
 #include "PostgresStore.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QHttpServer>
 #include <QHostAddress>
+#include <QList>
 #include <QObject>
 
 #include <memory>
 
 QT_BEGIN_NAMESPACE
 class QTcpServer;
+class QTimer;
 class QWebSocket;
 QT_END_NAMESPACE
 
@@ -55,8 +59,26 @@ public:
     // Allows tests without a running PostgreSQL database to register authenticated tokens.
     void registerTestToken(const QByteArray &token, const AuthenticatedDevice &device);
 
+    // Serves /v1/cosmetics* and counts each account's connected time toward
+    // its case drops. Without it those routes are 404 and nothing is counted.
+    void setCosmetics(CosmeticsService *cosmetics) { m_cosmetics = cosmetics; }
+
 private:
+    // An account's live sockets and the connected time not yet credited to it.
+    struct CosmeticSession final {
+        QList<QWebSocket *> sockets;
+        QElapsedTimer uncredited;
+        QTimer *nextDrop = nullptr;
+        int drops = -1; // as last credited, so only a new case is pushed
+    };
+
     void registerRoutes();
+    void registerCosmeticRoutes();
+    void beginCosmeticSession(const AccountId &account, QWebSocket *socket);
+    void endCosmeticSession(const AccountId &account, QWebSocket *socket);
+    // Credits the session's connected time, then waits for its next drop.
+    void creditCosmeticSession(const AccountId &account, bool push);
+    void pushCosmetics(const AccountId &account, const CosmeticState &state);
     void sendKeyPackageSupply(const DeviceId &device);
     void onWebSocketConnection();
     void handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice &device,
@@ -76,6 +98,9 @@ private:
     // Live sockets keyed by recipient device id bytes (hex), for best-effort
     // real-time delivery of freshly accepted envelopes.
     QHash<QByteArray, QWebSocket *> m_liveByDevice;
+    CosmeticsService *m_cosmetics = nullptr;
+    // Keyed by account id bytes (hex).
+    QHash<QByteArray, CosmeticSession> m_cosmeticSessions;
 };
 
 } // namespace OpenChat::Relay

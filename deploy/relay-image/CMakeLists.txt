@@ -28,6 +28,7 @@ enable_testing()
 add_library(openchat_domain STATIC
     src/domain/Identifiers.cpp
     src/domain/Handle.cpp
+    src/domain/CosmeticRules.cpp
 )
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)

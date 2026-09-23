@@ -406,7 +406,8 @@ void EndToEndTest::initTestCase()
                                  QStringLiteral(":/relay/003_inboxes_attachments.sql"),
                                  QStringLiteral(":/relay/004_invites.sql"),
                                  QStringLiteral(":/relay/005_envelope_acceptances.sql"),
-                                 QStringLiteral(":/relay/006_account_passwords.sql")};
+                                 QStringLiteral(":/relay/006_account_passwords.sql"),
+                                 QStringLiteral(":/relay/007_cosmetics.sql")};
     QVERIFY2(m_store->applyMigrations(migrations, &error), qPrintable(error));
 
     // Service + server wiring order mirrors relay/src/main.cpp.

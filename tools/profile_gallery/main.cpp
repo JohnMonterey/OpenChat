@@ -31,6 +31,7 @@
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
 #include "app/ComposerEditing.h"
+#include "app/TextLineSpacing.h"
 #include "app/TransportSettings.h"
 #include "case/DailyCaseController.h"
 #include "controllers/CallController.h"
@@ -57,6 +58,7 @@ void registerTypes()
         "OpenChat.Native", 1, 0, "VoiceEffectHost",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::VoiceEffectHost; });
     qmlRegisterType<OpenChat::ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
+    qmlRegisterType<OpenChat::TextLineSpacing>("OpenChat.Native", 1, 0, "TextLineSpacing");
     qmlRegisterSingletonType<OpenChat::TransportSettings>(
         "OpenChat.Native", 1, 0, "TransportSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::TransportSettings; });

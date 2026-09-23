@@ -7,6 +7,7 @@
 //   openchat-cosmetics-gallery [--output-dir DIR] [--scale 2] [--dump-tiles]
 
 #include "app/AppearanceSettings.h"
+#include "app/TextLineSpacing.h"
 #include "cosmetics/BubbleSkins.h"
 #include "render/BubbleBackground.h"
 
@@ -82,6 +83,7 @@ int main(int argc, char **argv)
         "OpenChat.Native", 1, 0, "AppearanceSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
+    qmlRegisterType<OpenChat::TextLineSpacing>("OpenChat.Native", 1, 0, "TextLineSpacing");
 
     QVariantList skins;
     skins.append(QVariantMap{{QStringLiteral("id"), QString()},

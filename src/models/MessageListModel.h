@@ -29,6 +29,11 @@ public:
         SenderDeviceRole,
         SecurityEventRole,
         SenderNameRole,
+        EditedRole,
+        EditableRole,
+        ReplyToIdRole,
+        QuotedSenderRole,
+        QuotedBodyRole,
     };
     Q_ENUM(Role)
 
@@ -48,7 +53,13 @@ public:
     // row was found.
     bool updateDeliveryState(const QString &stableId, MessageDeliveryState state,
                              MessageFailureReason failureReason = MessageFailureReason::None);
+    // The sender changed the text of the row with `stableId`: it shows the new
+    // text and says it was edited. Returns whether a row was found.
+    bool updateBody(const QString &stableId, const QString &body);
     [[nodiscard]] std::optional<Message> messageAt(int row) const;
+    [[nodiscard]] std::optional<Message> messageById(const QString &stableId) const;
+    // The row of `stableId`, or -1.
+    Q_INVOKABLE [[nodiscard]] int rowOf(const QString &stableId) const;
 
 signals:
     void countChanged();

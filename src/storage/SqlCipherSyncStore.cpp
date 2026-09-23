@@ -84,8 +84,10 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                         "INSERT INTO messages("
                         "id, conversation_id, sender_device_id, content_kind, content, "
                         "client_created_at_ms, server_sequence, delivery_state, flow, body, "
-                        "sent_at_ms, reply_to_id, locally_read) "
-                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
+                        "sent_at_ms, reply_to_id, locally_read, shared_id, edited_at_ms, "
+                        "quoted_sender_device_id, quoted_body) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, "
+                        "?16, ?17)");
     if (!statement.isValid())
         return false;
 
@@ -106,8 +108,43 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                        && (message.replyToId ? statement.bindBlob(12, message.replyToId->bytes())
                                              : statement.bindNull(12))
                        && statement.bindInt(13, message.flow == MessageFlow::Incoming
-                           && message.kind != ContentKind::System ? 0 : 1);
+                           && message.kind != ContentKind::System ? 0 : 1)
+                       && statement.bindInt(14, message.sharedId ? 1 : 0)
+                       && statement.bindInt64(15, message.editedAtMs)
+                       && (message.quotedSenderDeviceId
+                               ? statement.bindBlob(16, message.quotedSenderDeviceId->bytes())
+                               : statement.bindNull(16))
+                       && (message.quotedSenderDeviceId ? statement.bindText(17, message.quotedBody)
+                                                        : statement.bindNull(17));
     return bound && sqlite3_step(statement.get()) == SQLITE_DONE;
+}
+
+// Rewrites a message's text in place. The WHERE clause is the whole
+// authorisation: a text row of `conversation` under a shared id, last changed
+// before this edit, and either sent from here and already taken by the relay
+// (no `sender`) or received from `sender`. `changed` says whether one matched.
+bool applyEdit(sqlite3 *database, const ConversationId &conversation, const MessageId &target,
+               const DeviceId *sender, const QString &body, qint64 editedAtMs, bool &changed)
+{
+    // flow 1 = Outgoing, 0 = Incoming; content_kind 0 = Text; delivery_state
+    // 3, 4, 5 = Sent, Delivered, Read.
+    Statement statement(database,
+                        sender == nullptr
+                            ? "UPDATE messages SET body=?1, content=?2, edited_at_ms=?3 "
+                              "WHERE id=?4 AND conversation_id=?5 AND flow=1 AND content_kind=0 "
+                              "AND shared_id=1 AND delivery_state IN (3,4,5) AND edited_at_ms < ?3"
+                            : "UPDATE messages SET body=?1, content=?2, edited_at_ms=?3 "
+                              "WHERE id=?4 AND conversation_id=?5 AND flow=0 AND content_kind=0 "
+                              "AND shared_id=1 AND sender_device_id=?6 AND edited_at_ms < ?3");
+    const bool bound = statement.isValid() && statement.bindText(1, body)
+                       && statement.bindBlob(2, body.toUtf8()) && statement.bindInt64(3, editedAtMs)
+                       && statement.bindBlob(4, target.bytes())
+                       && statement.bindBlob(5, conversation.bytes())
+                       && (sender == nullptr || statement.bindBlob(6, sender->bytes()));
+    if (!bound || sqlite3_step(statement.get()) != SQLITE_DONE)
+        return false;
+    changed = sqlite3_changes(database) == 1;
+    return true;
 }
 
 // Same schema and binds as SqlCipherChatRepository::saveOutgoing's outbox insert.
@@ -465,6 +502,81 @@ SqlCipherSyncStore::commitControlSendMany(const QVector<OutboxRecord> &outboxes,
     });
 }
 
+Result<void, RepositoryError>
+SqlCipherSyncStore::commitEditSend(const ConversationId &conversation, const MessageId &target,
+                                   const QString &body, qint64 editedAtMs,
+                                   const QVector<OutboxRecord> &outboxes, QByteArrayView mlsState)
+{
+    if (outboxes.isEmpty() || body.trimmed().isEmpty() || editedAtMs <= 0
+        || mlsState.size() > maximumMlsStateSize)
+        return Result<void, RepositoryError>::failure(
+            error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitEditSend.invalid")));
+    for (const OutboxRecord &outbox : outboxes) {
+        if (outbox.envelope.isEmpty() || outbox.conversationId != conversation)
+            return Result<void, RepositoryError>::failure(
+                error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitEditSend.invalid")));
+    }
+
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("commitEditSend.begin")));
+        bool changed = false;
+        if (!applyEdit(database, conversation, target, nullptr, body, editedAtMs, changed)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitEditSend.message"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!changed) {
+            rollback(database);
+            return Result<void, RepositoryError>::failure(
+                error(RepositoryErrorCode::Conflict, QStringLiteral("commitEditSend.target")));
+        }
+        for (const OutboxRecord &outbox : outboxes) {
+            if (!insertOutbox(database, outbox)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                        QStringLiteral("commitEditSend.outbox"));
+                rollback(database);
+                return Result<void, RepositoryError>::failure(e);
+            }
+        }
+        if (!upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitEditSend.mls"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitEditSend.commit"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<bool, RepositoryError> SqlCipherSyncStore::canEditSent(const ConversationId &conversation,
+                                                              const MessageId &target)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        // The predicate of applyEdit's outgoing branch.
+        Statement statement(database,
+                            "SELECT 1 FROM messages WHERE id=?1 AND conversation_id=?2 AND flow=1 "
+                            "AND content_kind=0 AND shared_id=1 AND delivery_state IN (3,4,5)");
+        if (!statement.isValid() || !statement.bindBlob(1, target.bytes())
+            || !statement.bindBlob(2, conversation.bytes()))
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("canEditSent.prepare")));
+        const int step = sqlite3_step(statement.get());
+        if (step != SQLITE_ROW && step != SQLITE_DONE)
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("canEditSent.read")));
+        return Result<bool, RepositoryError>::success(step == SQLITE_ROW);
+    });
+}
+
 Result<void, RepositoryError> SqlCipherSyncStore::failEnvelope(const EnvelopeId &envelopeId)
 {
     return m_database.withConnection([&](sqlite3 *database) {
@@ -683,6 +795,69 @@ SqlCipherSyncStore::commitControlReceive(const EnvelopeId &envelopeId,
             return Result<bool, RepositoryError>::failure(e);
         }
         return Result<bool, RepositoryError>::success(true);
+    });
+}
+
+Result<EditReceiveOutcome, RepositoryError>
+SqlCipherSyncStore::commitEditReceive(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
+                                      const ConversationId &conversation, const MessageId &target,
+                                      const QString &body, qint64 editedAtMs, quint64 watermark,
+                                      QByteArrayView mlsState)
+{
+    using Outcome = Result<EditReceiveOutcome, RepositoryError>;
+    if (!fitsSqlInteger(watermark) || mlsState.size() > maximumMlsStateSize)
+        return Outcome::failure(
+            error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitEditReceive.invalid")));
+
+    const qint64 nowMs = m_clock();
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Outcome::failure(internalError(QStringLiteral("commitEditReceive.begin")));
+
+        if (!insertReplay(database, envelopeId, nowMs, senderDeviceId)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitEditReceive.replay"));
+            rollback(database);
+            return Outcome::failure(e);
+        }
+        if (sqlite3_changes(database) == 0) {
+            if (!commit(database)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                        QStringLiteral("commitEditReceive.idempotent.commit"));
+                rollback(database);
+                return Outcome::failure(e);
+            }
+            return Outcome::success(EditReceiveOutcome::AlreadySeen);
+        }
+
+        bool changed = false;
+        if (!applyEdit(database, conversation, target, &senderDeviceId, body, editedAtMs,
+                       changed)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitEditReceive.message"));
+            rollback(database);
+            return Outcome::failure(e);
+        }
+        if (!advanceCursor(database, senderDeviceId, watermark, nowMs)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitEditReceive.cursor"));
+            rollback(database);
+            return Outcome::failure(e);
+        }
+        if (!upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitEditReceive.mls"));
+            rollback(database);
+            return Outcome::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitEditReceive.commit"));
+            rollback(database);
+            return Outcome::failure(e);
+        }
+        return Outcome::success(changed ? EditReceiveOutcome::Applied
+                                        : EditReceiveOutcome::Ignored);
     });
 }
 

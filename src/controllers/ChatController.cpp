@@ -7,16 +7,20 @@
 #include "call/CallSignal.h"
 #include "domain/Contact.h"
 #include "domain/GroupUpdate.h"
+#include "domain/MessageContent.h"
 #include "network/SyncEngine.h"
 #include "render/AvatarStore.h"
 #include "render/ProfileImage.h"
 #include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 
+#include <QClipboard>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QUuid>
 
 #include <algorithm>
 
@@ -114,13 +118,24 @@ QString shortIdLabel(const AccountId &account)
 const QString groupIdPrefix = QStringLiteral("group:");
 const QString groupAvatarKey = QStringLiteral("group");
 
+// The reference mock has no peers to agree ids with; each of its messages
+// gets a local one so it can be answered and edited on screen.
+void giveMockId(Message &message)
+{
+    message.stableId = QUuid::createUuid().toString(QUuid::Id128);
+    message.sharedId = true;
+}
+
 } // namespace
 
 ChatController::ChatController(QObject *parent)
     : QObject(parent)
 {
     m_contacts.setContacts(referenceContacts());
-    m_messagesByContact.insert(QStringLiteral("michael"), michaelConversation());
+    QVector<Message> michael = michaelConversation();
+    for (Message &message : michael)
+        giveMockId(message);
+    m_messagesByContact.insert(QStringLiteral("michael"), michael);
     for (const QString &id : {QStringLiteral("sarah"), QStringLiteral("alex"),
                               QStringLiteral("jessica"), QStringLiteral("ryan"),
                               QStringLiteral("tom")}) {
@@ -316,7 +331,10 @@ bool ChatController::renameCurrentGroup(const QString &title)
         return false;
     const QString normalized = normalizeGroupTitle(title);
     if (m_live) {
-        if (m_groups == nullptr || !m_groups->rename(group->conversation, normalized)) {
+        // A copy, as in leaveCurrentGroup: groupChanged re-reads the roster
+        // while GroupService still holds the id.
+        const ConversationId conversation = group->conversation;
+        if (m_groups == nullptr || !m_groups->rename(conversation, normalized)) {
             setGroupNotice(QStringLiteral("The group could not be renamed."));
             return false;
         }
@@ -343,7 +361,10 @@ void ChatController::leaveCurrentGroup()
     if (group == m_liveGroups.cend())
         return;
     if (m_live) {
-        if (m_groups != nullptr && !m_groups->leave(group->conversation))
+        // A copy: leaving re-reads the roster (and m_liveGroups with it)
+        // before GroupService is done with the id.
+        const ConversationId conversation = group->conversation;
+        if (m_groups != nullptr && !m_groups->leave(conversation))
             setGroupNotice(QStringLiteral("The group could not be left."));
         return;
     }
@@ -578,6 +599,8 @@ bool ChatController::selectContact(const QString &id)
     if (!contact)
         return false;
 
+    // An edit or a reply belongs to the chat it was started in.
+    cancelComposeMode();
     const bool wasSendable = canSend();
     m_currentContactId = id;
     m_contacts.selectContact(id);
@@ -726,10 +749,15 @@ bool ChatController::sendMessage()
     const QString body = m_composerText.trimmed();
     if (body.isEmpty())
         return false;
+    if (!m_editingMessageId.isEmpty())
+        return sendEdit(body);
+    const std::optional<Message> answered = m_messages.messageById(m_replyingToMessageId);
 
     if (m_live) {
         if (m_engine == nullptr)
             return false;
+        const std::optional<MessageQuote> quote =
+            answered ? quoteFor(*answered) : std::nullopt;
         if (const LiveGroup *group = currentGroup()) {
             if (group->members.isEmpty())
                 return false;
@@ -737,8 +765,9 @@ bool ChatController::sendMessage()
             QList<DeviceId> recipients;
             for (const GroupMember &member : group->members)
                 recipients.append(member.device);
-            m_engine->enqueueGroupText(group->conversation, recipients, body);
+            m_engine->enqueueGroupText(group->conversation, recipients, body, quote);
             setComposerText({});
+            cancelComposeMode();
             return true;
         }
         const auto chat = m_liveChats.constFind(m_currentContactId);
@@ -747,20 +776,191 @@ bool ChatController::sendMessage()
         // The engine encrypts, commits the row durably and reports it back through
         // messageQueued, which is where the visible row is appended: the model only
         // ever shows what the store holds.
-        m_engine->enqueueText(chat->conversation, *chat->peerDevice, body);
+        m_engine->enqueueText(chat->conversation, *chat->peerDevice, body, quote);
         setComposerText({});
+        cancelComposeMode();
         return true;
     }
 
     const QDateTime sentAt = QDateTime::currentDateTime();
-    if (!m_messages.appendOutgoing(body, sentAt))
-        return false;
-
-    m_messagesByContact[m_currentContactId].append(
-        {MessageDirection::Outgoing, body, sentAt.time(), MessageKind::Text, sentAt.date()});
+    Message message{MessageDirection::Outgoing, body, sentAt.time(), MessageKind::Text,
+                    sentAt.date()};
+    giveMockId(message);
+    if (answered) {
+        message.replyToId = answered->stableId;
+        message.quotedSender = authorName(*answered);
+        message.quotedBody = quoteExcerpt(answered->body);
+    }
+    m_messages.appendMessage(message);
+    m_messagesByContact[m_currentContactId].append(message);
     m_contacts.setActivity(m_currentContactId, sentAt.toMSecsSinceEpoch(), 0);
     setComposerText({});
+    cancelComposeMode();
     return true;
+}
+
+bool ChatController::sendEdit(const QString &body)
+{
+    const std::optional<Message> original = m_messages.messageById(m_editingMessageId);
+    if (!original || !original->isEditable()) {
+        cancelComposeMode();
+        return false;
+    }
+    // Sent unchanged: there is nothing to tell anyone, the edit just ends.
+    if (body == original->body) {
+        cancelComposeMode();
+        return true;
+    }
+
+    if (m_live) {
+        const auto target =
+            MessageId::fromBytes(QByteArray::fromHex(m_editingMessageId.toLatin1()));
+        if (m_engine == nullptr || !target)
+            return false;
+        QList<DeviceId> recipients;
+        ConversationId conversation = ConversationId::generate();
+        if (const LiveGroup *group = currentGroup()) {
+            conversation = group->conversation;
+            for (const GroupMember &member : group->members)
+                recipients.append(member.device);
+        } else if (const auto chat = m_liveChats.constFind(m_currentContactId);
+                   chat != m_liveChats.cend() && chat->peerDevice) {
+            conversation = chat->conversation;
+            recipients.append(*chat->peerDevice);
+        }
+        if (recipients.isEmpty())
+            return false;
+        // The bubble changes when the engine reports the durable edit
+        // (messageEdited), so the screen only ever shows what the store holds.
+        m_engine->enqueueEdit(conversation, recipients, *target, body);
+    } else {
+        applyEdit(m_currentContactId, m_editingMessageId, body);
+    }
+    cancelComposeMode();
+    return true;
+}
+
+bool ChatController::beginEdit(const QString &messageId)
+{
+    if (!statePermitsPlaintext(m_sessionState))
+        return false;
+    const std::optional<Message> message = m_messages.messageById(messageId);
+    if (!message || !message->isEditable())
+        return false;
+    if (messageId == m_editingMessageId)
+        return true;
+    // Keep what was being typed; a second edit keeps the first one's draft.
+    const QString draft = m_editingMessageId.isEmpty() ? m_composerText : m_draftBeforeEdit;
+    m_replyingToMessageId.clear();
+    m_editingMessageId = messageId;
+    m_draftBeforeEdit = draft;
+    m_composeTargetName = QStringLiteral("You");
+    m_composeTargetText = quoteExcerpt(message->body);
+    emit composeModeChanged();
+    setComposerText(message->body);
+    return true;
+}
+
+bool ChatController::beginReply(const QString &messageId)
+{
+    if (!statePermitsPlaintext(m_sessionState))
+        return false;
+    const std::optional<Message> message = m_messages.messageById(messageId);
+    if (!message || !message->isConversation())
+        return false;
+    // Answering ends an edit in progress and gives back what was typed.
+    if (!m_editingMessageId.isEmpty())
+        cancelComposeMode();
+    m_replyingToMessageId = messageId;
+    m_composeTargetName = authorName(*message);
+    m_composeTargetText = quoteExcerpt(message->body);
+    emit composeModeChanged();
+    return true;
+}
+
+void ChatController::cancelComposeMode()
+{
+    if (m_editingMessageId.isEmpty() && m_replyingToMessageId.isEmpty())
+        return;
+    const bool wasEditing = !m_editingMessageId.isEmpty();
+    const QString draft = m_draftBeforeEdit;
+    m_editingMessageId.clear();
+    m_replyingToMessageId.clear();
+    m_composeTargetName.clear();
+    m_composeTargetText.clear();
+    m_draftBeforeEdit.clear();
+    emit composeModeChanged();
+    if (wasEditing)
+        setComposerText(draft);
+}
+
+bool ChatController::copyMessage(const QString &messageId)
+{
+    const std::optional<Message> message = m_messages.messageById(messageId);
+    if (!message || !message->isConversation())
+        return false;
+    // Only a GUI application has a clipboard.
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()) == nullptr)
+        return false;
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    if (clipboard == nullptr)
+        return false;
+    clipboard->setText(message->body);
+    return true;
+}
+
+std::optional<MessageQuote> ChatController::quoteFor(const Message &message) const
+{
+    const auto target = MessageId::fromBytes(QByteArray::fromHex(message.stableId.toLatin1()));
+    const auto sender = DeviceId::fromBytes(QByteArray::fromHex(message.senderDevice.toLatin1()));
+    if (!target || !sender)
+        return std::nullopt;
+    return MessageQuote{*target, *sender, message.body};
+}
+
+QString ChatController::authorName(const Message &message) const
+{
+    if (message.direction == MessageDirection::Outgoing)
+        return QStringLiteral("You");
+    if (!message.senderName.isEmpty())
+        return message.senderName;
+    return currentContactName();
+}
+
+QString ChatController::nameForDevice(const QString &chatId, const DeviceId &device) const
+{
+    if (m_localDevice && device == *m_localDevice)
+        return QStringLiteral("You");
+    if (const auto group = m_liveGroups.constFind(chatId); group != m_liveGroups.cend()) {
+        for (const GroupMember &member : group->members)
+            if (member.device == device)
+                return memberName(member);
+        return QStringLiteral("Former member");
+    }
+    if (const auto chat = m_liveChats.constFind(chatId); chat != m_liveChats.cend())
+        return contactRowFor(*chat).name;
+    return QString();
+}
+
+void ChatController::applyEdit(const QString &chatId, const QString &stableId,
+                               const QString &body)
+{
+    if (chatId.isEmpty())
+        return;
+    for (Message &message : m_messagesByContact[chatId]) {
+        if (message.stableId == stableId) {
+            message.body = body;
+            message.edited = true;
+        }
+    }
+    if (chatId == m_currentContactId && statePermitsPlaintext(m_sessionState))
+        m_messages.updateBody(stableId, body);
+}
+
+void ChatController::onMessageEdited(const ConversationId &conversation,
+                                     const MessageId &messageId, const QString &body)
+{
+    applyEdit(contactForConversation(conversation), messageId.toHex(), body);
 }
 
 void ChatController::setSessionState(SessionState state)
@@ -772,6 +972,10 @@ void ChatController::setSessionState(SessionState state)
     const bool visibilityChanged =
         statePermitsPlaintext(m_sessionState) != statePermitsPlaintext(state);
     m_sessionState = state;
+    // An edit or a quote shows the plaintext it is about; a state that hides
+    // the history ends it.
+    if (!statePermitsPlaintext(state))
+        cancelComposeMode();
     if (visibilityChanged)
         refreshVisibleMessages();
     refreshChatActivity();
@@ -870,6 +1074,10 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
     if (session == nullptr || engine == nullptr)
         return;
     m_session = session;
+    if (session != nullptr) {
+        if (const auto credential = session->publicCredential(); credential.hasValue())
+            m_localDevice = credential.value().deviceId;
+    }
     m_engine = engine;
     m_requests = requests;
     m_groups = groups;
@@ -927,6 +1135,9 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
     connect(m_engine, &SyncEngine::messageReceived, this, &ChatController::onMessageReceived);
     connect(m_engine, &SyncEngine::messageStateChanged, this,
             &ChatController::onMessageStateChanged);
+    connect(m_engine, &SyncEngine::messageEdited, this,
+            [this](const ConversationId &conversation, const MessageId &messageId,
+                   const QString &body, qint64) { onMessageEdited(conversation, messageId, body); });
     connect(m_engine, &SyncEngine::profileUpdateReceived, this,
             &ChatController::onProfileUpdateReceived);
     if (m_requests != nullptr) {
@@ -1274,6 +1485,9 @@ QVector<Message> ChatController::loadHistory(const ConversationId &conversation)
 Message ChatController::messageFor(const MessageRecord &record) const
 {
     Message message = toMessage(record);
+    if (record.replyToId && record.quotedSenderDeviceId)
+        message.quotedSender = nameForDevice(contactForConversation(record.conversationId),
+                                             *record.quotedSenderDeviceId);
     // In a group the bubble alone does not say who spoke.
     const auto group = m_liveGroups.constFind(contactForConversation(record.conversationId));
     if (group != m_liveGroups.cend() && record.flow == MessageFlow::Incoming
@@ -1310,6 +1524,12 @@ Message ChatController::toMessage(const MessageRecord &record)
         ? MessageFailureReason::Network
         : MessageFailureReason::None;
     message.senderDevice = record.senderDeviceId.toHex();
+    message.sharedId = record.sharedId;
+    message.edited = record.editedAtMs > 0;
+    if (record.replyToId) {
+        message.replyToId = record.replyToId->toHex();
+        message.quotedBody = record.quotedBody;
+    }
     return message;
 }
 

@@ -63,6 +63,12 @@ public:
     commitControlSendMany(const QVector<OutboxRecord> &outboxes,
                           QByteArrayView mlsState) override;
     [[nodiscard]] Result<void, RepositoryError> failEnvelope(const EnvelopeId &envelopeId) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    commitEditSend(const ConversationId &conversation, const MessageId &target,
+                   const QString &body, qint64 editedAtMs, const QVector<OutboxRecord> &outboxes,
+                   QByteArrayView mlsState) override;
+    [[nodiscard]] Result<bool, RepositoryError>
+    canEditSent(const ConversationId &conversation, const MessageId &target) override;
     [[nodiscard]] Result<void, RepositoryError> commitMlsStateOnly(QByteArrayView mlsState) override
     {
         return commitMlsState(mlsState);
@@ -80,6 +86,11 @@ public:
     [[nodiscard]] Result<bool, RepositoryError>
     commitControlReceive(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
                          quint64 watermark, QByteArrayView mlsState) override;
+    [[nodiscard]] Result<EditReceiveOutcome, RepositoryError>
+    commitEditReceive(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
+                      const ConversationId &conversation, const MessageId &target,
+                      const QString &body, qint64 editedAtMs, quint64 watermark,
+                      QByteArrayView mlsState) override;
 
     [[nodiscard]] Result<HandshakeReceiveOutcome, RepositoryError>
     commitHandshakeReceive(const EnvelopeId &envelopeId, const AccountId &senderAccountId,

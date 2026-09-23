@@ -106,7 +106,25 @@ struct MessageRecord final {
     qint64 sentAtMs = 0;
     DeliveryState deliveryState = DeliveryState::Draft;
     std::optional<quint64> serverSequence;
+    // A reply names the message it answers here, and carries who wrote that
+    // message and an excerpt of it, so the quote shows even when the answered
+    // message is not held locally.
     std::optional<MessageId> replyToId;
+    // True when `id` is the one both ends derive from the ciphertext, so the
+    // peer can refer to this message (reply to it, receive its edits). Rows
+    // from before shared ids carry one the peer never saw.
+    bool sharedId = false;
+    // When the sender last changed the text; 0 if it never was.
+    qint64 editedAtMs = 0;
+    std::optional<DeviceId> quotedSenderDeviceId;
+    QString quotedBody;
+};
+
+// The message a reply answers, as the reply sends it along.
+struct MessageQuote final {
+    MessageId target;
+    DeviceId sender;
+    QString body;
 };
 
 struct OutboxRecord final {

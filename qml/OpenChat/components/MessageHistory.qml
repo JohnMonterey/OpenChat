@@ -7,9 +7,20 @@ Item {
     id: history
     objectName: "messageHistory"
     required property var controller
+    // Typing that landed on a message after its text was selected; it belongs
+    // in the composer.
+    signal typed(string text)
 
     function positionAtEnd() {
         messageList.positionViewAtEnd()
+    }
+
+    // Brings a message into view, e.g. the one a reply quotes. Nothing happens
+    // for one no longer (or never) in this history.
+    function showMessage(stableId) {
+        const row = history.controller.messages.rowOf(stableId);
+        if (row >= 0)
+            messageList.positionViewAtIndex(row, ListView.Center);
     }
 
     onHeightChanged: Qt.callLater(positionAtEnd)
@@ -29,8 +40,24 @@ Item {
         spacing: 0
 
         delegate: MessageDelegate {
+            id: row
+            // The roles MessageDelegate leaves optional come through the model
+            // object: a delegate with required properties gets no others.
+            required property var model
             width: ListView.view.width
+            stableId: model.stableId
+            edited: model.edited
+            editable: model.editable
+            replyToId: model.replyToId
+            quotedSender: model.quotedSender
+            quotedBody: model.quotedBody
+            editing: stableId.length > 0 && stableId === history.controller.editingMessageId
             onRetryRequested: (messageBody) => history.controller.setComposerText(messageBody)
+            onCopyRequested: history.controller.copyMessage(row.stableId)
+            onEditRequested: history.controller.beginEdit(row.stableId)
+            onReplyRequested: history.controller.beginReply(row.stableId)
+            onQuoteActivated: history.showMessage(row.replyToId)
+            onTyped: (text) => history.typed(text)
         }
 
         onCountChanged: Qt.callLater(positionViewAtEnd)

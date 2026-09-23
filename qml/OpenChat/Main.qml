@@ -260,6 +260,7 @@ Window {
                 anchors.bottom: messageComposer.top
                 controller: root.chatController
                 visible: root.chatController.hasCurrentContact && !root.callFullscreen
+                onTyped: (text) => messageComposer.takeTyping(text)
             }
 
             Composer {

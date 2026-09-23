@@ -82,6 +82,7 @@ qt_add_executable(OpenChat
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
+    src/app/TextLineSpacing.cpp
     src/app/TransportSettings.cpp
 )
 
@@ -143,6 +144,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/ScreenSharePicker.qml
         qml/OpenChat/components/MediaIconButton.qml
         qml/OpenChat/components/MediaZoomOverlay.qml
+        qml/OpenChat/components/MessageActionButton.qml
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
@@ -277,6 +279,7 @@ add_library(openchat_domain STATIC
     src/domain/Handle.cpp
     src/domain/ProfileUpdate.cpp
     src/domain/GroupUpdate.cpp
+    src/domain/MessageContent.cpp
 )
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)
@@ -300,6 +303,7 @@ add_executable(openchat-cosmetics-gallery
     tools/cosmetics_gallery.cpp
     src/render/BubbleBackground.cpp
     src/app/AppearanceSettings.cpp
+    src/app/TextLineSpacing.cpp
 )
 target_include_directories(openchat-cosmetics-gallery PRIVATE src)
 target_compile_definitions(openchat-cosmetics-gallery PRIVATE
@@ -529,6 +533,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/012_profiles.sql
         src/storage/migrations/013_group_chats.sql
         src/storage/migrations/014_chat_read_state.sql
+        src/storage/migrations/015_message_edits_and_replies.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -636,6 +641,11 @@ add_executable(tst_groupupdate tests/tst_groupupdate.cpp)
 target_include_directories(tst_groupupdate PRIVATE src)
 target_link_libraries(tst_groupupdate PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_groupupdate COMMAND tst_groupupdate)
+
+add_executable(tst_messagecontent tests/tst_messagecontent.cpp)
+target_include_directories(tst_messagecontent PRIVATE src)
+target_link_libraries(tst_messagecontent PRIVATE openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_messagecontent COMMAND tst_messagecontent)
 
 add_executable(tst_keyvault tests/tst_keyvault.cpp)
 target_include_directories(tst_keyvault PRIVATE src tests)
@@ -1176,6 +1186,7 @@ add_executable(tst_qmlload
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
+    src/app/TextLineSpacing.cpp
     src/controllers/CrashReportController.cpp
     src/app/TransportSettings.cpp
 )
@@ -1229,6 +1240,7 @@ add_executable(openchat-profile-gallery
     src/app/MicrophoneSettings.cpp
     src/app/VoiceEffectHost.cpp
     src/app/ComposerEditing.cpp
+    src/app/TextLineSpacing.cpp
     src/app/TransportSettings.cpp
 )
 # The bundled contact photos, at the paths the avatar painter looks them up,

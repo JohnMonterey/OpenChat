@@ -1,5 +1,6 @@
 #include "network/SyncEngine.h"
 
+#include "domain/MessageContent.h"
 #include "protocol/CanonicalCborCodec.h"
 #include "protocol/CiphertextEnvelope.h"
 
@@ -282,6 +283,73 @@ public:
         return ok();
     }
 
+    // The SQL store's predicate for editing a sent message, over the rows here.
+    MessageRecord *editableSent(const ConversationId &conversation, const MessageId &target)
+    {
+        for (MessageRecord &message : messages) {
+            const DeliveryState state =
+                deliveryStates.value(message.id.bytes(), message.deliveryState);
+            if (message.id == target && message.conversationId == conversation
+                && message.sharedId && message.kind == ContentKind::Text
+                && (state == DeliveryState::Sent || state == DeliveryState::Delivered
+                    || state == DeliveryState::Read))
+                return &message;
+        }
+        return nullptr;
+    }
+
+    Result<bool, RepositoryError> canEditSent(const ConversationId &conversation,
+                                              const MessageId &target) override
+    {
+        return Result<bool, RepositoryError>::success(editableSent(conversation, target) != nullptr);
+    }
+
+    Result<void, RepositoryError> commitEditSend(const ConversationId &conversation,
+                                                 const MessageId &target, const QString &body,
+                                                 qint64 editedAtMs,
+                                                 const QVector<OutboxRecord> &records,
+                                                 QByteArrayView mlsState) override
+    {
+        MessageRecord *message = editableSent(conversation, target);
+        if (failSendCommit || message == nullptr || message->editedAtMs >= editedAtMs)
+            return err();
+        message->body = body;
+        message->editedAtMs = editedAtMs;
+        for (const OutboxRecord &outbox : records)
+            outboxes.append(StoredOutbox{outbox});
+        lastMlsState = mlsState.toByteArray();
+        return ok();
+    }
+
+    // The SQL store's predicate for an inbound edit: a text the same device
+    // sent into the same conversation under a shared id, older than the edit.
+    Result<EditReceiveOutcome, RepositoryError>
+    commitEditReceive(const EnvelopeId &envelopeId, const DeviceId &sender,
+                      const ConversationId &conversation, const MessageId &target,
+                      const QString &body, qint64 editedAtMs, quint64 watermark,
+                      QByteArrayView mlsState) override
+    {
+        if (failReceive)
+            return Result<EditReceiveOutcome, RepositoryError>::failure(error());
+        if (seen.contains(envelopeId.bytes()))
+            return Result<EditReceiveOutcome, RepositoryError>::success(
+                EditReceiveOutcome::AlreadySeen);
+        seen.insert(envelopeId.bytes());
+        lastMlsState = mlsState.toByteArray();
+        watermarkValue = std::max(watermarkValue, watermark);
+        for (MessageRecord &message : received) {
+            if (message.id == target && message.conversationId == conversation
+                && message.senderDeviceId == sender && message.sharedId
+                && message.kind == ContentKind::Text && message.editedAtMs < editedAtMs) {
+                message.body = body;
+                message.editedAtMs = editedAtMs;
+                return Result<EditReceiveOutcome, RepositoryError>::success(
+                    EditReceiveOutcome::Applied);
+            }
+        }
+        return Result<EditReceiveOutcome, RepositoryError>::success(EditReceiveOutcome::Ignored);
+    }
+
     Result<void, RepositoryError> failEnvelope(const EnvelopeId &id) override
     {
         for (auto &outbox : outboxes) {
@@ -447,6 +515,26 @@ CiphertextEnvelopeV1 incomingHandshakeEnvelope(const ConversationId &conversatio
         QByteArray(64, '\x03')};
 }
 
+// Every messageEdited the engine emits. Ids have no default value, so
+// QSignalSpy cannot hand them back through QVariant.
+struct EditLog final {
+    struct Entry final {
+        ConversationId conversation;
+        MessageId id;
+        QString body;
+        qint64 editedAtMs = 0;
+    };
+    explicit EditLog(SyncEngine &engine)
+    {
+        QObject::connect(&engine, &SyncEngine::messageEdited, &engine,
+                         [this](const ConversationId &conversation, const MessageId &id,
+                                const QString &body, qint64 editedAtMs) {
+                             entries.append(Entry{conversation, id, body, editedAtMs});
+                         });
+    }
+    QVector<Entry> entries;
+};
+
 SyncEngine::Config makeConfig(int maxAttempts = 8)
 {
     return SyncEngine::Config{AccountId::generate(), DeviceId::generate(), maxAttempts, 32, 30'000};
@@ -535,6 +623,12 @@ private slots:
     void groupWelcomeFromStrangerOrForKnownGroupIsConsumedNotJoined();
     void groupWelcomeNotNamingTheSenderIsRefused();
     void groupControlIsSurfacedOnReceive();
+    void textsAreFiledUnderTheirCiphertextOnBothEnds();
+    void replyCarriesItsQuoteBothWays();
+    void editChangesASentMessageAndTellsEveryRecipient();
+    void editOfAQueuedOrUnknownMessageDoesNothing();
+    void inboundEditAppliesOnlyToTheSendersNewerEdit();
+    void unreadableTaggedMessageIsConsumedWithoutARow();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -1894,6 +1988,218 @@ void SyncEngineTest::inboundDatagramsAreSurfacedWithoutTouchingTheStore()
     // And after stop() the callback is uninstalled entirely.
     engine.stop();
     QVERIFY(!transport.onDatagram);
+}
+
+void SyncEngineTest::textsAreFiledUnderTheirCiphertextOnBothEnds()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    // A plain text still travels as its bare UTF-8, so older clients read it,
+    // and the sender files it under the id its ciphertext names.
+    const ConversationId conversation = ConversationId::generate();
+    engine.enqueueText(conversation, DeviceId::generate(), QStringLiteral("hello"));
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(transport.sent.first().ciphertext, QByteArray("ENC:hello"));
+    QCOMPARE(store.messages.first().id, messageIdForCiphertext(transport.sent.first().ciphertext));
+    QVERIFY(store.messages.first().sharedId);
+
+    // The recipient arrives at the same id from the same bytes.
+    const auto incoming = incomingEnvelope(conversation, mls.senderDevice, "ENC:hi there");
+    engine.handleEnvelope(incoming, 3);
+    QCOMPARE(store.received.size(), 1);
+    QCOMPARE(store.received.first().id, messageIdForCiphertext(incoming.ciphertext));
+    QVERIFY(store.received.first().sharedId);
+    QCOMPARE(store.received.first().body, QStringLiteral("hi there"));
+    QVERIFY(!store.received.first().replyToId);
+}
+
+void SyncEngineTest::replyCarriesItsQuoteBothWays()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const MessageQuote quote{MessageId::generate(), DeviceId::generate(),
+                             QStringLiteral("Are you free on Saturday?")};
+    engine.enqueueText(conversation, DeviceId::generate(), QStringLiteral("Yes!"), quote);
+    QCOMPARE(transport.sent.size(), 1);
+    const auto sent = decodeMessageContent(transport.sent.first().ciphertext.mid(4));
+    QVERIFY(sent.has_value());
+    QCOMPARE(sent->type, MessageContent::Type::Reply);
+    QCOMPARE(*sent->target, quote.target);
+    QCOMPARE(*sent->quotedSender, quote.sender);
+    const MessageRecord &mine = store.messages.first();
+    QCOMPARE(mine.body, QStringLiteral("Yes!"));
+    QCOMPARE(*mine.replyToId, quote.target);
+    QCOMPARE(*mine.quotedSenderDeviceId, quote.sender);
+    QCOMPARE(mine.quotedBody, quote.body);
+
+    QSignalSpy received(&engine, &SyncEngine::messageReceived);
+    const QByteArray reply = encodeMessageContent(
+        MessageContent::reply(QStringLiteral("See you then"), mine.id, mine.senderDeviceId,
+                              mine.body));
+    engine.handleEnvelope(incomingEnvelope(conversation, mls.senderDevice, "ENC:" + reply), 4);
+    QCOMPARE(received.count(), 1);
+    const MessageRecord &theirs = store.received.first();
+    QCOMPARE(theirs.body, QStringLiteral("See you then"));
+    QCOMPARE(*theirs.replyToId, mine.id);
+    QCOMPARE(*theirs.quotedSenderDeviceId, mine.senderDeviceId);
+    QCOMPARE(theirs.quotedBody, QStringLiteral("Yes!"));
+}
+
+void SyncEngineTest::editChangesASentMessageAndTellsEveryRecipient()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    EditLog edited(engine);
+    QVector<MessageId> stateIds;
+    connect(&engine, &SyncEngine::messageStateChanged, &engine,
+            [&stateIds](const MessageId &id, DeliveryState) { stateIds.append(id); });
+    engine.start();
+
+    const ConversationId group = ConversationId::generate();
+    const QList<DeviceId> members{DeviceId::generate(), DeviceId::generate()};
+    engine.enqueueGroupText(group, members, QStringLiteral("See you at 7"));
+    const MessageId id = store.messages.first().id;
+    transport.onRelayAccepted(transport.sent.at(0).envelopeId, 1);
+    transport.onRelayAccepted(transport.sent.at(1).envelopeId, 2);
+    QCOMPARE(store.deliveryStates.value(id.bytes()), DeliveryState::Sent);
+
+    m_now += 5'000;
+    engine.enqueueEdit(group, members, id, QStringLiteral("See you at 8"));
+    QCOMPARE(edited.entries.size(), 1);
+    QCOMPARE(edited.entries.first().conversation, group);
+    QCOMPARE(edited.entries.first().id, id);
+    QCOMPARE(edited.entries.first().body, QStringLiteral("See you at 8"));
+    QCOMPARE(edited.entries.first().editedAtMs, m_now);
+    QCOMPARE(store.messages.first().body, QStringLiteral("See you at 8"));
+    QCOMPARE(store.messages.first().editedAtMs, m_now);
+
+    // One envelope per member, all one encrypted edit, none of them a row.
+    QCOMPARE(mls.encryptCount, 2);
+    QCOMPARE(store.messages.size(), 1);
+    QCOMPARE(transport.sent.size(), 4);
+    for (qsizetype i = 2; i < transport.sent.size(); ++i) {
+        const auto &envelope = transport.sent.at(i);
+        QCOMPARE(envelope.messageKind, EnvelopeMessageKind::MlsPrivateMessage);
+        const auto content = decodeMessageContent(envelope.ciphertext.mid(4));
+        QVERIFY(content.has_value());
+        QCOMPARE(content->type, MessageContent::Type::Edit);
+        QCOMPARE(*content->target, id);
+        QCOMPARE(content->body, QStringLiteral("See you at 8"));
+    }
+    // Its envelopes keep their own bookkeeping: the relay taking them does
+    // not report anything about the edited message.
+    const qsizetype before = stateIds.size();
+    transport.onRelayAccepted(transport.sent.at(2).envelopeId, 3);
+    for (qsizetype i = before; i < stateIds.size(); ++i)
+        QVERIFY(stateIds.at(i) != id);
+    QCOMPARE(store.deliveryStates.value(id.bytes()), DeliveryState::Sent);
+}
+
+void SyncEngineTest::editOfAQueuedOrUnknownMessageDoesNothing()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.connected = false;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    EditLog edited(engine);
+    QSignalSpy failed(&engine, &SyncEngine::failedClosed);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    engine.enqueueText(conversation, peer, QStringLiteral("typo"));
+    const MessageId id = store.messages.first().id;
+
+    // Still queued: the relay has not taken it, so an edit could overtake it.
+    engine.enqueueEdit(conversation, {peer}, id, QStringLiteral("fixed"));
+    // Not a message of this conversation, or not one at all.
+    engine.enqueueEdit(ConversationId::generate(), {peer}, id, QStringLiteral("fixed"));
+    engine.enqueueEdit(conversation, {peer}, MessageId::generate(), QStringLiteral("fixed"));
+
+    // Refused before the ratchet moved: nothing encrypted, nothing failed.
+    QCOMPARE(mls.encryptCount, 1);
+    QVERIFY(edited.entries.isEmpty());
+    QCOMPARE(failed.count(), 0);
+    QVERIFY(!engine.isFailedClosed());
+    QCOMPARE(store.messages.first().body, QStringLiteral("typo"));
+    QCOMPARE(store.outboxes.size(), 1);
+}
+
+void SyncEngineTest::inboundEditAppliesOnlyToTheSendersNewerEdit()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    EditLog edited(engine);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId author = mls.senderDevice;
+    const auto original = incomingEnvelope(conversation, author, "ENC:See you at 7");
+    engine.handleEnvelope(original, 1);
+    const MessageId id = messageIdForCiphertext(original.ciphertext);
+    const auto editEnvelope = [&](const QString &text, qint64 createdAtMs) {
+        auto envelope = incomingEnvelope(
+            conversation, mls.senderDevice,
+            "ENC:" + encodeMessageContent(MessageContent::edit(id, text)));
+        envelope.createdAtMs = createdAtMs;
+        return envelope;
+    };
+
+    // The author's edit lands.
+    engine.handleEnvelope(editEnvelope(QStringLiteral("See you at 8"), m_now + 1'000), 2);
+    QCOMPARE(edited.entries.size(), 1);
+    QCOMPARE(edited.entries.first().id, id);
+    QCOMPARE(edited.entries.first().body, QStringLiteral("See you at 8"));
+    QCOMPARE(store.received.first().body, QStringLiteral("See you at 8"));
+    QCOMPARE(store.received.first().editedAtMs, m_now + 1'000);
+
+    // An older edit arriving late does not undo a newer one.
+    engine.handleEnvelope(editEnvelope(QStringLiteral("See you at 6"), m_now + 500), 3);
+    QCOMPARE(edited.entries.size(), 1);
+    QCOMPARE(store.received.first().body, QStringLiteral("See you at 8"));
+
+    // Another member cannot rewrite the author's words.
+    mls.senderDevice = DeviceId::generate();
+    engine.handleEnvelope(editEnvelope(QStringLiteral("forged"), m_now + 2'000), 4);
+    QCOMPARE(edited.entries.size(), 1);
+    QCOMPARE(store.received.first().body, QStringLiteral("See you at 8"));
+
+    // Every one of them was consumed, and none became a row of its own.
+    QCOMPARE(transport.acks.size(), 4);
+    QCOMPARE(store.received.size(), 1);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::unreadableTaggedMessageIsConsumedWithoutARow()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy received(&engine, &SyncEngine::messageReceived);
+    engine.start();
+
+    engine.handleEnvelope(incomingEnvelope(ConversationId::generate(), mls.senderDevice,
+                                           QByteArray("ENC:\xFF\x01\x02", 7)),
+                          1);
+    QCOMPARE(received.count(), 0);
+    QVERIFY(store.received.isEmpty());
+    QCOMPARE(transport.acks.size(), 1);
+    QVERIFY(!engine.isFailedClosed());
 }
 
 QTEST_MAIN(SyncEngineTest)

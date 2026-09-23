@@ -59,6 +59,11 @@ public:
 // sender is blocked (the envelope is still consumed).
 enum class HandshakeReceiveOutcome { Stashed, AlreadySeen, DroppedBlocked };
 
+// Outcome of an inbound edit: it changed the message, it named nothing this
+// device lets the sender change (the envelope is still consumed), or the
+// envelope was an idempotent redelivery.
+enum class EditReceiveOutcome { Applied, Ignored, AlreadySeen };
+
 // Durable persistence with the atomic combinations the engine requires. Each
 // commit* persists the new MLS state blob in the SAME transaction as the message
 // / outbox / watermark, so a crash never leaves the ratchet ahead of the store.
@@ -87,6 +92,19 @@ public:
     // the message itself (other recipients may still get, or have got, it).
     [[nodiscard]] virtual Result<void, RepositoryError>
     failEnvelope(const EnvelopeId &envelopeId) = 0;
+    // Atomic: new text for a message this device sent + the envelopes that
+    // carry the edit (no visible row of their own) + the ratchet state. Only a
+    // text row of `conversation` sent from here under a shared id, and already
+    // taken by the relay, can change; for any other target nothing commits and
+    // the result is a Conflict.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    commitEditSend(const ConversationId &conversation, const MessageId &target,
+                   const QString &body, qint64 editedAtMs, const QVector<OutboxRecord> &outboxes,
+                   QByteArrayView mlsState) = 0;
+    // True iff commitEditSend would take `target` now. Asked before anything
+    // is encrypted, so an edit the store would refuse never moves the ratchet.
+    [[nodiscard]] virtual Result<bool, RepositoryError>
+    canEditSent(const ConversationId &conversation, const MessageId &target) = 0;
     // Persists the ratchet state alone: a group membership change that had no
     // envelope to ship with it still advanced the epoch.
     [[nodiscard]] virtual Result<void, RepositoryError>
@@ -115,6 +133,15 @@ public:
     [[nodiscard]] virtual Result<bool, RepositoryError>
     commitControlReceive(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
                          quint64 watermark, QByteArrayView mlsState) = 0;
+    // Atomic: replay-guard + the edit + watermark + ratchet state. The edit
+    // lands only on a text row `senderDeviceId` sent into `conversation` under
+    // a shared id, and only when it is newer than the last edit applied there;
+    // anything else is consumed without a change (Ignored).
+    [[nodiscard]] virtual Result<EditReceiveOutcome, RepositoryError>
+    commitEditReceive(const EnvelopeId &envelopeId, const DeviceId &senderDeviceId,
+                      const ConversationId &conversation, const MessageId &target,
+                      const QString &body, qint64 editedAtMs, quint64 watermark,
+                      QByteArrayView mlsState) = 0;
 
     // Atomic: replay-guard (idempotency) + minimal is-Blocked guard + stash insert
     // + watermark advance. Writes NO mls state (receive never joins).
@@ -203,9 +230,16 @@ public:
     // device. UI state reaches Queued only after the durable commit, whether or
     // not the relay link is up: a send made offline leaves once it reconnects
     // (even after a restart), and the relay then holds it until the recipient
-    // device next connects.
+    // device next connects. With a quote the message is a reply to it.
     void enqueueText(const ConversationId &conversation, const DeviceId &recipientDevice,
-                     const QString &text);
+                     const QString &text, const std::optional<MessageQuote> &quote = std::nullopt);
+
+    // Changes the text of a message this device sent, and tells `recipients`
+    // (the peer device, or every other member of a group). Only a text sent
+    // under a shared id and already taken by the relay can change; for any
+    // other target this does nothing. messageEdited reports the durable change.
+    void enqueueEdit(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                     const MessageId &target, const QString &text);
 
     // Sends an encrypted read receipt (MLS application message, no visible row).
     void acknowledgeRead(const ConversationId &conversation, const DeviceId &recipientDevice,
@@ -254,7 +288,8 @@ public:
     // row reaches Sent on the first relay acceptance and Failed only when no
     // recipient could be reached at all.
     void enqueueGroupText(const ConversationId &conversation, const QList<DeviceId> &recipients,
-                          const QString &text);
+                          const QString &text,
+                          const std::optional<MessageQuote> &quote = std::nullopt);
     // A group control message (an encoded GroupUpdateMessage), no visible row.
     void sendGroupControl(const ConversationId &conversation, const QList<DeviceId> &recipients,
                           const QByteArray &payload);
@@ -295,6 +330,11 @@ signals:
     void messageQueued(const MessageRecord &message);
     void messageStateChanged(const MessageId &messageId, DeliveryState state);
     void messageReceived(const MessageRecord &message);
+    // A message's text durably changed: this device edited one it sent, or the
+    // sender of one it received edited it.
+    void messageEdited(const OpenChat::ConversationId &conversation,
+                       const OpenChat::MessageId &messageId, const QString &body,
+                       qint64 editedAtMs);
     // A ContactAccept control message from `senderDevice` was authenticated and
     // consumed: the peer joined the conversation's group.
     void contactAcceptReceived(const OpenChat::ConversationId &conversation,

@@ -720,18 +720,38 @@ void ProfileScene::setFadeHeight(qreal height)
 QImage ProfileScene::render(const QString &sceneId, const QSizeF &size, bool dark,
                             const QRectF &readable, qreal fadeHeight, qreal dpr)
 {
-    QImage image = transparentImage(size, dpr);
     if (sceneId.isEmpty() || size.isEmpty())
-        return image;
+        return transparentImage(size.isEmpty() ? QSizeF(1, 1) : size, dpr);
+    // The painted scene is the expensive part and depends only on these; the
+    // veil and the fade are cheap and follow the text, so they go on a copy.
+    static QCache<QString, QImage> cache(8 * 1024);
+    const QString key = QStringLiteral("%1|%2x%3|%4|%5|%6")
+                            .arg(sceneId)
+                            .arg(size.width(), 0, 'f', 1)
+                            .arg(size.height(), 0, 'f', 1)
+                            .arg(dark ? 1 : 0)
+                            .arg(fadeHeight, 0, 'f', 1)
+                            .arg(dpr, 0, 'f', 3);
+    const QRectF r(QPointF(0, 0), size);
+    QImage image;
+    if (const QImage *cached = cache.object(key)) {
+        image = *cached;
+    } else {
+        image = transparentImage(size, dpr);
+        QPainter p(&image);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        // The horizon sits just above the fade, below the status line, so the
+        // landscape shows between the header's text and the search field.
+        const Stage stage{r, std::max(r.top() + r.height() * 0.6, r.bottom() - fadeHeight - 2.0),
+                          dark, dpr};
+        paintScene(p, sceneId, stage);
+        p.end();
+        cache.insert(key, new QImage(image), std::max<qsizetype>(1, image.sizeInBytes() / 1024));
+    }
+
     QPainter p(&image);
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    const QRectF r(QPointF(0, 0), size);
-    // The horizon sits just above the fade, below the status line, so the
-    // landscape shows between the header's text and the search field.
-    Stage stage{r, std::max(r.top() + r.height() * 0.6, r.bottom() - fadeHeight - 2.0), dark, dpr};
-    paintScene(p, sceneId, stage);
-
     // Frost the glass behind the words so they read over any scene.
     if (!readable.isEmpty()) {
         const QColor veil = dark ? QColor(20, 34, 48, 120) : QColor(248, 252, 255, 150);

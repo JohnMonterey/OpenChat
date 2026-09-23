@@ -185,7 +185,7 @@ void paintHolo(QPainter &p, const Words &w)
     p.fillRect(QRectF(x - w.size, w.box.top() - 4, w.size * 3.2, w.box.height() + 8), sheen);
     p.restore();
     drawGlint(p, letterTop(w, letterNear(w, 0.12), 0.3), w.size * 0.28, QColor(255, 220, 250));
-    drawGlint(p, QPointF(letterTop(w, letterNear(w, 0.7), 0.8).x(), w.baseline - w.size * 0.15),
+    drawGlint(p, letterTop(w, letterNear(w, 1.0), 0.85) + QPointF(0, w.size * 0.04),
               w.size * 0.2, QColor(210, 250, 255), 0.9);
 }
 

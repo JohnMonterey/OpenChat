@@ -797,9 +797,9 @@ void paintInferno(QPainter &p, const Canvas &c)
     p.save();
     p.setClipPath(roundedRect(c.picture, c.radius));
     QLinearGradient cast(c.picture.topLeft(), c.picture.bottomLeft());
-    cast.setColorAt(0.0, QColor(255, 120, 20, 110));
-    cast.setColorAt(0.22, QColor(255, 120, 20, 22));
-    cast.setColorAt(1.0, QColor(255, 120, 20, 0));
+    cast.setColorAt(0.0, QColor(255, 120, 20, 80));
+    cast.setColorAt(0.14, QColor(255, 120, 20, 14));
+    cast.setColorAt(0.4, QColor(255, 120, 20, 0));
     p.fillRect(c.picture, cast);
     p.restore();
     p.drawImage(c.bounds.topLeft(), fire);
@@ -880,14 +880,35 @@ void paintOrbit(QPainter &p, const Canvas &c)
     const std::array<QColor, 2> tails = {QColor(120, 220, 255), QColor(255, 140, 230)};
     for (int k = 0; k < 2; ++k) {
         const qreal head = std::fmod(progress + 0.5 * k + 0.12, 1.0);
-        const int segments = 18;
+        // A continuous tapering tail: closely spaced discs that merge into
+        // one streak, over a soft glow of the same path.
+        const int segments = 56;
+        const qreal tailLength = 0.2;
+        QPainterPath tailLine;
+        for (int j = 0; j <= segments; ++j) {
+            const QPointF pt = track.pointAtPercent(
+                std::fmod(head - tailLength * j / segments + 2.0, 1.0));
+            if (j == 0)
+                tailLine.moveTo(pt);
+            else
+                tailLine.lineTo(pt);
+        }
+        drawBlurred(p, tailLine.boundingRect(), 1.4 * s, [&](QPainter &lp) {
+            QLinearGradient fade(tailLine.pointAtPercent(0.0), tailLine.pointAtPercent(1.0));
+            fade.setColorAt(0.0, withAlpha(tails[size_t(k)], 0.9));
+            fade.setColorAt(1.0, withAlpha(QColor(150, 90, 255), 0.0));
+            lp.setBrush(Qt::NoBrush);
+            lp.setPen(QPen(QBrush(fade), 2.4 * s, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            lp.drawPath(tailLine);
+        });
+        p.setPen(Qt::NoPen);
         for (int j = segments; j >= 1; --j) {
-            const qreal at = std::fmod(head - j * 0.011 + 1.0, 1.0);
-            const qreal fade = 1.0 - qreal(j) / segments;
-            const QPointF pt = track.pointAtPercent(at);
-            const qreal r = std::max(0.4, (0.4 + 1.25 * fade) * std::max(0.9, s));
-            p.setPen(Qt::NoPen);
-            p.setBrush(withAlpha(mix(tails[size_t(k)], QColor(150, 90, 255), 1.0 - fade), 0.15 + 0.6 * fade * fade));
+            const qreal t = qreal(j) / segments;
+            const QPointF pt = tailLine.pointAtPercent(std::min(1.0, t));
+            const qreal r = (0.2 + 1.05 * std::pow(1.0 - t, 1.3)) * std::max(0.9, s);
+            const QColor colour = mix(mix(QColor(255, 255, 255), tails[size_t(k)], std::min(1.0, t * 4.0)),
+                                      QColor(150, 90, 255), t);
+            p.setBrush(withAlpha(colour, 0.9 * std::pow(1.0 - t, 1.5)));
             p.drawEllipse(pt, r, r);
         }
         const QPointF pt = track.pointAtPercent(head);

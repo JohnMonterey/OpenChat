@@ -1,5 +1,6 @@
 #include "network/SyncEngine.h"
 
+#include "domain/MessageContent.h"
 #include "protocol/CanonicalCborCodec.h"
 #include "repositories/OutboxRepository.h" // for retryDelayMs
 
@@ -120,12 +121,48 @@ public:
         return envelope;
     }
 
+    // What a text this device sends encrypts: its bare UTF-8, or, answering
+    // another message, the tagged reply that carries the quote.
+    [[nodiscard]] static QByteArray textPayload(const QString &text,
+                                                const std::optional<MessageQuote> &quote)
+    {
+        return encodeMessageContent(
+            quote ? MessageContent::reply(text, quote->target, quote->sender, quote->body)
+                  : MessageContent::text(text));
+    }
+
+    // The visible row of a text this device sends. It is named after its
+    // ciphertext, so every recipient files it under the same id and a later
+    // reply or edit can refer to it.
+    [[nodiscard]] MessageRecord outgoingText(const ConversationId &conversation,
+                                             const QByteArray &ciphertext, const QString &text,
+                                             const std::optional<MessageQuote> &quote) const
+    {
+        MessageRecord message{messageIdForCiphertext(ciphertext),
+                              conversation,
+                              config.localDeviceId,
+                              MessageFlow::Outgoing,
+                              ContentKind::Text,
+                              text,
+                              now(),
+                              DeliveryState::Queued,
+                              std::nullopt,
+                              std::nullopt};
+        message.sharedId = true;
+        if (quote) {
+            message.replyToId = quote->target;
+            message.quotedSenderDeviceId = quote->sender;
+            message.quotedBody = quoteExcerpt(quote->body);
+        }
+        return message;
+    }
+
     void doEnqueueText(const ConversationId &conversation, const DeviceId &recipient,
-                       const QString &text)
+                       const QString &text, const std::optional<MessageQuote> &quote)
     {
         if (failed)
             return;
-        const auto ciphertext = mls.encrypt(conversation, text.toUtf8());
+        const auto ciphertext = mls.encrypt(conversation, textPayload(text, quote));
         if (!ciphertext.hasValue()) {
             failClosed();
             return;
@@ -141,16 +178,7 @@ public:
 
         // Queued even with no relay link: the outbox is durable, so the send
         // leaves when the link comes back, including after a restart.
-        const MessageRecord message{MessageId::generate(),
-                                    conversation,
-                                    config.localDeviceId,
-                                    MessageFlow::Outgoing,
-                                    ContentKind::Text,
-                                    text,
-                                    now(),
-                                    DeliveryState::Queued,
-                                    std::nullopt,
-                                    std::nullopt};
+        const MessageRecord message = outgoingText(conversation, ciphertext.value(), text, quote);
 
         const OutboxRecord outbox =
             makeOutbox(envelope->envelopeId, message.id, conversation, envelopeBytes);
@@ -331,26 +359,17 @@ public:
     }
 
     void doEnqueueGroupText(const ConversationId &conversation, const QList<DeviceId> &recipients,
-                            const QString &text)
+                            const QString &text, const std::optional<MessageQuote> &quote)
     {
         if (failed || recipients.isEmpty())
             return;
-        const auto ciphertext = mls.encrypt(conversation, text.toUtf8());
+        const auto ciphertext = mls.encrypt(conversation, textPayload(text, quote));
         if (!ciphertext.hasValue()) {
             failClosed();
             return;
         }
         // Queued with or without a relay link, as in doEnqueueText.
-        const MessageRecord message{MessageId::generate(),
-                                    conversation,
-                                    config.localDeviceId,
-                                    MessageFlow::Outgoing,
-                                    ContentKind::Text,
-                                    text,
-                                    now(),
-                                    DeliveryState::Queued,
-                                    std::nullopt,
-                                    std::nullopt};
+        const MessageRecord message = outgoingText(conversation, ciphertext.value(), text, quote);
         const auto outboxes = buildFanOut(conversation, recipients, ciphertext.value(),
                                           EnvelopeMessageKind::MlsPrivateMessage, message.id);
         if (!outboxes) {
@@ -366,6 +385,44 @@ public:
         fanOut.insert(message.id.bytes(), FanOutProgress{outboxes->size(), false});
         emit q->messageQueued(message);
         emit q->messageStateChanged(message.id, DeliveryState::Queued);
+        drainOutbox();
+    }
+
+    void doEnqueueEdit(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                       const MessageId &target, const QString &text)
+    {
+        if (failed || recipients.isEmpty() || text.trimmed().isEmpty())
+            return;
+        // Asked before encrypting, so an edit the store would refuse (a message
+        // still queued, or one that is not ours) never moves the ratchet.
+        const auto editable = store.canEditSent(conversation, target);
+        if (!editable.hasValue() || !editable.value())
+            return;
+        const auto ciphertext =
+            mls.encrypt(conversation, encodeMessageContent(MessageContent::edit(target, text)));
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        // An edit is a conversation message with no row of its own: its
+        // envelopes take a fresh id, so their delivery bookkeeping never
+        // touches the message they change.
+        const auto outboxes = buildFanOut(conversation, recipients, ciphertext.value(),
+                                          EnvelopeMessageKind::MlsPrivateMessage,
+                                          MessageId::generate());
+        if (!outboxes) {
+            failClosed();
+            return;
+        }
+        // 0 means "never edited", so an edit is stamped no earlier than 1.
+        const qint64 editedAtMs = std::max<qint64>(now(), 1);
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitEditSend(conversation, target, text, editedAtMs, *outboxes, mlsState)
+                 .hasValue()) {
+            failClosed();
+            return;
+        }
+        emit q->messageEdited(conversation, target, text, editedAtMs);
         drainOutbox();
     }
 
@@ -622,18 +679,60 @@ public:
                 return;
             }
 
-            const MessageRecord message{MessageId::generate(),
-                                        envelope.conversationId,
-                                        envelope.senderDeviceId,
-                                        MessageFlow::Incoming,
-                                        ContentKind::Text,
-                                        QString::fromUtf8(processed.value().applicationData),
-                                        envelope.createdAtMs,
-                                        DeliveryState::Delivered,
-                                        std::optional<quint64>(serverSequence),
-                                        std::nullopt};
-
+            const auto content = decodeMessageContent(processed.value().applicationData);
             const QByteArray mlsState = mls.takePendingState();
+
+            // Tagged but unreadable here (malformed, or from a later version):
+            // consumed like control traffic, with nothing shown.
+            if (!content) {
+                const auto consumed = store.commitControlReceive(
+                    envelope.envelopeId, envelope.senderDeviceId, serverSequence, mlsState);
+                if (!consumed.hasValue()) {
+                    failClosed();
+                    return;
+                }
+                transport.acknowledge(envelope.envelopeId, serverSequence);
+                return;
+            }
+
+            // The store applies an edit only to a message this sender sent
+            // into this conversation, so an edit of anyone else's is consumed
+            // and changes nothing.
+            if (content->type == MessageContent::Type::Edit) {
+                const auto outcome = store.commitEditReceive(
+                    envelope.envelopeId, envelope.senderDeviceId, envelope.conversationId,
+                    *content->target, content->body, envelope.createdAtMs, serverSequence,
+                    mlsState);
+                if (!outcome.hasValue()) {
+                    failClosed();
+                    return;
+                }
+                transport.acknowledge(envelope.envelopeId, serverSequence);
+                if (outcome.value() == EditReceiveOutcome::Applied)
+                    emit q->messageEdited(envelope.conversationId, *content->target,
+                                          content->body, envelope.createdAtMs);
+                return;
+            }
+
+            // Filed under the id the sender gave it: both derive it from the
+            // ciphertext they share.
+            MessageRecord message{messageIdForCiphertext(envelope.ciphertext),
+                                  envelope.conversationId,
+                                  envelope.senderDeviceId,
+                                  MessageFlow::Incoming,
+                                  ContentKind::Text,
+                                  content->body,
+                                  envelope.createdAtMs,
+                                  DeliveryState::Delivered,
+                                  std::optional<quint64>(serverSequence),
+                                  std::nullopt};
+            message.sharedId = true;
+            if (content->type == MessageContent::Type::Reply) {
+                message.replyToId = content->target;
+                message.quotedSenderDeviceId = content->quotedSender;
+                message.quotedBody = content->quotedBody;
+            }
+
             const auto committed =
                 store.commitReceive(message, envelope.envelopeId, serverSequence, mlsState);
             if (!committed.hasValue()) {
@@ -860,12 +959,20 @@ void SyncEngine::stop()
 }
 
 void SyncEngine::enqueueText(const ConversationId &conversation, const DeviceId &recipientDevice,
-                            const QString &text)
+                            const QString &text, const std::optional<MessageQuote> &quote)
 {
     d->coordinator.run(conversation,
-                       [this, conversation, recipientDevice, text] {
-                           d->doEnqueueText(conversation, recipientDevice, text);
+                       [this, conversation, recipientDevice, text, quote] {
+                           d->doEnqueueText(conversation, recipientDevice, text, quote);
                        });
+}
+
+void SyncEngine::enqueueEdit(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                            const MessageId &target, const QString &text)
+{
+    d->coordinator.run(conversation, [this, conversation, recipients, target, text] {
+        d->doEnqueueEdit(conversation, recipients, target, text);
+    });
 }
 
 void SyncEngine::sendContactAccept(const ConversationId &conversation,
@@ -918,10 +1025,11 @@ void SyncEngine::sendProfileUpdate(const ConversationId &conversation,
 }
 
 void SyncEngine::enqueueGroupText(const ConversationId &conversation,
-                                  const QList<DeviceId> &recipients, const QString &text)
+                                  const QList<DeviceId> &recipients, const QString &text,
+                                  const std::optional<MessageQuote> &quote)
 {
-    d->coordinator.run(conversation, [this, conversation, recipients, text] {
-        d->doEnqueueGroupText(conversation, recipients, text);
+    d->coordinator.run(conversation, [this, conversation, recipients, text, quote] {
+        d->doEnqueueGroupText(conversation, recipients, text, quote);
     });
 }
 

@@ -5,6 +5,7 @@
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
 #include "domain/GroupUpdate.h"
+#include "domain/MessageContent.h"
 #include "call/CallSignal.h"
 #include "call/SyncCallTransport.h"
 #include "controllers/CallController.h"
@@ -26,8 +27,10 @@
 #include "render/AvatarStore.h"
 
 #include <QBuffer>
+#include <QClipboard>
 #include <QCryptographicHash>
 #include <QFile>
+#include <QGuiApplication>
 #include <QImage>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -796,6 +799,182 @@ private slots:
         QCOMPARE(reloaded.messages()->data(reloaded.messages()->index(1),
                                            MessageListModel::BodyRole).toString(),
                  QStringLiteral("hi back"));
+    }
+
+    void mockEditReplyAndCopyWorkOnScreen()
+    {
+        ChatController controller;
+        MessageListModel *messages = controller.messages();
+        const auto role = [messages](int row, int role) {
+            return messages->data(messages->index(row), role);
+        };
+        const QString theirs = role(0, MessageListModel::StableIdRole).toString();
+        const QString mine = role(1, MessageListModel::StableIdRole).toString();
+        QVERIFY(!theirs.isEmpty() && !mine.isEmpty());
+        QVERIFY(!role(0, MessageListModel::EditableRole).toBool());
+        QVERIFY(role(1, MessageListModel::EditableRole).toBool());
+        QSignalSpy modeSpy(&controller, &ChatController::composeModeChanged);
+
+        // Only one's own messages can be edited.
+        QVERIFY(!controller.beginEdit(theirs));
+        QVERIFY(controller.editingMessageId().isEmpty());
+
+        // The edit borrows the composer and gives back what was typed there.
+        controller.setComposerText(QStringLiteral("half a thought"));
+        QVERIFY(controller.beginEdit(mine));
+        QCOMPARE(controller.editingMessageId(), mine);
+        QCOMPARE(controller.composerText(), role(1, MessageListModel::BodyRole).toString());
+        controller.setComposerText(QStringLiteral("Hey Michael, how are you?"));
+        const int rows = messages->rowCount();
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(messages->rowCount(), rows);
+        QCOMPARE(role(1, MessageListModel::BodyRole).toString(),
+                 QStringLiteral("Hey Michael, how are you?"));
+        QVERIFY(role(1, MessageListModel::EditedRole).toBool());
+        QVERIFY(controller.editingMessageId().isEmpty());
+        QCOMPARE(controller.composerText(), QStringLiteral("half a thought"));
+
+        // Cancelling changes nothing and also gives the draft back.
+        QVERIFY(controller.beginEdit(mine));
+        controller.setComposerText(QStringLiteral("never mind"));
+        controller.cancelComposeMode();
+        QCOMPARE(role(1, MessageListModel::BodyRole).toString(),
+                 QStringLiteral("Hey Michael, how are you?"));
+        QCOMPARE(controller.composerText(), QStringLiteral("half a thought"));
+
+        // A reply names who is answered and quotes them.
+        QVERIFY(controller.beginReply(theirs));
+        QCOMPARE(controller.replyingToMessageId(), theirs);
+        QCOMPARE(controller.composeTargetName(), QStringLiteral("Michael"));
+        QCOMPARE(controller.composeTargetText(), QStringLiteral("Hey Daniel!"));
+        controller.setComposerText(QStringLiteral("Hi!"));
+        QVERIFY(controller.sendMessage());
+        const int reply = messages->rowCount() - 1;
+        QCOMPARE(role(reply, MessageListModel::BodyRole).toString(), QStringLiteral("Hi!"));
+        QCOMPARE(role(reply, MessageListModel::ReplyToIdRole).toString(), theirs);
+        QCOMPARE(role(reply, MessageListModel::QuotedSenderRole).toString(),
+                 QStringLiteral("Michael"));
+        QCOMPARE(role(reply, MessageListModel::QuotedBodyRole).toString(),
+                 QStringLiteral("Hey Daniel!"));
+        QVERIFY(controller.replyingToMessageId().isEmpty());
+        QVERIFY(modeSpy.count() >= 5);
+
+        // Replying to oneself says so; leaving the chat drops the reply.
+        QVERIFY(controller.beginReply(mine));
+        QCOMPARE(controller.composeTargetName(), QStringLiteral("You"));
+        QVERIFY(controller.selectContact(QStringLiteral("sarah")));
+        QVERIFY(controller.replyingToMessageId().isEmpty());
+        QVERIFY(controller.selectContact(QStringLiteral("michael")));
+
+        // Copy takes the whole text.
+        QVERIFY(controller.copyMessage(theirs));
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("Hey Daniel!"));
+        QVERIFY(!controller.copyMessage(QStringLiteral("no such message")));
+    }
+
+    void liveEditsAndRepliesTravelBothWays()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        MessageListModel *messages = controller.messages();
+        const auto role = [messages](int row, int role) {
+            return messages->data(messages->index(row), role);
+        };
+        const auto peerReads = [&](qsizetype sent) {
+            auto processed = live.peer->process(live.conversation,
+                                                live.transport->sent.at(sent).ciphertext);
+            return processed.hasValue()
+                ? decodeMessageContent(processed.value().applicationData) : std::nullopt;
+        };
+
+        controller.setComposerText(QStringLiteral("See you at 7"));
+        QVERIFY(controller.sendMessage());
+        const QString mine = role(0, MessageListModel::StableIdRole).toString();
+        // Filed under the id the peer derives from the same ciphertext.
+        QCOMPARE(mine, messageIdForCiphertext(live.transport->sent.at(0).ciphertext).toHex());
+        QCOMPARE(peerReads(0)->body, QStringLiteral("See you at 7"));
+        // Not editable until the relay has it, so an edit cannot overtake it.
+        QVERIFY(!role(0, MessageListModel::EditableRole).toBool());
+        QVERIFY(!controller.beginEdit(mine));
+        live.transport->onRelayAccepted(live.transport->sent.at(0).envelopeId, 7);
+        QVERIFY(role(0, MessageListModel::EditableRole).toBool());
+
+        // Our edit: changed here once durable, and the peer is told.
+        QVERIFY(controller.beginEdit(mine));
+        controller.setComposerText(QStringLiteral("See you at 8"));
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(role(0, MessageListModel::BodyRole).toString(), QStringLiteral("See you at 8"));
+        QVERIFY(role(0, MessageListModel::EditedRole).toBool());
+        QCOMPARE(live.transport->sent.size(), qsizetype(2));
+        const auto edit = peerReads(1);
+        QVERIFY(edit.has_value());
+        QCOMPARE(edit->type, MessageContent::Type::Edit);
+        QCOMPARE(edit->target->toHex(), mine);
+        QCOMPARE(edit->body, QStringLiteral("See you at 8"));
+
+        // The peer writes and then corrects themselves.
+        QVERIFY(live.deliverFromPeer(QStringLiteral("hi back")));
+        const QString theirs = role(1, MessageListModel::StableIdRole).toString();
+        QVERIFY(!role(1, MessageListModel::EditedRole).toBool());
+        const auto theirId = MessageId::fromBytes(QByteArray::fromHex(theirs.toLatin1()));
+        QVERIFY(theirId);
+        QVERIFY(live.deliverFromPeer(
+            EnvelopeMessageKind::MlsPrivateMessage,
+            encodeMessageContent(MessageContent::edit(*theirId, QStringLiteral("hi back!")))));
+        QCOMPARE(messages->rowCount(), 2);
+        QCOMPARE(role(1, MessageListModel::BodyRole).toString(), QStringLiteral("hi back!"));
+        QVERIFY(role(1, MessageListModel::EditedRole).toBool());
+        QVERIFY(!role(1, MessageListModel::EditableRole).toBool());
+
+        // Our reply carries the quote to the peer.
+        QVERIFY(controller.beginReply(theirs));
+        QCOMPARE(controller.composeTargetName(), QStringLiteral("bob"));
+        controller.setComposerText(QStringLiteral("great"));
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(role(2, MessageListModel::ReplyToIdRole).toString(), theirs);
+        QCOMPARE(role(2, MessageListModel::QuotedSenderRole).toString(), QStringLiteral("bob"));
+        QCOMPARE(role(2, MessageListModel::QuotedBodyRole).toString(), QStringLiteral("hi back!"));
+        const auto reply = peerReads(2);
+        QVERIFY(reply.has_value());
+        QCOMPARE(reply->type, MessageContent::Type::Reply);
+        QCOMPARE(reply->target->toHex(), theirs);
+        QCOMPARE(*reply->quotedSender, live.peerDevice);
+
+        // The peer's reply to us names us.
+        const DeviceId self = live.session->publicCredential().value().deviceId;
+        QVERIFY(live.deliverFromPeer(
+            EnvelopeMessageKind::MlsPrivateMessage,
+            encodeMessageContent(MessageContent::reply(QStringLiteral("8 works"),
+                                                       *MessageId::fromBytes(QByteArray::fromHex(mine.toLatin1())),
+                                                       self, QStringLiteral("See you at 8")))));
+        QCOMPARE(role(3, MessageListModel::BodyRole).toString(), QStringLiteral("8 works"));
+        QCOMPARE(role(3, MessageListModel::QuotedSenderRole).toString(), QStringLiteral("You"));
+        QCOMPARE(role(3, MessageListModel::ReplyToIdRole).toString(), mine);
+
+        // All of it is durable. (Rows sent within the same millisecond come
+        // back in id order, so each is looked up by its text.)
+        ChatController reloaded;
+        reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        MessageListModel *again = reloaded.messages();
+        QCOMPARE(again->rowCount(), 4);
+        const auto reread = [again](const QString &body, int role) {
+            for (int row = 0; row < again->rowCount(); ++row) {
+                if (again->data(again->index(row), MessageListModel::BodyRole).toString() == body)
+                    return again->data(again->index(row), role);
+            }
+            return QVariant();
+        };
+        QVERIFY(reread(QStringLiteral("See you at 8"), MessageListModel::EditedRole).toBool());
+        QVERIFY(reread(QStringLiteral("hi back!"), MessageListModel::EditedRole).toBool());
+        QCOMPARE(reread(QStringLiteral("great"), MessageListModel::QuotedSenderRole).toString(),
+                 QStringLiteral("bob"));
+        QCOMPARE(reread(QStringLiteral("8 works"), MessageListModel::QuotedSenderRole).toString(),
+                 QStringLiteral("You"));
     }
 
     void liveEmptyRosterThenAcceptedContactOpensChat()

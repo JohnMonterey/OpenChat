@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Shapes
 import OpenChat
 import OpenChat.Native
 
@@ -17,7 +18,12 @@ Item {
     readonly property real inputHeight: input.lineCount <= 1
         ? singleLineHeight
         : Math.max(singleLineHeight, Math.min(maxInputHeight, Math.ceil(input.contentHeight) + 20))
-    implicitHeight: inputHeight + 2 * margin
+    // Changing or answering a message: a bar above the field says which, and
+    // its cross (or Esc) goes back to writing a new message.
+    readonly property bool editingMessage: controller.editingMessageId.length > 0
+    readonly property bool composing: editingMessage || controller.replyingToMessageId.length > 0
+    readonly property real composeBarHeight: composing ? 26 : 0
+    implicitHeight: composeBarHeight + inputHeight + 2 * margin
                     + (lengthCounter.visible ? lengthCounter.implicitHeight + lengthCounter.anchors.topMargin : 0)
 
     // Whichever chat is open, the keyboard is in its composer, so typing and
@@ -26,9 +32,29 @@ Item {
     onChatIdChanged: input.forceActiveFocus()
     Component.onCompleted: input.forceActiveFocus()
 
+    // Picking Edit or Reply under a message hands the keyboard back here, at
+    // the end of the text.
+    Connections {
+        target: composer.controller
+        function onComposeModeChanged() {
+            if (!composer.composing)
+                return;
+            input.forceActiveFocus();
+            input.cursorPosition = input.length;
+        }
+    }
+
     function send() {
         if (controller.canSend && controller.sendMessage())
             messageSent();
+    }
+
+    // Takes the keyboard back, with whatever was typed elsewhere meanwhile
+    // (after selecting text in a message), at the cursor.
+    function takeTyping(text) {
+        input.forceActiveFocus();
+        if (text.length > 0)
+            input.insert(input.cursorPosition, text);
     }
 
     // Enter sends. The rest is the editing code editors are loved for; every
@@ -41,6 +67,11 @@ Item {
         const end = input.selectionEnd;
         let result = null;
         switch (event.key) {
+        case Qt.Key_Escape:
+            if (!composing || ctrl || shift || alt)
+                return false;
+            controller.cancelComposeMode();
+            return true;
         case Qt.Key_Return:
         case Qt.Key_Enter:
             if (alt)
@@ -132,10 +163,86 @@ Item {
     }
 
     Item {
+        id: composeBar
+        objectName: "composeBar"
+        visible: composer.composing
+        x: inputFrame.x + 2
+        y: 8
+        width: inputFrame.width - 4
+        height: 22
+
+        Rectangle {
+            width: 2
+            height: parent.height
+            radius: 1
+            color: Theme.accentBlue
+        }
+        Text {
+            id: composeTitle
+            objectName: "composeBarTitle"
+            x: 10
+            anchors.verticalCenter: parent.verticalCenter
+            text: composer.editingMessage ? "Editing message"
+                                          : "Replying to " + composer.controller.composeTargetName
+            textFormat: Text.PlainText
+            color: Theme.focusBorder
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+            font.bold: true
+            renderType: Text.NativeRendering
+        }
+        Text {
+            objectName: "composeBarText"
+            anchors.left: composeTitle.right
+            anchors.leftMargin: 8
+            anchors.right: composeCancel.left
+            anchors.rightMargin: 8
+            anchors.verticalCenter: parent.verticalCenter
+            text: composer.controller.composeTargetText.replace(/\s+/g, " ").trim()
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            color: Theme.textSecondary
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+            renderType: Text.NativeRendering
+        }
+        Item {
+            id: composeCancel
+            objectName: "composeCancel"
+            anchors.right: parent.right
+            width: 22
+            height: parent.height
+            Accessible.role: Accessible.Button
+            Accessible.name: composer.editingMessage ? "Stop editing" : "Stop replying"
+            Accessible.onPressAction: composer.controller.cancelComposeMode()
+
+            Shape {
+                anchors.centerIn: parent
+                width: 8
+                height: 8
+                ShapePath {
+                    fillColor: "transparent"
+                    strokeColor: cancelMouse.containsMouse ? Theme.textPrimary : Theme.timestampText
+                    strokeWidth: 1.4
+                    capStyle: ShapePath.RoundCap
+                    PathSvg { path: "M 0 0 L 8 8 M 8 0 L 0 8" }
+                }
+            }
+            MouseArea {
+                id: cancelMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: composer.controller.cancelComposeMode()
+            }
+        }
+    }
+
+    Item {
         id: inputFrame
         objectName: "composerInputFrame"
         x: 17
-        y: composer.margin
+        y: composer.margin + composer.composeBarHeight
         width: parent.width - 2 * x
         height: composer.inputHeight
 

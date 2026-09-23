@@ -108,6 +108,9 @@ private slots:
     void canJoinGroupNeedsAnAcceptedContactAndAnUnknownConversation();
     void commitGroupWelcomeCreatesTheGroupRowOnceAndCanRefuse();
     void emptyMlsStateNeverOverwritesTheStoredBlob();
+    void editSendChangesOnlyASharedTextTheRelayTook();
+    void editReceiveAppliesOnlyTheSendersNewerEdit();
+    void replyQuoteAndEditStampSurviveAReread();
 };
 
 void SyncStoreTest::groupSendCommitsOneRowAndEveryEnvelopeOrNothing()
@@ -1117,6 +1120,162 @@ void SyncStoreTest::deletePendingHandshakeRemovesRowAndListIsOrdered()
     // Deleting an absent conversation is an idempotent no-op success.
     QVERIFY(store.deletePendingHandshake(middle).hasValue());
     QCOMPARE(store.pendingHandshakes().value().size(), 2);
+}
+
+void SyncStoreTest::editSendChangesOnlyASharedTextTheRelayTook()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto self = DeviceId::generate();
+    auto message = outgoingMessage(MessageId::generate(), conversationId, self);
+    message.sharedId = true;
+    QVERIFY(store.commitSend(message, outbox(EnvelopeId::generate(), message.id, conversationId),
+                             QByteArray("send-1"))
+                .hasValue());
+    const auto body = [&] {
+        return chats.messages(conversationId, 50, std::nullopt).value().first();
+    };
+    const auto editOutboxes = [&] {
+        return QVector<OutboxRecord>{
+            outbox(EnvelopeId::generate(), MessageId::generate(), conversationId)};
+    };
+
+    // Still queued: an edit could reach the peer before the message does.
+    QVERIFY(!store.canEditSent(conversationId, message.id).value());
+    auto refused = store.commitEditSend(conversationId, message.id, QStringLiteral("fixed"),
+                                        5'000, editOutboxes(), QByteArray("edit-0"));
+    QVERIFY(!refused.hasValue());
+    QCOMPARE(refused.error().code, RepositoryErrorCode::Conflict);
+    QCOMPARE(body().body, QStringLiteral("encrypted later"));
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("send-1"));
+
+    QVERIFY(store.advanceDeliveryState(message.id, DeliveryState::Sending).hasValue());
+    QVERIFY(store.advanceDeliveryState(message.id, DeliveryState::Sent).hasValue());
+    QVERIFY(store.canEditSent(conversationId, message.id).value());
+    QVERIFY(!store.canEditSent(ConversationId::generate(), message.id).value());
+    QVERIFY(store.commitEditSend(conversationId, message.id, QStringLiteral("fixed"), 5'000,
+                                 editOutboxes(), QByteArray("edit-1"))
+                .hasValue());
+    QCOMPARE(body().body, QStringLiteral("fixed"));
+    QCOMPARE(body().editedAtMs, qint64(5'000));
+    QCOMPARE(body().deliveryState, DeliveryState::Sent);
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("edit-1"));
+    // The edit's envelope waits in the outbox beside the message's own.
+    QCOMPARE(store.claimDue(10'000, 10, 20'000).value().size(), 2);
+
+    // An older edit does not undo a newer one.
+    QVERIFY(!store.commitEditSend(conversationId, message.id, QStringLiteral("stale"), 4'000,
+                                  editOutboxes(), QByteArray("edit-2"))
+                 .hasValue());
+    QCOMPARE(body().body, QStringLiteral("fixed"));
+
+    // A message from before shared ids cannot be edited: the peer would not
+    // know which one was meant.
+    auto legacy = outgoingMessage(MessageId::generate(), conversationId, self, 3'000);
+    QVERIFY(store.commitSend(legacy, outbox(EnvelopeId::generate(), legacy.id, conversationId),
+                             QByteArray("send-2"))
+                .hasValue());
+    QVERIFY(store.advanceDeliveryState(legacy.id, DeliveryState::Sending).hasValue());
+    QVERIFY(store.advanceDeliveryState(legacy.id, DeliveryState::Sent).hasValue());
+    QVERIFY(!store.canEditSent(conversationId, legacy.id).value());
+}
+
+void SyncStoreTest::editReceiveAppliesOnlyTheSendersNewerEdit()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncRepository sync(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto author = DeviceId::generate();
+    auto message = incomingMessage(MessageId::generate(), conversationId, author, 41);
+    message.sharedId = true;
+    QVERIFY(store.commitReceive(message, EnvelopeId::generate(), 41, QByteArray("recv-1"))
+                .hasValue());
+    const auto body = [&] {
+        return chats.messages(conversationId, 50, std::nullopt).value().first();
+    };
+    const auto edit = [&](const EnvelopeId &envelope, const DeviceId &sender,
+                          const ConversationId &conversationOfEdit, const QString &text,
+                          qint64 editedAtMs, quint64 watermark) {
+        return store
+            .commitEditReceive(envelope, sender, conversationOfEdit, message.id, text,
+                               editedAtMs, watermark, QByteArray("edit-") + QByteArray::number(watermark))
+            .value();
+    };
+
+    const auto first = EnvelopeId::generate();
+    QCOMPARE(edit(first, author, conversationId, QStringLiteral("hello again"), 5'000, 42),
+             EditReceiveOutcome::Applied);
+    QCOMPARE(body().body, QStringLiteral("hello again"));
+    QCOMPARE(body().editedAtMs, qint64(5'000));
+    QCOMPARE(sync.cursor(author).value().serverWatermark, quint64(42));
+    QCOMPARE(edit(first, author, conversationId, QStringLiteral("hello again"), 5'000, 42),
+             EditReceiveOutcome::AlreadySeen);
+
+    // Someone else's edit, an older edit, the right message named in the
+    // wrong conversation: each is consumed (the ratchet state moves on and
+    // the envelope is not redelivered), and none of them changes the text.
+    const auto intruder = DeviceId::generate();
+    const auto forged = EnvelopeId::generate();
+    QCOMPARE(edit(forged, intruder, conversationId, QStringLiteral("forged"), 6'000, 43),
+             EditReceiveOutcome::Ignored);
+    QVERIFY(store.hasSeen(forged).value());
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("edit-43"));
+    QCOMPARE(edit(EnvelopeId::generate(), author, conversationId, QStringLiteral("older"), 4'000, 44),
+             EditReceiveOutcome::Ignored);
+    QCOMPARE(edit(EnvelopeId::generate(), author, ConversationId::generate(),
+                  QStringLiteral("elsewhere"), 7'000, 45),
+             EditReceiveOutcome::Ignored);
+    QCOMPARE(body().body, QStringLiteral("hello again"));
+    QCOMPARE(body().editedAtMs, qint64(5'000));
+}
+
+void SyncStoreTest::replyQuoteAndEditStampSurviveAReread()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    auto reply = incomingMessage(MessageId::generate(), conversationId, DeviceId::generate(), 7);
+    reply.sharedId = true;
+    reply.replyToId = MessageId::generate();
+    reply.quotedSenderDeviceId = DeviceId::generate();
+    reply.quotedBody = QStringLiteral("Are you coming?");
+    QVERIFY(store.commitReceive(reply, EnvelopeId::generate(), 7, QByteArray("recv-1")).hasValue());
+
+    const MessageRecord read = chats.messages(conversationId, 50, std::nullopt).value().first();
+    QVERIFY(read.sharedId);
+    QCOMPARE(read.editedAtMs, qint64(0));
+    QCOMPARE(*read.replyToId, *reply.replyToId);
+    QCOMPARE(*read.quotedSenderDeviceId, *reply.quotedSenderDeviceId);
+    QCOMPARE(read.quotedBody, reply.quotedBody);
 }
 
 QTEST_GUILESS_MAIN(SyncStoreTest)

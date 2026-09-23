@@ -64,6 +64,33 @@ struct Message {
     // Who sent an incoming message, shown above the bubble in a group chat
     // where the bubble alone does not say. Empty in a one-to-one chat.
     QString senderName;
+    // True when stableId is the id every participant knows this message by,
+    // so it can be answered and edited. History from before shared ids is not.
+    bool sharedId = false;
+    // The sender changed the text after sending it.
+    bool edited = false;
+    // A reply: the answered message's stableId, who wrote it (a display
+    // name) and the excerpt it quotes. Empty for anything else.
+    QString replyToId;
+    QString quotedSender;
+    QString quotedBody;
+
+    // A text or emoji, as opposed to an event row.
+    [[nodiscard]] bool isConversation() const
+    {
+        return kind == MessageKind::Text || kind == MessageKind::Emoji;
+    }
+    // Whether the local user may change the text: their own message, under a
+    // shared id, and already taken by the relay (None: not tracked at all, as
+    // in the reference mock), so an edit can never overtake it.
+    [[nodiscard]] bool isEditable() const
+    {
+        return direction == MessageDirection::Outgoing && isConversation() && sharedId
+            && (deliveryState == MessageDeliveryState::None
+                || deliveryState == MessageDeliveryState::Sent
+                || deliveryState == MessageDeliveryState::Delivered
+                || deliveryState == MessageDeliveryState::Read);
+    }
 };
 
 } // namespace OpenChat

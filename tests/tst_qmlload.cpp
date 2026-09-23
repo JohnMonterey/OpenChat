@@ -34,6 +34,7 @@
 #include "app/MicrophoneSettings.h"
 #include "app/VoiceEffectHost.h"
 #include "app/ComposerEditing.h"
+#include "app/TextLineSpacing.h"
 #include "app/TransportSettings.h"
 #include <QQmlExpression>
 #include <QQmlContext>
@@ -1747,6 +1748,153 @@ private slots:
 
         QVERIFY(input->setProperty("text", QString()));
         QVERIFY(!counter->isVisible());
+    }
+
+    void messageActionsSitInTheGapAndDriveEditAndReply()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to hover and type into");
+        window->resize(1100, 820);
+        QTest::qWait(50);
+
+        auto *messages = controller.messages();
+        const auto id = [messages](int row) {
+            return messages->data(messages->index(row), OpenChat::MessageListModel::StableIdRole)
+                .toString();
+        };
+        const QString theirs = id(0);
+        const QString mine = id(1);
+        // A message's delegate and its named parts, found in the visual tree.
+        const auto delegateFor = [window](const QString &stableId) -> QQuickItem * {
+            QQuickItem *found = nullptr;
+            const auto visit = [&](const auto &self, QQuickItem *item) -> void {
+                if (item->objectName() == QLatin1String("messageBubble") && item->parentItem()
+                    && item->parentItem()->property("stableId").toString() == stableId)
+                    found = item->parentItem();
+                for (QQuickItem *child : item->childItems())
+                    self(self, child);
+            };
+            visit(visit, window->contentItem());
+            return found;
+        };
+        const auto part = [](QQuickItem *delegate, const char *name) {
+            return delegate->findChild<QQuickItem *>(QLatin1String(name));
+        };
+        const auto hover = [window](QQuickItem *item) {
+            QTest::mouseMove(window, item->mapToScene(QPointF(item->width() / 2,
+                                                              item->height() / 2)).toPoint());
+        };
+
+        QQuickItem *myRow = delegateFor(mine);
+        QQuickItem *theirRow = delegateFor(theirs);
+        QVERIFY(myRow && theirRow);
+        // Any of a message's text can be selected, none of it changed.
+        QQuickItem *myBody = part(myRow, "messageBody");
+        QVERIFY(myBody);
+        QVERIFY(myBody->property("readOnly").toBool());
+        QVERIFY(myBody->property("selectByMouse").toBool());
+
+        // Hovering brings the actions up in the gap below the bubble without
+        // making the message any taller; only one's own message can be edited.
+        QQuickItem *myActions = part(myRow, "messageActions");
+        QVERIFY(myActions && !myActions->isVisible());
+        const qreal restingHeight = myRow->height();
+        hover(part(myRow, "messageBubble"));
+        QTRY_VERIFY(myActions->isVisible());
+        QCOMPARE(myRow->height(), restingHeight);
+        QQuickItem *bubble = part(myRow, "messageBubble");
+        QVERIFY(myActions->mapToScene(QPointF(0, 0)).y()
+                >= bubble->mapToScene(QPointF(0, bubble->height())).y());
+        QVERIFY(myActions->mapToScene(QPointF(0, myActions->height())).y()
+                <= myRow->mapToScene(QPointF(0, myRow->height())).y());
+        QVERIFY(part(myRow, "messageEditAction")->isVisible());
+        hover(part(theirRow, "messageBubble"));
+        QTRY_VERIFY(part(theirRow, "messageActions")->isVisible());
+        QVERIFY(!myActions->isVisible());
+        QVERIFY(!part(theirRow, "messageEditAction")->isVisible());
+
+        // Copy takes the whole message and says so.
+        clickItem(window, part(theirRow, "messageCopyAction"));
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("Hey Daniel!"));
+        QTRY_COMPARE(part(theirRow, "messageActionCaption")->property("text").toString(),
+                     QStringLiteral("Copied"));
+
+        // Edit: the bubble says so here, the composer holds the text, and Esc
+        // leaves it as it was.
+        auto *input = qobject_cast<QQuickItem *>(window->findChild<QObject *>(
+            QStringLiteral("messageInput")));
+        auto *bar = qobject_cast<QQuickItem *>(window->findChild<QObject *>(
+            QStringLiteral("composeBar")));
+        auto *barTitle = window->findChild<QObject *>(QStringLiteral("composeBarTitle"));
+        QVERIFY(input && bar && barTitle);
+        const QString original = messages->data(messages->index(1),
+                                                 OpenChat::MessageListModel::BodyRole).toString();
+        hover(part(myRow, "messageBubble"));
+        QTRY_VERIFY(part(myRow, "messageEditAction")->isVisible());
+        clickItem(window, part(myRow, "messageEditAction"));
+        QCOMPARE(controller.editingMessageId(), mine);
+        QCOMPARE(myBody->property("text").toString(), QStringLiteral("editing..."));
+        QVERIFY(bar->isVisible());
+        QCOMPARE(barTitle->property("text").toString(), QStringLiteral("Editing message"));
+        QTRY_VERIFY(input->hasActiveFocus());
+        QCOMPARE(input->property("text").toString(), original);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QVERIFY(controller.editingMessageId().isEmpty());
+        QVERIFY(!bar->isVisible());
+        QCOMPARE(myBody->property("text").toString(), original);
+        QVERIFY(!part(myRow, "messageEdited")->isVisible());
+
+        // Sent, the new text shows with "edited" below it, above the actions.
+        QVERIFY(controller.beginEdit(mine));
+        QTRY_VERIFY(input->hasActiveFocus());
+        controller.setComposerText(QStringLiteral("Hey Michael, how are you?"));
+        QTest::keyClick(window, Qt::Key_Return);
+        QVERIFY(controller.editingMessageId().isEmpty());
+        QCOMPARE(myBody->property("text").toString(), QStringLiteral("Hey Michael, how are you?"));
+        QQuickItem *editedLabel = part(myRow, "messageEdited");
+        QVERIFY(editedLabel->isVisible());
+        QVERIFY(editedLabel->y() >= bubble->y() + bubble->height());
+        QVERIFY(myActions->y() >= editedLabel->y() + editedLabel->height());
+
+        // Reply: the bar names who is answered, and the answer quotes them.
+        hover(part(theirRow, "messageBubble"));
+        QTRY_VERIFY(part(theirRow, "messageReplyAction")->isVisible());
+        clickItem(window, part(theirRow, "messageReplyAction"));
+        QCOMPARE(controller.replyingToMessageId(), theirs);
+        QCOMPARE(barTitle->property("text").toString(), QStringLiteral("Replying to Michael"));
+        QTRY_VERIFY(input->hasActiveFocus());
+        controller.setComposerText(QStringLiteral("All good here"));
+        QTest::keyClick(window, Qt::Key_Return);
+        QVERIFY(controller.replyingToMessageId().isEmpty());
+        QQuickItem *answer = nullptr;
+        QTRY_VERIFY((answer = delegateFor(id(messages->rowCount() - 1))));
+        QVERIFY(part(answer, "messageQuote")->isVisible());
+        QCOMPARE(part(answer, "messageQuoteSender")->property("text").toString(),
+                 QStringLiteral("Michael"));
+        QCOMPARE(part(answer, "messageQuoteText")->property("text").toString(),
+                 QStringLiteral("Hey Daniel!"));
+
+        // Clicking into a message's text gives it the keyboard, so Ctrl+C
+        // copies what is selected there; typing after that still lands in the
+        // composer.
+        QGuiApplication::clipboard()->clear();
+        QQuickItem *theirBody = part(theirRow, "messageBody");
+        clickItem(window, theirBody);
+        QTRY_VERIFY(theirBody->hasActiveFocus());
+        QVERIFY(QMetaObject::invokeMethod(theirBody, "select", Q_ARG(int, 0), Q_ARG(int, 3)));
+        QTest::keyClick(window, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("Hey"));
+        typeText(window, QStringLiteral("ok"));
+        QTRY_VERIFY(input->hasActiveFocus());
+        QCOMPARE(controller.composerText(), QStringLiteral("ok"));
     }
 
     void failedMessageShowsRetryBelowBubble()
@@ -3968,6 +4116,7 @@ int main(int argc, char **argv)
     qmlRegisterType<OpenChat::AvatarArtwork>(
         "OpenChat.Native", 1, 0, "AvatarArtwork");
     qmlRegisterType<OpenChat::ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
+    qmlRegisterType<OpenChat::TextLineSpacing>("OpenChat.Native", 1, 0, "TextLineSpacing");
     OpenChat::registerCosmeticQmlTypes();
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",

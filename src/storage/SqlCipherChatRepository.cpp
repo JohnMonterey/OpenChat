@@ -46,8 +46,10 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                         "INSERT INTO messages("
                         "id, conversation_id, sender_device_id, content_kind, content, "
                         "client_created_at_ms, server_sequence, delivery_state, flow, body, "
-                        "sent_at_ms, reply_to_id, locally_read) "
-                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
+                        "sent_at_ms, reply_to_id, locally_read, shared_id, edited_at_ms, "
+                        "quoted_sender_device_id, quoted_body) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, "
+                        "?16, ?17)");
     if (!statement.isValid())
         return false;
 
@@ -68,7 +70,14 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                        && (message.replyToId ? statement.bindBlob(12, message.replyToId->bytes())
                                             : statement.bindNull(12))
                        && statement.bindInt(13, message.flow == MessageFlow::Incoming
-                           && message.kind != ContentKind::System ? 0 : 1);
+                           && message.kind != ContentKind::System ? 0 : 1)
+                       && statement.bindInt(14, message.sharedId ? 1 : 0)
+                       && statement.bindInt64(15, message.editedAtMs)
+                       && (message.quotedSenderDeviceId
+                               ? statement.bindBlob(16, message.quotedSenderDeviceId->bytes())
+                               : statement.bindNull(16))
+                       && (message.quotedSenderDeviceId ? statement.bindText(17, message.quotedBody)
+                                                        : statement.bindNull(17));
     return bound && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
@@ -103,7 +112,14 @@ std::optional<MessageRecord> decodeMessage(sqlite3_stmt *statement)
             return std::nullopt;
     }
 
-    return MessageRecord{*id,
+    std::optional<DeviceId> quotedSender;
+    if (sqlite3_column_type(statement, 12) != SQLITE_NULL) {
+        quotedSender = DeviceId::fromBytes(RepositorySql::blob(statement, 12));
+        if (!quotedSender)
+            return std::nullopt;
+    }
+
+    MessageRecord record{*id,
                          *conversationId,
                          *senderId,
                          static_cast<MessageFlow>(flow),
@@ -113,6 +129,12 @@ std::optional<MessageRecord> decodeMessage(sqlite3_stmt *statement)
                          static_cast<DeliveryState>(state),
                          sequence,
                          replyTo};
+    record.sharedId = sqlite3_column_int(statement, 10) != 0;
+    record.editedAtMs = sqlite3_column_int64(statement, 11);
+    record.quotedSenderDeviceId = quotedSender;
+    if (quotedSender)
+        record.quotedBody = RepositorySql::text(statement, 13);
+    return record;
 }
 
 } // namespace
@@ -257,12 +279,14 @@ SqlCipherChatRepository::messages(const ConversationId &conversationId, int limi
 
         const char *sql = before
                               ? "SELECT id, conversation_id, sender_device_id, flow, content_kind, "
-                                "body, server_sequence, delivery_state, reply_to_id, sent_at_ms "
+                                "body, server_sequence, delivery_state, reply_to_id, sent_at_ms, shared_id, "
+                                "edited_at_ms, quoted_sender_device_id, quoted_body "
                                 "FROM messages WHERE conversation_id=?1 AND "
                                 "(sent_at_ms < ?2 OR (sent_at_ms = ?2 AND id < ?3)) "
                                 "ORDER BY sent_at_ms DESC, id DESC LIMIT ?4"
                               : "SELECT id, conversation_id, sender_device_id, flow, content_kind, "
-                                "body, server_sequence, delivery_state, reply_to_id, sent_at_ms "
+                                "body, server_sequence, delivery_state, reply_to_id, sent_at_ms, shared_id, "
+                                "edited_at_ms, quoted_sender_device_id, quoted_body "
                                 "FROM messages WHERE conversation_id=?1 "
                                 "ORDER BY sent_at_ms DESC, id DESC LIMIT ?2";
         Statement statement(database, sql);

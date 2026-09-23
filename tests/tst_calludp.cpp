@@ -189,6 +189,18 @@ public:
     {
         return Result<bool, RepositoryError>::success(true);
     }
+    Result<void, RepositoryError> commitEditSend(const ConversationId &, const MessageId &, const QString &, qint64, const QVector<OutboxRecord> &, QByteArrayView) override
+    {
+        return Result<void, RepositoryError>::success();
+    }
+    Result<bool, RepositoryError> canEditSent(const ConversationId &, const MessageId &) override
+    {
+        return Result<bool, RepositoryError>::success(false);
+    }
+    Result<EditReceiveOutcome, RepositoryError> commitEditReceive(const EnvelopeId &, const DeviceId &, const ConversationId &, const MessageId &, const QString &, qint64, quint64, QByteArrayView) override
+    {
+        return Result<EditReceiveOutcome, RepositoryError>::success(EditReceiveOutcome::Ignored);
+    }
     Result<HandshakeReceiveOutcome, RepositoryError> commitHandshakeReceive(const EnvelopeId &, const AccountId &, const DeviceId &, const ConversationId &, QByteArrayView, qint64, quint64) override
     {
         return Result<HandshakeReceiveOutcome, RepositoryError>::success(HandshakeReceiveOutcome::Stashed);

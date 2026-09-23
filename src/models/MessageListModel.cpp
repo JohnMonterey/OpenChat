@@ -50,6 +50,16 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         return static_cast<int>(message.securityEvent);
     case SenderNameRole:
         return message.senderName;
+    case EditedRole:
+        return message.edited;
+    case EditableRole:
+        return message.isEditable();
+    case ReplyToIdRole:
+        return message.replyToId;
+    case QuotedSenderRole:
+        return message.quotedSender;
+    case QuotedBodyRole:
+        return message.quotedBody;
     default:
         return {};
     }
@@ -70,6 +80,11 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {SenderDeviceRole, "senderDevice"},
         {SecurityEventRole, "securityEvent"},
         {SenderNameRole, "senderName"},
+        {EditedRole, "edited"},
+        {EditableRole, "editable"},
+        {ReplyToIdRole, "replyToId"},
+        {QuotedSenderRole, "quotedSender"},
+        {QuotedBodyRole, "quotedBody"},
     };
 }
 
@@ -120,20 +135,31 @@ void MessageListModel::appendMessage(Message message)
 bool MessageListModel::updateDeliveryState(const QString &stableId, MessageDeliveryState state,
                                            MessageFailureReason failureReason)
 {
-    if (stableId.isEmpty())
+    const int row = rowOf(stableId);
+    if (row < 0)
         return false;
-    for (int row = m_messages.size() - 1; row >= 0; --row) {
-        Message &message = m_messages[row];
-        if (message.stableId != stableId)
-            continue;
-        if (message.deliveryState == state && message.failureReason == failureReason)
-            return true;
-        message.deliveryState = state;
-        message.failureReason = failureReason;
-        emit dataChanged(index(row), index(row), {DeliveryStateRole, FailureReasonRole});
+    Message &message = m_messages[row];
+    if (message.deliveryState == state && message.failureReason == failureReason)
         return true;
-    }
-    return false;
+    message.deliveryState = state;
+    message.failureReason = failureReason;
+    // Whether it can be edited follows from whether the relay took it.
+    emit dataChanged(index(row), index(row), {DeliveryStateRole, FailureReasonRole, EditableRole});
+    return true;
+}
+
+bool MessageListModel::updateBody(const QString &stableId, const QString &body)
+{
+    const int row = rowOf(stableId);
+    if (row < 0)
+        return false;
+    Message &message = m_messages[row];
+    if (message.body == body && message.edited)
+        return true;
+    message.body = body;
+    message.edited = true;
+    emit dataChanged(index(row), index(row), {BodyRole, EditedRole});
+    return true;
 }
 
 std::optional<Message> MessageListModel::messageAt(int row) const
@@ -141,6 +167,23 @@ std::optional<Message> MessageListModel::messageAt(int row) const
     if (row < 0 || row >= m_messages.size())
         return std::nullopt;
     return m_messages.at(row);
+}
+
+std::optional<Message> MessageListModel::messageById(const QString &stableId) const
+{
+    return messageAt(rowOf(stableId));
+}
+
+int MessageListModel::rowOf(const QString &stableId) const
+{
+    if (stableId.isEmpty())
+        return -1;
+    // Recent rows are the ones acted on, so search from the end.
+    for (int row = m_messages.size() - 1; row >= 0; --row) {
+        if (m_messages.at(row).stableId == stableId)
+            return row;
+    }
+    return -1;
 }
 
 } // namespace OpenChat

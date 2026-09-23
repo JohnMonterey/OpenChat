@@ -76,6 +76,15 @@ class ChatController final : public QObject
     Q_PROPERTY(QString composerText READ composerText WRITE setComposerText NOTIFY composerTextChanged)
     Q_PROPERTY(int composerMaxLength READ composerMaxLength CONSTANT)
     Q_PROPERTY(bool canSend READ canSend NOTIFY canSendChanged)
+    // What the composer is doing besides writing a new message: changing one
+    // the user sent (editingMessageId; that bubble reads "editing..." on this
+    // device only) or answering one (replyingToMessageId). At most one is set,
+    // both are stableIds. composeTargetName and composeTargetText describe the
+    // message for the bar above the composer.
+    Q_PROPERTY(QString editingMessageId READ editingMessageId NOTIFY composeModeChanged)
+    Q_PROPERTY(QString replyingToMessageId READ replyingToMessageId NOTIFY composeModeChanged)
+    Q_PROPERTY(QString composeTargetName READ composeTargetName NOTIFY composeModeChanged)
+    Q_PROPERTY(QString composeTargetText READ composeTargetText NOTIFY composeModeChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY searchQueryChanged)
     Q_PROPERTY(SessionState sessionState READ sessionState NOTIFY sessionStateChanged)
     Q_PROPERTY(QString sessionStateText READ sessionStateText NOTIFY sessionStateChanged)
@@ -159,6 +168,10 @@ public:
     [[nodiscard]] QString composerText() const;
     [[nodiscard]] int composerMaxLength() const { return maxComposerLength; }
     [[nodiscard]] bool canSend() const;
+    [[nodiscard]] QString editingMessageId() const { return m_editingMessageId; }
+    [[nodiscard]] QString replyingToMessageId() const { return m_replyingToMessageId; }
+    [[nodiscard]] QString composeTargetName() const { return m_composeTargetName; }
+    [[nodiscard]] QString composeTargetText() const { return m_composeTargetText; }
     [[nodiscard]] QString searchQuery() const;
     [[nodiscard]] SessionState sessionState() const;
     [[nodiscard]] QString sessionStateText() const;
@@ -206,7 +219,20 @@ public:
     Q_INVOKABLE void leaveCurrentGroup();
     Q_INVOKABLE void clearGroupNotice();
     Q_INVOKABLE void setComposerText(const QString &text);
+    // Sends the composer's text: as a new message, as the answer to
+    // replyingToMessageId, or as the new text of editingMessageId (sending it
+    // unchanged just stops editing).
     Q_INVOKABLE bool sendMessage();
+    // The hover actions under a message of the open chat, by stableId.
+    // beginEdit puts an editable message's text in the composer, keeping what
+    // was typed there to give back when the edit is sent or cancelled.
+    // beginReply makes the next send answer the message. Each returns false
+    // for a message it does not apply to. copyMessage puts the whole text on
+    // the clipboard.
+    Q_INVOKABLE bool beginEdit(const QString &messageId);
+    Q_INVOKABLE bool beginReply(const QString &messageId);
+    Q_INVOKABLE void cancelComposeMode();
+    Q_INVOKABLE bool copyMessage(const QString &messageId);
     Q_INVOKABLE void setSessionState(SessionState state);
     // Opening the Call section (even when it is already open) clears the
     // missed-call count.
@@ -278,6 +304,7 @@ signals:
     void profileNoticeChanged();
     void composerTextChanged();
     void canSendChanged();
+    void composeModeChanged();
     void searchQueryChanged();
     void sessionStateChanged();
     void navSectionChanged();
@@ -370,6 +397,20 @@ private:
     void onMessageQueued(const MessageRecord &record);
     void onMessageReceived(const MessageRecord &record);
     void onMessageStateChanged(const MessageId &messageId, DeliveryState state);
+    void onMessageEdited(const ConversationId &conversation, const MessageId &messageId,
+                         const QString &body);
+    // Shows new text for a message of `chatId`, in its history and, when that
+    // chat is open, on screen.
+    void applyEdit(const QString &chatId, const QString &stableId, const QString &body);
+    // The edit the composer holds, sent. See sendMessage.
+    bool sendEdit(const QString &body);
+    // What a reply to `message` quotes, for the engine; nothing when its ids
+    // cannot be read back (it then goes out as a plain message).
+    [[nodiscard]] std::optional<MessageQuote> quoteFor(const Message &message) const;
+    // Who wrote a message of the open chat, as a quote names them.
+    [[nodiscard]] QString authorName(const Message &message) const;
+    // Who `device` is in chat `chatId`: "You", a member, or the contact.
+    [[nodiscard]] QString nameForDevice(const QString &chatId, const DeviceId &device) const;
     void onContactAccepted(const AccountId &account);
     void onProfileUpdateReceived(const ConversationId &conversation, const DeviceId &senderDevice,
                                  const QByteArray &payload);
@@ -394,6 +435,12 @@ private:
     QString m_profileNotice;
     QString m_groupNotice;
     QString m_composerText;
+    QString m_editingMessageId;
+    QString m_replyingToMessageId;
+    QString m_composeTargetName;
+    QString m_composeTargetText;
+    // What the composer held when an edit began, given back when it ends.
+    QString m_draftBeforeEdit;
     QString m_searchQuery;
     SessionState m_sessionState = SessionState::Ready;
     NavSection m_navSection = NavSection::Chat;
@@ -411,6 +458,8 @@ private:
     QTimer m_presenceTimer;
     QHash<QByteArray, qint64> m_onlineDevices;
     ProfileSession *m_session = nullptr;
+    // This device, so a quote of one of our own messages says "You".
+    std::optional<DeviceId> m_localDevice;
     SyncEngine *m_engine = nullptr;
     ContactRequestService *m_requests = nullptr;
     GroupService *m_groups = nullptr;

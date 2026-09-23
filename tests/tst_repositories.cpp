@@ -98,6 +98,11 @@ void RepositoryTest::existingHistoryRemainsReadWhenUpgrading()
         QCOMPARE(sqlite3_open(directory.filePath("profile.sqlite3").toUtf8().constData(), &handle), SQLITE_OK);
         const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> connection(handle, &sqlite3_close);
         QVERIFY(RepositorySql::execute(handle, "PRAGMA key = '0123456789abcdef0123456789abcdef';"));
+        QVERIFY(RepositorySql::execute(handle, "ALTER TABLE messages DROP COLUMN shared_id;"));
+        QVERIFY(RepositorySql::execute(handle, "ALTER TABLE messages DROP COLUMN edited_at_ms;"));
+        QVERIFY(RepositorySql::execute(
+            handle, "ALTER TABLE messages DROP COLUMN quoted_sender_device_id;"));
+        QVERIFY(RepositorySql::execute(handle, "ALTER TABLE messages DROP COLUMN quoted_body;"));
         QVERIFY(RepositorySql::execute(handle, "DROP INDEX messages_unread;"));
         QVERIFY(RepositorySql::execute(handle, "ALTER TABLE messages DROP COLUMN locally_read;"));
         QVERIFY(RepositorySql::execute(handle, "PRAGMA user_version = 13;"));

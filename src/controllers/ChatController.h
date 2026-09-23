@@ -92,12 +92,6 @@ class ChatController final : public QObject
                    currentSettingsCategoryChanged)
     Q_PROPERTY(QStringList currentSettingsElements READ currentSettingsElements NOTIFY
                    currentSettingsCategoryChanged)
-    Q_PROPERTY(QStringList settingsSubcategories READ settingsSubcategories NOTIFY
-                   currentSettingsCategoryChanged)
-    Q_PROPERTY(int currentSettingsSubcategory READ currentSettingsSubcategory NOTIFY
-                   currentSettingsCategoryChanged)
-    Q_PROPERTY(QString currentSettingsPageName READ currentSettingsPageName NOTIFY
-                   currentSettingsCategoryChanged)
 
 public:
     bool conversationVisible() const { return m_conversationVisible; }
@@ -172,9 +166,6 @@ public:
     [[nodiscard]] int currentSettingsCategory() const;
     [[nodiscard]] QString currentSettingsCategoryName() const;
     [[nodiscard]] QStringList currentSettingsElements() const;
-    [[nodiscard]] QStringList settingsSubcategories() const;
-    [[nodiscard]] int currentSettingsSubcategory() const { return m_currentSettingsSubcategory; }
-    [[nodiscard]] QString currentSettingsPageName() const;
     void setPresenceRelay(RelayClient *relay);
     [[nodiscard]] bool localOnline() const { return m_localOnline; }
     [[nodiscard]] bool isLive() const noexcept { return m_live; }
@@ -212,8 +203,6 @@ public:
     // missed-call count.
     Q_INVOKABLE void setNavSection(NavSection section);
     Q_INVOKABLE void setCurrentSettingsCategory(int index);
-    Q_INVOKABLE void setCurrentSettingsSubcategory(int index);
-    Q_INVOKABLE void showSettingsCategories();
 
     // C++-only live seam. Replaces the mock roster with the profile's Accepted
     // contacts, loads history from the message store on selection, sends through
@@ -399,9 +388,8 @@ private:
     NavSection m_navSection = NavSection::Chat;
     // Calls missed since the Call section was last opened, in this run.
     int m_callMissedCount = 0;
-    // -1 denotes the root list / category overview, respectively.
-    int m_currentSettingsCategory = -1;
-    int m_currentSettingsSubcategory = -1;
+    // Settings always has a category open; General is the first.
+    int m_currentSettingsCategory = 0;
 
     // Live seam (null in mock mode). Borrowed; owned by the app runtime and kept
     // alive past this controller.

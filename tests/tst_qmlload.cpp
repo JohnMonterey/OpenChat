@@ -1046,10 +1046,10 @@ private slots:
         QVERIFY(!sidebarCallList->property("visible").toBool());
         QCOMPARE(settingsDetailTitle->property("text").toString(), QStringLiteral("General"));
 
-        controller.setCurrentSettingsCategory(3);
+        controller.setCurrentSettingsCategory(1);
         QCoreApplication::processEvents();
         QCOMPARE(settingsDetailTitle->property("text").toString(),
-                 QStringLiteral("Notifications"));
+                 QStringLiteral("Audio & Video"));
 
         // Return to the default category so later assertions are unaffected.
         controller.setCurrentSettingsCategory(0);
@@ -1066,12 +1066,142 @@ private slots:
         QVERIFY(!sidebarCallList->property("visible").toBool());
     }
 
+    void settingsListCategoriesBesideTheOpenCategorysControls()
+    {
+        OpenChat::ChatController chats;
+        chats.setLocalUserName(QStringLiteral("Developer"));
+        OpenChat::ContactController contacts;
+        contacts.enableForPreview();
+        OpenChat::CallController calls;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                     {QStringLiteral("contactController"), QVariant::fromValue(&contacts)},
+                                     {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        const auto flushDeletes = [] {
+            QCoreApplication::processEvents();
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        };
+
+        // Out of Settings, no section's control is built: Input has a device
+        // behind it.
+        QVERIFY(!findVisualItem(window->contentItem(), QStringLiteral("lowMemoryPanel")));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        QCoreApplication::processEvents();
+
+        // Only categories with working controls, each holding only those.
+        const QStringList categories = chats.settingsCategories();
+        QCOMPARE(categories, (QStringList{QStringLiteral("General"),
+                                          QStringLiteral("Audio & Video"),
+                                          QStringLiteral("Appearance")}));
+        const QHash<QString, QString> controlOf = {
+            {QStringLiteral("Memory"), QStringLiteral("lowMemoryPanel")},
+            {QStringLiteral("Input"), QStringLiteral("microphoneSettingsPanel")},
+            {QStringLiteral("Custom Vocal FX"), QStringLiteral("customVocalFxPanel")},
+            {QStringLiteral("Connection"), QStringLiteral("connectionSettingsPanel")},
+            {QStringLiteral("Theme"), QStringLiteral("darkModeSwitch")},
+        };
+
+        // The sidebar lists exactly the categories, with no Back row, and
+        // stays that way whichever is open.
+        QVERIFY(!findVisualItem(window->contentItem(),
+                                QStringLiteral("settingsCategoryRow_%1").arg(categories.size())));
+        auto *title = findVisualItem(window->contentItem(), QStringLiteral("settingsDetailTitle"));
+        QVERIFY(title && title->isVisible());
+
+        for (int i = 0; i < categories.size(); ++i) {
+            auto *row = findVisualItem(window->contentItem(),
+                                       QStringLiteral("settingsCategoryRow_%1").arg(i));
+            QVERIFY(row && row->isVisible());
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                              row->mapToScene(QPointF(row->width() / 2, row->height() / 2)).toPoint());
+            QTRY_COMPARE(chats.currentSettingsCategory(), i);
+            flushDeletes();
+            QCOMPARE(title->property("text").toString(), categories.at(i));
+            for (int j = 0; j < categories.size(); ++j) {
+                auto *other = findVisualItem(window->contentItem(),
+                                             QStringLiteral("settingsCategoryRow_%1").arg(j));
+                QVERIFY(other && other->isVisible());
+                QCOMPARE(other->property("selected").toBool(), i == j);
+            }
+
+            // The page holds every section of the open category at once, each
+            // a heading over its control, and no other category's controls.
+            const QStringList sections = chats.currentSettingsElements();
+            QVERIFY(!sections.isEmpty());
+            for (const QString &name : sections) {
+                QVERIFY2(controlOf.contains(name), qPrintable(name + QStringLiteral(" has no working control")));
+                auto *section = findVisualItem(window->contentItem(), QStringLiteral("settingsSection_") + name);
+                auto *heading = findVisualItem(window->contentItem(), QStringLiteral("settingsSectionTitle_") + name);
+                auto *control = findVisualItem(window->contentItem(), controlOf.value(name));
+                QVERIFY2(section && section->isVisible(), qPrintable(name));
+                QVERIFY2(heading && heading->isVisible(), qPrintable(name));
+                QCOMPARE(heading->property("text").toString(), name);
+                QVERIFY2(control && control->isVisible(), qPrintable(name));
+                QVERIFY(section->isAncestorOf(control));
+                QVERIFY(control->height() > 0);
+            }
+            for (auto it = controlOf.cbegin(); it != controlOf.cend(); ++it) {
+                if (!sections.contains(it.key()))
+                    QVERIFY2(!findVisualItem(window->contentItem(), it.value()),
+                             qPrintable(it.value()));
+            }
+        }
+
+        // Set OPENCHAT_SETTINGS_CAPTURE_DIR to keep every category, light and
+        // dark, and the foot of any page that scrolls, for eyeballing.
+        const QString captureDir = qEnvironmentVariable("OPENCHAT_SETTINGS_CAPTURE_DIR");
+        if (!captureDir.isEmpty()) {
+            auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+                "OpenChat.Native", "AppearanceSettings");
+            auto *scroll = findVisualItem(window->contentItem(), QStringLiteral("settingsScroll"));
+            QVERIFY(appearance && scroll);
+            const auto shoot = [&](const QString &name) {
+                QTest::qWait(120);
+                return window->grabWindow().save(captureDir + QLatin1Char('/') + name
+                                                 + QStringLiteral(".png"));
+            };
+            for (const bool dark : {false, true}) {
+                appearance->setDarkMode(dark);
+                const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+                for (int i = 0; i < categories.size(); ++i) {
+                    chats.setCurrentSettingsCategory(i);
+                    flushDeletes();
+                    const QString name = QStringLiteral("settings-%1-%2").arg(i).arg(theme);
+                    QVERIFY(shoot(name));
+                    const qreal overflow = scroll->property("contentHeight").toReal() - scroll->height();
+                    if (overflow > 0) {
+                        scroll->setProperty("contentY", overflow);
+                        QVERIFY(shoot(name + QStringLiteral("-end")));
+                    }
+                }
+            }
+            appearance->setDarkMode(false);
+        }
+
+        // Leaving Settings tears the controls down again; coming back finds
+        // the category that was open.
+        chats.setNavSection(OpenChat::ChatController::NavSection::Chat);
+        flushDeletes();
+        QVERIFY(!findVisualItem(window->contentItem(), QStringLiteral("darkModeSwitch")));
+        chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        QCoreApplication::processEvents();
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Appearance"));
+        auto *toggle = findVisualItem(window->contentItem(), QStringLiteral("darkModeSwitch"));
+        QVERIFY(toggle && toggle->isVisible());
+    }
+
     void theMicrophonePanelDrivesAndRemembersTheSettings()
     {
         OpenChat::ChatController chats;
         chats.setLocalUserName(QStringLiteral("Developer"));
         chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
-        chats.setCurrentSettingsCategory(4); // Audio & Video
+        chats.setCurrentSettingsCategory(1); // Audio & Video
         OpenChat::ContactController contacts;
         contacts.enableForPreview();
         OpenChat::CallController calls;
@@ -1097,7 +1227,7 @@ private slots:
         QVERIFY(settings->processing().gateEnabled);
         QVERIFY(qAbs(settings->processing().gateThreshold - 0.02) < 0.001);
 
-        // The panel replaces the Microphone stub row, and only that row.
+        // The Input section, first on the Audio & Video page.
         auto *panel = findVisualItem(window->contentItem(), QStringLiteral("microphoneSettingsPanel"));
         QVERIFY(panel && panel->isVisible());
         auto *systemDefault = findVisualItem(window->contentItem(), QStringLiteral("microphoneDevice_0"));
@@ -1173,11 +1303,8 @@ private slots:
         OpenChat::ChatController chats;
         chats.setLocalUserName(QStringLiteral("Developer"));
         chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
-        chats.setCurrentSettingsCategory(4); // Audio & Video
-        // Settings are pages now: open the Connection page, as a click would.
-        const int page = chats.currentSettingsElements().indexOf(QStringLiteral("Connection"));
-        QVERIFY(page >= 0);
-        chats.setCurrentSettingsSubcategory(page);
+        chats.setCurrentSettingsCategory(1); // Audio & Video
+        QVERIFY(chats.currentSettingsElements().contains(QStringLiteral("Connection")));
         OpenChat::ContactController contacts;
         contacts.enableForPreview();
         OpenChat::CallController calls;
@@ -1259,10 +1386,8 @@ private slots:
     {
         OpenChat::ChatController chats;
         chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
-        chats.setCurrentSettingsCategory(0);
-        const int page = chats.currentSettingsElements().indexOf(QStringLiteral("Low memory mode"));
-        QVERIFY(page >= 0);
-        chats.setCurrentSettingsSubcategory(page);
+        chats.setCurrentSettingsCategory(0); // General
+        QVERIFY(chats.currentSettingsElements().contains(QStringLiteral("Memory")));
         OpenChat::CallController calls;
         QQmlApplicationEngine engine;
         engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
@@ -1319,7 +1444,7 @@ private slots:
         OpenChat::ChatController chats;
         chats.setLocalUserName(QStringLiteral("Developer"));
         chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
-        chats.setCurrentSettingsCategory(5);
+        chats.setCurrentSettingsCategory(2); // Appearance
         OpenChat::ContactController contacts;
         contacts.enableForPreview();
         contacts.setMockInvite(QStringLiteral("OPENCHAT-INV-TEST-0001"));
@@ -1398,7 +1523,12 @@ private slots:
         onboardingItem->setSize(window->size());
         QVERIFY(capture(QStringLiteral("onboarding")));
         screen.reset();
+        // Settings built its controls afresh on return; the earlier switch is gone.
         chats.setNavSection(OpenChat::ChatController::NavSection::Settings);
+        QCoreApplication::processEvents();
+        toggle = findVisualItem(window->contentItem(), QStringLiteral("darkModeSwitch"));
+        QVERIFY(toggle && toggle->isVisible());
+        QVERIFY(toggle->property("checked").toBool());
         toggle->forceActiveFocus();
         QTest::keyClick(window, Qt::Key_Space);
         QTRY_VERIFY(!appearance->darkMode());

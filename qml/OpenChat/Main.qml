@@ -79,7 +79,7 @@ Window {
         // The three navigation sections share the pane to the right of the
         // sidebar and are mutually exclusive. Chat is the default and renders
         // the approved conversation interface exactly as before; Call and
-        // Settings are placeholder stubs shown only when selected.
+        // Settings are shown only when selected.
         Item {
             id: conversationPane
             objectName: "conversationPane"
@@ -287,9 +287,8 @@ Window {
             }
         }
 
-        // Settings overview rows navigate to dedicated subcategory pages.
-        // Theme and Input have live controls; Custom Vocal FX stores preset
-        // designs. Other leaf settings retain their existing placeholder rows.
+        // Settings: the sidebar lists the categories and this pane shows the
+        // open one's sections, each a working control.
         Item {
             id: settingsView
             objectName: "settingsView"
@@ -307,222 +306,11 @@ Window {
                 }
             }
 
-            Item {
+            SettingsPage {
                 id: settingsDetail
-                objectName: "settingsDetail"
                 anchors.fill: parent
-                anchors.leftMargin: 34
-                anchors.rightMargin: 34
-                anchors.topMargin: 28
-
-                Text {
-                    id: settingsDetailTitle
-                    objectName: "settingsDetailTitle"
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    text: root.chatController.currentSettingsPageName
-                    color: Theme.textPrimary
-                    font.family: Theme.uiFont
-                    font.pixelSize: 22
-                    elide: Text.ElideRight
-                    renderType: Text.NativeRendering
-                }
-
-                Rectangle {
-                    id: settingsTitleRule
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: settingsDetailTitle.bottom
-                    anchors.topMargin: 16
-                    height: 1
-                    color: Theme.rule
-                }
-
-                // Scrolls, because a category with a real panel in it (Audio &
-                // Video) is taller than the minimum window.
-                Flickable {
-                    id: settingsScroll
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: settingsTitleRule.bottom
-                    anchors.topMargin: 6
-                    anchors.bottom: parent.bottom
-                    contentHeight: settingsRows.height
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    Connections {
-                        target: root.chatController
-                        function onCurrentSettingsCategoryChanged() { settingsScroll.contentY = 0; }
-                    }
-
-                Column {
-                    id: settingsRows
-                    width: parent.width
-
-                    Repeater {
-                        model: root.chatController.currentSettingsElements
-
-                        Item {
-                            id: settingsElementRow
-                            property int rowIndex: index
-                            property string elementLabel: modelData
-                            readonly property bool navigationRow: root.chatController.currentSettingsSubcategory < 0
-                            readonly property bool themeSetting:
-                                !navigationRow && root.chatController.currentSettingsCategoryName === "Appearance"
-                                && elementLabel === "Theme"
-                            readonly property bool microphoneSetting:
-                                !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
-                                && elementLabel === "Input"
-                            readonly property bool vocalFxSetting:
-                                !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
-                                && elementLabel === "Custom Vocal FX"
-                            readonly property bool lowMemorySetting:
-                                !navigationRow && root.chatController.currentSettingsCategoryName === "General"
-                                && elementLabel === "Low memory mode"
-                            readonly property bool connectionSetting:
-                                !navigationRow && root.chatController.currentSettingsCategoryName === "Audio & Video"
-                                && elementLabel === "Connection"
-                            readonly property bool panelSetting:
-                                microphoneSetting || vocalFxSetting || lowMemorySetting || connectionSetting
-                            width: parent.width
-                            height: microphoneSetting ? microphonePanel.height
-                                  : vocalFxSetting ? vocalFxPanel.height
-                                  : lowMemorySetting ? lowMemoryPanel.height
-                                  : connectionSetting ? connectionPanel.height : (themeSetting ? 70 : 48)
-                            activeFocusOnTab: navigationRow
-                            Accessible.role: navigationRow ? Accessible.Button : Accessible.Pane
-                            Accessible.name: elementLabel
-                            Accessible.onPressAction: openPage()
-                            Keys.onReturnPressed: openPage()
-                            Keys.onSpacePressed: openPage()
-                            function openPage() {
-                                if (!navigationRow) return;
-                                if (root.chatController.currentSettingsCategory < 0)
-                                    root.chatController.setCurrentSettingsCategory(rowIndex);
-                                else
-                                    root.chatController.setCurrentSettingsSubcategory(rowIndex);
-                            }
-
-                            Rectangle {
-                                anchors.fill: parent
-                                visible: settingsElementRow.navigationRow
-                                         && (settingsRowMouse.containsMouse || settingsElementRow.activeFocus)
-                                color: Theme.navSelected
-                                radius: 4
-                            }
-
-                            Loader {
-                                id: vocalFxPanel
-                                active: settingsElementRow.vocalFxSetting
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                height: item ? item.implicitHeight : 0
-                                sourceComponent: VocalFxPanel {}
-                            }
-
-                            // Built only on its own row: the panel is the one
-                            // settings control with a device behind it.
-                            Loader {
-                                id: microphonePanel
-                                active: settingsElementRow.microphoneSetting
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                height: item ? item.implicitHeight : 0
-                                sourceComponent: MicrophoneSettingsPanel {}
-                            }
-
-                            Loader {
-                                id: lowMemoryPanel
-                                active: settingsElementRow.lowMemorySetting
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                height: item ? item.implicitHeight : 0
-                                sourceComponent: LowMemoryPanel {
-                                    restartAllowed: !root.inCall
-                                }
-                            }
-
-                            Loader {
-                                id: connectionPanel
-                                active: settingsElementRow.connectionSetting
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                height: item ? item.implicitHeight : 0
-                                sourceComponent: ConnectionSettingsPanel {}
-                            }
-
-                            Text {
-                                visible: !settingsElementRow.panelSetting
-                                anchors.left: parent.left
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.verticalCenterOffset: settingsElementRow.themeSetting ? -10 : 0
-                                text: settingsElementRow.themeSetting ? "Dark mode" : settingsElementRow.elementLabel
-                                color: Theme.textPrimary
-                                font.family: Theme.uiFont
-                                font.pixelSize: 15
-                                renderType: Text.NativeRendering
-                            }
-
-                            Text {
-                                visible: settingsElementRow.themeSetting
-                                anchors.left: parent.left
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.verticalCenterOffset: 12
-                                width: parent.width - darkModeSwitch.width - 16
-                                text: "Use dark colors throughout OpenChat"
-                                elide: Text.ElideRight
-                                color: Theme.textSecondary
-                                font.family: Theme.uiFont
-                                font.pixelSize: 12
-                            }
-                            AeroSwitch {
-                                id: darkModeSwitch
-                                objectName: settingsElementRow.themeSetting ? "darkModeSwitch" : ""
-                                visible: settingsElementRow.themeSetting
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                checked: Theme.darkMode
-                                onToggled: checked => Theme.setDarkMode(checked)
-                            }
-
-                            Item {
-                                visible: !settingsElementRow.themeSetting
-                                         && !settingsElementRow.panelSetting
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                width: 14
-                                height: 14
-
-                                Image {
-                                    anchors.centerIn: parent
-                                    width: 13
-                                    height: 8
-                                    opacity: 0.45
-                                    rotation: -90
-                                    source: Qt.resolvedUrl("../../assets/icons/chevron-down" + (Theme.darkMode ? "-dark.svg" : ".svg"))
-                                    sourceSize: Qt.size(width * 2, height * 2)
-                                }
-                            }
-
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.bottom: parent.bottom
-                                height: 1
-                                color: Theme.softRule
-                            }
-                            MouseArea {
-                                id: settingsRowMouse
-                                anchors.fill: parent
-                                enabled: settingsElementRow.navigationRow
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: settingsElementRow.openPage()
-                            }
-                        }
-                    }
-                }
-                }
+                controller: root.chatController
+                restartAllowed: !root.inCall
             }
         }
     }

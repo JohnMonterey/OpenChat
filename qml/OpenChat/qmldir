@@ -21,6 +21,7 @@ MicrophoneContextMenu 1.0 components/MicrophoneContextMenu.qml
 MicrophoneSettingsPanel 1.0 components/MicrophoneSettingsPanel.qml
 LowMemoryPanel 1.0 components/LowMemoryPanel.qml
 ConnectionSettingsPanel 1.0 components/ConnectionSettingsPanel.qml
+SettingsPage 1.0 components/SettingsPage.qml
 ContactSidebar 1.0 components/ContactSidebar.qml
 ContactCategory 1.0 components/ContactCategory.qml
 ContactRow 1.0 components/ContactRow.qml

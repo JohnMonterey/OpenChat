@@ -57,42 +57,23 @@ QVector<Message> michaelConversation()
 
 QStringList settingsCategoryNames()
 {
-    return {
-        QStringLiteral("General"),        QStringLiteral("Account & Profile"),
-        QStringLiteral("Privacy"),        QStringLiteral("Notifications"),
-        QStringLiteral("Audio & Video"),  QStringLiteral("Appearance"),
-        QStringLiteral("About"),
-    };
+    return {QStringLiteral("General"), QStringLiteral("Audio & Video"),
+            QStringLiteral("Appearance")};
 }
 
-// Element labels shown in the detail pane for each settings category, indexed
-// to match settingsCategoryNames(). These are presentation stubs; wiring the
-// individual controls to real preferences comes later.
+// The sections a settings category shows, top to bottom, indexed to match
+// settingsCategoryNames(). Every section is a working control; nothing is
+// listed here until it does something.
 QStringList settingsElementsForCategory(int index)
 {
     switch (index) {
     case 0:
-        return {QStringLiteral("Language"), QStringLiteral("Show in taskbar"),
-                QStringLiteral("Launch on startup"), QStringLiteral("On close, keep running"),
-                QStringLiteral("Low memory mode")};
+        return {QStringLiteral("Memory")};
     case 1:
-        return {QStringLiteral("Display name"), QStringLiteral("Presence status"),
-                QStringLiteral("Profile picture"), QStringLiteral("Manage account")};
+        return {QStringLiteral("Input"), QStringLiteral("Custom Vocal FX"),
+                QStringLiteral("Connection")};
     case 2:
-        return {QStringLiteral("Read receipts"), QStringLiteral("Who can contact me"),
-                QStringLiteral("Blocked contacts"), QStringLiteral("Typing indicators")};
-    case 3:
-        return {QStringLiteral("Message notifications"), QStringLiteral("Call notifications"),
-                QStringLiteral("Notification sounds"), QStringLiteral("Do not disturb")};
-    case 4:
-        return {QStringLiteral("Input"), QStringLiteral("Output"), QStringLiteral("Custom Vocal FX"),
-                QStringLiteral("Camera"), QStringLiteral("Ringtone"), QStringLiteral("Connection")};
-    case 5:
-        return {QStringLiteral("Theme"), QStringLiteral("Chat font size"),
-                QStringLiteral("Bubble style"), QStringLiteral("Compact contact list")};
-    case 6:
-        return {QStringLiteral("Version"), QStringLiteral("What's new"),
-                QStringLiteral("Licenses"), QStringLiteral("Check for updates")};
+        return {QStringLiteral("Theme")};
     default:
         return {};
     }
@@ -845,57 +826,18 @@ QString ChatController::currentSettingsCategoryName() const
 
 QStringList ChatController::currentSettingsElements() const
 {
-    if (m_currentSettingsCategory < 0)
-        return settingsCategoryNames();
-    const auto elements = settingsSubcategories();
-    if (m_currentSettingsSubcategory >= 0)
-        return {elements.value(m_currentSettingsSubcategory)};
-    return elements;
-}
-
-QStringList ChatController::settingsSubcategories() const
-{
     return settingsElementsForCategory(m_currentSettingsCategory);
-}
-
-QString ChatController::currentSettingsPageName() const
-{
-    if (m_currentSettingsCategory < 0)
-        return QStringLiteral("Settings");
-    if (m_currentSettingsSubcategory >= 0)
-        return settingsSubcategories().value(m_currentSettingsSubcategory);
-    return currentSettingsCategoryName();
 }
 
 void ChatController::setCurrentSettingsCategory(int index)
 {
     // Ignore anything outside the fixed category range so the selection stays
     // valid; only a genuine change notifies.
-    if (index < 0 || index >= settingsCategoryNames().size())
-        return;
-    if (index == m_currentSettingsCategory && m_currentSettingsSubcategory == -1)
+    if (index < 0 || index >= settingsCategoryNames().size()
+        || index == m_currentSettingsCategory)
         return;
 
     m_currentSettingsCategory = index;
-    m_currentSettingsSubcategory = -1;
-    emit currentSettingsCategoryChanged();
-}
-
-void ChatController::setCurrentSettingsSubcategory(int index)
-{
-    if (index < 0 || index >= settingsSubcategories().size()
-        || index == m_currentSettingsSubcategory)
-        return;
-    m_currentSettingsSubcategory = index;
-    emit currentSettingsCategoryChanged();
-}
-
-void ChatController::showSettingsCategories()
-{
-    if (m_currentSettingsCategory == -1)
-        return;
-    m_currentSettingsCategory = -1;
-    m_currentSettingsSubcategory = -1;
     emit currentSettingsCategoryChanged();
 }
 

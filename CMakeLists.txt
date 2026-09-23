@@ -125,6 +125,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/LowMemoryPanel.qml
         qml/OpenChat/components/ConnectionSettingsPanel.qml
+        qml/OpenChat/components/SettingsPage.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml

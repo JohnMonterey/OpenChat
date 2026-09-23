@@ -23,3 +23,6 @@ deploy/**/pgdata/
 
 # Host-specific deployment credentials.
 deploy/.env.tunnel
+
+# Review sheets written by openchat-cosmetics-gallery and openchat-profile-gallery.
+cosmetics-shots/

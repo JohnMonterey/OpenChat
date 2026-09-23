@@ -11,7 +11,16 @@ Item {
     // absent the requests panel below collapses and the favorites category renders
     // exactly as before.
     property var contactController: null
+    property var dailyCaseController: null
+    property alias caseButton: caseEntry
+    signal caseClicked()
     readonly property real contactRowHeight: Math.max(44, Math.min(65, (height - 290) / 6))
+    // The local user's equipped profile cosmetics (catalogue ids; empty for
+    // none). They follow the saved appearance; the gallery sets them per copy.
+    property string avatarFrame: AppearanceSettings.avatarFrame
+    property string presenceBead: AppearanceSettings.presenceBead
+    property string nameFlair: AppearanceSettings.nameFlair
+    property string profileScene: AppearanceSettings.profileScene
 
     // Navigation artwork uses a fixed slot, independent of font glyph metrics.
     component NavigationIcon: Item {
@@ -36,6 +45,33 @@ Item {
         color: Theme.rule
     }
 
+    // The equipped profile scene, behind the user's own header and fading out
+    // above the search field. Nothing is created while none is equipped.
+    Loader {
+        id: sceneLoader
+        objectName: "profileSceneLoader"
+        active: sidebar.profileScene.length > 0
+        width: parent.width - 1
+        height: localUser.height + 12
+        sourceComponent: ProfileScene {
+            objectName: "profileScene"
+            sceneId: sidebar.profileScene
+            darkMode: Theme.darkMode
+            fadeHeight: 12
+            // A frosted lozenge behind the name and status line only.
+            readableRect: Qt.rect(localUser.textLeft - 7, 9,
+                                  Math.min(localUser.statusRight - localUser.textLeft,
+                                           Math.max(localName.width + 8 + localBead.width,
+                                                    statusLabel.implicitWidth)) + 16,
+                                  48)
+            // And behind the daily-case button, which sits over the scene's
+            // top-right corner, where several scenes put their sun or moon.
+            controlRect: caseEntry.visible ? Qt.rect(caseEntry.x - 4, caseEntry.y - 4,
+                                                     caseEntry.width + 8, caseEntry.height + 8)
+                                           : Qt.rect(0, 0, 0, 0)
+        }
+    }
+
     Item {
         id: localUser
         width: parent.width
@@ -50,8 +86,21 @@ Item {
         // gap the contact rows below use, so names and status lines line up.
         readonly property int textLeft: localAvatar.x + localAvatar.width + 14
         // The right edge the status field may grow to: clear of the add-contact
-        // "+" when it is shown, otherwise of the sidebar's own margin.
-        readonly property int statusRight: width - 48
+        // "+" when it is shown, otherwise of the sidebar's own margin, and of the
+        // daily-case button beside it.
+        readonly property int statusRight: caseEntry.visible ? caseEntry.x - 10 : width - 48
+
+        // On the "+" row, just left of the "+", or in its slot when it is hidden:
+        // the block is too short to stack a second button under it.
+        DailyCaseButton {
+            id: caseEntry
+            anchors.right: parent.right
+            anchors.rightMargin: addContact.visible ? 42 : 13
+            anchors.verticalCenter: addContact.verticalCenter
+            controller: sidebar.dailyCaseController
+            visible: controller !== null
+            onClicked: sidebar.caseClicked()
+        }
 
         Avatar {
             id: localAvatar
@@ -61,6 +110,7 @@ Item {
             width: 44
             height: 44
             avatarKey: sidebar.controller.localAvatarKey
+            frameId: sidebar.avatarFrame
         }
 
         // Hovering the picture darkens it and shows a "+"; clicking opens the
@@ -127,10 +177,32 @@ Item {
             width: Math.min(implicitWidth, localUser.statusRight - x - localBead.width - 8)
             elide: Text.ElideRight
             text: sidebar.controller.localUserName
-            color: Theme.textPrimary
+            // With a flair equipped the flair inks the name; this Text stays,
+            // unseen, so the width, elision and bead position are its own.
+            color: flairLoader.active ? "transparent" : Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 17
             renderType: Text.NativeRendering
+        }
+
+        Loader {
+            id: flairLoader
+            objectName: "localNameFlairLoader"
+            active: sidebar.nameFlair.length > 0
+            sourceComponent: NameFlair {
+                objectName: "localNameFlair"
+                flairId: sidebar.nameFlair
+                text: localName.text
+                font: localName.font
+                textColor: Theme.textPrimary
+                darkMode: Theme.darkMode
+                textWidth: localName.width
+                elided: localName.truncated
+                x: localName.x - padding
+                y: localName.y - padding
+                width: localName.width + 2 * padding
+                height: localName.height + 2 * padding
+            }
         }
 
         // The bead sits after the name, on its line, so the status line below
@@ -141,6 +213,7 @@ Item {
             anchors.verticalCenter: localName.verticalCenter
             anchors.verticalCenterOffset: 1
             beadSize: 11
+            styleId: sidebar.presenceBead
             presence: sidebar.controller.localOnline ? sidebar.controller.localPresence : 2
         }
 
@@ -301,6 +374,7 @@ Item {
         // Primitive "+" affordance drawn from two crossed strokes, opening the
         // add-contact dialog (invite codes). Present only with a contact bridge.
         Item {
+            id: addContact
             objectName: "addContactButton"
             anchors.right: parent.right
             anchors.rightMargin: 18

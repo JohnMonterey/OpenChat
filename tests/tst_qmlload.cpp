@@ -12,6 +12,8 @@
 #include <QUrl>
 #include <QWindow>
 #include <QtTest>
+#include <QScopeGuard>
+#include <QStyleHints>
 #include <QQuickWindow>
 
 #include <algorithm>
@@ -31,8 +33,12 @@
 #include <QQmlExpression>
 #include <QQmlContext>
 #include "call/ScreenCanvas.h"
+#include "case/DailyCaseController.h"
+#include "cosmetics/CosmeticTypes.h"
+#include "cosmetics/CosmeticCatalog.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
+#include "cosmetics/BubbleSkins.h"
 
 namespace {
 
@@ -49,6 +55,146 @@ QQuickItem *findVisualItem(QQuickItem *root, const QString &objectName)
     return nullptr;
 }
 
+void clearEquippedCosmetics()
+{
+    QSettings settings;
+    for (const char *key : {"Appearance/avatarFrame", "Appearance/presenceBead",
+                            "Appearance/nameFlair", "Appearance/profileScene"})
+        settings.remove(QLatin1String(key));
+}
+
+// Every equipped-cosmetic setting, the bubble skin included.
+void clearAllCosmetics()
+{
+    clearEquippedCosmetics();
+    QSettings().remove(QStringLiteral("Appearance/bubbleSkin"));
+}
+
+// The AppearanceSettings property that equips an item of `category`.
+QByteArray equipProperty(const QString &category)
+{
+    if (category == QLatin1String("bubble")) return "bubbleSkin";
+    if (category == QLatin1String("frame")) return "avatarFrame";
+    if (category == QLatin1String("bead")) return "presenceBead";
+    if (category == QLatin1String("flair")) return "nameFlair";
+    if (category == QLatin1String("scene")) return "profileScene";
+    return {};
+}
+
+// One row per catalogue item and theme.
+void addEveryCosmetic()
+{
+    QTest::addColumn<QString>("id");
+    QTest::addColumn<bool>("dark");
+    for (const OpenChat::CosmeticInfo &info : OpenChat::CosmeticCatalog::all()) {
+        for (const bool dark : {false, true})
+            QTest::newRow(qPrintable(info.id + (dark ? QStringLiteral(" dark") : QStringLiteral(" light"))))
+                << info.id << dark;
+    }
+}
+
+QRect deviceRect(QQuickItem *item, qreal dpr, int margin = 0)
+{
+    const QRectF scene = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    return QRect(QPoint(qFloor(scene.left() * dpr), qFloor(scene.top() * dpr)),
+                 QPoint(qCeil(scene.right() * dpr) - 1, qCeil(scene.bottom() * dpr) - 1))
+        .adjusted(-margin, -margin, margin, margin);
+}
+
+bool pixelsDiffer(QRgb a, QRgb b)
+{
+    constexpr int tolerance = 6;
+    return qAbs(qRed(a) - qRed(b)) > tolerance || qAbs(qGreen(a) - qGreen(b)) > tolerance
+        || qAbs(qBlue(a) - qBlue(b)) > tolerance || qAbs(qAlpha(a) - qAlpha(b)) > tolerance;
+}
+
+// Where two grabs of the same window differ: how much inside `allowed`, how
+// much (and where) outside it, skipping pixels in `ignored`.
+struct GrabDiff
+{
+    int inside = 0;
+    int outside = 0;
+    QRect outsideBox;
+    QList<int> perRect; // changed pixels inside each allowed rect
+};
+
+GrabDiff diffGrabs(const QImage &before, const QImage &after, const QList<QRect> &allowed,
+                   const QRegion &ignored = {})
+{
+    GrabDiff diff;
+    diff.perRect.fill(0, allowed.size());
+    const QImage a = before.convertToFormat(QImage::Format_ARGB32);
+    const QImage b = after.convertToFormat(QImage::Format_ARGB32);
+    if (a.size() != b.size()) {
+        diff.outside = -1;
+        return diff;
+    }
+    for (int y = 0; y < a.height(); ++y) {
+        const auto *la = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+        const auto *lb = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+        for (int x = 0; x < a.width(); ++x) {
+            if (!pixelsDiffer(la[x], lb[x]) || ignored.contains(QPoint(x, y)))
+                continue;
+            bool within = false;
+            for (int i = 0; i < allowed.size(); ++i) {
+                if (allowed[i].contains(x, y)) {
+                    within = true;
+                    ++diff.perRect[i];
+                }
+            }
+            if (within) {
+                ++diff.inside;
+            } else {
+                ++diff.outside;
+                diff.outsideBox |= QRect(x, y, 1, 1);
+            }
+        }
+    }
+    return diff;
+}
+
+// Pixels that change on their own between two grabs (a caret blinking, say).
+QRegion unstablePixels(const QImage &first, const QImage &second)
+{
+    QRegion region;
+    const QImage a = first.convertToFormat(QImage::Format_ARGB32);
+    const QImage b = second.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < a.height(); ++y) {
+        const auto *la = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+        const auto *lb = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+        for (int x = 0; x < a.width(); ++x) {
+            if (pixelsDiffer(la[x], lb[x]))
+                region += QRect(x - 2, y - 2, 5, 5);
+        }
+    }
+    return region;
+}
+
+QImage settledGrab(QQuickWindow *window)
+{
+    QCoreApplication::processEvents();
+    QTest::qWait(60);
+    return window->grabWindow();
+}
+
+// The local user's outgoing message bubbles on screen.
+QList<QQuickItem *> outgoingBubbles(QQuickItem *root)
+{
+    QList<QQuickItem *> bubbles;
+    const auto visit = [&bubbles](const auto &self, QQuickItem *item) -> void {
+        if (item->objectName() == QLatin1String("messageBubble") && item->isVisible()
+            && item->property("outgoing").toBool()) {
+            const QRectF scene = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+            if (scene.bottom() > 0 && scene.top() < item->window()->height())
+                bubbles.append(item);
+        }
+        for (QQuickItem *child : item->childItems())
+            self(self, child);
+    };
+    visit(visit, root);
+    return bubbles;
+}
+
 // Types `text` (ASCII) into whatever has focus in `window`, one key at a time.
 void typeText(QWindow *window, const QString &text)
 {
@@ -63,7 +209,138 @@ class QmlLoadTest final : public QObject
     Q_OBJECT
 
 private slots:
-    void init() { QSettings().setValue(QStringLiteral("Appearance/darkMode"), false); }
+    void init()
+    {
+        QSettings settings;
+        settings.setValue(QStringLiteral("Appearance/darkMode"), false);
+        settings.remove(QStringLiteral("Appearance/bubbleSkin"));
+    }
+
+    void dailyCaseInteraction()
+    {
+        OpenChat::ChatController chat;
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.setInitialProperties({{"chatController", QVariant::fromValue(&chat)},
+            {"dailyCaseAccount", QUuid::createUuid().toString()}});
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QTest::qWait(100);
+        auto *entry = window->findChild<QQuickItem *>("dailyCaseButton");
+        auto *controller = window->findChild<OpenChat::DailyCaseController *>("dailyCaseController");
+        QVERIFY(entry && controller);
+        controller->setProperty("muted", true);
+        controller->setProperty("reducedMotion", false);
+        const auto click = [window](QQuickItem *item) {
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                item->mapToScene(QPointF(item->width()/2, item->height()/2)).toPoint());
+        };
+        click(entry);
+        QVERIFY(window->property("caseRequested").toBool());
+        QQuickItem *reel = nullptr;
+        QTRY_VERIFY((reel = findVisualItem(window->contentItem(), "caseReel")));
+        auto *open = findVisualItem(window->contentItem(), "caseOpenButton");
+        QVERIFY(open);
+        const auto capture = [window](const QString &name) {
+            const auto dir = qEnvironmentVariable("OPENCHAT_CASE_CAPTURES");
+            if (!dir.isEmpty()) window->grabWindow().save(dir + '/' + name + ".png");
+        };
+        QTest::qWait(100);
+        capture("available");
+        QSignalSpy reveal(controller, &OpenChat::DailyCaseController::revealed);
+        QSignalSpy ticks(controller, &OpenChat::DailyCaseController::crossed);
+        click(open);
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::Opening);
+        QVERIFY(!open->isEnabled());
+        click(open);
+        QTest::qWait(450);
+        window->resize(1200, 720);
+        QTest::qWait(150);
+        window->resize(720, 560);
+        // Every frame: center stays fixed and both ends are outside the viewport.
+        int frames = 0;
+        const auto connection = connect(controller, &OpenChat::DailyCaseController::positionChanged,
+            window, [&] {
+                ++frames;
+                const auto tile = reel->property("tileWidth").toDouble();
+                const auto stride = reel->property("stride").toDouble();
+                const auto left = reel->width()/2 - tile/2 - controller->position()*stride;
+                QVERIFY(left <= 0);
+                QVERIFY(left + (controller->tileCount()-1)*stride + tile >= reel->width());
+                auto *selector = reel->findChild<QQuickItem *>("caseSelector");
+                QVERIFY(selector);
+                QCOMPARE(selector->x() + selector->width()/2, reel->width()/2);
+            });
+        QTRY_COMPARE_WITH_TIMEOUT(controller->state(), OpenChat::DailyCaseController::OpenedToday, 8500);
+        disconnect(connection);
+        QVERIFY(frames > 100);
+        QVERIFY(ticks.size() > 35);
+        QCOMPARE(reveal.size(), 1);
+        QCOMPARE(controller->position(), double(controller->winnerIndex()));
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        // The reveal names the drawn item and its tier.
+        const auto reward = controller->reward();
+        QVERIFY(!reward.value("id").toString().isEmpty());
+        auto *status = findVisualItem(window->contentItem(), "caseStatus");
+        QVERIFY(status);
+        QVERIFY(status->property("text").toString().contains(reward.value("name").toString()));
+        QVERIFY(status->property("text").toString().contains(reward.value("rarityName").toString()));
+        QTest::qWait(700);
+        capture("opened");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        QTRY_VERIFY(entry->hasActiveFocus());
+        const int tickCount = ticks.size();
+        QTest::qWait(100);
+        QCOMPARE(ticks.size(), tickCount);
+        click(entry);
+        QTRY_VERIFY((reel = findVisualItem(window->contentItem(), "caseReel")));
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        QCOMPARE(reveal.size(), 1);
+        // Exercise a narrow popup independently of the app's desktop minimum.
+        window->setMinimumWidth(320);
+        window->resize(392, 560);
+        QTest::qWait(100);
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        capture("narrow");
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            qmlTypeId("OpenChat.Native", 1, 0, "AppearanceSettings"));
+        QVERIFY(appearance);
+        appearance->setDarkMode(true);
+        QTest::qWait(100);
+        capture("narrow-dark");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        window->resize(860, 680);
+        controller->setAccountKey(QUuid::createUuid().toString());
+        click(entry);
+        QTRY_VERIFY(findVisualItem(window->contentItem(), "caseReel"));
+        open = findVisualItem(window->contentItem(), "caseOpenButton");
+        QVERIFY(open);
+        click(open);
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::Opening);
+        QTest::qWait(160);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        QCOMPARE(controller->state(), OpenChat::DailyCaseController::OpenedToday);
+        QSignalSpy stopped(controller, &OpenChat::DailyCaseController::positionChanged);
+        QTest::qWait(160);
+        QCOMPARE(stopped.size(), 0);
+        QCOMPARE(reveal.size(), 1);
+        click(entry);
+        QTRY_VERIFY((reel = findVisualItem(window->contentItem(), "caseReel")));
+        QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        QTest::qWait(100);
+        capture("dark");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!findVisualItem(window->contentItem(), "caseReel"));
+        appearance->setDarkMode(false);
+        QCOMPARE(warnings.size(), 0);
+    }
 
     void requiredStructure()
     {
@@ -98,6 +375,462 @@ private slots:
         QCoreApplication::processEvents();
         QVERIFY(sidebar->property("contactRowHeight").toDouble() >= 44.0);
         QVERIFY(sidebar->property("contactRowHeight").toDouble() <= 47.0);
+    }
+
+    // With nothing equipped the header is exactly the stock one: no cosmetic
+    // item is even created, and the name is inked by its own Text.
+    void profileCosmeticsAreAbsentByDefault()
+    {
+        clearEquippedCosmetics();
+        OpenChat::ChatController controller;
+        controller.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QObject *root = engine.rootObjects().constFirst();
+        for (const char *name : {"avatarFrame", "beadArt", "localNameFlair", "profileScene"})
+            QVERIFY2(!root->findChild<QObject *>(QLatin1String(name)), name);
+        QObject *localUserName = root->findChild<QObject *>(QStringLiteral("localUserName"));
+        QVERIFY(localUserName);
+        QCOMPARE(localUserName->property("color").value<QColor>(), QColor(QStringLiteral("#2b3b53")));
+    }
+
+    // Equipped through the saved settings, the local header wears every item,
+    // the name keeps its own geometry (so the bead does not move), and nobody
+    // else's picture is framed.
+    void equippedProfileCosmeticsDecorateOnlyTheLocalHeader()
+    {
+        const auto measure = [](QQmlApplicationEngine &engine, OpenChat::ChatController &controller) {
+            engine.setInitialProperties(
+                {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+            engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            engine.loadFromModule("OpenChat", "Main");
+            return engine.rootObjects().isEmpty() ? nullptr : engine.rootObjects().constFirst();
+        };
+        clearEquippedCosmetics();
+        OpenChat::ChatController plainController;
+        plainController.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine plainEngine;
+        QObject *plain = measure(plainEngine, plainController);
+        QVERIFY(plain);
+        auto *plainName = qobject_cast<QQuickItem *>(plain->findChild<QObject *>(QStringLiteral("localUserName")));
+        auto *plainBead = qobject_cast<QQuickItem *>(plain->findChild<QObject *>(QStringLiteral("localPresenceButton")));
+        QVERIFY(plainName && plainBead);
+
+        {
+            QSettings settings;
+            settings.setValue(QStringLiteral("Appearance/avatarFrame"), QStringLiteral("frame.gilded"));
+            settings.setValue(QStringLiteral("Appearance/presenceBead"), QStringLiteral("bead.gem"));
+            settings.setValue(QStringLiteral("Appearance/nameFlair"), QStringLiteral("flair.holo"));
+            settings.setValue(QStringLiteral("Appearance/profileScene"), QStringLiteral("scene.aurora"));
+        }
+        OpenChat::ChatController controller;
+        controller.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        QObject *root = measure(engine, controller);
+        QVERIFY(root);
+        QCoreApplication::processEvents();
+
+        const QList<QObject *> frames = root->findChildren<QObject *>(QStringLiteral("avatarFrame"));
+        QCOMPARE(frames.size(), 1);
+        QCOMPARE(frames.constFirst()->property("frameId").toString(), QStringLiteral("frame.gilded"));
+        QObject *bead = root->findChild<QObject *>(QStringLiteral("beadArt"));
+        QVERIFY(bead);
+        QCOMPARE(bead->property("styleId").toString(), QStringLiteral("bead.gem"));
+        QObject *flair = root->findChild<QObject *>(QStringLiteral("localNameFlair"));
+        QVERIFY(flair);
+        QCOMPARE(flair->property("text").toString(), QStringLiteral("Developer"));
+        QObject *scene = root->findChild<QObject *>(QStringLiteral("profileScene"));
+        QVERIFY(scene);
+        QCOMPARE(scene->property("sceneId").toString(), QStringLiteral("scene.aurora"));
+
+        auto *name = qobject_cast<QQuickItem *>(root->findChild<QObject *>(QStringLiteral("localUserName")));
+        auto *beadButton = qobject_cast<QQuickItem *>(root->findChild<QObject *>(QStringLiteral("localPresenceButton")));
+        QVERIFY(name && beadButton);
+        QCOMPARE(name->property("color").value<QColor>().alpha(), 0);
+        QCOMPARE(name->x(), plainName->x());
+        QCOMPARE(name->width(), plainName->width());
+        QCOMPARE(beadButton->x(), plainBead->x());
+
+        // Changing the choice at runtime follows through; clearing it removes the item.
+        QObject *appearance = engine.singletonInstance<QObject *>("OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QVERIFY(appearance->setProperty("avatarFrame", QStringLiteral("frame.neon")));
+        QTRY_COMPARE(root->findChild<QObject *>(QStringLiteral("avatarFrame"))->property("frameId").toString(),
+                     QStringLiteral("frame.neon"));
+        QVERIFY(appearance->setProperty("nameFlair", QString()));
+        QTRY_VERIFY(!root->findChild<QObject *>(QStringLiteral("localNameFlair")));
+        QCOMPARE(name->property("color").value<QColor>().alpha(), 255);
+        clearEquippedCosmetics();
+    }
+
+    void appearanceSettingsValidateAndPersistCosmetics()
+    {
+        clearEquippedCosmetics();
+        {
+            OpenChat::AppearanceSettings appearance;
+            QCOMPARE(appearance.avatarFrame(), QString());
+            appearance.setAvatarFrame(QStringLiteral("frame.pixel"));
+            appearance.setPresenceBead(QStringLiteral("bead.star"));
+            QCOMPARE(QSettings().value(QStringLiteral("Appearance/avatarFrame")).toString(),
+                     QStringLiteral("frame.pixel"));
+            // An id from another category, or one this build does not know, is none.
+            appearance.setNameFlair(QStringLiteral("bead.gem"));
+            QCOMPARE(appearance.nameFlair(), QString());
+            appearance.setPresenceBead(QStringLiteral("bead.unknown"));
+            QCOMPARE(appearance.presenceBead(), QString());
+            QVERIFY(!QSettings().contains(QStringLiteral("Appearance/presenceBead")));
+        }
+        QSettings().setValue(QStringLiteral("Appearance/profileScene"), QStringLiteral("scene.retired"));
+        OpenChat::AppearanceSettings reloaded;
+        QCOMPARE(reloaded.avatarFrame(), QStringLiteral("frame.pixel"));
+        QCOMPARE(reloaded.profileScene(), QString());
+        clearEquippedCosmetics();
+    }
+
+    // Every collectible, equipped live in the real window, in both themes:
+    // it lands on the right component, visibly changes only that component's
+    // pixels, moves nothing, warns nothing, animates only if it should, is
+    // remembered across a restart, and unequipping restores the exact pixels.
+    void everyCosmeticWorksInTheApp_data() { addEveryCosmetic(); }
+    void everyCosmeticWorksInTheApp()
+    {
+        QFETCH(QString, id);
+        QFETCH(bool, dark);
+        const OpenChat::CosmeticInfo *info = OpenChat::CosmeticCatalog::find(id);
+        QVERIFY(info);
+        const QByteArray property = equipProperty(info->category);
+        QVERIFY2(!property.isEmpty(), qPrintable(info->category));
+
+        clearAllCosmetics();
+        QSettings().setValue(QStringLiteral("Appearance/darkMode"), dark);
+        // The composer takes focus at start; hold its caret still so pixel
+        // comparisons are not at the mercy of the blink.
+        const int flashTime = QGuiApplication::styleHints()->cursorFlashTime();
+        QGuiApplication::styleHints()->setCursorFlashTime(0);
+        const auto restoreFlash = qScopeGuard([flashTime] {
+            QGuiApplication::styleHints()->setCursorFlashTime(flashTime);
+        });
+        OpenChat::ChatController controller;
+        controller.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        window->resize(860, 680);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QObject *appearance = engine.singletonInstance<QObject *>("OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QCOMPARE(appearance->property("darkMode").toBool(), dark);
+        QQuickItem *root = window->contentItem();
+        // The conversation scrolls to its end once laid out; measure after that.
+        QTest::qWait(400);
+
+        const auto item = [window](const char *name) {
+            return qobject_cast<QQuickItem *>(window->findChild<QObject *>(QLatin1String(name)));
+        };
+        auto *name = item("localUserName");
+        auto *beadButton = item("localPresenceButton");
+        auto *avatar = item("localUserAvatar");
+        QVERIFY(name && beadButton && avatar);
+        QQuickItem *header = avatar->parentItem();
+        QQuickItem *search = item("contactSearch");
+        QVERIFY(search);
+        QQuickItem *searchBox = search->parentItem();
+        const QRectF nameBefore(name->x(), name->y(), name->width(), name->height());
+        const QPointF beadBefore(beadButton->x(), beadButton->y());
+        const QRectF avatarBefore(avatar->x(), avatar->y(), avatar->width(), avatar->height());
+        const QList<QQuickItem *> bubbles = outgoingBubbles(root);
+        QVERIFY2(bubbles.size() >= 2, "the preview conversation shows my own messages");
+        QList<QRectF> bubblesBefore;
+        for (QQuickItem *bubble : bubbles)
+            bubblesBefore.append(bubble->mapRectToScene(QRectF(0, 0, bubble->width(), bubble->height())));
+
+        const QImage baseline = settledGrab(window);
+        QTest::qWait(560);
+        const QRegion unstable = unstablePixels(baseline, settledGrab(window));
+        const qreal dpr = baseline.devicePixelRatio();
+
+        // Equip it at runtime, as a picker would.
+        QVERIFY(appearance->setProperty(property.constData(), id));
+        QCOMPARE(appearance->property(property.constData()).toString(), id);
+        QCoreApplication::processEvents();
+
+        // It lands on its component, and only there.
+        QList<QRect> allowed;
+        QList<QQuickItem *> targets;
+        if (info->category == QLatin1String("bubble")) {
+            for (QQuickItem *bubble : bubbles) {
+                QCOMPARE(bubble->property("skin").toString(), id);
+                QVERIFY(bubble->property("skinned").toBool());
+                allowed.append(deviceRect(bubble, dpr, 1));
+                targets.append(bubble);
+            }
+            const auto everyBubble = window->findChildren<QQuickItem *>(QStringLiteral("messageBubble"));
+            for (QQuickItem *bubble : everyBubble) {
+                if (!bubble->property("outgoing").toBool())
+                    QCOMPARE(bubble->property("skin").toString(), QString());
+            }
+        } else {
+            const char *objectName = info->category == QLatin1String("frame") ? "avatarFrame"
+                : info->category == QLatin1String("bead")                     ? "beadArt"
+                : info->category == QLatin1String("flair")                    ? "localNameFlair"
+                                                                              : "profileScene";
+            const char *idProperty = info->category == QLatin1String("frame") ? "frameId"
+                : info->category == QLatin1String("bead")                     ? "styleId"
+                : info->category == QLatin1String("flair")                    ? "flairId"
+                                                                              : "sceneId";
+            QQuickItem *target = nullptr;
+            QTRY_VERIFY((target = item(objectName)));
+            QCOMPARE(window->findChildren<QObject *>(QLatin1String(objectName)).size(), 1);
+            QCOMPARE(target->property(idProperty).toString(), id);
+            // It belongs to the local header block; a scene alone may fade on
+            // into the gap above the search field, behind it.
+            const QRectF block = header->mapRectToScene(QRectF(0, 0, header->width(), header->height()))
+                                     .adjusted(-1, -1, 1, info->category == QLatin1String("scene") ? 13 : 1);
+            const QRectF own = target->mapRectToScene(QRectF(0, 0, target->width(), target->height()));
+            QVERIFY2(block.contains(own),
+                     qPrintable(QStringLiteral("%1 reaches outside the header: %2,%3 %4x%5")
+                                    .arg(id).arg(own.x()).arg(own.y()).arg(own.width()).arg(own.height())));
+            // Whatever it is, the search box itself is never painted over
+            // (only its rounded corners' cut-outs, which are see-through).
+            const QRect box = deviceRect(searchBox, dpr);
+            const int corner = qCeil(searchBox->property("radius").toReal() * dpr);
+            QRegion region(deviceRect(target, dpr, 1));
+            region -= QRegion(box.adjusted(corner, 0, -corner, 0));
+            region -= QRegion(box.adjusted(0, corner, 0, -corner));
+            for (const QRect &rect : region)
+                allowed.append(rect);
+            targets.append(target);
+        }
+
+        const QImage equipped = settledGrab(window);
+        // For review: the equipped surface with some surroundings, and the stock one.
+        if (const QString dir = qEnvironmentVariable("OPENCHAT_COSMETIC_CAPTURES"); !dir.isEmpty()) {
+            QRect crop;
+            for (const QRect &rect : allowed)
+                crop |= rect;
+            crop = crop.adjusted(-int(24 * dpr), -int(16 * dpr), int(24 * dpr), int(16 * dpr))
+                       .intersected(equipped.rect());
+            equipped.copy(crop).save(QStringLiteral("%1/%2-%3.png").arg(dir, id, dark ? "dark" : "light"));
+            baseline.copy(crop).save(QStringLiteral("%1/%2-%3-stock.png").arg(dir, id, dark ? "dark" : "light"));
+        }
+        const GrabDiff change = diffGrabs(baseline, equipped, allowed, unstable);
+        QVERIFY2(change.outside == 0,
+                 qPrintable(QStringLiteral("%1 changed %2 px outside its component, within %3,%4 %5x%6")
+                                .arg(id).arg(change.outside).arg(change.outsideBox.x())
+                                .arg(change.outsideBox.y()).arg(change.outsideBox.width())
+                                .arg(change.outsideBox.height())));
+        const int minimum = info->category == QLatin1String("bead") ? int(20 * dpr * dpr) : int(150 * dpr * dpr);
+        QVERIFY2(change.inside >= minimum,
+                 qPrintable(QStringLiteral("%1 changed only %2 px").arg(id).arg(change.inside)));
+        // Every one of my bubbles wears it, not just some.
+        if (info->category == QLatin1String("bubble")) {
+            for (int i = 0; i < change.perRect.size(); ++i)
+                QVERIFY2(change.perRect[i] > int(100 * dpr * dpr),
+                         qPrintable(QStringLiteral("%1 left bubble %2 unchanged").arg(id).arg(i)));
+        }
+
+        // Nothing moved.
+        QCOMPARE(QRectF(name->x(), name->y(), name->width(), name->height()), nameBefore);
+        QCOMPARE(QPointF(beadButton->x(), beadButton->y()), beadBefore);
+        QCOMPARE(QRectF(avatar->x(), avatar->y(), avatar->width(), avatar->height()), avatarBefore);
+        for (int i = 0; i < bubbles.size(); ++i)
+            QCOMPARE(bubbles[i]->mapRectToScene(QRectF(0, 0, bubbles[i]->width(), bubbles[i]->height())),
+                     bubblesBefore[i]);
+
+        // Only the animated items move on their own.
+        if (info->category == QLatin1String("frame")) {
+            QQuickItem *frame = targets.constFirst();
+            const int phase = frame->property("phase").toInt();
+            QTest::qWait(450);
+            if (info->animated)
+                QVERIFY2(frame->property("phase").toInt() != phase, qPrintable(id + " stood still"));
+            else
+                QCOMPARE(frame->property("phase").toInt(), phase);
+        }
+
+        // Remembered, and worn again after a restart.
+        QCOMPARE(QSettings().value(QStringLiteral("Appearance/") + QString::fromLatin1(property)).toString(), id);
+        if (!dark) {
+            OpenChat::ChatController again;
+            QQmlApplicationEngine restarted;
+            restarted.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&again)}});
+            restarted.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            restarted.loadFromModule("OpenChat", "Main");
+            QCOMPARE(restarted.rootObjects().size(), 1);
+            QObject *reloaded = restarted.singletonInstance<QObject *>("OpenChat.Native", "AppearanceSettings");
+            QCOMPARE(reloaded->property(property.constData()).toString(), id);
+        }
+        // The second window took the focus (and with it the composer's caret).
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        // Unequipping leaves exactly the stock pixels.
+        QVERIFY(appearance->setProperty(property.constData(), QString()));
+        const QImage cleared = settledGrab(window);
+        const GrabDiff residue = diffGrabs(baseline, cleared, {}, unstable);
+        QVERIFY2(residue.outside == 0,
+                 qPrintable(QStringLiteral("%1 left %2 px behind, within %3,%4 %5x%6")
+                                .arg(id).arg(residue.outside).arg(residue.outsideBox.x())
+                                .arg(residue.outsideBox.y()).arg(residue.outsideBox.width())
+                                .arg(residue.outsideBox.height())));
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.isEmpty() ? QString()
+            : warnings.constFirst().constFirst().value<QList<QQmlError>>().value(0).toString()));
+        clearAllCosmetics();
+    }
+
+    // Every frame also wears the local call tile, and only it: the remote
+    // tile keeps its stock picture and the caption stays clear of the frame.
+    void everyFrameWearsTheLocalCallTile_data()
+    {
+        QTest::addColumn<QString>("id");
+        for (const OpenChat::CosmeticInfo &info : OpenChat::CosmeticCatalog::inCategory(QStringLiteral("frame")))
+            QTest::newRow(qPrintable(info.id)) << info.id;
+    }
+    void everyFrameWearsTheLocalCallTile()
+    {
+        QFETCH(QString, id);
+        clearAllCosmetics();
+        const auto grabTiles = [](const QString &frame, QImage *localTile, QImage *remoteTile,
+                                  bool *captionClear, QString *equippedId, int *remoteFrames) {
+            QSettings().setValue(QStringLiteral("Appearance/avatarFrame"), frame);
+            OpenChat::ChatController chats;
+            OpenChat::CallController calls;
+            calls.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                   QStringLiteral("jessica"), false, false);
+            QQmlApplicationEngine engine;
+            engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)},
+                                         {QStringLiteral("callController"), QVariant::fromValue(&calls)}});
+            engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            engine.loadFromModule("OpenChat", "Main");
+            auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().value(0));
+            if (!window || !QTest::qWaitForWindowExposed(window))
+                return false;
+            window->resize(860, 680);
+            auto *local = window->findChild<QQuickItem *>(QStringLiteral("localParticipant"));
+            auto *remote = window->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+            if (!local || !remote)
+                return false;
+            const QImage shot = settledGrab(window);
+            const qreal dpr = shot.devicePixelRatio();
+            *localTile = shot.copy(deviceRect(local, dpr));
+            *remoteTile = shot.copy(deviceRect(remote, dpr));
+            auto *frameItem = local->findChild<QQuickItem *>(QStringLiteral("avatarFrame"));
+            *equippedId = frameItem ? frameItem->property("frameId").toString() : QString();
+            *remoteFrames = remote->findChildren<QQuickItem *>(QStringLiteral("avatarFrame")).size();
+            *captionClear = true;
+            if (frameItem) {
+                const QRectF frameRect = frameItem->mapRectToScene(
+                    QRectF(0, 0, frameItem->width(), frameItem->height()));
+                for (QQuickItem *text : local->findChildren<QQuickItem *>()) {
+                    if (qstrcmp(text->metaObject()->className(), "QQuickText") == 0 && text->isVisible()
+                        && !text->property("text").toString().isEmpty()) {
+                        const QRectF textRect = text->mapRectToScene(QRectF(0, 0, text->width(), text->height()));
+                        if (textRect.intersects(frameRect.adjusted(2, 2, -2, -2)))
+                            *captionClear = false;
+                    }
+                }
+            }
+            return true;
+        };
+        QImage stockLocal, stockRemote, framedLocal, framedRemote;
+        bool stockClear = false, framedClear = false;
+        QString stockId, framedId;
+        int stockRemoteFrames = -1, framedRemoteFrames = -1;
+        QVERIFY(grabTiles(QString(), &stockLocal, &stockRemote, &stockClear, &stockId, &stockRemoteFrames));
+        QVERIFY(grabTiles(id, &framedLocal, &framedRemote, &framedClear, &framedId, &framedRemoteFrames));
+        QCOMPARE(stockId, QString());
+        QCOMPARE(framedId, id);
+        QCOMPARE(framedRemoteFrames, 0);
+        QVERIFY2(framedClear, qPrintable(id + " overlaps the call tile's caption"));
+        // The remote tile is untouched (it may sit lower when the header grows).
+        QCOMPARE(framedRemote.size(), stockRemote.size());
+        QVERIFY2(diffGrabs(stockRemote, framedRemote, {}).outside == 0, qPrintable(id + " changed the remote tile"));
+        // The local tile visibly wears it.
+        QVERIFY(framedLocal.height() >= stockLocal.height());
+        const QImage stockTop = stockLocal.copy(0, 0, stockLocal.width(), stockLocal.height());
+        const QImage framedTop = framedLocal.copy(0, 0, stockLocal.width(), stockLocal.height());
+        QVERIFY(diffGrabs(stockTop, framedTop, {}).outside > 200);
+        clearAllCosmetics();
+    }
+
+    // Every collectible draws its preview in a case tile (the reel's and a
+    // narrow one), inside the preview slot, with its name and tier.
+    void everyCosmeticPreviewsInItsCaseTile_data() { addEveryCosmetic(); }
+    void everyCosmeticPreviewsInItsCaseTile()
+    {
+        QFETCH(QString, id);
+        QFETCH(bool, dark);
+        QSettings().setValue(QStringLiteral("Appearance/darkMode"), dark);
+        QQmlEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.setData(QByteArrayLiteral(R"(
+            import QtQuick
+            import OpenChat
+            import OpenChat.Native
+            Window {
+                id: window
+                property string itemId
+                readonly property var entry: Cosmetics.item(itemId)
+                // The same entry with no category: the tile without its preview.
+                readonly property var bare: Object.assign({}, entry, { category: "" })
+                width: 320; height: 150; visible: true
+                color: Theme.contentBackground
+                Row {
+                    x: 10; y: 10; spacing: 10
+                    CaseTile { objectName: "wide"; width: 104; height: 128; item: window.entry }
+                    CaseTile { objectName: "wideBare"; width: 104; height: 128; item: window.bare }
+                    CaseTile { objectName: "narrow"; width: 82; height: 128; item: window.entry }
+                }
+            })"), QUrl());
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{"itemId", id}}));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(object.data());
+        QVERIFY(window && QTest::qWaitForWindowExposed(window));
+        const QImage shot = settledGrab(window);
+        const qreal dpr = shot.devicePixelRatio();
+        auto *wide = window->findChild<QQuickItem *>(QStringLiteral("wide"));
+        auto *bare = window->findChild<QQuickItem *>(QStringLiteral("wideBare"));
+        auto *narrow = window->findChild<QQuickItem *>(QStringLiteral("narrow"));
+        QVERIFY(wide && bare && narrow);
+        const QImage withPreview = shot.copy(deviceRect(wide, dpr));
+        const QImage withoutPreview = shot.copy(deviceRect(bare, dpr));
+        // The preview slot: 6 px in, from y 12, 60 px tall.
+        const QRect slot = QRect(QPoint(int(6 * dpr), int(12 * dpr)),
+                                 QSize(int((104 - 12) * dpr), int(60 * dpr)));
+        const GrabDiff preview = diffGrabs(withoutPreview, withPreview, {slot});
+        QVERIFY2(preview.outside == 0, qPrintable(id + " draws outside its preview slot"));
+        QVERIFY2(preview.inside >= int(40 * dpr * dpr),
+                 qPrintable(QStringLiteral("%1 preview drew only %2 px").arg(id).arg(preview.inside)));
+        const QImage narrowShot = shot.copy(deviceRect(narrow, dpr));
+        int inked = 0;
+        const QRgb paper = narrowShot.pixel(narrowShot.width() / 2, int(4 * dpr));
+        for (int y = int(12 * dpr); y < int(72 * dpr); ++y)
+            for (int x = int(6 * dpr); x < narrowShot.width() - int(6 * dpr); ++x)
+                inked += pixelsDiffer(narrowShot.pixel(x, y), paper) ? 1 : 0;
+        QVERIFY2(inked >= int(40 * dpr * dpr), qPrintable(id + " vanishes in a narrow tile"));
+
+        const OpenChat::CosmeticInfo *info = OpenChat::CosmeticCatalog::find(id);
+        QStringList texts;
+        for (QQuickItem *child : wide->childItems()) {
+            if (child->isVisible() && qstrcmp(child->metaObject()->className(), "QQuickText") == 0)
+                texts << child->property("text").toString();
+        }
+        QVERIFY2(texts.contains(info->name), qPrintable(texts.join(QLatin1Char('|'))));
+        QVERIFY(texts.contains(OpenChat::CosmeticCatalog::rarityName(info->rarity)));
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.isEmpty() ? QString()
+            : warnings.constFirst().constFirst().value<QList<QQmlError>>().value(0).toString()));
     }
 
     void conversationStructureAndSending()
@@ -883,6 +1616,70 @@ private slots:
         QVERIFY(retry->property("y").toDouble() >= item->property("bubbleHeight").toDouble());
         item->setProperty("deliveryState", 3);
         QVERIFY(!retry->property("visible").toBool());
+    }
+
+    void outgoingBubblesWearTheEquippedSkin()
+    {
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            "OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QCOMPARE(appearance->bubbleSkin(), QString());
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        const auto message = [&component](int direction) {
+            return component.createWithInitialProperties({
+                {"direction", direction}, {"deliveryState", 3}, {"body", "hello"},
+                {"timestamp", "10:15 AM"}, {"kind", 0}, {"dateLabel", ""},
+                {"showDateDivider", false}, {"senderName", ""}, {"width", 540}});
+        };
+        QScopedPointer<QObject> mine(message(1));
+        QScopedPointer<QObject> theirs(message(0));
+        QVERIFY(mine && theirs);
+        auto *myBubble = mine->findChild<QObject *>(QStringLiteral("messageBubble"));
+        auto *myBody = mine->findChild<QObject *>(QStringLiteral("messageBody"));
+        auto *myTime = mine->findChild<QObject *>(QStringLiteral("messageTimestamp"));
+        auto *theirBubble = theirs->findChild<QObject *>(QStringLiteral("messageBubble"));
+        auto *theirBody = theirs->findChild<QObject *>(QStringLiteral("messageBody"));
+        QVERIFY(myBubble && myBody && myTime && theirBubble && theirBody);
+
+        // Nothing equipped: the classic bubble and the theme's text colours.
+        QCOMPARE(myBubble->property("skin").toString(), QString());
+        QVERIFY(!myBubble->property("skinned").toBool());
+        const QColor classicText = myBody->property("color").value<QColor>();
+        const QColor classicTime = myTime->property("color").value<QColor>();
+        QCOMPARE(classicText, QColor("#2b3b53"));
+        QCOMPARE(myBody->property("style").toInt(), 0); // Text.Normal
+
+        const QString nebula = QStringLiteral("bubble.nebula");
+        appearance->setBubbleSkin(nebula);
+        QCOMPARE(myBubble->property("skin").toString(), nebula);
+        QVERIFY(myBubble->property("skinned").toBool());
+        QCOMPARE(myBody->property("color").value<QColor>(), OpenChat::BubbleSkins::textColor(nebula));
+        QCOMPARE(myTime->property("color").value<QColor>(),
+                 OpenChat::BubbleSkins::secondaryTextColor(nebula));
+        QCOMPARE(myBody->property("style").toInt(), 2); // Text.Raised
+        QCOMPARE(myBody->property("styleColor").value<QColor>(),
+                 OpenChat::BubbleSkins::textShadowColor(nebula));
+        // Skins are local only: other people's bubbles stay classic.
+        QCOMPARE(theirBubble->property("skin").toString(), QString());
+        QCOMPARE(theirBody->property("color").value<QColor>(), classicText);
+
+        // The choice is remembered.
+        QCOMPARE(QSettings().value(QStringLiteral("Appearance/bubbleSkin")).toString(), nebula);
+        OpenChat::AppearanceSettings reloaded;
+        QCOMPARE(reloaded.bubbleSkin(), nebula);
+
+        // A skin this build does not know (retired, or from a newer build)
+        // falls back to the classic bubble rather than an unreadable one.
+        appearance->setBubbleSkin(QStringLiteral("bubble.retired"));
+        QVERIFY(!myBubble->property("skinned").toBool());
+        QCOMPARE(myBody->property("color").value<QColor>(), classicText);
+        QCOMPARE(myTime->property("color").value<QColor>(), classicTime);
+        QCOMPARE(myBody->property("style").toInt(), 0);
+        appearance->setBubbleSkin(QString());
     }
 
     void chatRowsShowUnreadCountBadges()
@@ -2857,8 +3654,10 @@ int main(int argc, char **argv)
     QCoreApplication::setOrganizationName(QStringLiteral("OpenChatTests"));
     QCoreApplication::setApplicationName(QStringLiteral("qml-appearance"));
     QTemporaryDir settingsDirectory;
+    qputenv("XDG_DATA_HOME", settingsDirectory.path().toUtf8());
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDirectory.path());
+    qmlRegisterType<OpenChat::DailyCaseController>("OpenChat.Native", 1, 0, "DailyCaseController");
     qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
         "OpenChat.Native", 1, 0, "AppearanceSettings",
         [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
@@ -2874,6 +3673,7 @@ int main(int argc, char **argv)
     qmlRegisterType<OpenChat::AvatarArtwork>(
         "OpenChat.Native", 1, 0, "AvatarArtwork");
     qmlRegisterType<OpenChat::ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
+    OpenChat::registerCosmeticQmlTypes();
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
         QStringLiteral("ChatController is provided by the application"));

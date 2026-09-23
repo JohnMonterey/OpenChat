@@ -25,6 +25,34 @@ include(cmake/OpenChatRust.cmake)
 add_openchat_rust_library()
 
 qt_standard_project_setup(REQUIRES 6.5)
+add_library(openchat_case STATIC
+    src/case/DailyCaseService.cpp
+    src/case/DailyCaseController.cpp
+    src/case/CaseAudio.cpp
+)
+target_include_directories(openchat_case PUBLIC src)
+# CaseAudio decodes its bundled crate samples with the defensive WavFile reader.
+# The claim draws its reward from the cosmetics catalogue's rarity tiers.
+target_link_libraries(openchat_case PUBLIC Qt6::Core Qt6::Multimedia
+    PRIVATE openchat_media openchat_cosmetics)
+
+# Collectible cosmetics: chat-bubble skins, avatar frames, presence beads, name
+# flair and profile scenes. All QPainter artwork, so it renders on the software scene
+# graph (which runs no shaders) exactly as on the hardware one.
+add_library(openchat_cosmetics STATIC
+    src/cosmetics/CosmeticCatalog.cpp
+    src/cosmetics/CosmeticPaint.cpp
+    src/cosmetics/CosmeticTypes.cpp
+    src/cosmetics/AvatarFrameItem.cpp
+    src/cosmetics/FramePainters.cpp
+    src/cosmetics/BeadArtItem.cpp
+    src/cosmetics/NameFlairItem.cpp
+    src/cosmetics/ProfileSceneItem.cpp
+    src/cosmetics/ProceduralNoise.cpp
+    src/cosmetics/BubbleSkins.cpp
+)
+target_include_directories(openchat_cosmetics PUBLIC src)
+target_link_libraries(openchat_cosmetics PUBLIC Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
     qt_policy(SET QTP0004 NEW)
 endif()
@@ -108,6 +136,11 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
+        qml/OpenChat/components/DailyCaseButton.qml
+        qml/OpenChat/components/DailyCaseModal.qml
+        qml/OpenChat/components/CaseReel.qml
+        qml/OpenChat/components/CaseTile.qml
+        qml/OpenChat/components/CosmeticPreview.qml
     RESOURCES
         assets/Jessica.png
         assets/alex.png
@@ -123,10 +156,15 @@ qt_add_qml_module(OpenChat
         assets/icons/chevron-down.svg
         assets/icons/chevron-down-dark.svg
         assets/icons/openchat.png
+        assets/sounds/crate-display.wav
+        assets/sounds/crate-item-scroll.wav
+        assets/sounds/crate-open.wav
 )
 
 target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
+    openchat_case
+    openchat_cosmetics
     openchat_app
     openchat_avatar
     openchat_call
@@ -196,6 +234,9 @@ target_link_libraries(openchat-call-check PRIVATE
 )
 
 enable_testing()
+add_executable(tst_dailycase tests/tst_dailycase.cpp)
+target_link_libraries(tst_dailycase PRIVATE openchat_case Qt6::Test)
+add_test(NAME tst_dailycase COMMAND tst_dailycase)
 
 add_executable(tst_voiceeffects tests/tst_voiceeffects.cpp src/media/VoiceEffects.cpp)
 target_include_directories(tst_voiceeffects PRIVATE src)
@@ -228,6 +269,25 @@ add_library(openchat_avatar STATIC
 )
 target_include_directories(openchat_avatar PUBLIC src)
 target_link_libraries(openchat_avatar PUBLIC openchat_domain Qt6::Core Qt6::Gui)
+
+# Renders every bubble skin through the real MessageDelegate to a contact sheet
+# (light and dark PNGs under cosmetics-shots/). Not part of the application: it
+# is how the skins are reviewed. Runs headless on the offscreen platform.
+add_executable(openchat-cosmetics-gallery
+    tools/cosmetics_gallery.cpp
+    src/render/BubbleBackground.cpp
+    src/app/AppearanceSettings.cpp
+)
+target_include_directories(openchat-cosmetics-gallery PRIVATE src)
+target_compile_definitions(openchat-cosmetics-gallery PRIVATE
+    OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(openchat-cosmetics-gallery PRIVATE
+    openchat_cosmetics
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Quick
+)
 
 # Desktop notifications. The policy (what is worth announcing, and what it says)
 # is platform-neutral and tested on its own; exactly one backend is compiled in,
@@ -905,8 +965,13 @@ add_executable(tst_bubblebackground
     src/render/AvatarArtwork.cpp
 )
 target_include_directories(tst_bubblebackground PRIVATE src)
-target_link_libraries(tst_bubblebackground PRIVATE openchat_avatar Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
+target_link_libraries(tst_bubblebackground PRIVATE openchat_avatar openchat_cosmetics Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
 add_test(NAME tst_bubblebackground COMMAND tst_bubblebackground)
+
+add_executable(tst_cosmetics tests/tst_cosmetics.cpp)
+target_link_libraries(tst_cosmetics PRIVATE openchat_cosmetics Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
+add_test(NAME tst_cosmetics COMMAND tst_cosmetics)
+set_tests_properties(tst_cosmetics PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp
@@ -931,6 +996,8 @@ target_compile_definitions(tst_qmlload PRIVATE
     OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_link_libraries(tst_qmlload PRIVATE
+    openchat_case
+    openchat_cosmetics
     openchat_app
     openchat_avatar
     openchat_call
@@ -951,6 +1018,62 @@ target_link_libraries(tst_qmlload PRIVATE
 add_test(NAME tst_qmlload COMMAND tst_qmlload)
 set_tests_properties(tst_qmlload PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
+)
+
+# Renders every profile cosmetic through the real QML components into labelled
+# PNG sheets (light and dark, 2x) under cosmetics-shots/. A design tool run by
+# hand, not part of the application; it loads the QML from the source tree.
+add_executable(openchat-profile-gallery
+    tools/profile_gallery/main.cpp
+    src/controllers/ChatController.cpp
+    src/controllers/ContactController.cpp
+    src/controllers/OnboardingController.cpp
+    src/controllers/CallController.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
+    src/models/RequestListModel.cpp
+    src/render/BubbleBackground.cpp
+    src/render/AvatarArtwork.cpp
+    src/render/CallVideoItem.cpp
+    src/app/AppearanceSettings.cpp
+    src/app/MicrophoneSettings.cpp
+    src/app/VoiceEffectHost.cpp
+    src/app/ComposerEditing.cpp
+)
+# The bundled contact photos, at the paths the avatar painter looks them up,
+# so frames are judged against real faces.
+qt_add_resources(openchat-profile-gallery gallery_photos
+    PREFIX /qt/qml/OpenChat
+    FILES
+        assets/Jessica.png
+        assets/alex.png
+        assets/michael.png
+        assets/ryan.png
+        assets/userpfp_none.png
+)
+target_include_directories(openchat-profile-gallery PRIVATE src)
+target_compile_definitions(openchat-profile-gallery PRIVATE
+    OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(openchat-profile-gallery PRIVATE
+    openchat_case
+    openchat_cosmetics
+    openchat_app
+    openchat_avatar
+    openchat_call
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Quick
+    Qt6::QuickControls2
+    Qt6::Network
+    Qt6::WebSockets
 )
 
 function(add_openchat_capture_test test_name capture_width capture_height)

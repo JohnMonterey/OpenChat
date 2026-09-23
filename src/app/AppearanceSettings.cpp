@@ -1,5 +1,8 @@
 #include "app/AppearanceSettings.h"
 
+#include "cosmetics/CosmeticCatalog.h"
+#include "cosmetics/BubbleSkins.h"
+
 #include <QGuiApplication>
 #include <QPalette>
 #include <QSettings>
@@ -7,10 +10,82 @@
 
 namespace OpenChat {
 
+namespace {
+
+const QString frameKey = QStringLiteral("Appearance/avatarFrame");
+const QString beadKey = QStringLiteral("Appearance/presenceBead");
+const QString flairKey = QStringLiteral("Appearance/nameFlair");
+const QString sceneKey = QStringLiteral("Appearance/profileScene");
+const QString bubbleKey = QStringLiteral("Appearance/bubbleSkin");
+
+// A stored id this build knows in `category`, or empty.
+QString knownCosmetic(const QSettings &settings, const QString &key, const QString &category)
+{
+    const QString id = settings.value(key).toString();
+    return CosmeticCatalog::isKnown(id, category) ? id : QString();
+}
+
+} // namespace
+
 AppearanceSettings::AppearanceSettings(QObject *parent) : QObject(parent)
 {
-    m_darkMode = QSettings().value(QStringLiteral("Appearance/darkMode"), false).toBool();
+    const QSettings settings;
+    m_darkMode = settings.value(QStringLiteral("Appearance/darkMode"), false).toBool();
+    m_avatarFrame = knownCosmetic(settings, frameKey, QStringLiteral("frame"));
+    m_presenceBead = knownCosmetic(settings, beadKey, QStringLiteral("bead"));
+    m_nameFlair = knownCosmetic(settings, flairKey, QStringLiteral("flair"));
+    m_profileScene = knownCosmetic(settings, sceneKey, QStringLiteral("scene"));
+    m_bubbleSkin = knownCosmetic(settings, bubbleKey, QStringLiteral("bubble"));
+    BubbleSkins::prepare(m_bubbleSkin);
     applyPalette();
+}
+
+bool AppearanceSettings::storeCosmetic(QString &field, const QString &id, const QString &category,
+                                       const QString &key)
+{
+    const QString value = CosmeticCatalog::isKnown(id, category) ? id : QString();
+    if (value == field)
+        return false;
+    field = value;
+    QSettings settings;
+    if (value.isEmpty())
+        settings.remove(key);
+    else
+        settings.setValue(key, value);
+    settings.sync();
+    return true;
+}
+
+void AppearanceSettings::setAvatarFrame(const QString &id)
+{
+    if (storeCosmetic(m_avatarFrame, id, QStringLiteral("frame"), frameKey))
+        emit avatarFrameChanged();
+}
+
+void AppearanceSettings::setPresenceBead(const QString &id)
+{
+    if (storeCosmetic(m_presenceBead, id, QStringLiteral("bead"), beadKey))
+        emit presenceBeadChanged();
+}
+
+void AppearanceSettings::setNameFlair(const QString &id)
+{
+    if (storeCosmetic(m_nameFlair, id, QStringLiteral("flair"), flairKey))
+        emit nameFlairChanged();
+}
+
+void AppearanceSettings::setProfileScene(const QString &id)
+{
+    if (storeCosmetic(m_profileScene, id, QStringLiteral("scene"), sceneKey))
+        emit profileSceneChanged();
+}
+
+void AppearanceSettings::setBubbleSkin(const QString &skin)
+{
+    if (!storeCosmetic(m_bubbleSkin, skin, QStringLiteral("bubble"), bubbleKey))
+        return;
+    BubbleSkins::prepare(m_bubbleSkin);
+    emit bubbleSkinChanged();
 }
 
 void AppearanceSettings::setDarkMode(bool enabled)

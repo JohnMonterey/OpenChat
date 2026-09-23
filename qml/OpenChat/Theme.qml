@@ -19,7 +19,9 @@ QtObject {
     // The in-call header replaces the conversation header and needs room for two
     // callers side by side plus the call controls beneath them.
     readonly property int callHeaderHeight: 212
-    readonly property int composerHeight: 104
+    // The sidebar's navigation bar, and the composer while it holds one line:
+    // the two sit side by side along the bottom of the window.
+    readonly property int bottomBarHeight: 64
 
     readonly property color sidebarTop: darkMode ? "#223442" : "#f0f9fd"
     readonly property color sidebarBottom: darkMode ? "#1a2a37" : "#e5f2f9"

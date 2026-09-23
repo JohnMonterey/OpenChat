@@ -565,21 +565,108 @@ private slots:
 
         QCoreApplication::processEvents();
         const qreal singleLineHeight = frame->property("height").toReal();
-        QVERIFY(singleLineHeight >= 46.0);
-        QVERIFY(singleLineHeight <= 50.0);
+        QCOMPARE(singleLineHeight, 40.0);
         QCOMPARE(attachment->property("height").toReal(), singleLineHeight);
         QCOMPARE(attachment->property("y").toReal(), 0.0);
+
+        // Holding one line, the composer lines up with the sidebar's navigation
+        // bar beside it, and Send lines up with the field.
+        auto *composerItem = qobject_cast<QQuickItem *>(composer);
+        auto *bottomNav = qobject_cast<QQuickItem *>(
+            root->findChild<QObject *>(QStringLiteral("bottomNav")));
+        auto *frameItem = qobject_cast<QQuickItem *>(frame);
+        auto *send = qobject_cast<QQuickItem *>(
+            root->findChild<QObject *>(QStringLiteral("sendButton")));
+        QVERIFY(composerItem && bottomNav && frameItem && send);
+        QCOMPARE(composerItem->height(), bottomNav->height());
+        QCOMPARE(composerItem->mapToScene(QPointF()).y(), bottomNav->mapToScene(QPointF()).y());
+        QCOMPARE(send->y(), frameItem->y());
+        QCOMPARE(send->height(), singleLineHeight);
 
         QVERIFY(input->setProperty("text", QStringLiteral("First line\nSecond line\nThird line")));
         QCoreApplication::processEvents();
         const qreal multilineHeight = frame->property("height").toReal();
         QVERIFY(multilineHeight > singleLineHeight);
         QCOMPARE(attachment->property("height").toReal(), multilineHeight);
-        QCOMPARE(composer->property("height").toReal(), multilineHeight + 34.0);
+        QCOMPARE(composer->property("height").toReal(), multilineHeight + 24.0);
+
+        // Far more lines than fit: the field stops at its cap and the text
+        // scrolls inside it, never reaching past the frame.
+        QStringList lines;
+        for (int i = 0; i < 80; ++i)
+            lines << QStringLiteral("Line %1").arg(i);
+        QVERIFY(input->setProperty("text", lines.join(QLatin1Char('\n'))));
+        QCoreApplication::processEvents();
+        QCOMPARE(frame->property("height").toReal(), composer->property("maxInputHeight").toReal());
+        QObject *scroll = root->findChild<QObject *>(QStringLiteral("messageInputScroll"));
+        QObject *scrollBar = root->findChild<QObject *>(QStringLiteral("messageInputScrollBar"));
+        QVERIFY(scroll && scrollBar);
+        const qreal viewY = scroll->property("y").toReal();
+        const qreal viewHeight = scroll->property("height").toReal();
+        const qreal contentHeight = scroll->property("contentHeight").toReal();
+        QVERIFY(scroll->property("clip").toBool());
+        QVERIFY(contentHeight > viewHeight);
+        QVERIFY(viewY >= 0.0);
+        QVERIFY(viewY + viewHeight <= frameItem->height());
+        QVERIFY(scrollBar->property("size").toReal() < 1.0);
+        // It follows the cursor to the end and back to the start.
+        QVERIFY(input->setProperty("cursorPosition", input->property("length")));
+        QTRY_COMPARE(scroll->property("contentY").toReal(), contentHeight - viewHeight);
+        QVERIFY(input->setProperty("cursorPosition", 0));
+        QTRY_COMPARE(scroll->property("contentY").toReal(), 0.0);
 
         QVERIFY(input->setProperty("text", QString()));
         QCoreApplication::processEvents();
         QCOMPARE(frame->property("height").toReal(), singleLineHeight);
+    }
+
+    void composerStopsAtTheLongestMessage()
+    {
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to type into");
+        auto *input = qobject_cast<QQuickItem *>(
+            window->findChild<QObject *>(QStringLiteral("messageInput")));
+        auto *counter = qobject_cast<QQuickItem *>(
+            window->findChild<QObject *>(QStringLiteral("composerLengthCounter")));
+        QVERIFY(input && counter);
+        const int max = controller.composerMaxLength();
+        QVERIFY(!counter->isVisible());
+
+        // More than fits arriving at once, as a paste would: the excess is cut.
+        QVERIFY(input->setProperty("text", QString(max + 50, QLatin1Char('a'))));
+        QCOMPARE(input->property("length").toInt(), max);
+        QCOMPARE(controller.composerText().size(), max);
+        QVERIFY(counter->isVisible());
+        QCOMPARE(counter->property("text").toString(), QStringLiteral("0 left"));
+        const QString capture = qEnvironmentVariable("OPENCHAT_COMPOSER_CAPTURE");
+        if (!capture.isEmpty())
+            QVERIFY(window->grabWindow().save(capture));
+
+        // Typing into a full message changes nothing already there.
+        input->forceActiveFocus();
+        QVERIFY(input->setProperty("cursorPosition", 10));
+        typeText(window, QStringLiteral("XYZ"));
+        QCOMPARE(input->property("length").toInt(), max);
+        QCOMPARE(controller.composerText(), QString(max, QLatin1Char('a')));
+        QCOMPARE(input->property("cursorPosition").toInt(), 10);
+
+        // With room again, typing lands where the cursor is.
+        QVERIFY(input->setProperty("text", QString(max - 2, QLatin1Char('a'))));
+        QVERIFY(input->setProperty("cursorPosition", 10));
+        typeText(window, QStringLiteral("XYZ"));
+        QCOMPARE(controller.composerText().size(), max);
+        QCOMPARE(controller.composerText().mid(10, 3), QStringLiteral("XYa"));
+
+        QVERIFY(input->setProperty("text", QString()));
+        QVERIFY(!counter->isVisible());
     }
 
     void failedMessageShowsRetryBelowBubble()

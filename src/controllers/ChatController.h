@@ -73,6 +73,7 @@ class ChatController final : public QObject
     // the person it is with). Each entry is {contactId, name, avatarKey}.
     Q_PROPERTY(QVariantList groupCandidates READ groupCandidates NOTIFY groupCandidatesChanged)
     Q_PROPERTY(QString composerText READ composerText WRITE setComposerText NOTIFY composerTextChanged)
+    Q_PROPERTY(int composerMaxLength READ composerMaxLength CONSTANT)
     Q_PROPERTY(bool canSend READ canSend NOTIFY canSendChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY searchQueryChanged)
     Q_PROPERTY(SessionState sessionState READ sessionState NOTIFY sessionStateChanged)
@@ -149,7 +150,13 @@ public:
     [[nodiscard]] QString localStatusLine() const;
     [[nodiscard]] int localPresence() const { return m_localPresence; }
     [[nodiscard]] QString profileNotice() const { return m_profileNotice; }
+    // The longest message the composer holds, in UTF-16 code units. Generous,
+    // yet even at three UTF-8 bytes a unit it stays far inside the 1 MiB one
+    // relay envelope may carry.
+    static constexpr int maxComposerLength = 65536;
+
     [[nodiscard]] QString composerText() const;
+    [[nodiscard]] int composerMaxLength() const { return maxComposerLength; }
     [[nodiscard]] bool canSend() const;
     [[nodiscard]] QString searchQuery() const;
     [[nodiscard]] SessionState sessionState() const;

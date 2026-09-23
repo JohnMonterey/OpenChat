@@ -2,9 +2,9 @@
 
 The small case icon beside the add-contact control opens a native Qt Quick popup.
 Each tile shows a collectible cosmetic with its rarity tier, and the claim draws
-one of them with the published odds. Nothing is granted yet: there is no
-inventory or equip flow behind the reveal. There is no payment and no monetary
-value.
+one of them with the published odds. The drawn item joins the account's
+collection, and only collected items can be worn (Settings → Cosmetics).
+There is no payment and no monetary value.
 
 ## Ownership and integration
 
@@ -24,16 +24,28 @@ independent. Preview windows use a separate `preview` key. Corrupt/unwritable
 files fail closed with a retryable UI error. The midnight refresh is a single
 shot timer; there is no polling while closed.
 
-This mock uses the local clock and local storage, and is **not secure eligibility**.
-Deleting its files, changing the clock, or using another device can bypass it.
-No actual reward may be granted using this mock.
+Every reward the mock hands out goes into `LocalCosmeticInventory`: one atomic
+`<hash>.owned.json` per account beside the claim, listing catalogue ids in the
+order they arrived. The claim is saved first and the grant second; each
+transaction hands a stored claim's reward over if the collection lacks it, so a
+failed grant is retried rather than lost, and claims saved before collections
+existed still count. An unreadable collection fails closed like a corrupt claim.
+Every reply carries the collection (`CaseReply::owned`), exposed as
+`DailyCaseController.owned` once known.
+
+This mock uses the local clock and local storage, and is **not secure eligibility**
+or a secure inventory. Deleting its files, changing the clock, using another
+device or editing the collection file can bypass it. That is acceptable only
+because cosmetics are local-only and worth nothing; anything with value, or
+anything shown to contacts, needs the online authority below.
 
 For the online implementation, use the existing authenticated relay/account
 conventions. The relay currently has no daily-case endpoint. Add a server
 transaction with a unique `(account_id, server_day)` claim constraint. Verify
 eligibility, choose the reward, persist consumption, and return the persisted
-claim on all retries, including after a lost response. Return at least
-`claimId`, `rewardId`, `seed`, and `nextAvailableAt`. The seed controls only the
+claim on all retries, including after a lost response. Grant the reward into a
+server-side inventory in the same transaction. Return at least `claimId`,
+`rewardId`, `seed`, `nextAvailableAt` and the account's owned ids. The seed controls only the
 visual arrangement; it must never select the actual reward on the client.
 `rewardId` is a cosmetic catalogue id; the server draws it with the tier odds
 below. `adopt()` is where the predetermined result enters the presentation. Implement the network service asynchronously, routing its
@@ -78,6 +90,30 @@ colour, and the ring thickens with the tier; Legendary and Exotic add a flash
 behind the belt and a second, later ring. Less motion skips all of it.
 `openchat-profile-gallery --page rarity-ladder` and `--page case-reveals`
 render the ladder and frozen reveals for review.
+
+## Equipping
+
+Settings → Cosmetics has one picker per kind (avatar frame, name flair,
+presence bead, profile scene, chat bubble). Each is a grid of tiles: None
+with the stock look first, then every item of the kind from Common to Exotic,
+drawn by `CosmeticPreview` over the same tier bar and glow as the case tiles.
+A click, Space or Enter equips the tile at once through `AppearanceSettings`,
+which remembers it; the sidebar header wears it while Settings is still open.
+Animated items carry a play mark and move while pointed at or focused. Arrow
+keys walk the grid and Tab stops once per kind, on its equipped tile.
+
+Only collected items can be worn. `Main.qml` hands the case controller's
+`owned` list to `AppearanceSettings.ownedCosmetics` once it is known, and
+`AppearanceSettings` enforces it: nothing is worn until ownership is known,
+an equipped id the account does not own is taken off and forgotten, and
+equipping one it does not own is refused (whoever asks). An unknown collection
+(a failed reply for a new account) hands over nothing rather than an empty
+list. In the picker, items not yet unboxed stay in the grid, dimmed under a
+padlock, with a tooltip pointing at the daily case; each section counts
+"N of M unboxed", and a newly unboxed item unlocks on the open page.
+
+What is equipped stays on this device (the page says so); nothing is
+published to contacts.
 
 ## Motion and sound
 

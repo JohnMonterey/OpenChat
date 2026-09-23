@@ -4,12 +4,16 @@ import OpenChat.Native
 
 // A still preview of one collectible, drawn by the same component that wears
 // it in the app, centred and scaled down to fit. `item` is a catalogue map
-// (Cosmetics.item(id)); an unknown or empty item draws nothing.
+// (Cosmetics.item(id)); an unknown or empty item draws nothing, unless
+// `stockCategory` names a kind, when it draws that kind's stock look.
 Item {
     id: root
     property var item: ({})
+    property string stockCategory: ""
+    // Animated items hold still unless asked to move.
+    property bool animate: false
     readonly property string itemId: item && item.id ? item.id : ""
-    readonly property string category: item && item.category ? item.category : ""
+    readonly property string category: item && item.category ? item.category : stockCategory
     implicitWidth: 84
     implicitHeight: 56
 
@@ -66,7 +70,7 @@ Item {
                 height: 38
                 avatarKey: "userpfp_none"
                 frameId: root.itemId
-                frameAnimated: false
+                frameAnimated: root.animate
             }
         }
     }
@@ -90,16 +94,18 @@ Item {
         Item {
             width: label.width + 16
             height: 44
-            // Measures the name; the flair draws it.
+            // Measures the name; the flair draws it, or it shows plain.
             Text {
                 id: label
                 anchors.centerIn: parent
                 text: "Name"
-                opacity: 0
+                opacity: root.itemId ? 0 : 1
+                color: Theme.textPrimary
                 font.family: Theme.uiFont
                 font.pixelSize: 21
             }
             NameFlair {
+                visible: root.itemId.length > 0
                 flairId: root.itemId
                 text: label.text
                 font: label.font
@@ -123,7 +129,8 @@ Item {
             height: 46
             radius: 4
             clip: true
-            color: Theme.contentBackground
+            // No scene shows the sidebar's own backdrop.
+            color: root.itemId ? Theme.contentBackground : Theme.sidebarTop
             border.color: Theme.rule
             ProfileScene {
                 x: 1

@@ -185,6 +185,11 @@ bool renderContext(bool dark, const QString &outDir)
         settings.setValue(QStringLiteral("Appearance/profileScene"), QStringLiteral("scene.aurora"));
         settings.sync();
     }
+    // Only what the window's (scratch) account has unboxed is worn.
+    if (!OpenChat::LocalCosmeticInventory().grant(
+            QStringLiteral("preview"), {QStringLiteral("frame.frost"), QStringLiteral("bead.gem"),
+                                        QStringLiteral("flair.holo"), QStringLiteral("scene.aurora")}))
+        return false;
     OpenChat::ChatController chat;
     chat.setLocalUserName(QStringLiteral("Daniel"));
     chat.setLocalStatusText(QStringLiteral("Snowed in, send cocoa"));

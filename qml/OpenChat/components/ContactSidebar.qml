@@ -835,11 +835,11 @@ Item {
         }
     }
 
-    // Categories become Back + subcategories after entering a settings section.
+    // The settings categories; the open one is highlighted and its sections
+    // fill the pane to the right.
     Flickable {
         id: settingsCategoryList
         objectName: "settingsCategoryList"
-        readonly property bool inCategory: sidebar.controller.currentSettingsCategory >= 0
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: searchArea.bottom
@@ -848,7 +848,6 @@ Item {
         contentHeight: settingsNavigationRows.height
         clip: true
         boundsBehavior: Flickable.StopAtBounds
-        onInCategoryChanged: contentY = 0
 
         Column {
             id: settingsNavigationRows
@@ -856,9 +855,7 @@ Item {
             width: parent.width
 
             Repeater {
-                model: settingsCategoryList.inCategory
-                       ? ["Back"].concat(sidebar.controller.settingsSubcategories)
-                       : sidebar.controller.settingsCategories
+                model: sidebar.controller.settingsCategories
 
                 Item {
                     id: settingsCategoryRow
@@ -867,27 +864,25 @@ Item {
                     width: settingsCategoryList.width
                     height: sidebar.contactRowHeight
                     readonly property bool selected:
-                        settingsCategoryList.inCategory && rowIndex > 0
-                        && rowIndex - 1 === sidebar.controller.currentSettingsSubcategory
+                        rowIndex === sidebar.controller.currentSettingsCategory
                     activeFocusOnTab: true
-                    Accessible.role: Accessible.Button
+                    Accessible.role: Accessible.PageTab
                     Accessible.name: modelData
+                    Accessible.selectable: true
+                    Accessible.selected: selected
                     Accessible.onPressAction: activate()
                     Keys.onReturnPressed: activate()
                     Keys.onSpacePressed: activate()
                     function activate() {
-                        if (!settingsCategoryList.inCategory)
-                            sidebar.controller.setCurrentSettingsCategory(rowIndex);
-                        else if (rowIndex === 0)
-                            sidebar.controller.showSettingsCategories();
-                        else
-                            sidebar.controller.setCurrentSettingsSubcategory(rowIndex - 1);
+                        sidebar.controller.setCurrentSettingsCategory(rowIndex);
                     }
 
                     Rectangle {
                         anchors.fill: parent
                         visible: settingsCategoryRow.selected || settingsCategoryRow.activeFocus
+                                 || settingsCategoryMouse.containsMouse
                         color: Theme.navSelected
+                        opacity: settingsCategoryRow.selected || settingsCategoryRow.activeFocus ? 1 : 0.55
                     }
 
                     Text {
@@ -904,7 +899,9 @@ Item {
                     }
 
                     MouseArea {
+                        id: settingsCategoryMouse
                         anchors.fill: parent
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: settingsCategoryRow.activate()
                     }

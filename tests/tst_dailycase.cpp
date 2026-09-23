@@ -10,6 +10,30 @@
 #include "cosmetics/CosmeticCatalog.h"
 
 using namespace OpenChat;
+namespace {
+QString accountStem(const QString &directory, const QByteArray &account)
+{
+    return directory + '/' + QString::fromLatin1(
+        QCryptographicHash::hash(account, QCryptographicHash::Sha256).toHex());
+}
+bool writeClaim(const QString &directory, const QByteArray &account, const QJsonObject &claim)
+{
+    QFile file(accountStem(directory, account) + ".json");
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        && file.write(QJsonDocument(claim).toJson()) > 0;
+}
+// Moves a saved claim to yesterday, so the account may claim again.
+bool expireClaim(const QString &directory, const QByteArray &account)
+{
+    QFile file(accountStem(directory, account) + ".json");
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    auto claim = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    claim["next"] = QDateTime::currentDateTimeUtc().addDays(-1).toString(Qt::ISODate);
+    return writeClaim(directory, account, claim);
+}
+}
 class DailyCaseTest : public QObject {
     Q_OBJECT
 private slots:
@@ -140,6 +164,99 @@ private slots:
         controller.setAccountKey("alice");
         QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
         QVERIFY(controller.reward().isEmpty());
+    }
+    void unboxedItemsStayInTheAccountsCollection()
+    {
+        QTemporaryDir directory;
+        LocalDailyCaseService service(directory.path());
+        const auto before = service.status("alice");
+        QVERIFY(before.error.isEmpty());
+        QCOMPARE(before.owned, QStringList());
+        const auto first = service.claim("alice");
+        QVERIFY(first.result);
+        QCOMPARE(first.owned, QStringList{first.result->rewardId});
+        // Kept across restarts and repeat requests, and nobody else's.
+        QCOMPARE(LocalDailyCaseService(directory.path()).status("alice").owned, first.owned);
+        QCOMPARE(service.claim("alice").owned, first.owned);
+        QCOMPARE(service.status("bob").owned, QStringList());
+        // The next day's item joins it; one already owned is not kept twice.
+        QVERIFY(expireClaim(directory.path(), "alice"));
+        QCOMPARE(service.status("alice").owned, first.owned);
+        const auto second = service.claim("alice");
+        QVERIFY(second.newlyClaimed);
+        QStringList expected = first.owned;
+        if (!expected.contains(second.result->rewardId))
+            expected.append(second.result->rewardId);
+        QCOMPARE(second.owned, expected);
+        QCOMPARE(LocalCosmeticInventory(directory.path()).owned("alice").value_or(QStringList{"unread"}),
+                 expected);
+    }
+    void aClaimSavedBeforeCollectionsHandsItsRewardOver()
+    {
+        QTemporaryDir directory;
+        // Yesterday's claim, from before anything was kept: the item is the
+        // account's now, whether or not the claim is still today's.
+        QVERIFY(writeClaim(directory.path(), "alice", {{"claim", "earlier"}, {"reward", "frame.neon"},
+            {"seed", 7.0}, {"next", QDateTime::currentDateTimeUtc().addDays(-1).toString(Qt::ISODate)}}));
+        LocalDailyCaseService service(directory.path());
+        const auto status = service.status("alice");
+        QVERIFY(!status.result);
+        QCOMPARE(status.owned, QStringList{"frame.neon"});
+        QCOMPARE(LocalCosmeticInventory(directory.path()).owned("alice").value_or(QStringList{}),
+                 QStringList{"frame.neon"});
+        // A claim saved before rewards existed hands nothing over.
+        QVERIFY(writeClaim(directory.path(), "bob", {{"claim", "earlier"}, {"seed", 7.0},
+            {"next", QDateTime::currentDateTimeUtc().addDays(1).toString(Qt::ISODate)}}));
+        QCOMPARE(service.status("bob").owned, QStringList());
+    }
+    void anUnreadableCollectionFailsClosed()
+    {
+        QTemporaryDir directory;
+        QFile file(accountStem(directory.path(), "alice") + ".owned.json");
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("broken");
+        file.close();
+        LocalDailyCaseService service(directory.path());
+        QVERIFY(!service.status("alice").error.isEmpty());
+        const auto claim = service.claim("alice");
+        QVERIFY(!claim.error.isEmpty());
+        QVERIFY(!claim.result);
+        QVERIFY(!LocalCosmeticInventory(directory.path()).grant("alice", {"frame.neon"}));
+        DailyCaseController controller(std::make_unique<LocalDailyCaseService>(directory.path()));
+        controller.setAccountKey("alice");
+        QVERIFY(!controller.ownershipKnown());
+        QCOMPARE(controller.owned(), QStringList());
+    }
+    void theControllerReportsTheAccountsCollection()
+    {
+        QTemporaryDir directory;
+        QVERIFY(LocalCosmeticInventory(directory.path()).grant("alice", {"bead.gem", "bead.gem", "frame.neon"}));
+        DailyCaseController controller(std::make_unique<LocalDailyCaseService>(directory.path()));
+        controller.setProperty("muted", true);
+        controller.setProperty("reducedMotion", true);
+        QVERIFY(!controller.ownershipKnown());
+        QSignalSpy changed(&controller, &DailyCaseController::ownedChanged);
+        controller.setAccountKey("alice");
+        QVERIFY(controller.ownershipKnown());
+        QCOMPARE(controller.owned(), (QStringList{"bead.gem", "frame.neon"}));
+        QCOMPARE(changed.size(), 1);
+        // The unboxed item is in the collection as soon as the claim is recorded.
+        controller.open();
+        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QVERIFY(controller.owned().contains(controller.reward().value("id").toString()));
+        // A failed reply (another window mid-claim) keeps what is known.
+        const QStringList known = controller.owned();
+        QLockFile lock(accountStem(directory.path(), "alice") + ".json.lock");
+        QVERIFY(lock.tryLock(0));
+        controller.refresh();
+        QVERIFY(!controller.error().isEmpty());
+        QVERIFY(controller.ownershipKnown());
+        QCOMPARE(controller.owned(), known);
+        lock.unlock();
+        // Another account never sees this one's collection.
+        controller.setAccountKey("bob");
+        QVERIFY(controller.ownershipKnown());
+        QCOMPARE(controller.owned(), QStringList());
     }
     void theBeltIsTheDaysAndStaysPutWhenTheClaimLands()
     {

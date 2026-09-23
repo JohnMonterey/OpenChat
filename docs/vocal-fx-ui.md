@@ -1,9 +1,9 @@
 # Custom Vocal FX UI
 
-Settings → Audio & Video → Custom Vocal FX opens the dedicated preset editor.
-Entering a settings category replaces the sidebar with Back and its subcategories;
-the overview on the right provides matching navigation rows. Input and Output
-are separate Audio & Video pages. Presets
+Settings → Audio & Video shows the preset editor as its Custom Vocal FX
+section, between Input and Connection. The sidebar lists the settings
+categories and the page on the right shows every section of the open one, so
+nothing in Settings navigates beyond picking a category. Presets
 have ten ordered slots, with bypass and wet/dry controls. They are saved
 automatically through Qt Settings under `CustomVocalFX`. The microphone context
 menu shares these documents and keeps custom preset selection mutually exclusive

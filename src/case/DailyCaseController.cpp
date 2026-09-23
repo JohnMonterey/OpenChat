@@ -39,12 +39,28 @@ void DailyCaseController::setAccountKey(const QString &account)
     if (account == m_account) return;
     dismiss();
     m_account = account;
+    // Another account's collection never carries over, even if its own
+    // cannot be read.
+    if (m_ownershipKnown || !m_owned.isEmpty()) {
+        m_owned.clear();
+        m_ownershipKnown = false;
+        emit ownedChanged();
+    }
     refresh();
 }
 void DailyCaseController::adopt(const CaseResult &result)
 {
     m_winner = CaseMotion::firstWinnerIndex + int(result.seed % CaseMotion::winnerVariants);
     m_reward = cosmeticToVariant(CosmeticCatalog::find(result.rewardId));
+}
+void DailyCaseController::adoptOwned(const CaseReply &reply)
+{
+    // A failed reply says nothing about the collection; keep what is known.
+    if (!reply.error.isEmpty() || (m_ownershipKnown && reply.owned == m_owned))
+        return;
+    m_owned = reply.owned;
+    m_ownershipKnown = true;
+    emit ownedChanged();
 }
 void DailyCaseController::arrangeBelt()
 {
@@ -69,6 +85,7 @@ void DailyCaseController::refresh()
 {
     if (m_state == Opening) return;
     const auto reply = m_service->status(m_account);
+    adoptOwned(reply);
     m_nextDay.stop();
     m_error = reply.error;
     m_state = reply.result ? OpenedToday : Available;
@@ -89,6 +106,8 @@ void DailyCaseController::open()
     m_error.clear();
     emit changed();
     const auto reply = m_service->claim(m_account);
+    // Granted with the claim: the collection holds the item before the reel moves.
+    adoptOwned(reply);
     m_error = reply.error;
     if (!reply.result) {
         m_state = Available;

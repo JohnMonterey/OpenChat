@@ -125,6 +125,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/MicrophoneSettingsPanel.qml
         qml/OpenChat/components/LowMemoryPanel.qml
         qml/OpenChat/components/ConnectionSettingsPanel.qml
+        qml/OpenChat/components/SettingsPage.qml
         qml/OpenChat/components/ContactSidebar.qml
         qml/OpenChat/components/ContactCategory.qml
         qml/OpenChat/components/ContactRow.qml
@@ -150,6 +151,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/CaseReel.qml
         qml/OpenChat/components/CaseTile.qml
         qml/OpenChat/components/CosmeticPreview.qml
+        qml/OpenChat/components/CosmeticPicker.qml
     # The logo and the placeholder picture ship as 256 px copies of the
     # full-size artwork beside them: neither is ever drawn larger, and the
     # window icon stays decoded for as long as the process runs.

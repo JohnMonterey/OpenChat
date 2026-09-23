@@ -130,9 +130,9 @@ Popup {
                 : root.controller.state === DailyCaseController.OpenedToday && root.rewarded
                     ? "<b>" + root.reward.name + "</b> · <font color=\"" + root.ink(root.reward.rarityColor)
                       + "\">" + root.reward.rarityName + "</font> " + Cosmetics.categoryName(root.reward.category)
-                      + " · See you tomorrow"
+                      + " · Yours to wear from Settings"
                 : root.controller.state === DailyCaseController.OpenedToday ? "Today's case opened · See you tomorrow"
-                : "One free case a day · Items can't be kept yet"
+                : "One free case a day · Keep what you unbox"
             color: root.controller.error.length ? Theme.warningText : Theme.textSecondary
             font.family: Theme.uiFont
             font.pixelSize: 12

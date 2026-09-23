@@ -553,39 +553,53 @@ private slots:
     {
         ChatController controller;
 
+        // Only categories with working controls in them.
         const QStringList categories = controller.settingsCategories();
-        QCOMPARE(categories.size(), 7);
-        QCOMPARE(categories.first(), QStringLiteral("General"));
+        QCOMPARE(categories, (QStringList{QStringLiteral("General"),
+                                          QStringLiteral("Audio & Video"),
+                                          QStringLiteral("Appearance"),
+                                          QStringLiteral("Cosmetics")}));
 
         // Defaults to the first category.
         QCOMPARE(controller.currentSettingsCategory(), 0);
         QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("General"));
-        QVERIFY(!controller.currentSettingsElements().isEmpty());
+        QCOMPARE(controller.currentSettingsElements(), QStringList{QStringLiteral("Memory")});
 
         QSignalSpy categorySpy(&controller,
                                &ChatController::currentSettingsCategoryChanged);
 
         // Selecting a different category updates the index, name, and elements
         // and emits exactly once.
-        controller.setCurrentSettingsCategory(2);
-        QCOMPARE(controller.currentSettingsCategory(), 2);
+        controller.setCurrentSettingsCategory(1);
+        QCOMPARE(controller.currentSettingsCategory(), 1);
         QCOMPARE(categorySpy.count(), 1);
-        QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("Privacy"));
-        const QStringList privacy = controller.currentSettingsElements();
-        QCOMPARE(privacy, (QStringList{QStringLiteral("Read receipts"),
-                                       QStringLiteral("Who can contact me"),
-                                       QStringLiteral("Blocked contacts"),
-                                       QStringLiteral("Typing indicators")}));
+        QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("Audio & Video"));
+        QCOMPARE(controller.currentSettingsElements(),
+                 (QStringList{QStringLiteral("Input"), QStringLiteral("Custom Vocal FX"),
+                              QStringLiteral("Connection")}));
+        controller.setCurrentSettingsCategory(2);
+        QCOMPARE(controller.currentSettingsElements(), QStringList{QStringLiteral("Theme")});
+        QCOMPARE(categorySpy.count(), 2);
 
         // Re-selecting the same category is a no-op and emits nothing further.
         controller.setCurrentSettingsCategory(2);
-        QCOMPARE(categorySpy.count(), 1);
+        QCOMPARE(categorySpy.count(), 2);
+
+        // Cosmetics holds one picker per kind of collectible.
+        controller.setCurrentSettingsCategory(3);
+        QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("Cosmetics"));
+        QCOMPARE(controller.currentSettingsElements(),
+                 (QStringList{QStringLiteral("Avatar frame"), QStringLiteral("Name flair"),
+                              QStringLiteral("Presence bead"), QStringLiteral("Profile scene"),
+                              QStringLiteral("Chat bubble")}));
+        QCOMPARE(categorySpy.count(), 3);
 
         // Out-of-range selections are ignored, leaving the current selection.
         controller.setCurrentSettingsCategory(-1);
+        controller.setCurrentSettingsCategory(4);
         controller.setCurrentSettingsCategory(99);
-        QCOMPARE(controller.currentSettingsCategory(), 2);
-        QCOMPARE(categorySpy.count(), 1);
+        QCOMPARE(controller.currentSettingsCategory(), 3);
+        QCOMPARE(categorySpy.count(), 3);
     }
 
     void anInboundMessageAsksForADesktopNotification()

@@ -51,6 +51,7 @@ Item {
             replyToId: model.replyToId
             quotedSender: model.quotedSender
             quotedBody: model.quotedBody
+            senderAccount: model.senderAccount
             editing: stableId.length > 0 && stableId === history.controller.editingMessageId
             onRetryRequested: (messageBody) => history.controller.setComposerText(messageBody)
             onCopyRequested: history.controller.copyMessage(row.stableId)

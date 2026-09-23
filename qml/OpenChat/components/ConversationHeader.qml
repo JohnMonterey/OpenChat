@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Shapes
 import QtQuick.Window
 import OpenChat
+import OpenChat.Native
 
 Item {
     id: header
@@ -13,6 +14,14 @@ Item {
     readonly property bool isGroup: controller.currentIsGroup
     implicitHeight: Theme.conversationHeaderHeight
 
+    // What the person in this chat wears, from the relay; a group wears nothing.
+    function worn(slot) {
+        return PeerCosmetics.revision >= 0 && !header.isGroup && header.controller.hasCurrentContact
+            ? PeerCosmetics.item(header.controller.currentContactId, slot) : "";
+    }
+    readonly property string sceneId: worn("scene")
+    readonly property string flairId: worn("flair")
+
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
@@ -21,14 +30,37 @@ Item {
         }
     }
 
+    // Their profile scene, behind their picture and name.
+    Loader {
+        objectName: "conversationSceneLoader"
+        anchors.fill: parent
+        active: header.sceneId.length > 0
+        sourceComponent: ProfileScene {
+            objectName: "conversationScene"
+            sceneId: header.sceneId
+            darkMode: Theme.darkMode
+            fadeHeight: 0
+            // A frosted lozenge behind the name and status line only.
+            readableRect: Qt.rect(titleEditor.x - 4, 20,
+                                  Math.max(titleEditor.width, subtitle.x + Math.min(subtitle.implicitWidth, subtitle.width)
+                                                             - titleEditor.x) + 12, 64)
+            // And behind the call buttons and menu on the right.
+            controlRect: Qt.rect(videoButton.x - 8, Math.min(videoButton.y, menuButton.y) - 8,
+                                 menuButton.x + menuButton.width - videoButton.x + 16,
+                                 Math.max(videoButton.height, menuButton.height) + 16)
+        }
+    }
+
     Avatar {
         id: contactAvatar
+        objectName: "conversationAvatar"
         x: 24
         y: 21
         width: 68
         height: 68
         cornerRadius: 6
         avatarKey: header.controller.currentAvatarKey
+        frameId: header.worn("frame")
     }
 
     // The name. For a group it is the title, and editable the same way the
@@ -80,10 +112,32 @@ Item {
             elide: Text.ElideRight
             visible: !titleEditor.editing
             text: header.controller.currentContactName
-            color: Theme.textPrimary
+            // Their flair inks the name; this Text stays, unseen, so the
+            // width and elision are its own.
+            color: titleFlair.active ? "transparent" : Theme.textPrimary
             font.family: Theme.uiFont
             font.pixelSize: 20
             renderType: Text.NativeRendering
+        }
+
+        Loader {
+            id: titleFlair
+            objectName: "conversationFlairLoader"
+            active: header.flairId.length > 0 && !titleEditor.editing
+            sourceComponent: NameFlair {
+                objectName: "conversationFlair"
+                flairId: header.flairId
+                text: titleLabel.text
+                font: titleLabel.font
+                textColor: Theme.textPrimary
+                darkMode: Theme.darkMode
+                textWidth: Math.min(titleLabel.implicitWidth, titleLabel.width)
+                elided: titleLabel.truncated
+                x: titleLabel.x - padding
+                y: titleLabel.y - padding
+                width: Math.min(titleLabel.implicitWidth, titleLabel.width) + 2 * padding
+                height: titleLabel.height + 2 * padding
+            }
         }
 
         TextInput {
@@ -174,14 +228,17 @@ Item {
     }
 
     PresenceBead {
+        objectName: "conversationBead"
         x: 110
         y: 63
         beadSize: 11
         presence: header.controller.currentPresence
+        styleId: header.worn("bead")
         visible: !header.isGroup
     }
 
     Text {
+        id: subtitle
         objectName: "conversationSubtitle"
         x: header.isGroup ? 110 : 127
         y: 58

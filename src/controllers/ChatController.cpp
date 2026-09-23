@@ -5,6 +5,7 @@
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
 #include "call/CallSignal.h"
+#include "cosmetics/PeerCosmetics.h"
 #include "domain/Contact.h"
 #include "domain/GroupUpdate.h"
 #include "domain/MessageContent.h"
@@ -20,6 +21,7 @@
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QUuid>
 
 #include <algorithm>
@@ -1179,15 +1181,56 @@ void ChatController::setPresenceRelay(RelayClient *relay)
     m_onlineDevices.clear();
     disconnect(&m_presenceTimer, nullptr, this, nullptr);
     connect(&m_presenceTimer, &QTimer::timeout, this, &ChatController::refreshPresence);
+    disconnect(&m_loadoutTimer, nullptr, this, nullptr);
+    disconnect(&m_loadoutSoon, nullptr, this, nullptr);
+    connect(&m_loadoutTimer, &QTimer::timeout, this, &ChatController::requestPeerLoadouts);
+    m_loadoutSoon.setSingleShot(true);
+    connect(&m_loadoutSoon, &QTimer::timeout, this, &ChatController::requestPeerLoadouts);
     if (relay) {
         connect(relay, &RelayClient::connected, this, &ChatController::refreshPresence);
         connect(relay, &RelayClient::disconnected, this, &ChatController::refreshPresence);
         connect(relay, &RelayClient::devicePresenceChanged, this, &ChatController::setDevicePresence);
+        connect(relay, &RelayClient::connected, this, &ChatController::requestPeerLoadouts);
+        connect(relay, &RelayClient::loadoutsReceived, this, &ChatController::onPeerLoadouts);
         m_presenceTimer.start(5000);
+        m_loadoutTimer.start(5 * 60 * 1000);
     } else {
         m_presenceTimer.stop();
+        m_loadoutTimer.stop();
     }
     refreshPresence();
+    requestPeerLoadouts();
+}
+
+void ChatController::requestPeerLoadouts()
+{
+    if (!m_presenceRelay || !m_presenceRelay->isConnected())
+        return;
+    QList<AccountId> accounts;
+    QSet<QByteArray> seen;
+    const auto add = [&](const AccountId &account) {
+        if (!seen.contains(account.bytes())) {
+            seen.insert(account.bytes());
+            accounts.append(account);
+        }
+    };
+    for (const LiveChat &chat : std::as_const(m_liveChats))
+        add(chat.account);
+    for (const LiveGroup &group : std::as_const(m_liveGroups)) {
+        for (const GroupMember &member : group.members)
+            add(member.account);
+    }
+    if (!accounts.isEmpty())
+        m_presenceRelay->fetchLoadouts(accounts);
+}
+
+void ChatController::onPeerLoadouts(const QHash<QByteArray, QHash<QString, QString>> &loadouts)
+{
+    // The answer covers everyone asked about: whoever is missing wears nothing.
+    QHash<QString, PeerCosmetics::Loadout> byAccount;
+    for (auto it = loadouts.cbegin(); it != loadouts.cend(); ++it)
+        byAccount.insert(QString::fromLatin1(it.key().toHex()), it.value());
+    PeerCosmetics::instance()->setLoadouts(byAccount);
 }
 
 void ChatController::refreshPresence()
@@ -1287,8 +1330,11 @@ void ChatController::loadRoster()
     emit currentContactChanged();
     emit groupCandidatesChanged();
     updateCanSend(wasSendable);
-    if (m_presenceRelay)
+    if (m_presenceRelay) {
         refreshPresence();
+        // The roster may have gained someone; a burst of reloads asks once.
+        m_loadoutSoon.start(500);
+    }
 }
 
 void ChatController::loadGroups(QVector<Contact> &rows, QHash<QByteArray, QString> &byConversation)
@@ -1489,14 +1535,21 @@ Message ChatController::messageFor(const MessageRecord &record) const
         message.quotedSender = nameForDevice(contactForConversation(record.conversationId),
                                              *record.quotedSenderDeviceId);
     // In a group the bubble alone does not say who spoke.
-    const auto group = m_liveGroups.constFind(contactForConversation(record.conversationId));
+    const QString conversation = contactForConversation(record.conversationId);
+    const auto group = m_liveGroups.constFind(conversation);
     if (group != m_liveGroups.cend() && record.flow == MessageFlow::Incoming
         && record.kind != ContentKind::System) {
-        for (const GroupMember &member : group->members)
-            if (member.device == record.senderDeviceId)
+        for (const GroupMember &member : group->members) {
+            if (member.device == record.senderDeviceId) {
                 message.senderName = memberName(member);
+                message.senderAccount = member.account.toHex();
+            }
+        }
         if (message.senderName.isEmpty())
             message.senderName = QStringLiteral("Former member");
+    } else if (record.flow == MessageFlow::Incoming && m_liveChats.contains(conversation)) {
+        // One to one: the contact is who spoke.
+        message.senderAccount = conversation;
     }
     return message;
 }

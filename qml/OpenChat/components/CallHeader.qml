@@ -212,6 +212,9 @@ Item {
             videoMaxHeight: callHeader.videoHeightCap
             name: callHeader.controller.peerName
             avatarKey: callHeader.controller.peerAvatarKey
+            // Their frame (a one-to-one call's chat is their account).
+            frameId: PeerCosmetics.revision >= 0 && callHeader.controller.callChatId
+                     ? PeerCosmetics.item(callHeader.controller.callChatId, "frame") : ""
             speaking: callHeader.controller.remoteSpeaking
             level: callHeader.controller.remoteLevel
             // "Left" while they are out of a call we stayed in, "Reconnecting…"

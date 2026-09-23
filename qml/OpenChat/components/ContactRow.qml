@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Window
 import OpenChat
+import OpenChat.Native
 
 Item {
     id: row
@@ -34,6 +35,10 @@ Item {
     // The text block starts one avatar-margin right of the avatar; the bead
     // follows the name on its own line so the status line gets the full width.
     readonly property int textLeft: avatarImage.x + avatarImage.width + 14
+    // What this person wears (from the relay); a group wears nothing.
+    function worn(slot) {
+        return PeerCosmetics.revision >= 0 && !row.isGroup ? PeerCosmetics.item(row.contactId, slot) : "";
+    }
     signal activated(string contactId)
 
     implicitHeight: 60
@@ -58,6 +63,7 @@ Item {
         width: Math.min(44, row.height - 6)
         height: width
         avatarKey: row.avatarKey
+        frameId: row.worn("frame")
     }
 
     Text {
@@ -81,6 +87,7 @@ Item {
         anchors.verticalCenterOffset: 1
         beadSize: 11
         presence: row.presence
+        styleId: row.worn("bead")
         visible: !row.isGroup
     }
 

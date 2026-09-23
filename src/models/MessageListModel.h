@@ -34,6 +34,7 @@ public:
         ReplyToIdRole,
         QuotedSenderRole,
         QuotedBodyRole,
+        SenderAccountRole,
     };
     Q_ENUM(Role)
 

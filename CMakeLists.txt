@@ -49,6 +49,7 @@ target_link_libraries(openchat_case PUBLIC Qt6::Core Qt6::Multimedia
 # graph (which runs no shaders) exactly as on the hardware one.
 add_library(openchat_cosmetics STATIC
     src/cosmetics/CosmeticCatalog.cpp
+    src/cosmetics/PeerCosmetics.cpp
     src/cosmetics/CosmeticPaint.cpp
     src/cosmetics/CosmeticTypes.cpp
     src/cosmetics/AvatarFrameItem.cpp
@@ -951,6 +952,7 @@ add_executable(tst_e2e
 )
 target_include_directories(tst_e2e PRIVATE src tests relay/src)
 target_link_libraries(tst_e2e PRIVATE
+    openchat_cosmetics
     openchat_app
     openchat_avatar
     openchat_call
@@ -1051,6 +1053,7 @@ add_executable(tst_chatcontroller
 )
 target_include_directories(tst_chatcontroller PRIVATE src tests)
 target_link_libraries(tst_chatcontroller PRIVATE
+    openchat_cosmetics
     openchat_call
     openchat_avatar
     openchat_app

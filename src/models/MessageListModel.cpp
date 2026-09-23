@@ -60,6 +60,8 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         return message.quotedSender;
     case QuotedBodyRole:
         return message.quotedBody;
+    case SenderAccountRole:
+        return message.senderAccount;
     default:
         return {};
     }
@@ -85,6 +87,7 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {ReplyToIdRole, "replyToId"},
         {QuotedSenderRole, "quotedSender"},
         {QuotedBodyRole, "quotedBody"},
+        {SenderAccountRole, "senderAccount"},
     };
 }
 

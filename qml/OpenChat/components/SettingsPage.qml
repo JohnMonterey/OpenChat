@@ -39,7 +39,7 @@ Item {
         switch (name) {
         case "Cosmetics":
             return "Unbox cosmetics from the cases that drop while OpenChat is open, then wear "
-                   + "them here. They show on this device only; your contacts still see your usual look.";
+                   + "them here. The people you chat with see what you wear, on every device.";
         }
         return "";
     }

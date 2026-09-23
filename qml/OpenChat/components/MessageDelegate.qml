@@ -41,10 +41,15 @@ Item {
     readonly property bool showSender: !eventRow && !outgoing && senderName.length > 0
     readonly property bool isReply: kind === 0 && (quotedSender.length > 0 || quotedBody.length > 0)
     readonly property string shownText: editing ? "editing..." : body
-    // The collectible skin this bubble wears. The local user's own messages
-    // wear the equipped one; everyone else's stay classic (skins are local
-    // only for now). Empty means the classic bubble.
-    property string bubbleSkin: outgoing ? AppearanceSettings.bubbleSkin : ""
+    // Who sent an incoming message (account hex), to wear their skin.
+    property string senderAccount: ""
+    // The collectible skin this bubble wears: the local user's own messages
+    // wear the one equipped here, everyone else's the one they wear (from the
+    // relay). Event rows never wear one. Empty means the classic bubble.
+    property string bubbleSkin: eventRow ? ""
+        : outgoing ? AppearanceSettings.bubbleSkin
+        : PeerCosmetics.revision >= 0 && senderAccount.length > 0 ? PeerCosmetics.item(senderAccount, "bubble")
+        : ""
     readonly property real senderHeight: showSender ? 18 : 0
     // A bubble hugs its text and only widens for a longer message: up to most
     // of the pane, but never past about eighty characters a line. Text that

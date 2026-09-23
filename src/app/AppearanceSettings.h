@@ -16,13 +16,14 @@ class AppearanceSettings final : public QObject
     // The local user's equipped profile cosmetics, by catalogue id (see
     // cosmetics/CosmeticCatalog.h). Empty means none, which renders exactly the
     // stock look; an id this build does not know reads back as empty too.
-    // Local only: nothing here is published to contacts.
+    // Signed in, these mirror the loadout the relay holds, which is also what
+    // other people see (PeerCosmetics on their side).
     Q_PROPERTY(QString avatarFrame READ avatarFrame WRITE setAvatarFrame NOTIFY avatarFrameChanged)
     Q_PROPERTY(QString presenceBead READ presenceBead WRITE setPresenceBead NOTIFY presenceBeadChanged)
     Q_PROPERTY(QString nameFlair READ nameFlair WRITE setNameFlair NOTIFY nameFlairChanged)
     Q_PROPERTY(QString profileScene READ profileScene WRITE setProfileScene NOTIFY profileSceneChanged)
     // The equipped chat-bubble skin for the local user's own messages
-    // ("bubble.aero", ...). Empty means the classic bubble. Local only.
+    // ("bubble.aero", ...). Empty means the classic bubble.
     Q_PROPERTY(QString bubbleSkin READ bubbleSkin WRITE setBubbleSkin NOTIFY bubbleSkinChanged)
     // What the account may wear: the catalogue ids it has unboxed, as the daily
     // case's authority reports them (Main.qml hands them over). Until they are

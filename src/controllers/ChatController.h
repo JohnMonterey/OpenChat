@@ -379,6 +379,9 @@ private:
     void loadRoster();
     void refreshPresence();
     void setDevicePresence(const DeviceId &device, bool online);
+    // What contacts and group members wear, from the relay, into PeerCosmetics.
+    void requestPeerLoadouts();
+    void onPeerLoadouts(const QHash<QByteArray, QHash<QString, QString>> &loadouts);
     [[nodiscard]] Contact contactRowFor(const LiveChat &chat) const;
     [[nodiscard]] QVector<Message> loadHistory(const ConversationId &conversation) const;
     [[nodiscard]] static Message toMessage(const MessageRecord &record);
@@ -444,6 +447,10 @@ private:
     bool m_localOnline = true; // reference rendering
     RelayClient *m_presenceRelay = nullptr;
     QTimer m_presenceTimer;
+    // Others' loadouts change rarely: asked for on connect, when the roster
+    // changes (coalesced) and every few minutes.
+    QTimer m_loadoutTimer;
+    QTimer m_loadoutSoon;
     QHash<QByteArray, qint64> m_onlineDevices;
     ProfileSession *m_session = nullptr;
     // This device, so a quote of one of our own messages says "You".

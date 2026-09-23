@@ -64,6 +64,9 @@ struct Message {
     // Who sent an incoming message, shown above the bubble in a group chat
     // where the bubble alone does not say. Empty in a one-to-one chat.
     QString senderName;
+    // The account (hex) that sent an incoming message, so its bubble can wear
+    // the sender's skin. Empty for anything this device sent.
+    QString senderAccount;
     // True when stableId is the id every participant knows this message by,
     // so it can be answered and edited. History from before shared ids is not.
     bool sharedId = false;

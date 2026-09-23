@@ -48,6 +48,7 @@
 #include "case/DailyCaseController.h"
 #include "cosmetics/CosmeticTypes.h"
 #include "cosmetics/CosmeticCatalog.h"
+#include "cosmetics/PeerCosmetics.h"
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "cosmetics/BubbleSkins.h"
@@ -1503,12 +1504,12 @@ private slots:
         QVERIFY(appearance);
         QQuickItem *root = window->contentItem();
 
-        // Said once for the page: where cosmetics come from, and that nothing
-        // here reaches contacts.
+        // Said once for the page: where cosmetics come from, and that the
+        // people you chat with see them.
         auto *note = findVisualItem(root, QStringLiteral("settingsCategoryNote"));
         QVERIFY(note && note->isVisible());
         QVERIFY(note->property("text").toString().contains(QStringLiteral("cases that drop")));
-        QVERIFY(note->property("text").toString().contains(QStringLiteral("this device only")));
+        QVERIFY(note->property("text").toString().contains(QStringLiteral("see what you wear")));
         QTRY_COMPARE(appearance->property("ownedCosmetics").toStringList(), owned);
 
         auto *scroll = findVisualItem(root, QStringLiteral("settingsScroll"));
@@ -2614,7 +2615,7 @@ private slots:
         QCOMPARE(myBody->property("style").toInt(), 2); // Text.Raised
         QCOMPARE(myBody->property("styleColor").value<QColor>(),
                  OpenChat::BubbleSkins::textShadowColor(nebula));
-        // Skins are local only: other people's bubbles stay classic.
+        // Mine is mine: someone else's bubble wears only what they wear.
         QCOMPARE(theirBubble->property("skin").toString(), QString());
         QCOMPARE(theirBody->property("color").value<QColor>(), classicText);
 
@@ -2632,6 +2633,126 @@ private slots:
         QCOMPARE(myTime->property("color").value<QColor>(), classicTime);
         QCOMPARE(myBody->property("style").toInt(), 0);
         appearance->setBubbleSkin(QString());
+    }
+
+    // What other people wear (PeerCosmetics, filled from the relay) shows on
+    // their bubbles, their row and the conversation header -- and only there.
+    void othersWearWhatTheRelaySaysTheyWear()
+    {
+        auto *peers = OpenChat::PeerCosmetics::instance();
+        peers->clear();
+        const auto cleanup = qScopeGuard([peers] { peers->clear(); });
+
+        // Their bubbles.
+        {
+            QQmlEngine engine;
+            engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+            QQmlComponent component(&engine);
+            component.loadFromModule("OpenChat", "MessageDelegate");
+            QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+            const auto incoming = [&component](const QString &sender) {
+                return component.createWithInitialProperties({
+                    {"direction", 0}, {"deliveryState", 3}, {"body", "hello"},
+                    {"timestamp", "10:15 AM"}, {"kind", 0}, {"dateLabel", ""},
+                    {"showDateDivider", false}, {"senderName", ""}, {"width", 540},
+                    {"senderAccount", sender}});
+            };
+            QScopedPointer<QObject> alice(incoming(QStringLiteral("alice")));
+            QScopedPointer<QObject> bob(incoming(QStringLiteral("bob")));
+            auto *aliceBubble = alice->findChild<QObject *>(QStringLiteral("messageBubble"));
+            auto *bobBubble = bob->findChild<QObject *>(QStringLiteral("messageBubble"));
+            QVERIFY(aliceBubble && bobBubble);
+            QCOMPARE(aliceBubble->property("skin").toString(), QString());
+            peers->setLoadout(QStringLiteral("alice"), {{QStringLiteral("bubble"), QStringLiteral("bubble.magma")}});
+            QCOMPARE(aliceBubble->property("skin").toString(), QStringLiteral("bubble.magma"));
+            QVERIFY(aliceBubble->property("skinned").toBool());
+            QCOMPARE(bobBubble->property("skin").toString(), QString());
+            // An id in the wrong slot, or unknown to this build, is worn by nobody.
+            peers->setLoadout(QStringLiteral("bob"), {{QStringLiteral("bubble"), QStringLiteral("frame.neon")}});
+            QCOMPARE(bobBubble->property("skin").toString(), QString());
+            peers->setLoadout(QStringLiteral("alice"), {});
+            QCOMPARE(aliceBubble->property("skin").toString(), QString());
+        }
+
+        // Their row and the header of their chat (the preview opens Michael's).
+        OpenChat::ChatController chats;
+        chats.setLocalUserName(QStringLiteral("Developer"));
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&chats)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window && QTest::qWaitForWindowExposed(window));
+        QCOMPARE(chats.currentContactId(), QStringLiteral("michael"));
+        QQuickItem *root = window->contentItem();
+        // Rows come from repeaters, so walk the visual tree for them.
+        const auto rowAvatar = [root](const QString &contact) -> QQuickItem * {
+            QList<QQuickItem *> pending{root};
+            while (!pending.isEmpty()) {
+                QQuickItem *item = pending.takeFirst();
+                if (item->objectName() == QLatin1String("contactAvatar") && item->parentItem()
+                    && item->parentItem()->property("contactId").toString() == contact)
+                    return item;
+                pending.append(item->childItems());
+            }
+            return nullptr;
+        };
+        const auto frameOf = [](QQuickItem *avatar) -> QString {
+            auto *frame = avatar ? findVisualItem(avatar, QStringLiteral("avatarFrame")) : nullptr;
+            return frame ? frame->property("frameId").toString() : QString();
+        };
+        auto *headerAvatar = findVisualItem(root, QStringLiteral("conversationAvatar"));
+        auto *headerBead = findVisualItem(root, QStringLiteral("conversationBead"));
+        QVERIFY(rowAvatar(QStringLiteral("michael")) && rowAvatar(QStringLiteral("sarah")) && headerAvatar
+                && headerBead);
+        QCOMPARE(frameOf(headerAvatar), QString());
+        QVERIFY(!findVisualItem(root, QStringLiteral("conversationFlair")));
+        QVERIFY(!findVisualItem(root, QStringLiteral("conversationScene")));
+
+        peers->setLoadouts({
+            {QStringLiteral("michael"), {{QStringLiteral("frame"), QStringLiteral("frame.gilded")},
+                                         {QStringLiteral("bead"), QStringLiteral("bead.gem")},
+                                         {QStringLiteral("flair"), QStringLiteral("flair.holo")},
+                                         {QStringLiteral("scene"), QStringLiteral("scene.aurora")}}},
+            {QStringLiteral("sarah"), {{QStringLiteral("frame"), QStringLiteral("frame.neon")}}},
+        });
+        QTRY_COMPARE(frameOf(rowAvatar(QStringLiteral("michael"))), QStringLiteral("frame.gilded"));
+        QCOMPARE(frameOf(rowAvatar(QStringLiteral("sarah"))), QStringLiteral("frame.neon"));
+        QCOMPARE(frameOf(rowAvatar(QStringLiteral("alex"))), QString());
+        QCOMPARE(frameOf(headerAvatar), QStringLiteral("frame.gilded"));
+        QCOMPARE(headerBead->property("styleId").toString(), QStringLiteral("bead.gem"));
+        QTRY_VERIFY(findVisualItem(root, QStringLiteral("conversationFlair")));
+        QCOMPARE(findVisualItem(root, QStringLiteral("conversationFlair"))->property("flairId").toString(),
+                 QStringLiteral("flair.holo"));
+        QCOMPARE(findVisualItem(root, QStringLiteral("conversationTitle"))->property("color").value<QColor>().alpha(), 0);
+        QVERIFY(findVisualItem(root, QStringLiteral("conversationScene")));
+        QCOMPARE(findVisualItem(root, QStringLiteral("conversationScene"))->property("sceneId").toString(),
+                 QStringLiteral("scene.aurora"));
+        if (const QString dir = qEnvironmentVariable("OPENCHAT_COSMETIC_CAPTURES"); !dir.isEmpty()) {
+            for (const bool dark : {false, true}) {
+                engine.singletonInstance<OpenChat::AppearanceSettings *>("OpenChat.Native", "AppearanceSettings")
+                    ->setDarkMode(dark);
+                QTest::qWait(300);
+                window->grabWindow().save(dir + (dark ? "/peer-cosmetics-dark.png" : "/peer-cosmetics-light.png"));
+            }
+            engine.singletonInstance<OpenChat::AppearanceSettings *>("OpenChat.Native", "AppearanceSettings")
+                ->setDarkMode(false);
+        }
+        // My own header is not theirs.
+        QVERIFY(!findVisualItem(root, QStringLiteral("profileScene")));
+        QVERIFY(!findVisualItem(root, QStringLiteral("localNameFlair")));
+
+        // Switching chats follows the person; taking it all off restores the stock look.
+        chats.selectContact(QStringLiteral("sarah"));
+        QTRY_COMPARE(frameOf(headerAvatar), QStringLiteral("frame.neon"));
+        QTRY_VERIFY(!findVisualItem(root, QStringLiteral("conversationScene")));
+        peers->clear();
+        QTRY_COMPARE(frameOf(headerAvatar), QString());
+        QCOMPARE(frameOf(rowAvatar(QStringLiteral("michael"))), QString());
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.isEmpty() ? QString()
+            : warnings.constFirst().constFirst().value<QList<QQmlError>>().value(0).toString()));
     }
 
     void chatRowsShowUnreadCountBadges()

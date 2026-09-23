@@ -16,6 +16,7 @@ const QString frameKey = QStringLiteral("Appearance/avatarFrame");
 const QString beadKey = QStringLiteral("Appearance/presenceBead");
 const QString flairKey = QStringLiteral("Appearance/nameFlair");
 const QString sceneKey = QStringLiteral("Appearance/profileScene");
+const QString bubbleKey = QStringLiteral("Appearance/bubbleSkin");
 
 // A stored id this build knows in `category`, or empty.
 QString knownCosmetic(const QSettings &settings, const QString &key, const QString &category)
@@ -34,7 +35,7 @@ AppearanceSettings::AppearanceSettings(QObject *parent) : QObject(parent)
     m_presenceBead = knownCosmetic(settings, beadKey, QStringLiteral("bead"));
     m_nameFlair = knownCosmetic(settings, flairKey, QStringLiteral("flair"));
     m_profileScene = knownCosmetic(settings, sceneKey, QStringLiteral("scene"));
-    m_bubbleSkin = settings.value(QStringLiteral("Appearance/bubbleSkin")).toString();
+    m_bubbleSkin = knownCosmetic(settings, bubbleKey, QStringLiteral("bubble"));
     BubbleSkins::prepare(m_bubbleSkin);
     applyPalette();
 }
@@ -81,13 +82,9 @@ void AppearanceSettings::setProfileScene(const QString &id)
 
 void AppearanceSettings::setBubbleSkin(const QString &skin)
 {
-    if (skin == m_bubbleSkin)
+    if (!storeCosmetic(m_bubbleSkin, skin, QStringLiteral("bubble"), bubbleKey))
         return;
-    m_bubbleSkin = skin;
-    QSettings settings;
-    settings.setValue(QStringLiteral("Appearance/bubbleSkin"), skin);
-    settings.sync();
-    BubbleSkins::prepare(skin);
+    BubbleSkins::prepare(m_bubbleSkin);
     emit bubbleSkinChanged();
 }
 

@@ -1,4 +1,5 @@
 #include "DailyCaseService.h"
+#include "cosmetics/CosmeticCatalog.h"
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -37,16 +38,23 @@ CaseReply LocalDailyCaseService::transact(const QString &account, bool claim)
         if (!next.isValid() || obj.value("claim").toString().isEmpty() || !obj.value("seed").isDouble())
             return {{}, false, QStringLiteral("The saved case could not be read.")};
         if (now < next)
-            return {CaseResult{obj.value("claim").toString(), "placeholder",
+            return {CaseResult{obj.value("claim").toString(),
+                               obj.value("reward").toString(QStringLiteral("placeholder")),
                                quint32(obj.value("seed").toDouble()), next}, false, {}};
     }
     if (!claim)
         return {};
-    CaseResult result{QUuid::createUuid().toString(QUuid::WithoutBraces), "placeholder",
-                      QRandomGenerator::global()->generate(),
+    // The reward is drawn here, by the authority, with the tier odds; the seed
+    // below only arranges the reel. MOCK ONLY: the online adapter's server draws.
+    auto *random = QRandomGenerator::global();
+    const auto &reward = CosmeticCatalog::draw(random->bounded(quint32(CosmeticCatalog::totalWeight)),
+                                               random->generate());
+    CaseResult result{QUuid::createUuid().toString(QUuid::WithoutBraces), reward.id,
+                      random->generate(),
                       QDateTime(now.date().addDays(1), QTime(0, 0), QTimeZone::UTC)};
     const auto bytes = QJsonDocument(QJsonObject{{"claim", result.claimId},
-        {"seed", double(result.seed)}, {"next", result.nextAvailableAt.toString(Qt::ISODate)}}).toJson();
+        {"reward", result.rewardId}, {"seed", double(result.seed)},
+        {"next", result.nextAvailableAt.toString(Qt::ISODate)}}).toJson();
     QSaveFile output(path);
     if (!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit())
         return {{}, false, QStringLiteral("Could not save today's case. Please try again.")};

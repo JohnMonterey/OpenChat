@@ -3,6 +3,8 @@
 #include <QSet>
 #include <QtTest>
 
+#include <array>
+
 #include "cosmetics/AvatarFrameItem.h"
 #include "cosmetics/BeadArtItem.h"
 #include "cosmetics/CosmeticCatalog.h"
@@ -61,11 +63,67 @@ private slots:
             QVERIFY(!info.name.isEmpty());
             QVERIFY(!info.description.isEmpty());
         }
-        for (const char *category : {"frame", "bead", "flair", "scene"})
+        for (const char *category : {"bubble", "frame", "bead", "flair", "scene"})
             QVERIFY(OpenChat::CosmeticCatalog::inCategory(QLatin1String(category)).size() >= 5);
         QVERIFY(OpenChat::CosmeticCatalog::isKnown(QStringLiteral("frame.aero"), QStringLiteral("frame")));
         QVERIFY(!OpenChat::CosmeticCatalog::isKnown(QStringLiteral("frame.aero"), QStringLiteral("bead")));
         QVERIFY(!OpenChat::CosmeticCatalog::isKnown(QString(), QStringLiteral("frame")));
+        QVERIFY(OpenChat::CosmeticCatalog::isKnown(QStringLiteral("bubble.magma"), QStringLiteral("bubble")));
+    }
+
+    // The ladder narrows as it climbs and its odds fall with it. The counts are
+    // pinned so a new item is given its tier on purpose, not by default.
+    void theRarityLadderNarrowsAsItClimbs()
+    {
+        using OpenChat::CosmeticCatalog;
+        using OpenChat::Rarity;
+        std::array<int, 5> counts{};
+        for (const OpenChat::CosmeticInfo &info : CosmeticCatalog::all())
+            ++counts[static_cast<std::size_t>(info.rarity)];
+        QCOMPARE(counts, (std::array<int, 5>{8, 7, 7, 5, 2}));
+
+        int total = 0;
+        int previous = CosmeticCatalog::totalWeight + 1;
+        for (Rarity rarity : CosmeticCatalog::rarities()) {
+            const int weight = CosmeticCatalog::rarityWeight(rarity);
+            QVERIFY(weight > 0 && weight < previous);
+            previous = weight;
+            total += weight;
+            QVERIFY(CosmeticCatalog::rarityColor(rarity).isValid());
+            QVERIFY(!CosmeticCatalog::rarityName(rarity).isEmpty());
+        }
+        QCOMPARE(total, CosmeticCatalog::totalWeight);
+        // Animated items are showpieces: never below Legendary.
+        for (const OpenChat::CosmeticInfo &info : CosmeticCatalog::all()) {
+            if (info.animated)
+                QVERIFY2(info.rarity >= Rarity::Legendary, qPrintable(info.id));
+        }
+    }
+
+    // A tier roll lands on its tier's share of the thousand, and within the
+    // tier every item is reachable once per cycle of the item roll.
+    void drawsFollowTheTierOdds()
+    {
+        using OpenChat::CosmeticCatalog;
+        using OpenChat::Rarity;
+        const QList<QPair<quint32, Rarity>> edges = {
+            {0, Rarity::Common},    {599, Rarity::Common},     {600, Rarity::Rare},
+            {849, Rarity::Rare},    {850, Rarity::Epic},       {949, Rarity::Epic},
+            {950, Rarity::Legendary}, {989, Rarity::Legendary}, {990, Rarity::Exotic},
+            {999, Rarity::Exotic},  {1000, Rarity::Common},    {0xffffffffu, Rarity::Common},
+        };
+        for (const auto &[roll, rarity] : edges)
+            QCOMPARE(int(CosmeticCatalog::draw(roll, 12345).rarity), int(rarity));
+
+        quint32 tierStart = 0;
+        for (Rarity rarity : CosmeticCatalog::rarities()) {
+            const QList<OpenChat::CosmeticInfo> members = CosmeticCatalog::ofRarity(rarity);
+            QSet<QString> reached;
+            for (quint32 k = 0; k < quint32(members.size()); ++k)
+                reached.insert(CosmeticCatalog::draw(tierStart, k).id);
+            QCOMPARE(reached.size(), members.size());
+            tierStart += quint32(CosmeticCatalog::rarityWeight(rarity));
+        }
     }
 
     // Every frame draws something round the picture and leaves its middle

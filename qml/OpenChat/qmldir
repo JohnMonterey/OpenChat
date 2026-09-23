@@ -40,3 +40,4 @@ DailyCaseButton 1.0 components/DailyCaseButton.qml
 DailyCaseModal 1.0 components/DailyCaseModal.qml
 CaseReel 1.0 components/CaseReel.qml
 CaseTile 1.0 components/CaseTile.qml
+CosmeticPreview 1.0 components/CosmeticPreview.qml

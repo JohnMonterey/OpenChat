@@ -147,6 +147,8 @@ bool renderSheet(const QString &page, bool dark, const QString &outDir)
                              .arg(page == QLatin1String("avatar-frames")    ? QStringLiteral("FramesSheet")
                                   : page == QLatin1String("presence-beads") ? QStringLiteral("BeadsSheet")
                                   : page == QLatin1String("name-flair")     ? QStringLiteral("FlairSheet")
+                                  : page == QLatin1String("rarity-ladder")  ? QStringLiteral("RaritySheet")
+                                  : page == QLatin1String("case-reveals")   ? QStringLiteral("RevealSheet")
                                                                             : QStringLiteral("ScenesSheet"));
     engine.load(QUrl::fromLocalFile(file));
     if (engine.rootObjects().isEmpty())
@@ -243,6 +245,7 @@ int main(int argc, char **argv)
     if (pages.isEmpty())
         pages = {QStringLiteral("avatar-frames"), QStringLiteral("presence-beads"),
                  QStringLiteral("name-flair"), QStringLiteral("profile-scenes"),
+                 QStringLiteral("rarity-ladder"), QStringLiteral("case-reveals"),
                  QStringLiteral("in-context")};
     bool ok = true;
     for (const QString &page : pages) {

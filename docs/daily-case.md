@@ -1,8 +1,10 @@
 # Daily case opening
 
-The small case icon below the add-contact control opens a native Qt Quick popup.
-Every tile is a neutral placeholder. There is no reward activation, inventory,
-rarity system, payment, or monetary value.
+The small case icon beside the add-contact control opens a native Qt Quick popup.
+Each tile shows a collectible cosmetic with its rarity tier, and the claim draws
+one of them with the published odds. Nothing is granted yet: there is no
+inventory or equip flow behind the reveal. There is no payment and no monetary
+value.
 
 ## Ownership and integration
 
@@ -33,12 +35,49 @@ eligibility, choose the reward, persist consumption, and return the persisted
 claim on all retries, including after a lost response. Return at least
 `claimId`, `rewardId`, `seed`, and `nextAvailableAt`. The seed controls only the
 visual arrangement; it must never select the actual reward on the client.
-Extend `CaseResult`/tile presentation data with name, icon, rarity, type, and
-payload when rewards exist. `adopt()` is where the predetermined result enters
-the presentation. Implement the network service asynchronously, routing its
+`rewardId` is a cosmetic catalogue id; the server draws it with the tier odds
+below. `adopt()` is where the predetermined result enters the presentation. Implement the network service asynchronously, routing its
 completion into the controller's claim-result handling; never block the GUI
 thread with a network wait. Preserve the Opening guard during the request and
 reconcile an uncertain response using the server's existing claim.
+
+## Rewards and rarity
+
+`CosmeticCatalog` (`src/cosmetics/`) lists every collectible (bubble skins,
+avatar frames, presence beads, name flair, profile scenes) with a stable id and
+one of five tiers. The ladder and each item's tier live in one table in
+`CosmeticCatalog.cpp`:
+
+| Tier | Colour | Odds | Items |
+|---|---|---|---|
+| Common | blue `#4b69ff` | 60% | 8 |
+| Rare | purple `#8847ff` | 25% | 7 |
+| Epic | pink `#d32ce6` | 10% | 7 |
+| Legendary | red `#eb4b4b` | 4% | 5 |
+| Exotic | gold `#e4ae39` | 1% | 2 |
+
+A draw rolls a tier by weight (parts per thousand), then picks one of its items
+evenly, so an item's chance is its tier's share over the tier's size.
+`CosmeticCatalog::draw()` is deterministic in its two rolls; the caller supplies
+the randomness. Small or plain items are Common; the larger, more detailed or
+animated an item, the higher it sits, and animated items are never below
+Legendary. `tst_cosmetics` pins the tier sizes so a new item gets its tier on
+purpose.
+
+The local mock draws at claim time and stores the id beside the claim; a claim
+saved before rewards existed replays as `placeholder` and shows the "?" tile.
+The belt around the winner is the day's: `DailyCaseController.fillers` is drawn
+with the same odds from a hash of the account and the UTC date. It does not
+change when the claim lands, so nothing on screen swaps as the spin starts, and
+the seed still only chooses which of five slots the winner occupies.
+
+Tiles draw each item through the component that wears it (`CosmeticPreview`),
+with the tier's colour as a bottom bar, a glow and a label. The popup always
+shows the odds. On reveal, the ring, selector and winner border take the tier
+colour, and the ring thickens with the tier; Legendary and Exotic add a flash
+behind the belt and a second, later ring. Less motion skips all of it.
+`openchat-profile-gallery --page rarity-ladder` and `--page case-reveals`
+render the ladder and frozen reveals for review.
 
 ## Motion and sound
 

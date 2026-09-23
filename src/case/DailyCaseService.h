@@ -4,8 +4,9 @@
 #include <optional>
 
 namespace OpenChat {
-// Presentation metadata only. Future reward definitions can add name, icon,
-// rarity, type and payload without changing the reel's positioning contract.
+// One claim. `rewardId` is a cosmetic catalogue id (see CosmeticCatalog) drawn
+// by the authority with the tier odds, or "placeholder" for a claim saved
+// before rewards existed. `seed` only arranges the reel.
 struct CaseResult {
     QString claimId;
     QString rewardId = QStringLiteral("placeholder");
@@ -23,9 +24,10 @@ public:
     virtual CaseReply status(const QString &account) = 0;
     virtual CaseReply claim(const QString &account) = 0;
 };
-// Temporary local authority. No rewards are granted. An online adapter must
-// perform eligibility + selection + consumption in one server transaction and
-// return the existing claim for repeat requests, keyed by account/server day.
+// Temporary local authority. It draws the reward it shows, but grants nothing:
+// there is no inventory yet. An online adapter must perform eligibility +
+// selection + consumption in one server transaction and return the existing
+// claim for repeat requests, keyed by account/server day.
 class LocalDailyCaseService final : public DailyCaseService {
 public:
     explicit LocalDailyCaseService(QString directory = {});

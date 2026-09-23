@@ -145,6 +145,13 @@ private slots:
         QCOMPARE(reveal.size(), 1);
         QCOMPARE(controller->position(), double(controller->winnerIndex()));
         QCOMPARE(reel->property("winnerCenter").toDouble(), reel->width()/2);
+        // The reveal names the drawn item and its tier.
+        const auto reward = controller->reward();
+        QVERIFY(!reward.value("id").toString().isEmpty());
+        auto *status = findVisualItem(window->contentItem(), "caseStatus");
+        QVERIFY(status);
+        QVERIFY(status->property("text").toString().contains(reward.value("name").toString()));
+        QVERIFY(status->property("text").toString().contains(reward.value("rarityName").toString()));
         QTest::qWait(700);
         capture("opened");
         QTest::keyClick(window, Qt::Key_Escape);

@@ -4,7 +4,10 @@
 #include <QFile>
 #include <QLockFile>
 #include <QCryptographicHash>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "case/DailyCaseController.h"
+#include "cosmetics/CosmeticCatalog.h"
 
 using namespace OpenChat;
 class DailyCaseTest : public QObject {
@@ -109,6 +112,61 @@ private slots:
             const auto n = times.size();
             QVERIFY(times[n-1] - times[n-2] > times[n-2] - times[n-3]);
         }
+    }
+    void claimsDrawACatalogueRewardAndReplayIt()
+    {
+        QTemporaryDir directory;
+        LocalDailyCaseService service(directory.path());
+        const auto claim = service.claim("alice");
+        QVERIFY(claim.result);
+        const auto *reward = CosmeticCatalog::find(claim.result->rewardId);
+        QVERIFY2(reward, qPrintable(claim.result->rewardId));
+        QCOMPARE(service.status("alice").result->rewardId, reward->id);
+        QCOMPARE(LocalDailyCaseService(directory.path()).claim("alice").result->rewardId, reward->id);
+    }
+    void aClaimSavedBeforeRewardsKeepsThePlaceholder()
+    {
+        QTemporaryDir directory;
+        const auto path = directory.path() + '/' + QString::fromLatin1(
+            QCryptographicHash::hash("alice", QCryptographicHash::Sha256).toHex()) + ".json";
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QJsonDocument(QJsonObject{{"claim", "earlier"}, {"seed", 7.0},
+            {"next", QDateTime::currentDateTimeUtc().addDays(1).toString(Qt::ISODate)}}).toJson());
+        file.close();
+        QCOMPARE(LocalDailyCaseService(directory.path()).status("alice").result->rewardId,
+                 QStringLiteral("placeholder"));
+        DailyCaseController controller(std::make_unique<LocalDailyCaseService>(directory.path()));
+        controller.setAccountKey("alice");
+        QCOMPARE(controller.state(), DailyCaseController::OpenedToday);
+        QVERIFY(controller.reward().isEmpty());
+    }
+    void theBeltIsTheDaysAndStaysPutWhenTheClaimLands()
+    {
+        QTemporaryDir directory;
+        DailyCaseController first(std::make_unique<LocalDailyCaseService>(directory.path()));
+        DailyCaseController again(std::make_unique<LocalDailyCaseService>(directory.path()));
+        DailyCaseController other(std::make_unique<LocalDailyCaseService>(directory.path()));
+        first.setAccountKey("alice");
+        again.setAccountKey("alice");
+        other.setAccountKey("bob");
+        const auto belt = first.fillers();
+        QCOMPARE(belt.size(), first.tileCount());
+        QCOMPARE(again.fillers(), belt);
+        QVERIFY(other.fillers() != belt);
+        for (const auto &tile : belt)
+            QVERIFY(CosmeticCatalog::find(tile.toMap().value("id").toString()));
+        QVERIFY(first.reward().isEmpty());
+        first.setProperty("muted", true);
+        first.setProperty("reducedMotion", true);
+        QSignalSpy rearranged(&first, &DailyCaseController::fillersChanged);
+        first.open();
+        QCOMPARE(first.state(), DailyCaseController::OpenedToday);
+        QCOMPARE(first.fillers(), belt);
+        QCOMPARE(rearranged.size(), 0);
+        QCOMPARE(first.reward().value("id").toString(),
+                 LocalDailyCaseService(directory.path()).status("alice").result->rewardId);
+        QVERIFY(first.reward().value("rarityColor").value<QColor>().isValid());
     }
     void duplicateClickDismissAndReducedMotion()
     {

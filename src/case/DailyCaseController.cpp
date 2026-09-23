@@ -1,5 +1,8 @@
 #include "DailyCaseController.h"
+#include "cosmetics/CosmeticCatalog.h"
+#include <QCryptographicHash>
 #include <QSettings>
+#include <random>
 
 namespace OpenChat {
 DailyCaseController::DailyCaseController(QObject *parent)
@@ -41,6 +44,26 @@ void DailyCaseController::setAccountKey(const QString &account)
 void DailyCaseController::adopt(const CaseResult &result)
 {
     m_winner = CaseMotion::firstWinnerIndex + int(result.seed % CaseMotion::winnerVariants);
+    m_reward = cosmeticToVariant(CosmeticCatalog::find(result.rewardId));
+}
+void DailyCaseController::arrangeBelt()
+{
+    // Visual only: the reward never comes from here (the service draws it).
+    const auto day = QDateTime::currentDateTimeUtc().date().toString(Qt::ISODate);
+    const auto digest = QCryptographicHash::hash((m_account + '|' + day).toUtf8(),
+                                                 QCryptographicHash::Sha256);
+    quint64 seed = 0;
+    for (int i = 0; i < 8; ++i)
+        seed = (seed << 8) | quint8(digest[i]);
+    if (seed == m_beltSeed && !m_fillers.isEmpty()) return;
+    m_beltSeed = seed;
+    std::mt19937_64 random(seed);
+    m_fillers.clear();
+    for (int i = 0; i < CaseMotion::tileCount; ++i) {
+        const auto tierRoll = quint32(random() >> 32), itemRoll = quint32(random() >> 32);
+        m_fillers.append(cosmeticToVariant(&CosmeticCatalog::draw(tierRoll, itemRoll)));
+    }
+    emit fillersChanged();
 }
 void DailyCaseController::refresh()
 {
@@ -49,6 +72,8 @@ void DailyCaseController::refresh()
     m_nextDay.stop();
     m_error = reply.error;
     m_state = reply.result ? OpenedToday : Available;
+    if (!reply.result) m_reward.clear();
+    arrangeBelt();
     if (reply.result) {
         adopt(*reply.result);
         m_nextDay.start(int(std::clamp(QDateTime::currentDateTimeUtc().msecsTo(reply.result->nextAvailableAt),

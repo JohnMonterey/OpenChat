@@ -8,6 +8,13 @@ Popup {
     objectName: "dailyCaseModal"
     required property var controller
     property var returnFocus: null
+    readonly property var reward: controller ? controller.reward : ({})
+    readonly property bool rewarded: !!(reward && reward.id)
+    readonly property var categoryNames: ({
+        bubble: "chat bubble", frame: "avatar frame", bead: "presence bead",
+        flair: "name flair", scene: "profile scene"
+    })
+    function ink(color) { return Theme.darkMode ? Qt.lighter(color, 1.3) : Qt.darker(color, 1.3) }
     parent: Overlay.overlay
     anchors.centerIn: parent
     width: Math.min(700, parent.width - 32)
@@ -90,15 +97,46 @@ Popup {
             active: root.visible
             sourceComponent: CaseReel { controller: root.controller }
         }
+        // The odds, always on show: each tier's share of a draw, in its colour.
+        Row {
+            objectName: "caseOdds"
+            y: 270
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: 12
+            scale: Math.min(1, parent.width / implicitWidth)
+            Repeater {
+                model: Cosmetics.tiers()
+                Row {
+                    required property var modelData
+                    spacing: 4
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 7; height: 7; radius: 3.5
+                        color: modelData.color
+                    }
+                    Text {
+                        text: modelData.name + " " + modelData.percent + "%"
+                        color: root.ink(modelData.color)
+                        font.family: Theme.uiFont
+                        font.pixelSize: 11
+                    }
+                }
+            }
+        }
         Text {
             objectName: "caseStatus"
-            y: 275
+            y: 290
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.StyledText
             text: root.controller.error.length ? root.controller.error
                 : root.controller.state === DailyCaseController.Opening ? "Finding your moment…"
+                : root.controller.state === DailyCaseController.OpenedToday && root.rewarded
+                    ? "<b>" + root.reward.name + "</b> · <font color=\"" + root.ink(root.reward.rarityColor)
+                      + "\">" + root.reward.rarityName + "</font> " + (root.categoryNames[root.reward.category] || "")
+                      + " · See you tomorrow"
                 : root.controller.state === DailyCaseController.OpenedToday ? "Today's case opened · See you tomorrow"
-                : "One free case · Placeholder reveal · No rewards yet"
+                : "One free case a day · Items can't be kept yet"
             color: root.controller.error.length ? Theme.warningText : Theme.textSecondary
             font.family: Theme.uiFont
             font.pixelSize: 12
@@ -131,7 +169,7 @@ Popup {
             id: action
             objectName: "caseOpenButton"
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 317
+            y: 320
             width: root.width < 480 ? 132 : 170
             height: 36
             enabled: root.controller.state === DailyCaseController.Available

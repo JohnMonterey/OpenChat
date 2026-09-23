@@ -32,8 +32,9 @@ add_library(openchat_case STATIC
 )
 target_include_directories(openchat_case PUBLIC src)
 # CaseAudio decodes its bundled crate samples with the defensive WavFile reader.
+# The claim draws its reward from the cosmetics catalogue's rarity tiers.
 target_link_libraries(openchat_case PUBLIC Qt6::Core Qt6::Multimedia
-    PRIVATE openchat_media)
+    PRIVATE openchat_media openchat_cosmetics)
 
 # Collectible cosmetics: chat-bubble skins, avatar frames, presence beads, name
 # flair and profile scenes. All QPainter artwork, so it renders on the software scene
@@ -138,6 +139,7 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/DailyCaseModal.qml
         qml/OpenChat/components/CaseReel.qml
         qml/OpenChat/components/CaseTile.qml
+        qml/OpenChat/components/CosmeticPreview.qml
     RESOURCES
         assets/Jessica.png
         assets/alex.png

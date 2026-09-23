@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(OpenChat VERSION 0.1.0 LANGUAGES C CXX)
+project(OpenChat VERSION 0.2.8 LANGUAGES C CXX)
 
 # The macOS notification backend is Objective-C++ (UNUserNotificationCenter has
 # no C interface). Enabled here rather than beside the target, because a

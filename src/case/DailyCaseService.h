@@ -1,7 +1,10 @@
 #pragma once
+#include <QByteArray>
 #include <QDateTime>
+#include <QHash>
 #include <QString>
 #include <QStringList>
+#include <functional>
 #include <optional>
 
 namespace OpenChat {
@@ -22,8 +25,11 @@ struct CaseResult {
 // `result` is the last case opened, if any. `drops` is how many cases wait to
 // be opened, and `progressMs` how much running time already counts toward the
 // next drop. `owned` is everything the account has unboxed. `caseKey` names the
-// case on offer next; it seeds that case's belt, never its reward. All of them
-// mean nothing when `error` is set.
+// case on offer next; it seeds that case's belt, never its reward. `loadout` is
+// what the account wears (slot -> id) when the authority holds it; a local one
+// leaves that to AppearanceSettings. `counting` is false while the authority is
+// not counting time (the relay, while disconnected), so no next drop is due.
+// All of them mean nothing when `error` is set.
 struct CaseReply {
     std::optional<CaseResult> result;
     bool newlyClaimed = false;
@@ -32,17 +38,47 @@ struct CaseReply {
     QString caseKey;
     int drops = 0;
     qint64 progressMs = 0;
+    std::optional<QHash<QString, QString>> loadout;
+    bool counting = true;
 };
+// Where cases and collections come from: the relay when signed in
+// (RelayCaseService), a local stand-in otherwise. Every call answers through
+// `done` -- at once for a local authority, when the relay replies for a remote
+// one -- and an authority never calls `done` after it is destroyed.
 class DailyCaseService {
 public:
+    using Reply = std::function<void(const CaseReply &)>;
     virtual ~DailyCaseService() = default;
-    virtual CaseReply status(const QString &account) = 0;
+    virtual void status(const QString &account, Reply done) = 0;
     // Opens a waiting case; with none waiting, replays the last one opened.
-    virtual CaseReply claim(const QString &account) = 0;
+    // Retrying with the same `requestId` returns the same case rather than
+    // opening another.
+    virtual void claim(const QString &account, const QByteArray &requestId, Reply done) = 0;
+    // Whether the authority must be told the running time; the relay counts
+    // the time an account is connected itself.
+    [[nodiscard]] virtual bool needsRunningTime() const { return true; }
     // Counts `ms` of running time toward the next drop. One report credits at
     // most what the next drop still needs, so it adds one drop at most.
-    virtual CaseReply accrue(const QString &account, qint64 ms) = 0;
-    virtual qint64 dropIntervalMs() const { return caseDropIntervalMs; }
+    virtual void accrue(const QString &account, qint64 ms, Reply done) = 0;
+    // Wears `itemId` in `slot` (empty clears it) where the authority keeps the
+    // loadout; a local one leaves that to AppearanceSettings and answers empty.
+    virtual void equip(const QString &account, const QString &slot, const QString &itemId, Reply done)
+    {
+        Q_UNUSED(account); Q_UNUSED(slot); Q_UNUSED(itemId);
+        done({});
+    }
+    [[nodiscard]] virtual qint64 dropIntervalMs() const { return caseDropIntervalMs; }
+    // Replies the authority sends unasked: a case dropped, or the connection
+    // came or went.
+    void setPushHandler(Reply handler) { m_push = std::move(handler); }
+protected:
+    void push(const CaseReply &reply) const
+    {
+        if (m_push)
+            m_push(reply);
+    }
+private:
+    Reply m_push;
 };
 // What each account has unboxed, kept by the local authority beside its
 // claims: catalogue ids in the order they arrived, one atomic file per
@@ -59,18 +95,27 @@ private:
     QString path(const QString &account) const;
     QString m_directory;
 };
-// Temporary local authority. It keeps each account's waiting drops and running
-// time, draws the reward it shows and grants it into the account's
-// LocalCosmeticInventory. It believes whatever running time it is told; an
-// online adapter must count drops + perform selection + consumption + grant on
-// the server, in one transaction per claim. (The DailyCase names predate drops.)
+// The local stand-in, used when not signed in (previews, tests) and when the
+// relay does not hold cosmetics yet. It keeps each account's waiting drops and
+// running time, draws the reward it shows and grants it into the account's
+// LocalCosmeticInventory, all in files on this device that anyone can edit;
+// the relay (RelayCaseService) is the authority. It answers at once, and its
+// plain calls below answer directly. (The DailyCase names predate drops.)
 class LocalDailyCaseService final : public DailyCaseService {
 public:
     explicit LocalDailyCaseService(QString directory = {}, qint64 dropIntervalMs = caseDropIntervalMs);
-    CaseReply status(const QString &account) override;
-    CaseReply claim(const QString &account) override;
-    CaseReply accrue(const QString &account, qint64 ms) override;
+    CaseReply status(const QString &account);
+    CaseReply claim(const QString &account);
+    CaseReply accrue(const QString &account, qint64 ms);
+    void status(const QString &account, Reply done) override { done(status(account)); }
+    void claim(const QString &account, const QByteArray &requestId, Reply done) override
+    {
+        Q_UNUSED(requestId);
+        done(claim(account));
+    }
+    void accrue(const QString &account, qint64 ms, Reply done) override { done(accrue(account, ms)); }
     qint64 dropIntervalMs() const override { return m_dropIntervalMs; }
+    [[nodiscard]] const QString &directory() const { return m_directory; }
 private:
     enum class Action { Status, Claim, Accrue };
     CaseReply transact(const QString &account, Action action, qint64 ms = 0);

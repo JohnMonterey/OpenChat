@@ -39,15 +39,24 @@ class DailyCaseController : public QObject {
     // new account) the list is empty and means nothing.
     Q_PROPERTY(QStringList owned READ owned NOTIFY ownedChanged)
     Q_PROPERTY(bool ownershipKnown READ ownershipKnown NOTIFY ownedChanged)
+    // What the account wears (slot -> catalogue id) where the authority keeps
+    // it -- the relay, so it follows the account to every device -- and whether
+    // it has said so. A local authority leaves this unknown.
+    Q_PROPERTY(QVariantMap loadout READ loadout NOTIFY loadoutChanged)
+    Q_PROPERTY(bool loadoutKnown READ loadoutKnown NOTIFY loadoutChanged)
 public:
     // Available: a case waits, on show from the start of its belt. Opening: the
     // reel spins. Opened: the last case opened is on show, and stays until the
     // popup closes or the next case is opened; with nothing waiting, it stays.
     enum State { Available, Opening, Opened };
     Q_ENUM(State)
+    // Without a service, a controller asks the factory the app installed (the
+    // relay's, once signed in) or falls back to the local stand-in.
     explicit DailyCaseController(QObject *parent = nullptr);
     DailyCaseController(std::unique_ptr<DailyCaseService> service, QObject *parent = nullptr);
     ~DailyCaseController() override;
+    using ServiceFactory = std::function<std::unique_ptr<DailyCaseService>()>;
+    static void setServiceFactory(ServiceFactory factory);
     QString accountKey() const { return m_account; }
     void setAccountKey(const QString &account);
     int state() const { return m_state; }
@@ -61,22 +70,32 @@ public:
     QVariantList fillers() const { return m_fillers; }
     QStringList owned() const { return m_owned; }
     bool ownershipKnown() const { return m_ownershipKnown; }
+    QVariantMap loadout() const { return m_loadout; }
+    bool loadoutKnown() const { return m_loadoutKnown; }
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void open();
     Q_INVOKABLE void dismiss();
     Q_INVOKABLE void display();
+    // Wears `itemId` in `slot` (empty clears it) through the authority; the
+    // answer arrives as the new loadout.
+    Q_INVOKABLE void equip(const QString &slot, const QString &itemId);
 signals:
     void changed();
     void positionChanged();
     void preferencesChanged();
     void fillersChanged();
     void ownedChanged();
+    void loadoutChanged();
     void crossed(int index);
     void revealed();
 private:
+    void applyStatus(const CaseReply &reply);
+    void applyClaim(const CaseReply &reply);
+    void applyPush(const CaseReply &reply);
     void adopt(const CaseResult &result);
     void adoptOwned(const CaseReply &reply);
     void adoptDrops(const CaseReply &reply);
+    void adoptLoadout(const CaseReply &reply);
     // Reports the running time not yet counted, then waits for the next drop.
     void reportRunningTime();
     qint64 untilNextDropMs() const;
@@ -91,14 +110,26 @@ private:
     QVariantList m_fillers;
     QStringList m_owned;
     bool m_ownershipKnown = false;
+    QVariantMap m_loadout;
+    bool m_loadoutKnown = false;
     int m_drops = 0;
     qint64 m_progressMs = 0;
     bool m_dropsKnown = false;
+    bool m_counting = true;
     QString m_nextCaseKey;
     // A fresh reveal the popup has not been closed on yet.
     bool m_revealOnShow = false;
+    // Replies for an account that is no longer this one are dropped.
+    quint64 m_generation = 0;
+    // The open in flight or last failed, retried as the same claim.
+    QByteArray m_claimRequestId;
+    bool m_claimPending = false;
+    // The popup closed while the claim was on its way: land without a spin.
+    bool m_quietClaim = false;
     // Running time since the last report, on a monotonic clock.
     QElapsedTimer m_running;
+    // Time since the authority last said how far along the next drop is.
+    QElapsedTimer m_sinceProgress;
     QTimer m_dropTimer;
     quint64 m_beltSeed = 0;
     State m_state = Available;

@@ -77,6 +77,7 @@
 #include "app/TextLineSpacing.h"
 #include "call/ScreenCanvas.h"
 #include "case/DailyCaseController.h"
+#include "case/RelayCaseService.h"
 #include "cosmetics/CosmeticTypes.h"
 #include "app/TransportSettings.h"
 #include "call/UdpCallMediaPath.h"
@@ -602,6 +603,11 @@ private:
         }
         if (!m_transport)
             m_transport = std::make_unique<OpenChat::RelayTransport>(*m_relay);
+        // Signed in: cases, the collection and what is worn come from the relay.
+        OpenChat::DailyCaseController::setServiceFactory(
+            [relay = QPointer<OpenChat::RelayClient>(m_relay.get())] {
+                return std::make_unique<OpenChat::RelayCaseService>(relay.data());
+            });
         if (!m_session->startNetworking(*m_transport).hasValue())
             return;
         OpenChat::SyncEngine *engine = m_session->syncEngine();

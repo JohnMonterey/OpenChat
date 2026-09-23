@@ -195,6 +195,7 @@ qt_add_qml_module(OpenChat
 target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
     openchat_case
+    openchat_case_relay
     openchat_cosmetics
     openchat_app
     openchat_avatar
@@ -443,6 +444,14 @@ target_include_directories(openchat_network PUBLIC src)
 target_link_libraries(openchat_network
     PUBLIC openchat_protocol openchat_domain Qt6::Core Qt6::Network Qt6::WebSockets
 )
+
+# The relay as the authority for cases and cosmetics, for the signed-in app.
+# Kept out of openchat_case so the case and QML tests need no network stack.
+add_library(openchat_case_relay STATIC
+    src/case/RelayCaseService.cpp
+)
+target_include_directories(openchat_case_relay PUBLIC src)
+target_link_libraries(openchat_case_relay PUBLIC openchat_case openchat_network Qt6::Core)
 
 add_library(openchat_crypto STATIC
     src/crypto/MlsClient.cpp

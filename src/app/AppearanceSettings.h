@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 
 #include <array>
 
@@ -29,6 +30,11 @@ class AppearanceSettings final : public QObject
     // does not own, and equipping one it does not own is refused.
     Q_PROPERTY(QStringList ownedCosmetics READ ownedCosmetics WRITE setOwnedCosmetics NOTIFY
                    ownedCosmeticsChanged)
+    // What the account wears (slot -> id) as the relay holds it, adopted as it
+    // is -- Main.qml hands it over from the case controller -- so the loadout
+    // follows the account to every device. Adopting it never asks the relay to
+    // equip anything; equipping here does, through equipRequested().
+    Q_PROPERTY(QVariantMap loadout READ loadout WRITE setLoadout NOTIFY loadoutChanged)
 public:
     explicit AppearanceSettings(QObject *parent = nullptr);
     bool darkMode() const { return m_darkMode; }
@@ -47,6 +53,8 @@ public:
 
     QStringList ownedCosmetics() const { return m_owned; }
     void setOwnedCosmetics(const QStringList &ids);
+    QVariantMap loadout() const;
+    void setLoadout(const QVariantMap &loadout);
     bool owns(const QString &id) const { return m_ownershipKnown && m_owned.contains(id); }
 signals:
     void darkModeChanged();
@@ -56,6 +64,10 @@ signals:
     void profileSceneChanged();
     void bubbleSkinChanged();
     void ownedCosmeticsChanged();
+    void loadoutChanged();
+    // Something was equipped here (`itemId` empty: the slot was cleared), for
+    // the authority to hold.
+    void equipRequested(const QString &slot, const QString &itemId);
 private:
     // One equipped cosmetic: its field, kind, settings key and change signal.
     struct EquipSlot

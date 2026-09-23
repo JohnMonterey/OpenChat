@@ -7,15 +7,19 @@
 #include "protocol/CiphertextEnvelope.h"
 
 #include <QByteArray>
+#include <QCborMap>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QSslConfiguration>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 
 QT_BEGIN_NAMESPACE
 class QNetworkAccessManager;
@@ -47,6 +51,12 @@ struct RelayEndpoints final {
     QUrl directoryAccount; // GET ?account_id=<hex> -> CBOR { handle } (authenticated)
     QUrl invites;       // POST { ttl_ms? } -> CBOR { token, expires_at_ms } (authenticated)
     QUrl invitesRedeem; // POST { token } -> CBOR { account_id, devices } (authenticated)
+    // Collectible cosmetics, held by the relay (all authenticated):
+    QUrl cosmetics;         // GET -> the account's cosmetic state
+    QUrl cosmeticsClaim;    // POST { request_id } -> { state, claim, newly_claimed }
+    QUrl cosmeticsEquip;    // POST { slot, item_id } -> state
+    QUrl cosmeticsImport;   // POST { owned, drops } -> state (first import only)
+    QUrl cosmeticsLoadouts; // POST { accounts } -> { loadouts: [{ account_id, slots }] }
     QUrl live;          // wss:// live envelope stream
 
     // Derives the full endpoint set from a base URL, e.g. https://host/v1. The
@@ -178,6 +188,31 @@ enum class RelayClaimError {
     Malformed,
     Transport,
 };
+
+// One case opened, as the relay drew it (see relay/src/CosmeticsService.h).
+struct RelayCosmeticClaim final {
+    QByteArray claimId;
+    QString rewardId;
+    quint32 seed = 0;
+    QString caseKey;
+};
+
+// The account's cosmetics as the relay holds them: waiting cases and connected
+// time toward the next, the last case opened, what it owns and wears. Only ever
+// populated from a response that passed defensive validation.
+struct RelayCosmeticState final {
+    int drops = 0;
+    qint64 progressMs = 0;
+    qint64 intervalMs = 0;
+    QString nextCaseKey;
+    QStringList owned;
+    QHash<QString, QString> loadout; // slot -> item id
+    bool imported = false;
+    std::optional<RelayCosmeticClaim> last;
+};
+
+// Which cosmetics call failed, for cosmeticsFailed().
+enum class RelayCosmeticsCall { State, Claim, Equip, Import, Loadouts };
 
 // Result of a device authentication exchange (Task 8 obtains it; later phases
 // persist the tokens through their own wiped storage).
@@ -352,6 +387,25 @@ public:
     // non-empty key_package emits Malformed; any other failure emits Transport.
     void claimKeyPackage(const DeviceId &targetDevice);
 
+    // Collectible cosmetics over the authenticated HTTPS endpoints. A rejected
+    // token drives the single refresh-and-retry then authExpired(); any other
+    // failure emits cosmeticsFailed(call, httpStatus), with status 0 for a
+    // transport failure or a malformed body (a relay without these routes
+    // answers 404). The account's own state arrives through cosmeticsReceived()
+    // -- also pushed by the relay over the live stream whenever a case drops --
+    // and a claim through caseClaimed().
+    void fetchCosmetics();
+    // `requestId` (8-32 bytes) makes the claim idempotent: resending it after a
+    // lost response returns the same case instead of opening another.
+    void claimCase(const QByteArray &requestId);
+    // Wears `itemId` in `slot`, or clears the slot when `itemId` is empty.
+    void equipCosmetic(const QString &slot, const QString &itemId);
+    // Hands over a collection kept on this device before the relay held it.
+    void importCosmetics(const QStringList &owned, int drops);
+    // What the given accounts wear (at most 256); answered by loadoutsReceived()
+    // keyed by account id bytes, leaving out accounts that wear nothing.
+    void fetchLoadouts(const QList<AccountId> &accounts);
+
     // Closes the live stream and cancels any pending reconnect. Idempotent.
     void disconnect();
 
@@ -418,8 +472,18 @@ signals:
     // refresh-and-retry).
     void keyPackageClaimed(const QByteArray &keyPackage);
     void keyPackageClaimFailed(RelayClaimError error);
+    // Collectible cosmetics (see fetchCosmetics()).
+    void cosmeticsReceived(const OpenChat::RelayCosmeticState &state);
+    void caseClaimed(const OpenChat::RelayCosmeticState &state,
+                     const OpenChat::RelayCosmeticClaim &claim, bool newlyClaimed);
+    void cosmeticsFailed(OpenChat::RelayCosmeticsCall call, int httpStatus);
+    void loadoutsReceived(const QHash<QByteArray, QHash<QString, QString>> &loadouts);
 
 private:
+    // One authenticated cosmetics round trip: POSTs `body` (GET without one),
+    // and hands a well-formed CBOR map to `done`; failures emit cosmeticsFailed.
+    void cosmeticsRequest(RelayCosmeticsCall call, const QUrl &url, const std::optional<QCborMap> &body,
+                          std::function<void(const QCborMap &)> done);
     void completeAuthentication(const QByteArray &challenge, const ChallengeSigner &signer,
                                 const QByteArray &context);
     void refreshThenRetryFetch(quint64 watermark);

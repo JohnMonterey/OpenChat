@@ -62,6 +62,7 @@ enum class ControlType : int {
     DatagramDelivery = 6, // server -> client: [6, bstr canonicalEnvelope]
     MediaTokenRequest = 12, // client -> server: [12]
     MediaToken = 13,        // server -> client: [13, bstr token(32)]
+    Cosmetics = 14,         // server -> client: [14, { cosmetic state }] (opt-in)
 };
 
 [[nodiscard]] bool isSecureScheme(const QUrl &url, QLatin1StringView scheme)
@@ -121,6 +122,90 @@ constexpr qsizetype maxDirectoryDevices = 64;
 constexpr qsizetype directorySigningKeyBytes = 32;
 constexpr qsizetype maxInviteTokenBytes = 4096;
 
+// Bounds on the cosmetics the relay reports; anything outside is malformed.
+constexpr qsizetype maxCosmeticIdChars = 64;
+constexpr qsizetype maxCaseKeyChars = 80;
+constexpr qsizetype maxOwnedCosmetics = 1024;
+constexpr qsizetype maxLoadoutSlots = 16;
+constexpr qsizetype maxLoadoutAccounts = 256;
+
+[[nodiscard]] bool boundedText(const QCborValue &value, qsizetype maxChars)
+{
+    return value.isString() && !value.toString().isEmpty() && value.toString().size() <= maxChars;
+}
+
+// slot -> item id, both bounded text.
+[[nodiscard]] std::optional<QHash<QString, QString>> parseSlots(const QCborValue &value)
+{
+    if (!value.isMap() || value.toMap().size() > maxLoadoutSlots)
+        return std::nullopt;
+    QHash<QString, QString> worn;
+    const QCborMap map = value.toMap();
+    for (auto it = map.cbegin(); it != map.cend(); ++it) {
+        if (!boundedText(it.key(), maxCosmeticIdChars) || !boundedText(it.value(), maxCosmeticIdChars))
+            return std::nullopt;
+        worn.insert(it.key().toString(), it.value().toString());
+    }
+    return worn;
+}
+
+[[nodiscard]] std::optional<RelayCosmeticClaim> parseCosmeticClaim(const QCborValue &value)
+{
+    if (!value.isMap())
+        return std::nullopt;
+    const QCborMap map = value.toMap();
+    const QCborValue id = map.value(QLatin1StringView("claim_id"));
+    const QCborValue seed = map.value(QLatin1StringView("seed"));
+    if (!id.isByteArray() || id.toByteArray().size() != 16
+        || !boundedText(map.value(QLatin1StringView("reward_id")), maxCosmeticIdChars)
+        || !seed.isInteger() || seed.toInteger() < 0 || seed.toInteger() > 0xffffffffLL
+        || !boundedText(map.value(QLatin1StringView("case_key")), maxCaseKeyChars))
+        return std::nullopt;
+    return RelayCosmeticClaim{id.toByteArray(), map.value(QLatin1StringView("reward_id")).toString(),
+                              static_cast<quint32>(seed.toInteger()),
+                              map.value(QLatin1StringView("case_key")).toString()};
+}
+
+// The account's own cosmetic state, as GET /cosmetics and frame 14 carry it.
+[[nodiscard]] std::optional<RelayCosmeticState> parseCosmeticState(const QCborValue &value)
+{
+    if (!value.isMap())
+        return std::nullopt;
+    const QCborMap map = value.toMap();
+    const QCborValue drops = map.value(QLatin1StringView("drops"));
+    const QCborValue progress = map.value(QLatin1StringView("progress_ms"));
+    const QCborValue interval = map.value(QLatin1StringView("interval_ms"));
+    const QCborValue owned = map.value(QLatin1StringView("owned"));
+    const QCborValue imported = map.value(QLatin1StringView("imported"));
+    if (!drops.isInteger() || drops.toInteger() < 0 || drops.toInteger() > INT_MAX
+        || !progress.isInteger() || progress.toInteger() < 0
+        || !interval.isInteger() || interval.toInteger() <= 0
+        || !boundedText(map.value(QLatin1StringView("next_case_key")), maxCaseKeyChars)
+        || !owned.isArray() || owned.toArray().size() > maxOwnedCosmetics || !imported.isBool())
+        return std::nullopt;
+    RelayCosmeticState state;
+    state.drops = static_cast<int>(drops.toInteger());
+    state.progressMs = progress.toInteger();
+    state.intervalMs = interval.toInteger();
+    state.nextCaseKey = map.value(QLatin1StringView("next_case_key")).toString();
+    state.imported = imported.toBool();
+    for (const QCborValue &id : owned.toArray()) {
+        if (!boundedText(id, maxCosmeticIdChars))
+            return std::nullopt;
+        state.owned.append(id.toString());
+    }
+    const auto worn = parseSlots(map.value(QLatin1StringView("loadout")));
+    if (!worn)
+        return std::nullopt;
+    state.loadout = *worn;
+    if (map.contains(QLatin1StringView("last"))) {
+        state.last = parseCosmeticClaim(map.value(QLatin1StringView("last")));
+        if (!state.last)
+            return std::nullopt;
+    }
+    return state;
+}
+
 } // namespace
 
 RelayEndpoints RelayEndpoints::fromBaseUrl(const QString &base)
@@ -138,6 +223,11 @@ RelayEndpoints RelayEndpoints::fromBaseUrl(const QString &base)
     endpoints.directoryAccount = QUrl(base + QStringLiteral("/directory/account"));
     endpoints.invites = QUrl(base + QStringLiteral("/invites"));
     endpoints.invitesRedeem = QUrl(base + QStringLiteral("/invites/redeem"));
+    endpoints.cosmetics = QUrl(base + QStringLiteral("/cosmetics"));
+    endpoints.cosmeticsClaim = QUrl(base + QStringLiteral("/cosmetics/claim"));
+    endpoints.cosmeticsEquip = QUrl(base + QStringLiteral("/cosmetics/equip"));
+    endpoints.cosmeticsImport = QUrl(base + QStringLiteral("/cosmetics/import"));
+    endpoints.cosmeticsLoadouts = QUrl(base + QStringLiteral("/cosmetics/loadouts"));
     QUrl live(base + QStringLiteral("/live"));
     if (live.scheme() == QStringLiteral("https"))
         live.setScheme(QStringLiteral("wss"));
@@ -156,7 +246,9 @@ bool RelayEndpoints::isSecure() const
         && isHttps(authComplete)
         && isHttps(authRefresh) && isHttps(sync) && isHttps(keyPackages)
         && isHttps(keyPackagesClaim) && isHttps(directory) && isHttps(directoryAccount)
-        && isHttps(invites) && isHttps(invitesRedeem) && isWss(live);
+        && isHttps(invites) && isHttps(invitesRedeem) && isHttps(cosmetics)
+        && isHttps(cosmeticsClaim) && isHttps(cosmeticsEquip) && isHttps(cosmeticsImport)
+        && isHttps(cosmeticsLoadouts) && isWss(live);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +423,9 @@ public:
         query.addQueryItem(QStringLiteral("since"), QString::number(resumeWatermark));
         query.removeQueryItem(QStringLiteral("keyPackageSupply"));
         query.addQueryItem(QStringLiteral("keyPackageSupply"), QStringLiteral("1"));
+        // Hear about case drops as they happen; relays without cosmetics ignore it.
+        query.removeQueryItem(QStringLiteral("cosmetics"));
+        query.addQueryItem(QStringLiteral("cosmetics"), QStringLiteral("1"));
         url.setQuery(query);
 
         QNetworkRequest request(url);
@@ -590,6 +685,13 @@ public:
                 return;
             }
             emit q->mediaTokenReceived(array->at(1).toByteArray());
+            return;
+        }
+        case ControlType::Cosmetics: {
+            // Decoration, not traffic: a malformed one is dropped, never fatal.
+            const auto state = array->size() == 2 ? parseCosmeticState(array->at(1)) : std::nullopt;
+            if (state)
+                emit q->cosmeticsReceived(*state);
             return;
         }
         case ControlType::AuthExpired:
@@ -1586,6 +1688,146 @@ void RelayClient::claimKeyPackage(const DeviceId &targetDevice)
         d->refreshAttemptedThisCycle = false; // authorized round-trip succeeded
         emit keyPackageClaimed(keyPackage);
     });
+}
+
+void RelayClient::cosmeticsRequest(RelayCosmeticsCall call, const QUrl &url,
+                                   const std::optional<QCborMap> &body,
+                                   std::function<void(const QCborMap &)> done)
+{
+    if (!isHttps(url)) {
+        emit transportError(RelayTransportError::InsecureEndpoint);
+        emit cosmeticsFailed(call, 0);
+        return;
+    }
+    QNetworkRequest request = d->authorizedRequest(url);
+    QNetworkReply *reply = nullptr;
+    if (body) {
+        request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/cbor"));
+        reply = d->network->post(request, body->toCborValue().toCbor());
+    } else {
+        reply = d->network->get(request);
+    }
+    d->guardReply(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, call, url, body, done] {
+        const bool oversized = reply->property("oc_oversized").toBool();
+        reply->deleteLater();
+        const QVariant statusVar = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        const int status = statusVar.isValid() ? statusVar.toInt() : 0;
+        if (!oversized && status == 401) {
+            if (!d->refreshAttemptedThisCycle && !d->refreshInFlight)
+                refreshThenRetry([this, call, url, body, done] { cosmeticsRequest(call, url, body, done); });
+            else
+                emit authExpired();
+            return;
+        }
+        if (oversized || reply->error() != QNetworkReply::NoError || status < 200 || status >= 300
+            || !d->bodyWithinBounds(reply)) {
+            qCWarning(relayLog) << "Cosmetics call failed; HTTP status" << status;
+            emit cosmeticsFailed(call, oversized ? 0 : status);
+            return;
+        }
+        const QByteArray raw = reply->readAll();
+        QCborParserError error{};
+        const QCborValue value = QCborValue::fromCbor(raw, &error);
+        if (raw.size() > d->limits.maxHttpBodyBytes || error.error != QCborError::NoError
+            || error.offset != raw.size() || !value.isMap()) {
+            emit cosmeticsFailed(call, 0);
+            return;
+        }
+        done(value.toMap());
+    });
+}
+
+void RelayClient::fetchCosmetics()
+{
+    cosmeticsRequest(RelayCosmeticsCall::State, d->endpoints.cosmetics, std::nullopt,
+                     [this](const QCborMap &map) {
+                         const auto state = parseCosmeticState(map);
+                         if (!state) {
+                             emit cosmeticsFailed(RelayCosmeticsCall::State, 0);
+                             return;
+                         }
+                         emit cosmeticsReceived(*state);
+                     });
+}
+
+void RelayClient::claimCase(const QByteArray &requestId)
+{
+    QCborMap body;
+    body.insert(QLatin1StringView("request_id"), requestId);
+    cosmeticsRequest(RelayCosmeticsCall::Claim, d->endpoints.cosmeticsClaim, body,
+                     [this](const QCborMap &map) {
+                         const auto state = parseCosmeticState(map.value(QLatin1StringView("state")));
+                         const auto claim = parseCosmeticClaim(map.value(QLatin1StringView("claim")));
+                         const QCborValue newly = map.value(QLatin1StringView("newly_claimed"));
+                         if (!state || !claim || !newly.isBool()) {
+                             emit cosmeticsFailed(RelayCosmeticsCall::Claim, 0);
+                             return;
+                         }
+                         emit caseClaimed(*state, *claim, newly.toBool());
+                     });
+}
+
+void RelayClient::equipCosmetic(const QString &slot, const QString &itemId)
+{
+    QCborMap body;
+    body.insert(QLatin1StringView("slot"), slot);
+    body.insert(QLatin1StringView("item_id"), itemId);
+    cosmeticsRequest(RelayCosmeticsCall::Equip, d->endpoints.cosmeticsEquip, body,
+                     [this](const QCborMap &map) {
+                         const auto state = parseCosmeticState(map);
+                         if (!state) {
+                             emit cosmeticsFailed(RelayCosmeticsCall::Equip, 0);
+                             return;
+                         }
+                         emit cosmeticsReceived(*state);
+                     });
+}
+
+void RelayClient::importCosmetics(const QStringList &owned, int drops)
+{
+    QCborMap body;
+    body.insert(QLatin1StringView("owned"), QCborArray::fromStringList(owned));
+    body.insert(QLatin1StringView("drops"), std::max(0, drops));
+    cosmeticsRequest(RelayCosmeticsCall::Import, d->endpoints.cosmeticsImport, body,
+                     [this](const QCborMap &map) {
+                         const auto state = parseCosmeticState(map);
+                         if (!state) {
+                             emit cosmeticsFailed(RelayCosmeticsCall::Import, 0);
+                             return;
+                         }
+                         emit cosmeticsReceived(*state);
+                     });
+}
+
+void RelayClient::fetchLoadouts(const QList<AccountId> &accounts)
+{
+    QCborArray ids;
+    for (const AccountId &account : accounts.first(std::min<qsizetype>(accounts.size(), maxLoadoutAccounts)))
+        ids.append(account.bytes());
+    QCborMap body;
+    body.insert(QLatin1StringView("accounts"), ids);
+    cosmeticsRequest(RelayCosmeticsCall::Loadouts, d->endpoints.cosmeticsLoadouts, body,
+                     [this](const QCborMap &map) {
+                         const QCborValue list = map.value(QLatin1StringView("loadouts"));
+                         if (!list.isArray() || list.toArray().size() > maxLoadoutAccounts) {
+                             emit cosmeticsFailed(RelayCosmeticsCall::Loadouts, 0);
+                             return;
+                         }
+                         QHash<QByteArray, QHash<QString, QString>> loadouts;
+                         for (const QCborValue &value : list.toArray()) {
+                             const QCborMap entry = value.toMap();
+                             const QByteArray account = fixedBytes(
+                                 entry.value(QLatin1StringView("account_id")), AccountId::byteCount);
+                             const auto worn = parseSlots(entry.value(QLatin1StringView("slots")));
+                             if (account.isEmpty() || !worn) {
+                                 emit cosmeticsFailed(RelayCosmeticsCall::Loadouts, 0);
+                                 return;
+                             }
+                             loadouts.insert(account, *worn);
+                         }
+                         emit loadoutsReceived(loadouts);
+                     });
 }
 
 void RelayClient::disconnect()

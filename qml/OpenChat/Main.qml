@@ -25,6 +25,20 @@ Window {
         when: dailyCase.ownershipKnown
         restoreMode: Binding.RestoreNone
     }
+    // What is worn lives with the account on the relay: its loadout is worn
+    // here, and what is equipped here is sent there (a local stand-in keeps it
+    // on this device instead).
+    Binding {
+        target: AppearanceSettings
+        property: "loadout"
+        value: dailyCase.loadout
+        when: dailyCase.loadoutKnown
+        restoreMode: Binding.RestoreNone
+    }
+    Connections {
+        target: AppearanceSettings
+        function onEquipRequested(slot, itemId) { dailyCase.equip(slot, itemId); }
+    }
     onActiveChanged: { if (active) dailyCase.refresh(); }
     // Optional add-contact bridge; null in the default/capture paths. The visible
     // add-contact surface binds to it in a later change; declaring it here keeps the

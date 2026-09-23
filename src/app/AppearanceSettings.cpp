@@ -57,6 +57,45 @@ const std::array<AppearanceSettings::EquipSlot, 5> &AppearanceSettings::equipSlo
     return list;
 }
 
+QVariantMap AppearanceSettings::loadout() const
+{
+    QVariantMap map;
+    for (const EquipSlot &slot : equipSlots()) {
+        const QString id = worn(this->*slot.field);
+        if (!id.isEmpty())
+            map.insert(slot.category, id);
+    }
+    return map;
+}
+
+void AppearanceSettings::setLoadout(const QVariantMap &loadout)
+{
+    // The relay only lets an account wear what it owns, so its loadout is
+    // taken as it is; only ids this build does not know are left off.
+    QSettings settings;
+    QList<void (AppearanceSettings::*)()> changed;
+    for (const EquipSlot &slot : equipSlots()) {
+        const QString wanted = loadout.value(slot.category).toString();
+        const QString id = CosmeticCatalog::isKnown(wanted, slot.category) ? wanted : QString();
+        QString &field = this->*slot.field;
+        if (id == field)
+            continue;
+        field = id;
+        if (id.isEmpty())
+            settings.remove(slot.key);
+        else
+            settings.setValue(slot.key, id);
+        changed.append(slot.changed);
+    }
+    if (changed.isEmpty())
+        return;
+    settings.sync();
+    BubbleSkins::prepare(worn(m_bubbleSkin));
+    for (const auto signal : changed)
+        (this->*signal)();
+    emit loadoutChanged();
+}
+
 void AppearanceSettings::setOwnedCosmetics(const QStringList &ids)
 {
     QStringList owned;
@@ -116,26 +155,34 @@ bool AppearanceSettings::storeCosmetic(QString &field, const QString &id, const 
 
 void AppearanceSettings::setAvatarFrame(const QString &id)
 {
-    if (storeCosmetic(m_avatarFrame, id, QStringLiteral("frame"), frameKey))
-        emit avatarFrameChanged();
+    if (!storeCosmetic(m_avatarFrame, id, QStringLiteral("frame"), frameKey))
+        return;
+    emit avatarFrameChanged();
+    emit equipRequested(QStringLiteral("frame"), m_avatarFrame);
 }
 
 void AppearanceSettings::setPresenceBead(const QString &id)
 {
-    if (storeCosmetic(m_presenceBead, id, QStringLiteral("bead"), beadKey))
-        emit presenceBeadChanged();
+    if (!storeCosmetic(m_presenceBead, id, QStringLiteral("bead"), beadKey))
+        return;
+    emit presenceBeadChanged();
+    emit equipRequested(QStringLiteral("bead"), m_presenceBead);
 }
 
 void AppearanceSettings::setNameFlair(const QString &id)
 {
-    if (storeCosmetic(m_nameFlair, id, QStringLiteral("flair"), flairKey))
-        emit nameFlairChanged();
+    if (!storeCosmetic(m_nameFlair, id, QStringLiteral("flair"), flairKey))
+        return;
+    emit nameFlairChanged();
+    emit equipRequested(QStringLiteral("flair"), m_nameFlair);
 }
 
 void AppearanceSettings::setProfileScene(const QString &id)
 {
-    if (storeCosmetic(m_profileScene, id, QStringLiteral("scene"), sceneKey))
-        emit profileSceneChanged();
+    if (!storeCosmetic(m_profileScene, id, QStringLiteral("scene"), sceneKey))
+        return;
+    emit profileSceneChanged();
+    emit equipRequested(QStringLiteral("scene"), m_profileScene);
 }
 
 void AppearanceSettings::setBubbleSkin(const QString &skin)
@@ -144,6 +191,7 @@ void AppearanceSettings::setBubbleSkin(const QString &skin)
         return;
     BubbleSkins::prepare(m_bubbleSkin);
     emit bubbleSkinChanged();
+    emit equipRequested(QStringLiteral("bubble"), m_bubbleSkin);
 }
 
 void AppearanceSettings::setDarkMode(bool enabled)

@@ -130,6 +130,7 @@ void giveMockId(Message &message)
 
 ChatController::ChatController(QObject *parent)
     : QObject(parent)
+    , m_profiles(std::make_unique<ProfileController>(*this))
 {
     m_contacts.setContacts(referenceContacts());
     QVector<Message> michael = michaelConversation();
@@ -1167,6 +1168,8 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
 
     loadRoster();
     emit chatUnreadCountChanged();
+    // Profile pages ride the same session and engine, over the roster just loaded.
+    m_profiles->setLiveServices(session, engine, requests);
 }
 
 void ChatController::setPresenceRelay(RelayClient *relay)
@@ -1188,6 +1191,8 @@ void ChatController::setPresenceRelay(RelayClient *relay)
         m_presenceTimer.stop();
     }
     refreshPresence();
+    // The same relay confirms handles for profiles (own and strangers').
+    m_profiles->setRelay(relay);
 }
 
 void ChatController::refreshPresence()

@@ -32,8 +32,15 @@ Item {
     }
     readonly property string nameFamily: render && render.nameFamily.length > 0 ? render.nameFamily : Theme.uiFont
     readonly property int halfWidth: Math.floor((width - 32 - 8) / 2)
-    // Everything here edits the name on the identity card.
-    readonly property string editingTarget: "name"
+    // The preview marks the box this tab edits while a control here has focus.
+    readonly property bool focusInside: {
+        for (let at = Window.activeFocusItem; at; at = at.parent) {
+            if (at === tab)
+                return true;
+        }
+        return false;
+    }
+    readonly property string editingTarget: focusInside ? "name" : ""
 
     function focusField(field) {
         fontGrid.forceActiveFocus(Qt.OtherFocusReason);

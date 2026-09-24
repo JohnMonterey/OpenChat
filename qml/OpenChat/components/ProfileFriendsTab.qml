@@ -31,7 +31,15 @@ Item {
     }
     readonly property bool full: friends.length >= maxFriends
     readonly property bool popupOpen: slotMenu.opened
-    readonly property string editingTarget: "friends"
+    // The preview marks the box this tab edits while a control here has focus.
+    readonly property bool focusInside: {
+        for (let at = Window.activeFocusItem; at; at = at.parent) {
+            if (at === tab)
+                return true;
+        }
+        return false;
+    }
+    readonly property string editingTarget: focusInside ? "friends" : ""
     // A slot being dragged, and where it would land.
     property int dragFrom: -1
     property int dragTo: -1

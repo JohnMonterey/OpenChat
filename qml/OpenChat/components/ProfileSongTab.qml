@@ -25,7 +25,15 @@ Item {
     readonly property bool playerHoldsDraft: player !== null && draft !== null && draft.hasSong
                                              && player.songKey === draft.songKey
     readonly property real budget: profiles ? profiles.limits.songBytes : 229376
-    readonly property string editingTarget: "song"
+    // The preview marks the box this tab edits while a control here has focus.
+    readonly property bool focusInside: {
+        for (let at = Window.activeFocusItem; at; at = at.parent) {
+            if (at === tab)
+                return true;
+        }
+        return false;
+    }
+    readonly property string editingTarget: focusInside ? "song" : ""
 
     function clock(ms) {
         const seconds = Math.round(ms / 1000);

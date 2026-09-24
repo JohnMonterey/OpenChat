@@ -26,6 +26,7 @@
 
 #include <QAudioFormat>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
 #include <QFont>
@@ -779,11 +780,15 @@ private slots:
         QQuickItem *chrome = f.item(QStringLiteral("profileThemeTile_chrome-y2k"));
         QVERIFY(chrome);
 
-        // Resting on a tile: nothing before 250 ms, the try-on after.
-        f.hover(chrome);
-        QTest::qWait(150);
+        // Resting on a tile: nothing before 250 ms, the try-on after. (A
+        // coarse timer may fire up to 5% early.)
+        EditorFixture::settle(chrome);
+        QElapsedTimer resting;
+        resting.start();
+        QTest::mouseMove(f.window(), chrome->mapToScene(QPointF(chrome->width() / 2, chrome->height() / 2)).toPoint());
         QCOMPARE(profiles.tryOnPreset(), -1);
         QTRY_COMPARE_WITH_TIMEOUT(profiles.tryOnPreset(), int(Profile::Preset::ChromeY2KPreset), 1000);
+        QVERIFY2(resting.elapsed() >= 237, qPrintable(QString::number(resting.elapsed())));
         QTRY_COMPARE(f.frame()->property("shownPage").value<QObject *>(), profiles.tryOn());
         QVERIFY(EditorFixture::isShown(f.item(QStringLiteral("profileTryOnPill"))));
         QCOMPARE(f.text(QStringLiteral("profileTryOnPillText")), QStringLiteral("Trying on Chrome Y2K. Click to keep it."));
@@ -1832,6 +1837,13 @@ private slots:
         QMetaObject::invokeMethod(f.frame(), "editRequested", Q_ARG(QString, QStringLiteral("interests")));
         QTRY_COMPARE(f.frame()->property("editingTarget").toString(), QStringLiteral("interests"));
         QVERIFY(f.item(QStringLiteral("profileInterestsFold"))->property("expanded").toBool());
+        for (const char *target : {"song", "friends", "name", "strip"}) {
+            QMetaObject::invokeMethod(f.frame(), "editRequested", Q_ARG(QString, QString::fromLatin1(target)));
+            QTRY_COMPARE(f.frame()->property("editingTarget").toString(), QString::fromLatin1(target));
+        }
+        // Nothing is marked while focus is elsewhere.
+        f.item(QStringLiteral("profileEditorRail"))->forceActiveFocus();
+        QTRY_COMPARE(f.frame()->property("editingTarget").toString(), QString());
 
         // The page kit's view gets the draft in preview mode and reports
         // clicks on its boxes through editRequested.

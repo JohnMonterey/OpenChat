@@ -14,8 +14,8 @@ opens, so starting OpenChat never loads them.
 | Typewriter | `Courier Prime` (Regular, Bold) | `courierprime/CourierPrime-Regular.ttf`, `courierprime/CourierPrime-Bold.ttf` | Courier Prime 3.018, unmodified | OFL 1.1 |
 | Pixel (names only) | `Press Start 2P` | `pressstart2p/PressStart2P-Regular.ttf` | Press Start 2P 3.000, unmodified | OFL 1.1 |
 | Gothic | `UnifrakturMaguntia` | `unifrakturmaguntia/UnifrakturMaguntia-Book.ttf` | UnifrakturMaguntia 2010-11-24, unmodified | OFL 1.1 |
-| Future | `Orbitron SemiBold`, `Orbitron ExtraBold` | `orbitron/OrbitronSemiBold.ttf`, `orbitron/OrbitronExtraBold.ttf` | static cuts of `Orbitron[wght].ttf` 2.001 at wght 600 / 800 | OFL 1.1 |
-| Serif | `Playfair Display Regular`, `Playfair Display Bold` | `playfairdisplay/PlayfairDisplayRegular.ttf`, `playfairdisplay/PlayfairDisplayBold.ttf` | static cuts of `PlayfairDisplay[wght].ttf` 1.203 at wght 400 / 700 | OFL 1.1 |
+| Future | `OpenChat Future SemiBold`, `OpenChat Future ExtraBold` | `orbitron/OpenChatFuture-SemiBold.ttf`, `orbitron/OpenChatFuture-ExtraBold.ttf` | renamed static cuts of Orbitron (`Orbitron[wght].ttf` 2.001) at wght 600 / 800 | OFL 1.1 (`orbitron/OFL.txt`) |
+| Serif | `OpenChat Serif Regular`, `OpenChat Serif Bold` | `playfairdisplay/OpenChatSerif-Regular.ttf`, `playfairdisplay/OpenChatSerif-Bold.ttf` | renamed static cuts of Playfair Display (`PlayfairDisplay[wght].ttf` 1.203) at wght 400 / 700 | OFL 1.1 (`playfairdisplay/OFL.txt`) |
 | Marker | `Permanent Marker` | `permanentmarker/PermanentMarker-Regular.ttf` | Permanent Marker 1.001, unmodified | Apache 2.0 (`permanentmarker/LICENSE.txt`) |
 
 All sources are the files published in the google/fonts repository
@@ -34,9 +34,35 @@ weight. They were cut with fontTools 4.65 by
 
 which pins every axis (`fontTools.varLib.instancer`), rewrites only the naming
 records (family = e.g. "Fredoka SemiBold", subfamily "Regular", weight class
-400, no STAT table) and keeps the copyright, licence and version records. It
-also copies each family's `OFL.txt` beside its files.
+400, no STAT table) and keeps the copyright, trademark, designer, licence and
+version records. It also copies each family's `OFL.txt` beside its files.
 
-Orbitron and Playfair Display declare Reserved Font Names in their OFL
-headers; see the licence texts before renaming or redistributing the cuts in
-another form.
+## Modified Versions: OpenChat Future and OpenChat Serif
+
+A static cut is a Modified Version of the font under the SIL Open Font
+License 1.1, and the licence (condition 3) forbids a Modified Version from
+using a Reserved Font Name. Orbitron reserves "Orbitron" and Playfair Display
+reserves "Playfair Display" (see the first line of each `OFL.txt`), so our
+cuts are distributed under the SIL OFL 1.1 with new names:
+
+- **OpenChat Future** (`OpenChat Future SemiBold`, `OpenChat Future
+  ExtraBold`) is a Modified Version of **Orbitron** by Matt McInerney
+  (The League of Moveable Type), Copyright 2018 The Orbitron Project Authors,
+  <https://github.com/theleagueof/orbitron>.
+- **OpenChat Serif** (`OpenChat Serif Regular`, `OpenChat Serif Bold`) is a
+  Modified Version of **Playfair Display** by Claus Eggers Sørensen,
+  Copyright 2017 The Playfair Display Project Authors,
+  <https://github.com/clauseggers/Playfair-Display>.
+
+The outlines, metrics and OpenType features are the originals' at those
+weights; only the naming records differ. Every family, full, unique,
+PostScript, typographic and other naming record says the new name; the
+copyright and licence records (and Playfair's trademark notice) are kept
+verbatim, as the licence requires, and `make_static.py` refuses to write a cut
+whose other records still carry the reserved name. The folders keep their
+upstream names and each keeps its unmodified `OFL.txt`. The profile editor
+labels these faces "Future" and "Serif"; those labels are OpenChat's own.
+
+Fredoka reserves no font name, so its cuts keep it. Press Start 2P and
+UnifrakturMaguntia reserve theirs but are shipped unmodified, which the
+licence allows.

@@ -25,8 +25,10 @@ void ensureRegistered();
 
 // "" for InterfaceFont (the caller uses Theme.uiFont). Rounded body is
 // "Fredoka Medium" and its labels, headings and name "Fredoka SemiBold"; Serif
-// is "Playfair Display Regular" / "… Bold" the same way; Future headings are
-// "Orbitron SemiBold" and names "Orbitron ExtraBold".
+// is "OpenChat Serif Regular" / "… Bold" the same way; Future headings are
+// "OpenChat Future SemiBold" and names "OpenChat Future ExtraBold". Those two
+// are our renamed cuts of Playfair Display and Orbitron, whose original names
+// are OFL Reserved Font Names (assets/fonts/README.md).
 [[nodiscard]] QString family(Profile::Font font, Role role);
 // True only where the face has a real bold: the interface font and Courier
 // Prime, for labels, headings and names. The others are single-weight cuts

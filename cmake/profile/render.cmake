@@ -41,11 +41,11 @@ qt_add_resources(openchat_profile "openchat_profile_fonts"
         assets/fonts/pressstart2p/OFL.txt
         assets/fonts/unifrakturmaguntia/UnifrakturMaguntia-Book.ttf
         assets/fonts/unifrakturmaguntia/OFL.txt
-        assets/fonts/orbitron/OrbitronSemiBold.ttf
-        assets/fonts/orbitron/OrbitronExtraBold.ttf
+        assets/fonts/orbitron/OpenChatFuture-SemiBold.ttf
+        assets/fonts/orbitron/OpenChatFuture-ExtraBold.ttf
         assets/fonts/orbitron/OFL.txt
-        assets/fonts/playfairdisplay/PlayfairDisplayRegular.ttf
-        assets/fonts/playfairdisplay/PlayfairDisplayBold.ttf
+        assets/fonts/playfairdisplay/OpenChatSerif-Regular.ttf
+        assets/fonts/playfairdisplay/OpenChatSerif-Bold.ttf
         assets/fonts/playfairdisplay/OFL.txt
         assets/fonts/permanentmarker/PermanentMarker-Regular.ttf
         assets/fonts/permanentmarker/LICENSE.txt

@@ -370,9 +370,19 @@ private slots:
         QCOMPARE(ProfileFonts::family(Profile::Font::RoundedFont, ProfileFonts::Role::Label),
                  QStringLiteral("Fredoka SemiBold"));
         QCOMPARE(ProfileFonts::family(Profile::Font::FutureFont, ProfileFonts::Role::Heading),
-                 QStringLiteral("Orbitron SemiBold"));
+                 QStringLiteral("OpenChat Future SemiBold"));
         QCOMPARE(ProfileFonts::family(Profile::Font::FutureFont, ProfileFonts::Role::Name),
-                 QStringLiteral("Orbitron ExtraBold"));
+                 QStringLiteral("OpenChat Future ExtraBold"));
+        QCOMPARE(ProfileFonts::family(Profile::Font::SerifFont, ProfileFonts::Role::Body),
+                 QStringLiteral("OpenChat Serif Regular"));
+        QCOMPARE(ProfileFonts::family(Profile::Font::SerifFont, ProfileFonts::Role::Heading),
+                 QStringLiteral("OpenChat Serif Bold"));
+        // Our cuts of Orbitron and Playfair Display are Modified Versions, so
+        // they must not register under those Reserved Font Names (OFL §3).
+        for (const QString &family : ProfileFonts::bundledFamilies()) {
+            QVERIFY2(!family.contains(QLatin1String("Orbitron"), Qt::CaseInsensitive), qPrintable(family));
+            QVERIFY2(!family.contains(QLatin1String("Playfair"), Qt::CaseInsensitive), qPrintable(family));
+        }
         QVERIFY(ProfileFonts::useBold(Profile::Font::TypewriterFont, ProfileFonts::Role::Label));
         QVERIFY(!ProfileFonts::useBold(Profile::Font::TypewriterFont, ProfileFonts::Role::Body));
         QVERIFY(!ProfileFonts::useBold(Profile::Font::SerifFont, ProfileFonts::Role::Heading));

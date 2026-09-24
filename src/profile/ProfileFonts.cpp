@@ -27,10 +27,10 @@ constexpr std::array<const char *, 12> fontFiles{
     "courierprime/CourierPrime-Bold.ttf",
     "pressstart2p/PressStart2P-Regular.ttf",
     "unifrakturmaguntia/UnifrakturMaguntia-Book.ttf",
-    "orbitron/OrbitronSemiBold.ttf",
-    "orbitron/OrbitronExtraBold.ttf",
-    "playfairdisplay/PlayfairDisplayRegular.ttf",
-    "playfairdisplay/PlayfairDisplayBold.ttf",
+    "orbitron/OpenChatFuture-SemiBold.ttf",
+    "orbitron/OpenChatFuture-ExtraBold.ttf",
+    "playfairdisplay/OpenChatSerif-Regular.ttf",
+    "playfairdisplay/OpenChatSerif-Bold.ttf",
     "permanentmarker/PermanentMarker-Regular.ttf",
 };
 
@@ -79,10 +79,10 @@ QStringList bundledFamilies()
             QStringLiteral("Courier Prime"),
             QStringLiteral("Press Start 2P"),
             QStringLiteral("UnifrakturMaguntia"),
-            QStringLiteral("Orbitron SemiBold"),
-            QStringLiteral("Orbitron ExtraBold"),
-            QStringLiteral("Playfair Display Regular"),
-            QStringLiteral("Playfair Display Bold"),
+            QStringLiteral("OpenChat Future SemiBold"),
+            QStringLiteral("OpenChat Future ExtraBold"),
+            QStringLiteral("OpenChat Serif Regular"),
+            QStringLiteral("OpenChat Serif Bold"),
             QStringLiteral("Permanent Marker")};
 }
 
@@ -103,9 +103,10 @@ QString family(Font font, Role role)
     case Font::GothicFont:
         return QStringLiteral("UnifrakturMaguntia");
     case Font::FutureFont:
-        return role == Role::Name ? QStringLiteral("Orbitron ExtraBold") : QStringLiteral("Orbitron SemiBold");
+        return role == Role::Name ? QStringLiteral("OpenChat Future ExtraBold")
+                                  : QStringLiteral("OpenChat Future SemiBold");
     case Font::SerifFont:
-        return body ? QStringLiteral("Playfair Display Regular") : QStringLiteral("Playfair Display Bold");
+        return body ? QStringLiteral("OpenChat Serif Regular") : QStringLiteral("OpenChat Serif Bold");
     case Font::MarkerFont:
         return QStringLiteral("Permanent Marker");
     }

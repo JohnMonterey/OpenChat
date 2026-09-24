@@ -1,6 +1,7 @@
 #include "app/ProfileSession.h"
 
 #include "crypto/MlsClient.h"
+#include "domain/Handle.h"
 #include "domain/ProfileUpdate.h"
 #include "models/Contact.h"
 #include "network/MlsSyncSession.h"
@@ -14,6 +15,7 @@
 #include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherDatabase.h"
 #include "storage/SqlCipherOutboxRepository.h"
+#include "storage/SqlCipherProfilePageRepository.h"
 #include "storage/SqlCipherSyncRepository.h"
 #include "storage/SqlCipherSyncStore.h"
 
@@ -232,6 +234,10 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
   if (!storedDisplayName.hasValue())
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         ProfileSessionError::DatabaseFailure);
+  auto storedHandle = database->loadProfileHandle(profileId);
+  if (!storedHandle.hasValue())
+    return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
+        ProfileSessionError::DatabaseFailure);
 
   auto session = std::unique_ptr<ProfileSession>(
       new ProfileSession(profileId, vault, paths, std::move(hooks)));
@@ -244,6 +250,7 @@ ProfileSession::unlock(const ProfileId &profileId, KeyVault &vault,
     return Result<std::unique_ptr<ProfileSession>, ProfileSessionError>::failure(
         activated.error());
   session->m_displayName = std::move(storedDisplayName).value();
+  session->m_handle = std::move(storedHandle).value();
   // The profile columns arrived with migration 012; a row that predates it
   // reads back as the defaults, which is exactly an unset profile.
   if (auto storedProfile = session->m_database->loadLocalProfile(profileId);
@@ -267,6 +274,8 @@ Result<void, ProfileSessionError> ProfileSession::activate(
   m_accountId = std::move(accountId);
   m_chats = std::make_unique<SqlCipherChatRepository>(*m_database);
   m_contacts = std::make_unique<SqlCipherContactRepository>(*m_database);
+  m_profilePages =
+      std::make_unique<SqlCipherProfilePageRepository>(*m_database, m_profileId);
   m_outbox = std::make_unique<SqlCipherOutboxRepository>(*m_database);
   m_sync = std::make_unique<SqlCipherSyncRepository>(*m_database);
   // MLS state is captured in memory, not written through. load() still returns
@@ -318,6 +327,7 @@ void ProfileSession::lock() noexcept {
   m_syncStore.reset();
   m_chats.reset();
   m_contacts.reset();
+  m_profilePages.reset();
   m_outbox.reset();
   m_sync.reset();
   m_mls.reset();
@@ -325,6 +335,7 @@ void ProfileSession::lock() noexcept {
   m_identity.reset();
   m_accountId.reset();
   m_displayName.clear();
+  m_handle.clear();
   m_presence = 0;
   m_statusText.clear();
   m_avatarJpeg.clear();
@@ -340,6 +351,8 @@ void ProfileSession::lock() noexcept {
 }
 
 bool ProfileSession::isUnlocked() const noexcept { return m_unlocked; }
+
+ProfileId ProfileSession::profileId() const noexcept { return m_profileId; }
 
 Result<DevicePublicCredential, ProfileSessionError>
 ProfileSession::publicCredential() const {
@@ -399,6 +412,27 @@ ProfileSession::setDisplayName(const QString &displayName) {
   if (!m_database->storeProfileDisplayName(m_profileId, normalized).hasValue())
     return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
   m_displayName = normalized;
+  return Result<void, ProfileSessionError>::success();
+}
+
+QString ProfileSession::handle() const {
+  return m_unlocked ? m_handle : QString();
+}
+
+Result<void, ProfileSessionError>
+ProfileSession::setHandle(const QString &handle) {
+  if (!m_unlocked || !m_database)
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::NotUnlocked);
+  // No normalising here: the handle comes from the relay or the login flow,
+  // which already hold the canonical form, and anything else is a bug that
+  // must not be stored (a page shows it as the user's address).
+  if (!isCanonicalHandle(handle))
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  if (handle == m_handle)
+    return Result<void, ProfileSessionError>::success();
+  if (!m_database->storeProfileHandle(m_profileId, handle).hasValue())
+    return Result<void, ProfileSessionError>::failure(ProfileSessionError::DatabaseFailure);
+  m_handle = handle;
   return Result<void, ProfileSessionError>::success();
 }
 
@@ -489,6 +523,10 @@ SqlCipherContactRepository *ProfileSession::contacts() const noexcept {
 
 SqlCipherOutboxRepository *ProfileSession::outbox() const noexcept {
   return m_outbox.get();
+}
+
+SqlCipherProfilePageRepository *ProfileSession::profilePages() const noexcept {
+  return m_profilePages.get();
 }
 
 SqlCipherSyncRepository *ProfileSession::sync() const noexcept {

@@ -22,6 +22,7 @@ class SqlCipherChatRepository;
 class SqlCipherContactRepository;
 class SqlCipherDatabase;
 class SqlCipherOutboxRepository;
+class SqlCipherProfilePageRepository;
 class SqlCipherSyncRepository;
 class SqlCipherSyncStore;
 class SyncEngine;
@@ -77,6 +78,9 @@ public:
 
   void lock() noexcept;
   [[nodiscard]] bool isUnlocked() const noexcept;
+  // The local profile this session opens; fixed for the session's lifetime,
+  // readable even while locked.
+  [[nodiscard]] ProfileId profileId() const noexcept;
   [[nodiscard]] Result<DevicePublicCredential, ProfileSessionError>
   publicCredential() const;
   [[nodiscard]] Result<QByteArray, ProfileSessionError>
@@ -91,6 +95,13 @@ public:
   [[nodiscard]] QString displayName() const;
   [[nodiscard]] Result<void, ProfileSessionError>
   setDisplayName(const QString &displayName);
+  // The account's @handle, stamped at sign-up/login or filled in later by the
+  // relay's reverse lookup. Empty when unknown (profiles made before 0.2.9) and
+  // while locked. setHandle takes only the canonical form (domain/Handle.h;
+  // anything else is DatabaseFailure, like the other setters' rejects) and
+  // persists it.
+  [[nodiscard]] QString handle() const;
+  [[nodiscard]] Result<void, ProfileSessionError> setHandle(const QString &handle);
   // The self-published profile shown to contacts: chosen presence (a
   // models/Contact.h Presence value, Available by default), status line and
   // JPEG picture (empty when none). Each setter persists durably; presence is
@@ -116,6 +127,9 @@ public:
   [[nodiscard]] SqlCipherChatRepository *chats() const noexcept;
   [[nodiscard]] SqlCipherContactRepository *contacts() const noexcept;
   [[nodiscard]] SqlCipherOutboxRepository *outbox() const noexcept;
+  // The profile page store (own page, contacts' pages, delivery records).
+  // Null while locked.
+  [[nodiscard]] SqlCipherProfilePageRepository *profilePages() const noexcept;
   [[nodiscard]] SqlCipherSyncRepository *sync() const noexcept;
   // The durable SyncStore as its concrete type, so callers can reach the
   // non-virtual pending-handshake reads/deletes as well as the SyncStore surface.
@@ -155,6 +169,7 @@ private:
   std::unique_ptr<SqlCipherChatRepository> m_chats;
   std::unique_ptr<SqlCipherContactRepository> m_contacts;
   std::unique_ptr<SqlCipherOutboxRepository> m_outbox;
+  std::unique_ptr<SqlCipherProfilePageRepository> m_profilePages;
   std::unique_ptr<SqlCipherSyncRepository> m_sync;
   std::unique_ptr<CapturingMlsStateStore> m_mlsStateStore;
   std::unique_ptr<MlsClient> m_mls;
@@ -169,6 +184,7 @@ private:
   std::unique_ptr<SyncEngine> m_syncEngine;
   std::optional<AccountId> m_accountId;
   QString m_displayName;
+  QString m_handle;
   int m_presence = 0;
   QString m_statusText;
   QByteArray m_avatarJpeg;

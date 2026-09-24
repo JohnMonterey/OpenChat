@@ -257,7 +257,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
                                  ? sqlite3_column_int(versionStatement, 0)
                                  : -1;
   sqlite3_finalize(versionStatement);
-  constexpr int latestVersion = 15;
+  constexpr int latestVersion = 16;
   if (currentVersion < 0 || currentVersion > latestVersion)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
 
@@ -281,8 +281,17 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
       {13, ":/openchat/013_group_chats.sql"},
       {14, ":/openchat/014_chat_read_state.sql"},
       {15, ":/openchat/015_message_edits_and_replies.sql"},
+      {16, ":/openchat/016_profile_pages.sql"},
   };
 
+  // Every pending migration runs in this one transaction with foreign_keys=ON
+  // (configure() set it, and a migration cannot switch it off: the pragma is a
+  // no-op inside a transaction). So a migration that rebuilds a table the way 005 rebuilt outbox (CREATE, copy,
+  // DROP, RENAME) makes the DROP delete every row first and fire each ON
+  // DELETE CASCADE that points at it. That is why no table added by 016 has a
+  // foreign key to contacts: a future rebuild of contacts would otherwise wipe
+  // every stored profile page without a trace. Before rebuilding a table that
+  // others reference, check PRAGMA foreign_key_list of every table.
   if (!execute("BEGIN IMMEDIATE;").hasValue())
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
   for (const auto &migration : migrations) {
@@ -640,6 +649,55 @@ SqlCipherDatabase::loadProfileDisplayName(const ProfileId &profileId) {
   const QString displayName = text ? QString::fromUtf8(text) : QString();
   sqlite3_finalize(statement);
   return Result<QString, StorageError>::success(displayName);
+}
+
+Result<void, StorageError>
+SqlCipherDatabase::storeProfileHandle(const ProfileId &profileId,
+                                      const QString &handle) {
+  if (!m_database)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql = "UPDATE local_profiles SET handle = ?1 WHERE profile_id = ?2";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  const QByteArray handleUtf8 = handle.toUtf8();
+  sqlite3_bind_text(statement, 1, handleUtf8.constData(),
+                    static_cast<int>(handleUtf8.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_blob(statement, 2, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  const int changes = sqlite3_changes(m_database);
+  sqlite3_finalize(statement);
+  if (step != SQLITE_DONE)
+    return Result<void, StorageError>::failure(StorageError::QueryFailed);
+  if (changes == 0)
+    return Result<void, StorageError>::failure(StorageError::NotFound);
+  return Result<void, StorageError>::success();
+}
+
+Result<QString, StorageError>
+SqlCipherDatabase::loadProfileHandle(const ProfileId &profileId) {
+  if (!m_database)
+    return Result<QString, StorageError>::failure(StorageError::QueryFailed);
+  sqlite3_stmt *statement = nullptr;
+  constexpr auto sql = "SELECT handle FROM local_profiles WHERE profile_id = ?1";
+  if (sqlite3_prepare_v2(m_database, sql, -1, &statement, nullptr) != SQLITE_OK)
+    return Result<QString, StorageError>::failure(StorageError::QueryFailed);
+  const auto profileBytes = profileId.bytes();
+  sqlite3_bind_blob(statement, 1, profileBytes.constData(),
+                    static_cast<int>(profileBytes.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement);
+  if (step != SQLITE_ROW) {
+    sqlite3_finalize(statement);
+    return Result<QString, StorageError>::failure(
+        step == SQLITE_DONE ? StorageError::NotFound : StorageError::QueryFailed);
+  }
+  const auto *text = reinterpret_cast<const char *>(sqlite3_column_text(statement, 0));
+  const QString handle =
+      text ? QString::fromUtf8(text, sqlite3_column_bytes(statement, 0)) : QString();
+  sqlite3_finalize(statement);
+  return Result<QString, StorageError>::success(handle);
 }
 
 Result<void, StorageError>

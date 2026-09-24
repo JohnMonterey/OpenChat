@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls.Basic
 import OpenChat
+import OpenChat.Native
 
 // Settings → the open category. The sidebar picks the category; this page
 // shows everything in it at once, each section a working control under its
@@ -24,6 +25,7 @@ Item {
         case "Custom Vocal FX": return vocalFxSection;
         case "Connection": return connectionSection;
         case "Theme": return themeSection;
+        case "Profiles": return profilesSection;
         case "Avatar frame": return frameSection;
         case "Name flair": return flairSection;
         case "Presence bead": return beadSection;
@@ -268,6 +270,47 @@ Item {
                 Accessible.name: "Dark mode"
                 checked: Theme.darkMode
                 onToggled: checked => Theme.setDarkMode(checked)
+            }
+        }
+    }
+
+    // The same choice as the "Plain style" switch on a profile's top bar.
+    Component {
+        id: profilesSection
+        Item {
+            implicitHeight: 64
+
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.verticalCenterOffset: -10
+                width: parent.width - plainProfilesSwitch.width - 16
+                text: "Show profiles in plain style"
+                elide: Text.ElideRight
+                color: Theme.textPrimary
+                font.family: Theme.uiFont
+                font.pixelSize: 15
+                renderType: Text.NativeRendering
+            }
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.verticalCenterOffset: 12
+                width: parent.width - plainProfilesSwitch.width - 16
+                text: "Show everyone's profile with OpenChat's own look"
+                elide: Text.ElideRight
+                color: Theme.textSecondary
+                font.family: Theme.uiFont
+                font.pixelSize: 12
+            }
+            AeroSwitch {
+                id: plainProfilesSwitch
+                objectName: "plainProfilesSwitch"
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                accessibleName: "Show profiles in plain style"
+                checked: AppearanceSettings.plainProfiles
+                onToggled: checked => AppearanceSettings.plainProfiles = checked
             }
         }
     }

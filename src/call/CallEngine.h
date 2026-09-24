@@ -130,6 +130,11 @@ public:
         QString contactId;   // AccountId hex, the key the UI's roster uses
         QString displayName;
         QString avatarKey;
+        // The peer's AccountId hex whenever it is known, contact or not (a
+        // group member who is nobody's contact here has no contactId), so a
+        // call tile can open that person's profile. Empty for an incoming
+        // one-to-one offer, which names only a device.
+        QString accountId;
     };
 
     // A group, as a call needs to address it: the group conversation and every

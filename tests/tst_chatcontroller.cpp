@@ -1,7 +1,9 @@
 #include <QtTest>
 
 #include "CallTestSupport.h"
+#include "app/AppearanceSettings.h"
 #include "app/ContactRequestService.h"
+#include "app/MemorySettings.h"
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
 #include "domain/GroupUpdate.h"
@@ -24,6 +26,8 @@
 #include "storage/SqlCipherDatabase.h"
 
 #include "domain/ProfileUpdate.h"
+#include "profile/ProfileMediaStore.h"
+#include "profile/ProfileRenderPolicy.h"
 #include "render/AvatarStore.h"
 
 #include "app/ProfilePageSync.h"
@@ -39,6 +43,7 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QMetaProperty>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -379,9 +384,18 @@ class ChatControllerTest final : public QObject
 {
     Q_OBJECT
 
+    // What the controllers and settings objects remember (appearance, recent
+    // colours, call preferences) lives here for the run, never in a
+    // developer's own settings.
+    QTemporaryDir m_settingsDirectory;
+
 private slots:
     void initTestCase()
     {
+        QVERIFY(m_settingsDirectory.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settingsDirectory.path());
+
         // Every live controller here also runs profile page sync. Its
         // background page requests (production: up to two minutes after
         // start, under a minute after an acceptance) are pushed an hour out,
@@ -631,8 +645,11 @@ private slots:
         QCOMPARE(controller.currentSettingsElements(),
                  (QStringList{QStringLiteral("Input"), QStringLiteral("Custom Vocal FX"),
                               QStringLiteral("Connection")}));
+        // Appearance: the app's own look, then how other people's profiles show.
         controller.setCurrentSettingsCategory(2);
-        QCOMPARE(controller.currentSettingsElements(), QStringList{QStringLiteral("Theme")});
+        QCOMPARE(controller.currentSettingsCategoryName(), QStringLiteral("Appearance"));
+        QCOMPARE(controller.currentSettingsElements(),
+                 (QStringList{QStringLiteral("Theme"), QStringLiteral("Profiles")}));
         QCOMPARE(categorySpy.count(), 2);
 
         // Re-selecting the same category is a no-op and emits nothing further.
@@ -654,6 +671,85 @@ private slots:
         controller.setCurrentSettingsCategory(99);
         QCOMPARE(controller.currentSettingsCategory(), 3);
         QCOMPARE(categorySpy.count(), 3);
+    }
+
+    // Appearance › Profiles and a profile's "Plain style" switch are one
+    // remembered choice, off until the user turns it on.
+    void plainProfilesIsARememberedAppearanceChoice()
+    {
+        using OpenChat::AppearanceSettings;
+        const QString key = QStringLiteral("Appearance/plainProfiles");
+        QSettings().remove(key);
+
+        AppearanceSettings appearance;
+        QVERIFY(!appearance.plainProfiles());
+        const bool dark = appearance.darkMode();
+        QSignalSpy changed(&appearance, &AppearanceSettings::plainProfilesChanged);
+        appearance.setPlainProfiles(true);
+        QVERIFY(appearance.plainProfiles());
+        QCOMPARE(changed.count(), 1);
+        appearance.setPlainProfiles(true);
+        QCOMPARE(changed.count(), 1);
+        QVERIFY(QSettings().value(key).toBool());
+        // Its own setting: the app's look is untouched.
+        QCOMPARE(appearance.darkMode(), dark);
+
+        // The next start reads it back.
+        AppearanceSettings restarted;
+        QVERIFY(restarted.plainProfiles());
+
+        // QML reads and writes it by name, and hears it change.
+        const QMetaObject &meta = AppearanceSettings::staticMetaObject;
+        const QMetaProperty property = meta.property(meta.indexOfProperty("plainProfiles"));
+        QVERIFY(property.isValid());
+        QVERIFY(property.isWritable());
+        QVERIFY(property.hasNotifySignal());
+        QCOMPARE(property.notifySignal().name(), QByteArray("plainProfilesChanged"));
+        QSignalSpy restartedChanged(&restarted, &AppearanceSettings::plainProfilesChanged);
+        QVERIFY(property.write(&restarted, false));
+        QVERIFY(!restarted.plainProfiles());
+        QCOMPARE(restartedChanged.count(), 1);
+        QVERIFY(!QSettings().value(key).toBool());
+        QVERIFY(!AppearanceSettings().plainProfiles());
+    }
+
+    // Low memory mode reaches the profile renderer at once, both ways: its
+    // animations hold still and a page's background picture is not kept
+    // decoded. A start with the mode saved on applies it before any page.
+    void lowMemoryModeReachesProfilePages()
+    {
+        using namespace OpenChat;
+        const auto restore = qScopeGuard([] {
+            QSettings().remove(QStringLiteral("Performance/lowMemoryMode"));
+            ProfileRenderPolicy::instance().resetForTesting();
+            ProfileMediaStore::instance().resetForTesting();
+        });
+        QSettings().remove(QStringLiteral("Performance/lowMemoryMode"));
+        ProfileRenderPolicy::instance().resetForTesting();
+        ProfileMediaStore::instance().resetForTesting();
+        QVERIFY(!ProfileRenderPolicy::instance().lowMemoryMode());
+        QVERIFY(ProfileMediaStore::instance().keepDecoded());
+
+        {
+            MemorySettings memory;
+            QVERIFY(!ProfileRenderPolicy::instance().lowMemoryMode());
+            QVERIFY(ProfileMediaStore::instance().keepDecoded());
+            memory.setLowMemoryMode(true);
+            QVERIFY(ProfileRenderPolicy::instance().lowMemoryMode());
+            QVERIFY(!ProfileRenderPolicy::instance().animationsAllowed());
+            QVERIFY(!ProfileMediaStore::instance().keepDecoded());
+            memory.setLowMemoryMode(false);
+            QVERIFY(!ProfileRenderPolicy::instance().lowMemoryMode());
+            QVERIFY(ProfileMediaStore::instance().keepDecoded());
+            memory.setLowMemoryMode(true);
+        }
+
+        ProfileRenderPolicy::instance().resetForTesting();
+        ProfileMediaStore::instance().resetForTesting();
+        const MemorySettings restarted;
+        QVERIFY(restarted.lowMemoryMode());
+        QVERIFY(ProfileRenderPolicy::instance().lowMemoryMode());
+        QVERIFY(!ProfileMediaStore::instance().keepDecoded());
     }
 
     void anInboundMessageAsksForADesktopNotification()
@@ -1535,6 +1631,128 @@ private slots:
         calls.acceptCall();
         QCOMPARE(engine.state(), CallState::Connecting);
         QCOMPARE(calls.peerName(), updated);
+    }
+
+    // A call tile opens its member's profile by account, so every member of a
+    // group route carries one, including someone who is not a contact here
+    // (they have no roster id), and so does a one-to-one call.
+    void groupCallRoutesCarryAccountIds()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        GroupService groups(*live.session, *live.session->syncEngine(), {});
+        ChatController chats;
+        chats.setLiveServices(live.session.get(), live.session->syncEngine(), &requests, &groups);
+
+        // Bob puts us in a group with Dana, who is nobody's contact here.
+        auto ourKeyPackage = live.session->mls()->generateKeyPackage();
+        QVERIFY(ourKeyPackage.hasValue());
+        QVERIFY(live.session->persistMlsState().hasValue());
+        const DeviceId danaDevice = DeviceId::generate();
+        const AccountId danaAccount = AccountId::generate();
+        auto dana = std::move(MlsClient::create(credentialFor(danaDevice))).value();
+        const ConversationId group = ConversationId::generate();
+        QVERIFY(live.peer->createGroup(group).hasValue());
+        auto added = live.peer->addMembers(
+            group, {ourKeyPackage.value(), dana->generateKeyPackage().value()});
+        QVERIFY(added.hasValue());
+        deliver(live, live.peerAccount, live.peerDevice, group, EnvelopeMessageKind::GroupWelcome,
+                added.value().welcome);
+        const DeviceId ourDevice = live.session->publicCredential().value().deviceId;
+        const auto info = GroupUpdateMessage::info(
+            QStringLiteral("Lunch"),
+            {GroupMemberInfo{live.peerAccount, live.peerDevice, QStringLiteral("Robert")},
+             GroupMemberInfo{live.session->accountId().value(), ourDevice, QStringLiteral("me")},
+             GroupMemberInfo{danaAccount, danaDevice, QStringLiteral("dana")}});
+        deliver(live, live.peerAccount, live.peerDevice, group, EnvelopeMessageKind::GroupControl,
+                live.peer->encrypt(group, encodeGroupUpdate(info)).value().bytes);
+        const QString groupId = chats.groupChatIdFor(group);
+        QVERIFY(!groupId.isEmpty());
+
+        const auto route = chats.groupCallRouteFor(groupId);
+        QVERIFY(route.has_value());
+        QCOMPARE(route->members.size(), 2);
+        QHash<QString, CallEngine::CallPeer> members;
+        for (const CallEngine::CallPeer &peer : route->members)
+            members.insert(peer.device.toHex(), peer);
+        QVERIFY(members.contains(live.peerDevice.toHex()));
+        QVERIFY(members.contains(danaDevice.toHex()));
+        const CallEngine::CallPeer bob = members.value(live.peerDevice.toHex());
+        QCOMPARE(bob.accountId, live.peerAccount.toHex());
+        QCOMPARE(bob.contactId, live.peerAccount.toHex());
+        const CallEngine::CallPeer stranger = members.value(danaDevice.toHex());
+        QCOMPARE(stranger.accountId, danaAccount.toHex());
+        QVERIFY(stranger.contactId.isEmpty());
+        QCOMPARE(stranger.displayName, QStringLiteral("dana"));
+
+        // Ringing the group puts each account on its participant row, what a
+        // group call tile hands to the profile.
+        SyncCallTransport transport(*live.session->syncEngine());
+        CallTest::ScriptedAudioDevices devices;
+        CallEngine::Config config;
+        config.localDevice = ourDevice;
+        CallEngine engine(config, transport, devices.factory());
+        CallController calls;
+        calls.setLiveEngine(&engine, &chats);
+        QVERIFY(chats.selectContact(groupId));
+        calls.callCurrentContact();
+        QCOMPARE(engine.state(), CallState::Dialing);
+        QVERIFY(calls.isGroupCall());
+        CallParticipantModel *rows = calls.participants();
+        QCOMPARE(rows->rowCount(), 2);
+        QHash<QString, QString> accountOf;
+        for (int row = 0; row < rows->rowCount(); ++row) {
+            const QModelIndex index = rows->index(row);
+            accountOf.insert(rows->data(index, CallParticipantModel::DeviceIdRole).toString(),
+                             rows->data(index, CallParticipantModel::AccountIdRole).toString());
+        }
+        QCOMPARE(accountOf.value(live.peerDevice.toHex()), live.peerAccount.toHex());
+        QCOMPARE(accountOf.value(danaDevice.toHex()), danaAccount.toHex());
+
+        // A one-to-one call to a contact carries their account too.
+        calls.hangUp();
+        calls.dismissCall();
+        QCOMPARE(engine.state(), CallState::Idle);
+        QVERIFY(chats.selectContact(live.peerAccount.toHex()));
+        calls.callCurrentContact();
+        QCOMPARE(engine.state(), CallState::Dialing);
+        QVERIFY(!calls.isGroupCall());
+        QCOMPARE(engine.peer().accountId, live.peerAccount.toHex());
+        QCOMPARE(calls.callChatId(), live.peerAccount.toHex());
+        calls.hangUp();
+        QVERIFY(!live.session->syncEngine()->isFailedClosed());
+    }
+
+    // The previews' one-to-one far-end tile opens the chat the call belongs
+    // to; a live controller takes it from the engine and ignores the seam.
+    void previewCallChatIdIsForPreviewsOnly()
+    {
+        using namespace OpenChat;
+        CallController preview;
+        QVERIFY(preview.callChatId().isEmpty());
+        QSignalSpy changed(&preview, &CallController::callChanged);
+        preview.setPreviewCallChatId(QStringLiteral("jessica"));
+        QCOMPARE(preview.callChatId(), QStringLiteral("jessica"));
+        QCOMPARE(changed.count(), 1);
+        preview.setPreviewCallChatId(QStringLiteral("jessica"));
+        QCOMPARE(changed.count(), 1);
+        preview.setPreviewCallChatId(QString());
+        QVERIFY(preview.callChatId().isEmpty());
+        QCOMPARE(changed.count(), 2);
+
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        ChatController chats;
+        SyncCallTransport transport(*live.session->syncEngine());
+        CallTest::ScriptedAudioDevices devices;
+        CallEngine engine(CallEngine::Config{}, transport, devices.factory());
+        CallController calls;
+        calls.setLiveEngine(&engine, &chats);
+        calls.setPreviewCallChatId(QStringLiteral("jessica"));
+        QVERIFY(calls.callChatId().isEmpty());
     }
 
     void mockProfileEditsUpdateTheSidebarWithoutServices()

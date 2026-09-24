@@ -77,7 +77,8 @@ QStringList settingsElementsForCategory(int index)
         return {QStringLiteral("Input"), QStringLiteral("Custom Vocal FX"),
                 QStringLiteral("Connection")};
     case 2:
-        return {QStringLiteral("Theme")};
+        // Profiles: whether other people's pages keep their own look.
+        return {QStringLiteral("Theme"), QStringLiteral("Profiles")};
     case 3:
         // One picker per kind of collectible, profile pieces before messages.
         return {QStringLiteral("Avatar frame"), QStringLiteral("Name flair"),
@@ -1350,6 +1351,9 @@ ChatController::groupCallRouteFor(const QString &chatId) const
         peer.contactId = member.contactId;
         peer.displayName = memberName(member);
         peer.avatarKey = member.avatarKey;
+        // Every member's account, contact or not, so their call tile can
+        // open their profile (a stub for someone who is not a contact here).
+        peer.accountId = member.account.toHex();
         route.members.append(peer);
     }
     return route;

@@ -47,6 +47,8 @@ QVariant CallParticipantModel::data(const QModelIndex &index, int role) const
         return QVariant::fromValue(row.screenCanvas);
     case ScreenSharingRole:
         return row.screenCanvas != nullptr;
+    case AccountIdRole:
+        return row.accountId;
     default:
         return {};
     }
@@ -68,6 +70,7 @@ QHash<int, QByteArray> CallParticipantModel::roleNames() const
         {VideoAspectRole, "videoAspect"},
         {ScreenCanvasRole, "screenCanvas"},
         {ScreenSharingRole, "screenSharing"},
+        {AccountIdRole, "accountId"},
     };
 }
 

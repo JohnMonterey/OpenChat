@@ -140,7 +140,8 @@ std::optional<SongContainer> decodeSongContainer(QByteArrayView bytes)
 
 bool looksLikeSongContainer(QByteArrayView bytes)
 {
-    return bytes.size() >= qsizetype(sizeof(magic)) && bytes.first(sizeof(magic)) == QByteArrayView(magic, sizeof(magic));
+    const QByteArrayView expected(magic, sizeof(magic));
+    return bytes.size() >= expected.size() && bytes.first(expected.size()) == expected;
 }
 
 } // namespace OpenChat

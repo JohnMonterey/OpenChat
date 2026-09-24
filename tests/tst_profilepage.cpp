@@ -874,7 +874,8 @@ private slots:
         QCOMPARE(faces(Font::PixelFont, Font::InterfaceFont, Font::PixelFont).headingFont, Font::InterfaceFont);
         QCOMPARE(faces(Font::PixelFont, Font::InterfaceFont, Font::PixelFont).nameFont, Font::PixelFont);
         QCOMPARE(faces(Font::GothicFont, Font::InterfaceFont, Font::InterfaceFont).headingFont, Font::GothicFont);
-        for (const Font body : {Font::ScriptFont, Font::PixelFont, Font::GothicFont, Font::FutureFont, Font::MarkerFont})
+        for (const Font body :
+             {Font::ScriptFont, Font::PixelFont, Font::GothicFont, Font::FutureFont, Font::MarkerFont})
             QCOMPARE(faces(Font::InterfaceFont, body, Font::InterfaceFont).bodyFont, Font::InterfaceFont);
         for (const Font body : {Font::InterfaceFont, Font::RoundedFont, Font::TypewriterFont, Font::SerifFont})
             QCOMPARE(faces(Font::InterfaceFont, body, Font::InterfaceFont).bodyFont, body);
@@ -939,36 +940,45 @@ private slots:
         line("DEL", u"a\u007Fb"_s, u"ab"_s);
         line("C1 controls", u"a\u0085b\u009Bc\u0080d"_s, u"abcd"_s);
         line("tab is whitespace", u"a\tb"_s, u"a b"_s);
-        line("bidi override", u"‮gnp.exe"_s, u"gnp.exe"_s);
-        line("bidi marks and isolates", u"a‎b‏c؜d⁦e⁧f⁨g⁩h‪i‭j"_s,
+        line("bidi override", u"\u202Egnp.exe"_s, u"gnp.exe"_s);
+        line("bidi marks and isolates", u"a\u200Eb\u200Fc\u061Cd\u2066e\u2067f\u2068g\u2069h\u202Ai\u202Dj"_s,
              u"abcdefghij"_s);
-        line("line and paragraph separators", u"a b c"_s, u"abc"_s);
-        line("default ignorables", u"a­b​c﻿d⁠e͏fㅤgﾠhᅟi᠎j឴k"_s,
+        line("line and paragraph separators", u"a\u2028b\u2029c"_s, u"abc"_s);
+        line("default ignorables", u"a\u00ADb\u200Bc\uFEFFd\u2060e\u034Ff\u3164g\uFFA0h\u115Fi\u180Ej\u17B4k"_s,
              u"abcdefghijk"_s);
         line("tag characters", u"flag\U000E0067\U000E0062\U000E007F"_s, u"flag"_s);
         line("musical formatting", u"a\U0001D173b\U0001BCA0c"_s, u"abc"_s);
         line("lone surrogates", QStringLiteral("a") + QChar(0xD800) + u"b"_s + QChar(0xDC00), u"ab"_s);
-        line("ZWJ inside an emoji sequence kept", u"👩‍💻 ok"_s, u"👩‍💻 ok"_s);
-        line("ZWJ after a variation selector kept", u"🏳️‍🌈"_s, u"🏳️‍🌈"_s);
-        line("ZWJ in a heart on fire kept", u"❤️‍🔥"_s, u"❤️‍🔥"_s);
-        line("stray ZWJ between letters dropped", u"a‍b"_s, u"ab"_s);
-        line("ZWJ at the end dropped", u"👩‍"_s, u"👩"_s);
-        line("ZWJ at the start dropped", u"‍👩"_s, u"👩"_s);
-        line("ZWJ after a space dropped", u"👩 ‍💻"_s, u"👩 💻"_s);
-        line("ZWJ before an ignorable dropped", u"👩‍​"_s, u"👩"_s);
-        line("doubled ZWJ keeps one", u"👩‍‍💻"_s, u"👩‍💻"_s);
-        line("ZWNJ between letters kept", u"می‌خواهم"_s, u"می‌خواهم"_s);
-        line("ZWNJ after a virama kept", u"क्‌ष"_s, u"क्‌ष"_s);
-        line("ZWNJ between ASCII dropped", u"a‌b"_s, u"ab"_s);
-        line("ZWNJ at the end dropped", u"می‌"_s, u"می"_s);
-        line("variation selector after a base kept", u"☺️!"_s, u"☺️!"_s);
-        line("variation selector at the start dropped", u"️a"_s, u"a"_s);
-        line("variation selector after a space dropped", u"a ️b"_s, u"a b"_s);
-        line("doubled variation selector keeps one", u"☺️︎"_s, u"☺️"_s);
-        line("five combining marks keep two", u"Zé̂̃̄̅d"_s, u"Zé̂d"_s);
-        line("enclosing marks count too", u"a⃝⃞⃟"_s, u"a⃝⃞"_s);
-        line("marks on each base counted apart", u"é̂̃ó̂̃"_s,
-             u"é̂ó̂"_s);
+        // The sequences below, spelled out. A joiner inside them is meaningful and kept.
+        const QString woman = u"\U0001F469"_s, laptop = u"\U0001F4BB"_s;
+        const QString zwj = u"\u200D"_s, zwnj = u"\u200C"_s, emojiStyle = u"\uFE0F"_s;
+        const QString coder = woman + zwj + laptop;
+        const QString rainbowFlag = u"\U0001F3F3"_s + emojiStyle + zwj + u"\U0001F308"_s;
+        const QString heartOnFire = u"\u2764"_s + emojiStyle + zwj + u"\U0001F525"_s;
+        const QString persianMi = u"\u0645\u06CC"_s;
+        const QString persian = persianMi + zwnj + u"\u062E\u0648\u0627\u0647\u0645"_s; // "mi-khaham"
+        const QString devanagari = u"\u0915\u094D"_s + zwnj + u"\u0937"_s;           // ka, virama, ZWNJ, ssa
+        line("ZWJ inside an emoji sequence kept", coder + u" ok"_s, coder + u" ok"_s);
+        line("ZWJ after a variation selector kept", rainbowFlag, rainbowFlag);
+        line("ZWJ in a heart on fire kept", heartOnFire, heartOnFire);
+        line("stray ZWJ between letters dropped", u"a"_s + zwj + u"b"_s, u"ab"_s);
+        line("ZWJ at the end dropped", woman + zwj, woman);
+        line("ZWJ at the start dropped", zwj + woman, woman);
+        line("ZWJ after a space dropped", woman + u" "_s + zwj + laptop, woman + u" "_s + laptop);
+        line("ZWJ before an ignorable dropped", woman + zwj + u"\u200B"_s, woman);
+        line("doubled ZWJ keeps one", woman + zwj + zwj + laptop, coder);
+        line("ZWNJ between letters kept", persian, persian);
+        line("ZWNJ after a virama kept", devanagari, devanagari);
+        line("ZWNJ between ASCII dropped", u"a"_s + zwnj + u"b"_s, u"ab"_s);
+        line("ZWNJ at the end dropped", persianMi + zwnj, persianMi);
+        line("variation selector after a base kept", u"\u263A\uFE0F!"_s, u"\u263A\uFE0F!"_s);
+        line("variation selector at the start dropped", u"\uFE0Fa"_s, u"a"_s);
+        line("variation selector after a space dropped", u"a \uFE0Fb"_s, u"a b"_s);
+        line("doubled variation selector keeps one", u"\u263A\uFE0F\uFE0E"_s, u"\u263A\uFE0F"_s);
+        line("five combining marks keep two", u"Ze\u0301\u0302\u0303\u0304\u0305d"_s, u"Ze\u0301\u0302d"_s);
+        line("enclosing marks count too", u"a\u20DD\u20DE\u20DF"_s, u"a\u20DD\u20DE"_s);
+        line("marks on each base counted apart", u"e\u0301\u0302\u0303o\u0301\u0302\u0303"_s,
+             u"e\u0301\u0302o\u0301\u0302"_s);
         line("newline in a single-line field", u"a\nb"_s, u"a b"_s);
         line("CRLF in a single-line field", u"a\r\nb\rc"_s, u"a b c"_s);
         para("CRLF and CR in paragraphs", u"a\r\nb\rc"_s, u"a\nb\nc"_s);
@@ -977,12 +987,12 @@ private slots:
         para("trailing whitespace per line", u"a  \nb\t\nc"_s, u"a\nb\nc"_s);
         para("leading and trailing newlines", u"\n\n  a\n\n"_s, u"a"_s);
         para("paragraph spaces collapse", u"a   b\n c  d"_s, u"a b\n c d"_s);
-        line("whitespace collapse", u"  a \t  b  "_s, u"a b"_s);
-        line("wide spaces collapse", u"a　  b"_s, u"a b"_s);
-        line("surrogate at the bound", u"abc😀"_s, u"abc"_s, 4);
-        line("cluster at the bound", u"abé"_s, u"ab"_s, 3);
-        line("emoji sequence at the bound", u"a👩‍💻"_s, u"a"_s, 4);
-        line("flag at the bound", u"ab🇺🇸"_s, u"ab"_s, 5);
+        line("whitespace collapse", u"  a \t\u00A0 b  "_s, u"a b"_s);
+        line("wide spaces collapse", u"a\u3000\u2003\u2002b"_s, u"a b"_s);
+        line("surrogate at the bound", u"abc\U0001F600"_s, u"abc"_s, 4);
+        line("cluster at the bound", u"abe\u0301"_s, u"ab"_s, 3);
+        line("emoji sequence at the bound", u"a\U0001F469\u200D\U0001F4BB"_s, u"a"_s, 4);
+        line("flag at the bound", u"ab\U0001F1FA\U0001F1F8"_s, u"ab"_s, 5);
         line("cut then trim", u"ab cd"_s, u"ab"_s, 3);
         para("cut then trim newlines", u"ab\n\ncd"_s, u"ab"_s, 4);
         line("exactly at the bound", u"abcd"_s, u"abcd"_s, 4);
@@ -1024,7 +1034,7 @@ private slots:
         c.displayName = c.headline = c.aboutMe = c.meet = c.songTitle = c.songArtist = longText;
         c.interests = {longText, longText, longText, longText, longText, longText};
         c.details.hometown = c.details.occupation = c.details.education = c.details.languages = longText;
-        c.infoLines = {longText, u"  "_s, longText, u"​"_s, longText, longText};
+        c.infoLines = {longText, u"  "_s, longText, u"\u200B"_s, longText, longText};
         page.topFriends = {{accountOf(1), longText}};
 
         const Profile::Content n = Profile::normalized(page).content;
@@ -1055,23 +1065,23 @@ private slots:
         QCOMPARE(Profile::sanitizeLive(u"  lead  in"_s, 48, false), u"  lead  in"_s);
         QCOMPARE(Profile::sanitizeLive(u"x\n\n"_s, 1000, true), u"x\n\n"_s);
         QCOMPARE(Profile::sanitizeLive(u"x\n\n\n\n"_s, 1000, true), u"x\n\n\n\n"_s);
-        QCOMPARE(Profile::sanitizeLive(u"a b"_s, 48, false), u"a b"_s);
+        QCOMPARE(Profile::sanitizeLive(u"a\u00A0b"_s, 48, false), u"a\u00A0b"_s);
         // Line breaks are still normalised; single-line fields turn them into spaces.
         QCOMPARE(Profile::sanitizeLive(u"a\r\nb\rc"_s, 1000, true), u"a\nb\nc"_s);
         QCOMPARE(Profile::sanitizeLive(u"a\nb"_s, 48, false), u"a b"_s);
         QCOMPARE(Profile::sanitizeLive(u"a\tb"_s, 48, false), u"a b"_s);
         // Invisible and direction-changing characters never get in.
-        QCOMPARE(Profile::sanitizeLive(u"a‮b​c\u0007d\U000E0041e"_s, 48, false), u"abcde"_s);
-        QCOMPARE(Profile::sanitizeLive(u"a‍b"_s, 48, false), u"ab"_s);
+        QCOMPARE(Profile::sanitizeLive(u"a\u202Eb\u200Bc\u0007d\U000E0041e"_s, 48, false), u"abcde"_s);
+        QCOMPARE(Profile::sanitizeLive(u"a\u200Db"_s, 48, false), u"ab"_s);
         // A joiner being typed at the end waits for its right-hand neighbour.
-        QCOMPARE(Profile::sanitizeLive(u"می‌"_s, 48, false), u"می‌"_s);
-        QCOMPARE(Profile::sanitizeLive(u"👩‍"_s, 48, false), u"👩‍"_s);
+        QCOMPARE(Profile::sanitizeLive(u"\u0645\u06CC\u200C"_s, 48, false), u"\u0645\u06CC\u200C"_s);
+        QCOMPARE(Profile::sanitizeLive(u"\U0001F469\u200D"_s, 48, false), u"\U0001F469\u200D"_s);
         // The bound holds, without splitting a character.
         QCOMPARE(Profile::sanitizeLive(QString(50, u'a'), 48, false).size(), 48);
-        QCOMPARE(Profile::sanitizeLive(QString(47, u'a') + u"😀"_s, 48, false), QString(47, u'a'));
+        QCOMPARE(Profile::sanitizeLive(QString(47, u'a') + u"\U0001F600"_s, 48, false), QString(47, u'a'));
 
         // Saving what was typed gives what pasting it would have given.
-        for (const QString &typed : {u"  Dana  W. "_s, u"a\n\n\n\nb  "_s, u"x‮ y​"_s}) {
+        for (const QString &typed : {u"  Dana  W. "_s, u"a\n\n\n\nb  "_s, u"x\u202E y\u200B"_s}) {
             QCOMPARE(Profile::sanitizeParagraphs(Profile::sanitizeLive(typed, 1000, true), 1000),
                      Profile::sanitizeParagraphs(typed, 1000));
             QCOMPARE(Profile::sanitizeLine(Profile::sanitizeLive(typed, 48, false), 48),
@@ -1157,7 +1167,7 @@ private slots:
             {accountOf(1), u"One again"_s},       // repeated: the first wins
             {accountOf(3).left(15), u"Short"_s}, // not an account id
             {filled(16, '\0'), u"Null"_s},        // not an account id
-            {accountOf(4), u"  Four‮  "_s},
+            {accountOf(4), u"  Four\u202E  "_s},
             {accountOf(5), u"Five"_s},
             {accountOf(6), u"Six"_s},
             {accountOf(7), u"Seven"_s},
@@ -1282,7 +1292,7 @@ private slots:
 
         // Two pages that normalise alike encode to the same bytes.
         Page messy = richPage();
-        messy.content.headline = u"  "_s + messy.content.headline + u"​ "_s;
+        messy.content.headline = u"  "_s + messy.content.headline + u"\u200B "_s;
         // The wide column listed first: the same arrangement, in another order.
         std::rotate(messy.modules.begin(), messy.modules.begin() + 3, messy.modules.end());
         messy.theme.nameColor |= 0xAB000000;
@@ -1629,7 +1639,7 @@ private slots:
         // Text over its bound is sanitised, then cut.
         const Page longText = decodeWith(setIn(valid, {6, 2}, QString(500, u'h')));
         QCOMPARE(longText.content.headline, QString(Profile::TextBounds::headline, u'h'));
-        QCOMPARE(decodeWith(setIn(valid, {6, 1}, u" ‮Dana​ "_s)).content.displayName, u"Dana"_s);
+        QCOMPARE(decodeWith(setIn(valid, {6, 1}, u" \u202EDana\u200B "_s)).content.displayName, u"Dana"_s);
 
         // Refs out of range drop only themselves; an image background without its ref falls back to solid.
         const Page wide = decodeWith(setIn(valid, {8, 1, 3}, 4000));

@@ -169,8 +169,8 @@ enum class CharClass {
         && previous != zeroWidthNonJoiner && !isVariationSelector(previous) && !isMarkCategory(previous);
 }
 
-// ZWJ glues emoji into one picture (👩‍💻, 🏳️‍🌈); the left side may carry
-// its variation selector.
+// ZWJ glues emoji into one picture (woman + laptop, white flag + rainbow);
+// the left side may carry its variation selector.
 [[nodiscard]] bool joinsAfter(const QVector<char32_t> &out) noexcept
 {
     if (out.isEmpty())

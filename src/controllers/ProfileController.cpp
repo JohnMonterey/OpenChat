@@ -2072,6 +2072,12 @@ void ProfileController::setSongWindow(qint64 startMs)
     if (source.path.isEmpty())
         return;
     source.windowStartMs = std::max<qint64>(0, startMs);
+    // A window encode still running is for where the handle was: its result
+    // would only flash in before the one for where it rests.
+    if (m_songEncoding && !m_songAnalysing && m_songImporter) {
+        m_songImporter->cancel();
+        m_songEncoding = false;
+    }
     // Re-encoded once the handle rests: a drag is one encode, not fifty.
     m_songWindowTimer.start();
     emit importChanged();

@@ -166,7 +166,6 @@ FocusScope {
         if (!avatarFileDialog)
             avatarFileDialog = findOwned(page, "localAvatarFileDialog");
         slide = previewOnly ? 1 : 0;
-        rail.forceActiveFocus(Qt.OtherFocusReason);
     }
     onPreviewOnlyChanged: slide = previewOnly ? 1 : 0
 

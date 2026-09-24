@@ -22,7 +22,11 @@ Item {
     readonly property var wideRows: arrangement.filter(entry => entry.column === Profile.WideColumn)
     readonly property int layout: draft ? draft.layout : Profile.ClassicLayout
     readonly property bool flipped: layout === Profile.FlippedLayout
-    readonly property string firstName: profiles ? profiles.personFirstName : ""
+    // The owner as the page names them (the preview shows your page as your
+    // contacts see it: "Contacting Daniel").
+    readonly property string firstName: draft && draft.displayName.trim().length > 0
+                                        ? draft.displayName.trim().split(/\s+/)[0]
+                                        : profiles ? profiles.personFirstName : ""
     // The module being dragged by its grip, and the pointer, in tab coordinates.
     property int dragModule: -1
     property point dragPoint: Qt.point(0, 0)
@@ -70,7 +74,7 @@ Item {
             if (row.mapToItem(tab, 0, row.height / 2).y < point.y)
                 ++index;
         }
-        return { column: best.list.column, index: Math.min(index, rows.length) };
+        return { column: best.list.moduleColumn, index: Math.min(index, rows.length) };
     }
     function dragTo(point) {
         dragPoint = point;
@@ -135,9 +139,9 @@ Item {
     // move, Space to hide or show.
     component ModuleList: ProfileTileGrid {
         id: list
-        property int column: Profile.NarrowColumn
+        property int moduleColumn: Profile.NarrowColumn
         property ProfileTileGrid otherList: null
-        readonly property var rows: tab.columnRows(column)
+        readonly property var rows: tab.columnRows(moduleColumn)
         function rowAt(index) {
             return itemAt(index);
         }
@@ -153,18 +157,18 @@ Item {
                 return;
             if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
                 const step = event.key === Qt.Key_Up ? -1 : 1;
-                tab.nudge(entry.module, column, step);
-                focusIndex = Math.max(0, tab.indexIn(column, entry.module));
+                tab.nudge(entry.module, moduleColumn, step);
+                focusIndex = Math.max(0, tab.indexIn(moduleColumn, entry.module));
                 event.accepted = true;
             } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
                 // ← and → move toward that side of the page.
                 const leftward = event.key === Qt.Key_Left;
-                const onLeft = (column === Profile.NarrowColumn) !== tab.flipped;
+                const onLeft = (moduleColumn === Profile.NarrowColumn) !== tab.flipped;
                 if (leftward !== onLeft) {
-                    tab.swapColumn(entry.module, column);
+                    tab.swapColumn(entry.module, moduleColumn);
                     if (otherList) {
                         otherList.forceActiveFocus(Qt.TabFocusReason);
-                        otherList.focusIndex = Math.max(0, tab.indexIn(otherList.column, entry.module));
+                        otherList.focusIndex = Math.max(0, tab.indexIn(otherList.moduleColumn, entry.module));
                     }
                 }
                 event.accepted = true;
@@ -288,11 +292,11 @@ Item {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 if (parent.modelData === "up")
-                                    tab.nudge(row.module, list.column, -1);
+                                    tab.nudge(row.module, list.moduleColumn, -1);
                                 else if (parent.modelData === "down")
-                                    tab.nudge(row.module, list.column, 1);
+                                    tab.nudge(row.module, list.moduleColumn, 1);
                                 else
-                                    tab.swapColumn(row.module, list.column);
+                                    tab.swapColumn(row.module, list.moduleColumn);
                             }
                         }
                     }
@@ -481,7 +485,7 @@ Item {
                 id: firstList
                 objectName: "profileLayoutFirstList"
                 accessibleName: "Left column"
-                column: tab.flipped ? Profile.WideColumn : Profile.NarrowColumn
+                moduleColumn: tab.flipped ? Profile.WideColumn : Profile.NarrowColumn
                 otherList: secondList
             }
         }
@@ -516,7 +520,7 @@ Item {
                 id: secondList
                 objectName: "profileLayoutSecondList"
                 accessibleName: "Right column"
-                column: tab.flipped ? Profile.NarrowColumn : Profile.WideColumn
+                moduleColumn: tab.flipped ? Profile.NarrowColumn : Profile.WideColumn
                 otherList: firstList
             }
         }

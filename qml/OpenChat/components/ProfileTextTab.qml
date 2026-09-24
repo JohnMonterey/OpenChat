@@ -27,7 +27,11 @@ Item {
     readonly property var bodyFonts: [Profile.InterfaceFont, Profile.RoundedFont, Profile.TypewriterFont,
                                       Profile.SerifFont].map(id => fonts.find(font => font.id === id))
                                                          .filter(font => font !== undefined && font.bodySafe)
-    readonly property string owner: profiles ? profiles.personFirstName : ""
+    // The owner as the page names them: the first word of the page's name,
+    // else the app's first name for them.
+    readonly property string owner: draft && draft.displayName.trim().length > 0
+                                    ? draft.displayName.trim().split(/\s+/)[0]
+                                    : profiles ? profiles.personFirstName : ""
     readonly property string sample: owner.length === 0 ? "Blurbs"
                                      : owner + (/s$/i.test(owner) ? "'" : "'s") + " Blurbs"
     readonly property int thirdWidth: Math.floor((width - 32 - 12) / 3)

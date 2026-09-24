@@ -232,8 +232,12 @@ Item {
                     anchors.fill: parent
                 }
                 ProfileNameText {
+                    id: sample
                     anchors.horizontalCenter: parent.horizontalCenter
                     y: 20 - height / 2
+                    // Fancy effects never render a name below 30 px; the
+                    // swatches all show "Aa" at 22 so they compare.
+                    scale: sample.renderedPixelSize > 22 ? 22 / sample.renderedPixelSize : 1
                     text: "Aa"
                     fontFamily: tab.nameFamily
                     basePixelSize: 22

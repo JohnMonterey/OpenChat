@@ -212,6 +212,11 @@ public:
         int maxSendAttempts = 8;
         int drainBatch = 32;
         qint64 leaseMs = 30'000;
+        // The outbox drain hands the link another envelope only while the
+        // transport's unsent bytes are at or below this, so a chat message or a
+        // call offer never queues behind megabytes already in the TLS buffer.
+        // A transport that cannot say (-1) is never held back; <= 0 disables.
+        qint64 maxDrainBacklogBytes = 64 * 1024;
     };
 
     // signer produces the Ed25519 signature over the canonical envelope signing
@@ -312,6 +317,9 @@ public:
                        const QByteArray &payload);
     // What the transport has queued and not yet written, or -1 if unknown.
     [[nodiscard]] qint64 pendingSendBytes() const;
+    // Whether the relay link is up right now. Callers that pace their own
+    // traffic wait for linkUp() rather than queueing sends while it is down.
+    [[nodiscard]] bool isLinkUp() const;
 
     // Processes an inbound envelope with its relay sequence.
     void handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);
@@ -366,6 +374,10 @@ signals:
                               const OpenChat::DeviceId &senderDevice,
                               const QList<QByteArray> &members);
     void failedClosed();
+    // The relay link (re)connected. Emitted after the engine has resumed its
+    // own outbox, so anything a listener sends in response leaves behind the
+    // envelopes that were already waiting.
+    void linkUp();
     // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
     void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,
                            const OpenChat::ConversationId &conversation, qint64 receivedAtMs);

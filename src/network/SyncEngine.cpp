@@ -33,6 +33,19 @@ constexpr qint64 callEnvelopeLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
     }
 }
 
+// The slowest uplink the retry schedule plans for: 16 KB/s, i.e. 16 bytes a
+// millisecond. "Sent" only means handed to the socket; a 240 KiB page envelope
+// can still be leaving the TLS buffer 15 s later on such a link, long after
+// the first 1 s backoff. Re-sending it then would upload it twice and burn an
+// attempt on every retry, so each attempt also waits for the envelope's own
+// upload at this rate (a tenth of a second for a text).
+constexpr qint64 slowestPlannedUplinkBytesPerMs = 16;
+
+[[nodiscard]] constexpr qint64 uploadAllowanceMs(qsizetype envelopeBytes) noexcept
+{
+    return envelopeBytes > 0 ? envelopeBytes / slowestPlannedUplinkBytesPerMs : 0;
+}
+
 // DevicePublicCredential serializes as: version(1) || deviceId(16) || key(32).
 constexpr char credentialVersion = 1;
 constexpr qsizetype credentialDeviceIdOffset = 1;
@@ -510,43 +523,67 @@ public:
         transport.sendDatagram(*envelope);
     }
 
+    // True while the link already holds more unsent bytes than the drain may
+    // add to. A transport that cannot tell (-1) never holds the drain back, so
+    // one without a backlog figure drains exactly as it always has.
+    [[nodiscard]] bool linkIsBacklogged() const
+    {
+        if (config.maxDrainBacklogBytes <= 0)
+            return false;
+        return transport.pendingSendBytes() > config.maxDrainBacklogBytes;
+    }
+
+    // Hands due envelopes to the link one at a time, oldest first, up to
+    // drainBatch per call. The backlog is looked at again before every claim:
+    // one large envelope can fill the socket on its own, and a batch claimed
+    // up front would pile everything behind it (a chat message, a call offer)
+    // into the TLS buffer too. A row that is not claimed stays Pending and
+    // spends no attempt; the retry timer comes back for it within a second.
     void drainOutbox()
     {
-        if (failed || !transport.isConnected())
-            return;
         const qint64 nowMs = now();
-        const auto due = store.claimDue(nowMs, config.drainBatch, nowMs + config.leaseMs);
-        if (!due.hasValue())
-            return;
-        for (const OutboxRecord &record : due.value()) {
-            if (record.attemptCount >= config.maxSendAttempts) {
-                inflight.remove(record.envelopeId.bytes());
-                failOne(record.envelopeId, record.messageId);
-                continue;
-            }
-            const auto decoded = decodeEnvelope(record.envelope);
-            if (!decoded.hasValue()) {
-                (void)store.advanceDeliveryState(record.messageId, DeliveryState::Failed);
-                (void)store.scheduleRetry(record.envelopeId, record.attemptCount,
-                                          nowMs + maxEnvelopeLifetimeMs);
-                continue;
-            }
-            // Queued offline for longer than its lifetime: the relay would
-            // refuse it on every attempt, so give up now rather than retrying.
-            if (decoded.value().expiresAtMs <= nowMs) {
-                inflight.remove(record.envelopeId.bytes());
-                failOne(record.envelopeId, record.messageId);
-                continue;
-            }
-            inflight.insert(record.envelopeId.bytes(), record.messageId);
-            if (store.advanceDeliveryState(record.messageId, DeliveryState::Sending).hasValue()
-                && decoded.value().messageKind == EnvelopeMessageKind::MlsPrivateMessage)
-                emit q->messageStateChanged(record.messageId, DeliveryState::Sending);
-            // Schedule the next attempt; relay acceptance cancels it via markAccepted.
-            const qint64 nextMs = nowMs + retryDelayMs(record.attemptCount, 0);
-            (void)store.scheduleRetry(record.envelopeId, record.attemptCount + 1, nextMs);
-            transport.sendEnvelope(decoded.value());
+        for (int claimed = 0; claimed < config.drainBatch; ++claimed) {
+            if (failed || !transport.isConnected() || linkIsBacklogged())
+                return;
+            const auto due = store.claimDue(nowMs, 1, nowMs + config.leaseMs);
+            if (!due.hasValue() || due.value().isEmpty())
+                return;
+            sendClaimed(due.value().constFirst(), nowMs);
         }
+    }
+
+    void sendClaimed(const OutboxRecord &record, qint64 nowMs)
+    {
+        if (record.attemptCount >= config.maxSendAttempts) {
+            inflight.remove(record.envelopeId.bytes());
+            failOne(record.envelopeId, record.messageId);
+            return;
+        }
+        const auto decoded = decodeEnvelope(record.envelope);
+        if (!decoded.hasValue()) {
+            (void)store.advanceDeliveryState(record.messageId, DeliveryState::Failed);
+            (void)store.scheduleRetry(record.envelopeId, record.attemptCount,
+                                      nowMs + maxEnvelopeLifetimeMs);
+            return;
+        }
+        // Queued offline for longer than its lifetime: the relay would
+        // refuse it on every attempt, so give up now rather than retrying.
+        if (decoded.value().expiresAtMs <= nowMs) {
+            inflight.remove(record.envelopeId.bytes());
+            failOne(record.envelopeId, record.messageId);
+            return;
+        }
+        inflight.insert(record.envelopeId.bytes(), record.messageId);
+        if (store.advanceDeliveryState(record.messageId, DeliveryState::Sending).hasValue()
+            && decoded.value().messageKind == EnvelopeMessageKind::MlsPrivateMessage)
+            emit q->messageStateChanged(record.messageId, DeliveryState::Sending);
+        // Schedule the next attempt; relay acceptance cancels it via markAccepted.
+        // The allowance keeps a large envelope from being re-sent while its
+        // first copy may still be uploading.
+        const qint64 nextMs = nowMs + retryDelayMs(record.attemptCount, 0)
+                              + uploadAllowanceMs(record.envelope.size());
+        (void)store.scheduleRetry(record.envelopeId, record.attemptCount + 1, nextMs);
+        transport.sendEnvelope(decoded.value());
     }
 
     // Gives up on one envelope. For an ordinary send that fails the message; for
@@ -939,8 +976,10 @@ void SyncEngine::start()
         handleDatagram(envelope);
     };
     d->transport.onConnected = [this] {
-        // Resume: drain the durable outbox once the link is up.
+        // Resume: drain the durable outbox once the link is up, then tell the
+        // callers that pace their own sends, which queue behind what drained.
         d->drainOutbox();
+        emit linkUp();
     };
     // Kick an initial drain (e.g. offline items queued before start / on restart).
     d->drainOutbox();
@@ -1055,6 +1094,11 @@ void SyncEngine::sendGroupChange(const ConversationId &conversation,
 qint64 SyncEngine::pendingSendBytes() const
 {
     return d->transport.pendingSendBytes();
+}
+
+bool SyncEngine::isLinkUp() const
+{
+    return d->transport.isConnected();
 }
 
 void SyncEngine::sendCallMedia(const ConversationId &conversation,

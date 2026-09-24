@@ -2526,6 +2526,53 @@ private slots:
         QCOMPARE(asked, 0);
     }
 
+    void undoToACollectedPictureDropsItAndSaysSo()
+    {
+        // A picture the draft let go of is kept for the collection's grace
+        // (ten minutes), so undo can bring it back; an undo reaching further
+        // may find it gone. The draft then drops it and tells the owner,
+        // rather than keeping a reference nothing can publish.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString picture = writePicture(dir, QStringLiteral("old.png"), QSize(320, 200));
+        PageSyncTest::TwoPeerFixture fixture;
+        QVERIFY(fixture.setUp());
+        useFixtureTime(fixture);
+        PageSyncTest::Peer &alice = fixture.a();
+        LiveChat live(alice);
+        ProfileController &p = live.profiles();
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        ProfilePageObject &d = *p.draft();
+        p.importBackground(QUrl::fromLocalFile(picture));
+        QTRY_VERIFY_WITH_TIMEOUT(!p.backgroundImporting(), 20'000);
+        const QByteArray hash = d.page().background.sha256;
+        QVERIFY(!p.sync()->localMedia(hash).isEmpty());
+
+        p.removeBackgroundImage();
+        QTRY_VERIFY_WITH_TIMEOUT(!alice.pages().localPage().value().draftBackground.has_value(), 5'000);
+        // Within the grace, undo brings it back whole.
+        p.undo();
+        QVERIFY(d.hasBackgroundImage());
+        QVERIFY(!d.backgroundPending());
+        QCOMPARE(p.notice(), QString());
+        p.redo();
+        QVERIFY(!d.hasBackgroundImage());
+        QTRY_VERIFY_WITH_TIMEOUT(!alice.pages().localPage().value().draftBackground.has_value(), 5'000);
+
+        // Past it, a collection frees the blob, and undo cannot restore it.
+        fixture.clock.advance(PageSyncTest::quietLimits().localBlobGraceMs + 60'000);
+        p.sync()->collectGarbage();
+        QVERIFY(p.sync()->localMedia(hash).isEmpty());
+        p.undo();
+        QVERIFY(!d.hasBackgroundImage());
+        QCOMPARE(d.backgroundKind(), int(Profile::BackgroundKind::SolidBackground));
+        QCOMPARE(p.notice(), QStringLiteral("Your background picture is no longer available. Choose it again."));
+        // What is saved and published never names the missing blob.
+        QVERIFY(p.publish());
+        QVERIFY(!p.sync()->publishedPage().background.isSet());
+    }
+
     void callActiveDefersMedia()
     {
         QTemporaryDir dir;

@@ -12,7 +12,8 @@ Item {
     // note, music, copy, idCard, envelope, phone, video, palette, grip, undo,
     // redo, plus, minus, cross, down, up, swap, image, star, text, sparkle,
     // layout, boxes, friends, link, upload, play, pause, preview, dice,
-    // shieldCheck. An unknown kind draws nothing.
+    // shieldCheck, gamepad, film, heart, book, chat, trophy. An unknown kind
+    // draws nothing.
     property string kind: "envelope"
     property color ink: Theme.iconInk
     // Line width in pixels; a few kinds ask for a heavier line of their own.
@@ -275,6 +276,37 @@ Item {
         case "dice":
             stroke = rr(0.12, 0.12, 0.76, 0.76, 0.14);
             fill = circle(0.34, 0.34, 0.07) + circle(0.5, 0.5, 0.07) + circle(0.66, 0.66, 0.07);
+            break;
+        // Custom panels' icons.
+        case "gamepad":
+            stroke = M(0.3, 0.3) + L(0.7, 0.3) + C(0.9, 0.3, 0.98, 0.62, 0.92, 0.76)
+                   + C(0.86, 0.9, 0.72, 0.84, 0.64, 0.68) + L(0.36, 0.68) + C(0.28, 0.84, 0.14, 0.9, 0.08, 0.76)
+                   + C(0.02, 0.62, 0.1, 0.3, 0.3, 0.3) + Z;
+            fill = rect(0.22, 0.46, 0.18, 0.06) + rect(0.28, 0.4, 0.06, 0.18)
+                 + circle(0.66, 0.44, 0.045) + circle(0.76, 0.54, 0.045);
+            break;
+        case "film":
+            stroke = rr(0.1, 0.12, 0.8, 0.76, 0.06) + M(0.26, 0.12) + L(0.26, 0.88) + M(0.74, 0.12) + L(0.74, 0.88);
+            fill = rect(0.14, 0.2, 0.08, 0.08) + rect(0.14, 0.46, 0.08, 0.08) + rect(0.14, 0.72, 0.08, 0.08)
+                 + rect(0.78, 0.2, 0.08, 0.08) + rect(0.78, 0.46, 0.08, 0.08) + rect(0.78, 0.72, 0.08, 0.08);
+            break;
+        case "heart":
+            fill = M(0.5, 0.86) + C(0.14, 0.62, 0.04, 0.4, 0.14, 0.24) + C(0.24, 0.1, 0.44, 0.12, 0.5, 0.3)
+                 + C(0.56, 0.12, 0.76, 0.1, 0.86, 0.24) + C(0.96, 0.4, 0.86, 0.62, 0.5, 0.86) + Z;
+            break;
+        case "book":
+            stroke = M(0.5, 0.24) + Q(0.3, 0.12, 0.08, 0.18) + L(0.08, 0.8) + Q(0.3, 0.74, 0.5, 0.86)
+                   + Q(0.7, 0.74, 0.92, 0.8) + L(0.92, 0.18) + Q(0.7, 0.12, 0.5, 0.24) + L(0.5, 0.86);
+            break;
+        case "chat":
+            stroke = rr(0.08, 0.14, 0.84, 0.56, 0.14) + M(0.28, 0.7) + L(0.24, 0.9) + L(0.46, 0.7);
+            break;
+        case "trophy":
+            stroke = M(0.28, 0.14) + L(0.72, 0.14) + L(0.72, 0.36) + Q(0.72, 0.6, 0.5, 0.62) + Q(0.28, 0.6, 0.28, 0.36) + Z
+                   + M(0.28, 0.2) + Q(0.08, 0.2, 0.12, 0.36) + Q(0.16, 0.46, 0.3, 0.46)
+                   + M(0.72, 0.2) + Q(0.92, 0.2, 0.88, 0.36) + Q(0.84, 0.46, 0.7, 0.46)
+                   + M(0.5, 0.62) + L(0.5, 0.78);
+            fill = rect(0.32, 0.78, 0.36, 0.1);
             break;
         }
         return { stroke: stroke, fill: fill, weight: weight };

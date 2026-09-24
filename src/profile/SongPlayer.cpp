@@ -61,6 +61,19 @@ SongOutputFactory &outputFactory()
     return factory;
 }
 
+// The other page sound playing now (a panel video), stopped when a song starts.
+std::function<void()> &otherSound()
+{
+    static std::function<void()> stop;
+    return stop;
+}
+
+quint64 &otherSoundToken()
+{
+    static quint64 token = 0;
+    return token;
+}
+
 // A QAudioSink on a real device, pulling from the stream.
 class SystemSongOutput final : public SongOutput
 {
@@ -527,13 +540,11 @@ void SongPlayer::play()
         return;
     if (SongPlayer *other = soundingPlayer(); other != nullptr && other != this)
         other->pause();
+    if (std::function<void()> stop = std::exchange(otherSound(), {}))
+        stop();
 
     QString error;
-    std::unique_ptr<SongOutput> output;
-    if (const SongOutputFactory &factory = outputFactory())
-        output = factory(m_song->channels, error);
-    else
-        output = openSystemOutput(QMediaDevices::defaultAudioOutput(), m_song->channels, error);
+    std::unique_ptr<SongOutput> output = openOutput(m_song->channels, error);
     if (!output) {
         setError(error.isEmpty() ? QStringLiteral("No audio output") : error);
         return;
@@ -633,6 +644,32 @@ std::unique_ptr<SongOutput> SongPlayer::openSystemOutput(const QAudioDevice &dev
         return {};
     }
     return std::make_unique<SystemSongOutput>(device, format);
+}
+
+std::unique_ptr<SongOutput> SongPlayer::openOutput(int channels, QString &error)
+{
+    if (const SongOutputFactory &factory = outputFactory())
+        return factory(channels, error);
+    return openSystemOutput(QMediaDevices::defaultAudioOutput(), channels, error);
+}
+
+quint64 SongPlayer::takeOverSound(std::function<void()> stop)
+{
+    static quint64 tokens = 0;
+    if (SongPlayer *song = soundingPlayer())
+        song->pause();
+    if (std::function<void()> previous = std::exchange(otherSound(), std::move(stop)))
+        previous();
+    otherSoundToken() = ++tokens;
+    return tokens;
+}
+
+void SongPlayer::releaseSound(quint64 token)
+{
+    if (otherSoundToken() != token)
+        return; // another sound took over since
+    otherSound() = {};
+    otherSoundToken() = 0;
 }
 
 void SongPlayer::setOutputFactoryForTesting(SongOutputFactory factory)

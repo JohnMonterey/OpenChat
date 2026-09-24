@@ -62,7 +62,7 @@ public:
     explicit ProfileBackgroundImporter(QObject *parent = nullptr);
     ~ProfileBackgroundImporter() override;
 
-    void start(const QString &path, const QColor &matte);
+    void start(const QString &path, const QColor &matte, const ProfileBackgroundLimits &limits = {});
     void cancel();
     [[nodiscard]] bool busy() const noexcept { return m_job != nullptr; }
     [[nodiscard]] qreal progress() const noexcept { return m_progress; }

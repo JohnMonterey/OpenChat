@@ -29,6 +29,8 @@ namespace OpenChat {
 
 class ChatController;
 class ContactRequestService;
+class ClipImporter;
+struct ImportedClip;
 class ProfileBackgroundImporter;
 class ProfileSession;
 class RelayClient;
@@ -117,6 +119,12 @@ class ProfileController final : public QObject
     Q_PROPERTY(qint64 songWindowStartMs READ songWindowStartMs NOTIFY importChanged)
     Q_PROPERTY(qint64 songWindowMs READ songWindowMs NOTIFY importChanged)
     Q_PROPERTY(qint64 songClipBytes READ songClipBytes NOTIFY importChanged)
+    // Panel pictures and videos on their way in (docs/profile-panels.md):
+    // the block they go to (0 when none), how many files wait, and progress.
+    Q_PROPERTY(bool panelImporting READ panelImporting NOTIFY importChanged)
+    Q_PROPERTY(int panelImportBlock READ panelImportBlock NOTIFY importChanged)
+    Q_PROPERTY(int panelImportQueued READ panelImportQueued NOTIFY importChanged)
+    Q_PROPERTY(qreal panelImportProgress READ panelImportProgress NOTIFY importChanged)
     // Accepted contacts: [{contactId, name, avatarKey, placedIndex}]
     Q_PROPERTY(QVariantList topFriendCandidates READ topFriendCandidates NOTIFY topFriendCandidatesChanged)
     Q_PROPERTY(QVariantList recentColors READ recentColors NOTIFY recentColorsChanged)
@@ -131,6 +139,12 @@ class ProfileController final : public QObject
     Q_PROPERTY(QVariantList moodChoices READ moodChoices CONSTANT)
     Q_PROPERTY(QVariantList hereForChoices READ hereForChoices CONSTANT)
     Q_PROPERTY(QVariantMap limits READ limits CONSTANT)
+    // [{value, label, glyph, blurb}]: "Add new panel"s choices; [{value, label, glyph}]; [{value, label}].
+    Q_PROPERTY(QVariantList panelTemplates READ panelTemplates CONSTANT)
+    Q_PROPERTY(QVariantList panelIcons READ panelIcons CONSTANT)
+    Q_PROPERTY(QVariantList gameStatuses READ gameStatuses CONSTANT)
+    // False on a build without libvpx: no video template, no video block.
+    Q_PROPERTY(bool videoSupported READ videoSupported CONSTANT)
     Q_PROPERTY(QString notice READ notice NOTIFY noticeChanged)
 
 public:
@@ -142,6 +156,10 @@ public:
     // song bytes: past the close and slide-out animations, then released.
     static constexpr int idleMediaReleaseMs = 1'000;
     static constexpr int maxRecentColors = 8;
+    // What one panel picture or cover is encoded down to: 24 pictures of
+    // 160 KiB stay within the panels' 4 MiB.
+    static constexpr qsizetype panelPictureBytes = 160 * 1024;
+    static constexpr qsizetype panelCoverBytes = 64 * 1024;
 
     // A relay handle lookup that got no answer at all (a session refused
     // mid-refresh, a lost reply) counts as failed after this long.
@@ -213,6 +231,12 @@ public:
     Q_INVOKABLE void importSong(const QUrl &file);
     Q_INVOKABLE void setSongWindow(qint64 startMs);
     Q_INVOKABLE void removeSong();
+    // Pictures for a panel's picture block, one after another; a list item's
+    // cover; a video block's clip. Each waits its turn behind the others.
+    Q_INVOKABLE void importPanelPictures(int blockId, const QList<QUrl> &files);
+    Q_INVOKABLE void importItemCover(int blockId, int index, const QUrl &file);
+    Q_INVOKABLE void importPanelVideo(int blockId, const QUrl &file);
+    Q_INVOKABLE void cancelPanelImports();
     Q_INVOKABLE void cancelImports();
     Q_INVOKABLE bool addTopFriend(const QString &contactId);
     Q_INVOKABLE void removeTopFriend(int index);
@@ -298,6 +322,10 @@ public:
     [[nodiscard]] bool backgroundImporting() const noexcept { return m_backgroundImporting; }
     [[nodiscard]] qreal backgroundImportProgress() const noexcept { return m_backgroundProgress; }
     [[nodiscard]] bool songImporting() const;
+    [[nodiscard]] bool panelImporting() const noexcept { return m_panelImport.has_value(); }
+    [[nodiscard]] int panelImportBlock() const noexcept { return m_panelImport ? m_panelImport->blockId : 0; }
+    [[nodiscard]] int panelImportQueued() const noexcept { return int(m_panelQueue.size()); }
+    [[nodiscard]] qreal panelImportProgress() const noexcept { return m_panelProgress; }
     [[nodiscard]] QVariantMap songSource() const;
     [[nodiscard]] QVariantList songPeaks() const;
     [[nodiscard]] qint64 songWindowStartMs() const { return shownSongSource().windowStartMs; }
@@ -316,6 +344,10 @@ public:
     [[nodiscard]] static QVariantList moodChoices();
     [[nodiscard]] static QVariantList hereForChoices();
     [[nodiscard]] static QVariantMap limits();
+    [[nodiscard]] static QVariantList panelTemplates();
+    [[nodiscard]] static QVariantList panelIcons();
+    [[nodiscard]] static QVariantList gameStatuses();
+    [[nodiscard]] static bool videoSupported();
     [[nodiscard]] QString notice() const { return m_notice; }
 
 signals:
@@ -385,6 +417,15 @@ private:
         QString imageKey;
         QByteArray songHash;
         bool songPresent = false;
+        QSet<QByteArray> panelHeld; // put into PanelMediaLibrary for this object
+    };
+    // One file on its way into a panel.
+    struct PanelImport final {
+        enum class Target { Pictures, Cover, Video };
+        Target target = Target::Pictures;
+        int blockId = 0;
+        int itemIndex = -1; // Cover
+        QString path;
     };
     // Who a stack entry is, as far as this viewer can tell: the account and
     // the relay-confirmed handle it resolves to, else how it was opened.
@@ -493,6 +534,15 @@ private:
     [[nodiscard]] SongImporter &songImporter();
     void onBackgroundImported(const QByteArray &jpeg, QSize size);
     void onBackgroundFailed(const QString &message);
+    [[nodiscard]] ProfileBackgroundImporter &panelImporter();
+    void startNextPanelImport();
+    void startPanelVideoImport(const PanelImport &import);
+    void onPanelPictureImported(const QByteArray &jpeg, QSize size);
+    void onPanelImportFailed(const QString &message);
+    void onPanelVideoImported(const ImportedClip &clip);
+    void finishPanelImport();
+    // Whether one more blob of `bytes` fits the panels' page-wide budgets.
+    [[nodiscard]] bool panelBudgetAllows(int blobs, qint64 bytes) const;
     void onSongAnalysed(const SongSourceInfo &info);
     void onSongEncoded(const QByteArray &container, qint64 durationMs, qint64 windowStartMs);
     void onSongFailed(const QString &message);
@@ -567,6 +617,11 @@ private:
     // Imports
     std::unique_ptr<ProfileBackgroundImporter> m_backgroundImporter;
     bool m_backgroundImporting = false;
+    std::unique_ptr<ProfileBackgroundImporter> m_panelImporter;
+    std::unique_ptr<ClipImporter> m_clipImporter;
+    std::optional<PanelImport> m_panelImport; // under way
+    QList<PanelImport> m_panelQueue;          // waiting
+    qreal m_panelProgress = 0;
     qreal m_backgroundProgress = 0;
     std::unique_ptr<SongImporter> m_songImporter;
     bool m_songAnalysing = false;

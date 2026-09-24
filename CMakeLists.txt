@@ -90,12 +90,16 @@ add_library(openchat_profile STATIC
     src/profile/ProfileQmlTypes.cpp
     src/profile/SongImport.cpp
     src/profile/SongPlayer.cpp
+    src/profile/ProfilePanelMedia.cpp
+    src/profile/ClipCodec.cpp
+    src/profile/ProfileClipPlayer.cpp
+    src/profile/ClipImport.cpp
 )
 target_include_directories(openchat_profile PUBLIC src)
 target_link_libraries(openchat_profile
     PUBLIC openchat_domain openchat_media openchat_avatar openchat_cosmetics
            Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Multimedia
-    PRIVATE openchat_opus
+    PRIVATE openchat_opus openchat_vpx
 )
 # The eight bundled content faces (docs/profile-pages.md), with their
 # licences. Registered lazily by ProfileFonts::ensureRegistered(), never at
@@ -1462,6 +1466,14 @@ target_link_libraries(tst_profilesong PRIVATE
     openchat_profile openchat_media openchat_domain openchat_opus Qt6::Multimedia Qt6::Test)
 add_test(NAME tst_profilesong COMMAND tst_profilesong)
 set_tests_properties(tst_profilesong PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Panel videos: the clip codec and, where ffmpeg can write a file, the import.
+add_executable(tst_profileclip tests/tst_profileclip.cpp)
+target_include_directories(tst_profileclip PRIVATE src)
+target_link_libraries(tst_profileclip PRIVATE
+    openchat_profile openchat_media openchat_domain Qt6::Multimedia Qt6::Test)
+add_test(NAME tst_profileclip COMMAND tst_profileclip)
+set_tests_properties(tst_profileclip PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 240)
 
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp

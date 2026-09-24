@@ -213,6 +213,15 @@ public:
     // Replaces how every player opens its output; an empty factory restores
     // the system output.
     static void setOutputFactoryForTesting(SongOutputFactory factory);
+    // An output as play() opens one (the test factory when one is set), for
+    // other page sounds: a panel video's.
+    [[nodiscard]] static std::unique_ptr<SongOutput> openOutput(int channels, QString &error);
+    // Another page sound takes over: the sounding song pauses, and `stop`
+    // runs (once) when a song starts playing, so two never sound together.
+    // Returns a token for releaseSound().
+    static quint64 takeOverSound(std::function<void()> stop);
+    // Forgets the stop a sound registered (it ended by itself).
+    static void releaseSound(quint64 token);
 
 signals:
     void sourceChanged();

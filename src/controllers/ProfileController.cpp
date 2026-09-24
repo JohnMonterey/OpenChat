@@ -13,6 +13,8 @@
 #include "profile/ProfileBackgroundImage.h"
 #include "profile/ProfileFonts.h"
 #include "profile/ProfileMediaStore.h"
+#include "profile/ClipImport.h"
+#include "profile/ProfilePanelMedia.h"
 #include "profile/ProfileReadability.h"
 #include "profile/SongImport.h"
 #include "profile/SongPlayer.h"
@@ -212,9 +214,15 @@ ProfileController::~ProfileController()
         m_songImporter->cancel();
     if (m_backgroundImporter)
         m_backgroundImporter->cancel();
+    if (m_panelImporter)
+        m_panelImporter->cancel();
+    if (m_clipImporter)
+        m_clipImporter->cancel();
     for (const HeldMedia *held : {&m_viewMedia, &m_draftMedia, &m_tryOnMedia}) {
         if (!held->imageKey.isEmpty())
             ProfileMediaStore::instance().release(held->imageKey);
+        for (const QByteArray &hash : held->panelHeld)
+            PanelMediaLibrary::instance().release(QString::fromLatin1(hash.toHex()));
     }
 }
 
@@ -1218,8 +1226,52 @@ void ProfileController::updateMedia(ProfilePageObject &object, const MediaSource
         if (hadSong && (oldHash != songHash || !held.songPresent))
             releaseSong(oldHash);
     }
+
+    // Panel media: every picture and video segment the panels name, put into
+    // the library while this object shows it. Only what is not held yet is
+    // read, so a keystroke in a panel reads nothing.
+    PanelMediaLibrary &library = PanelMediaLibrary::instance();
+    const auto keyOf = [](const QByteArray &sha256) { return QString::fromLatin1(sha256.toHex()); };
+    if (sourceChanged || force) {
+        for (const QByteArray &hash : std::as_const(held.panelHeld))
+            library.release(keyOf(hash));
+        held.panelHeld.clear();
+    }
+    QSet<QByteArray> wanted;
+    const auto want = [&](const Profile::MediaRef &ref, Profile::MediaKind kind) {
+        if (!ref.isSet())
+            return;
+        wanted.insert(ref.sha256);
+        if (held.panelHeld.contains(ref.sha256))
+            return;
+        const QByteArray bytes = blob(source, ref.sha256, kind);
+        if (bytes.isEmpty())
+            return;
+        library.put(keyOf(ref.sha256), bytes);
+        held.panelHeld.insert(ref.sha256);
+    };
+    for (const Profile::Panel &panel : page.panels) {
+        for (const Profile::Block &block : panel.blocks) {
+            for (const Profile::PanelImage &image : block.images)
+                want(image.ref, Profile::MediaKind::PanelImageMedia);
+            for (const Profile::ListItem &item : block.items)
+                want(item.cover, Profile::MediaKind::PanelImageMedia);
+            want(block.video.poster, Profile::MediaKind::PanelImageMedia);
+            for (const Profile::MediaRef &segment : block.video.segments)
+                want(segment, Profile::MediaKind::VideoSegmentMedia);
+        }
+    }
+    for (auto it = held.panelHeld.begin(); it != held.panelHeld.end();) {
+        if (wanted.contains(*it)) {
+            ++it;
+            continue;
+        }
+        library.release(keyOf(*it));
+        it = held.panelHeld.erase(it);
+    }
+
     held.source = source;
-    object.setMediaState({held.backgroundPresent, held.imageKey, held.songPresent});
+    object.setMediaState({held.backgroundPresent, held.imageKey, held.songPresent, held.panelHeld});
 }
 
 void ProfileController::releaseImage(const QString &key)
@@ -1584,7 +1636,7 @@ void ProfileController::finishPendingPublish(bool importSucceeded)
 
 bool ProfileController::importsBusy() const
 {
-    return m_backgroundImporting || songImporting();
+    return m_backgroundImporting || songImporting() || panelImporting() || !m_panelQueue.isEmpty();
 }
 
 bool ProfileController::dropUnresolvedDraftMedia()
@@ -1603,6 +1655,41 @@ bool ProfileController::dropUnresolvedDraftMedia()
         page.song = {};
         notice = mediaGoneNotice(Profile::MediaKind::SongMedia);
     }
+    // Panel media an undo brought back after its blob was collected.
+    const auto gone = [&](const Profile::MediaRef &ref, Profile::MediaKind kind) {
+        return ref.isSet() && blob(own, ref.sha256, kind).isEmpty();
+    };
+    bool panelMediaGone = false;
+    for (Profile::Panel &panel : page.panels) {
+        for (Profile::Block &block : panel.blocks) {
+            const qsizetype pictures = block.images.size();
+            block.images.removeIf([&](const Profile::PanelImage &image) {
+                return gone(image.ref, Profile::MediaKind::PanelImageMedia);
+            });
+            panelMediaGone = panelMediaGone || block.images.size() != pictures;
+            for (Profile::ListItem &item : block.items) {
+                if (gone(item.cover, Profile::MediaKind::PanelImageMedia)) {
+                    item.cover = {};
+                    panelMediaGone = true;
+                }
+            }
+            if (gone(block.video.poster, Profile::MediaKind::PanelImageMedia)) {
+                block.video.poster = {};
+                panelMediaGone = true;
+            }
+            const bool segmentGone = std::any_of(block.video.segments.cbegin(), block.video.segments.cend(),
+                                                 [&](const Profile::MediaRef &segment) {
+                                                     return gone(segment, Profile::MediaKind::VideoSegmentMedia);
+                                                 });
+            if (segmentGone) {
+                block.video = {};
+                panelMediaGone = true;
+            }
+        }
+    }
+    if (panelMediaGone)
+        notice = QStringLiteral("Some pictures or videos in your panels were no longer on this device and were "
+                                "removed. Add them again if you want them.");
     if (notice.isEmpty())
         return false;
     m_draft.edit(page);
@@ -2250,6 +2337,13 @@ void ProfileController::cancelImports()
 {
     // Measured before the timer stops: a window waiting to be cut is busy too.
     const bool wasBusy = importsBusy() || m_songIsNewImport;
+    m_panelQueue.clear();
+    m_panelImport.reset();
+    m_panelProgress = 0;
+    if (m_panelImporter)
+        m_panelImporter->cancel();
+    if (m_clipImporter)
+        m_clipImporter->cancel();
     if (m_backgroundImporter)
         m_backgroundImporter->cancel();
     if (m_songImporter)
@@ -2500,7 +2594,292 @@ QVariantMap ProfileController::limits()
             {QStringLiteral("songBytes"), qint64(maxSongBytes)},
             {QStringLiteral("backgroundBytes"), qint64(maxBackgroundImageBytes)},
             {QStringLiteral("songMs"), SongContainer::maxDurationMs},
-            {QStringLiteral("backgroundSide"), Profile::maxBackgroundDimension}};
+            {QStringLiteral("backgroundSide"), Profile::maxBackgroundDimension},
+            {QStringLiteral("panelTitle"), Bounds::panelTitle},
+            {QStringLiteral("blockText"), Bounds::blockText},
+            {QStringLiteral("caption"), Bounds::caption},
+            {QStringLiteral("itemTitle"), Bounds::itemTitle},
+            {QStringLiteral("itemDetail"), Bounds::itemDetail},
+            {QStringLiteral("maxPanels"), Profile::PanelBounds::maxPanels},
+            {QStringLiteral("maxBlocksPerPanel"), Profile::PanelBounds::maxBlocksPerPanel},
+            {QStringLiteral("maxImagesPerBlock"), Profile::PanelBounds::maxImagesPerBlock},
+            {QStringLiteral("maxItemsPerList"), Profile::PanelBounds::maxItemsPerList},
+            {QStringLiteral("maxPanelMedia"), Profile::PanelBounds::maxMedia},
+            {QStringLiteral("maxRating"), Profile::PanelBounds::maxRating}};
+}
+
+QVariantList ProfileController::panelTemplates()
+{
+    struct Entry {
+        Profile::PanelTemplate value;
+        const char *glyph;
+        const char *blurb;
+    };
+    static constexpr Entry entries[] = {
+        {Profile::PanelTemplate::BlankPanel, "plus", "Start empty and add what you like."},
+        {Profile::PanelTemplate::TextPanel, "chat", "A box of your own words."},
+        {Profile::PanelTemplate::PhotoPanel, "camera", "Up to six pictures, framed your way."},
+        {Profile::PanelTemplate::GamesPanel, "gamepad", "The games you love, with covers and ratings."},
+        {Profile::PanelTemplate::VideoPanel, "film", "A short clip that plays on your page."},
+        {Profile::PanelTemplate::TopListPanel, "star", "Rank your top five anything."},
+    };
+    QVariantList list;
+    for (const Entry &entry : entries) {
+        if (entry.value == Profile::PanelTemplate::VideoPanel && !videoSupported())
+            continue;
+        list.append(QVariantMap{{QStringLiteral("value"), int(entry.value)},
+                                {QStringLiteral("label"), Profile::panelTemplateName(entry.value)},
+                                {QStringLiteral("glyph"), QString::fromLatin1(entry.glyph)},
+                                {QStringLiteral("blurb"), QString::fromLatin1(entry.blurb)}});
+    }
+    return list;
+}
+
+QVariantList ProfileController::panelIcons()
+{
+    static const char *const labels[] = {"None",  "Gamepad", "Camera",   "Film",    "Music",  "Heart",
+                                         "Star",  "Book",    "Speech",   "Sparkle", "Trophy", "Palette"};
+    QVariantList list;
+    for (int value = 0; value <= int(Profile::PanelIcon::PaletteIcon); ++value)
+        list.append(QVariantMap{{QStringLiteral("value"), value},
+                                {QStringLiteral("label"), QString::fromLatin1(labels[value])},
+                                {QStringLiteral("glyph"), Profile::panelIconGlyph(Profile::PanelIcon(value))}});
+    return list;
+}
+
+bool ProfileController::videoSupported()
+{
+    return clipCodecAvailable();
+}
+
+QVariantList ProfileController::gameStatuses()
+{
+    QVariantList list;
+    for (int value = 0; value <= int(Profile::GameStatus::PlayingWithFriends); ++value) {
+        const QString name = Profile::gameStatusName(Profile::GameStatus(value));
+        list.append(QVariantMap{{QStringLiteral("value"), value},
+                                {QStringLiteral("label"), name.isEmpty() ? QStringLiteral("No status") : name}});
+    }
+    return list;
+}
+
+// ---------------------------------------------------------------------------
+// Panel imports (docs/profile-panels.md)
+// ---------------------------------------------------------------------------
+
+ProfileBackgroundImporter &ProfileController::panelImporter()
+{
+    if (!m_panelImporter) {
+        m_panelImporter = std::make_unique<ProfileBackgroundImporter>();
+        connect(m_panelImporter.get(), &ProfileBackgroundImporter::progressChanged, this, [this](qreal progress) {
+            m_panelProgress = progress;
+            emit importChanged();
+        });
+        connect(m_panelImporter.get(), &ProfileBackgroundImporter::finished, this,
+                &ProfileController::onPanelPictureImported);
+        connect(m_panelImporter.get(), &ProfileBackgroundImporter::failed, this,
+                [this](ProfileImageError, const QString &message) { onPanelImportFailed(message); });
+    }
+    return *m_panelImporter;
+}
+
+bool ProfileController::panelBudgetAllows(int blobs, qint64 bytes) const
+{
+    const Profile::Page page = Profile::normalized(m_draft.page());
+    int count = 0;
+    qint64 used = 0;
+    for (const Profile::NamedMedia &named : Profile::mediaRefs(page)) {
+        if (named.kind == Profile::MediaKind::PanelImageMedia || named.kind == Profile::MediaKind::VideoSegmentMedia) {
+            ++count;
+            used += named.ref.bytes;
+        }
+    }
+    return count + blobs <= Profile::PanelBounds::maxMedia && used + bytes <= Profile::PanelBounds::maxMediaBytes;
+}
+
+void ProfileController::importPanelPictures(int blockId, const QList<QUrl> &files)
+{
+    if (!m_editing)
+        return;
+    setNotice({});
+    for (const QUrl &file : files)
+        m_panelQueue.append({PanelImport::Target::Pictures, blockId, -1, localPath(file)});
+    emit importChanged();
+    startNextPanelImport();
+}
+
+void ProfileController::importItemCover(int blockId, int index, const QUrl &file)
+{
+    if (!m_editing)
+        return;
+    setNotice({});
+    m_panelQueue.append({PanelImport::Target::Cover, blockId, index, localPath(file)});
+    emit importChanged();
+    startNextPanelImport();
+}
+
+void ProfileController::cancelPanelImports()
+{
+    m_panelQueue.clear();
+    if (m_panelImporter)
+        m_panelImporter->cancel();
+    if (m_clipImporter)
+        m_clipImporter->cancel();
+    if (m_panelImport) {
+        m_panelImport.reset();
+        m_panelProgress = 0;
+        emit importChanged();
+        finishPendingPublish(false);
+    }
+}
+
+void ProfileController::startNextPanelImport()
+{
+    if (m_panelImport || m_panelQueue.isEmpty())
+        return;
+    m_panelImport = m_panelQueue.takeFirst();
+    m_panelProgress = 0;
+    emit importChanged();
+    if (m_panelImport->target == PanelImport::Target::Video) {
+        startPanelVideoImport(*m_panelImport);
+        return;
+    }
+    // Never enlarged; a panel picture is at most 1280 px and small enough
+    // that two dozen of them fit the panels' 4 MiB.
+    ProfileBackgroundLimits limits;
+    limits.maxLongSide = Profile::PanelBounds::maxImageDimension;
+    limits.maxOutputBytes = m_panelImport->target == PanelImport::Target::Cover ? panelCoverBytes
+                                                                                 : panelPictureBytes;
+    // Transparency is composited onto the page's box colour.
+    panelImporter().start(m_panelImport->path, m_draft.boxFill(), limits);
+}
+
+void ProfileController::onPanelPictureImported(const QByteArray &jpeg, QSize size)
+{
+    if (!m_panelImport)
+        return;
+    const PanelImport import = *m_panelImport;
+    if (!panelBudgetAllows(1, jpeg.size())) {
+        m_panelQueue.clear();
+        setNotice(QStringLiteral("Your panels are full. Remove a picture or video to add more."));
+        finishPanelImport();
+        return;
+    }
+    const std::optional<QByteArray> sha256 = storeLocalMedia(Profile::MediaKind::PanelImageMedia, jpeg);
+    if (!sha256) {
+        setNotice(QStringLiteral("This picture could not be saved."));
+        finishPanelImport();
+        return;
+    }
+    Profile::MediaRef ref;
+    ref.sha256 = *sha256;
+    ref.bytes = quint32(jpeg.size());
+    ref.width = quint16(std::clamp(size.width(), 1, Profile::PanelBounds::maxImageDimension));
+    ref.height = quint16(std::clamp(size.height(), 1, Profile::PanelBounds::maxImageDimension));
+    const bool placed = import.target == PanelImport::Target::Cover
+                            ? m_draft.setItemCover(import.blockId, import.itemIndex, ref)
+                            : m_draft.appendImage(import.blockId, ref);
+    if (!placed) {
+        // The block went (or filled up) while the picture was on its way.
+        if (import.target == PanelImport::Target::Pictures)
+            m_panelQueue.removeIf([&](const PanelImport &queued) { return queued.blockId == import.blockId; });
+    } else {
+        saveDraftNow();
+        updateMedia(m_draft, draftMediaSource(), true);
+    }
+    finishPanelImport();
+}
+
+void ProfileController::importPanelVideo(int blockId, const QUrl &file)
+{
+    if (!m_editing)
+        return;
+    setNotice({});
+    m_panelQueue.append({PanelImport::Target::Video, blockId, -1, localPath(file)});
+    emit importChanged();
+    startNextPanelImport();
+}
+
+void ProfileController::startPanelVideoImport(const PanelImport &import)
+{
+    if (!m_clipImporter) {
+        m_clipImporter = std::make_unique<ClipImporter>();
+        connect(m_clipImporter.get(), &ClipImporter::progressChanged, this, [this](qreal progress) {
+            m_panelProgress = progress;
+            emit importChanged();
+        });
+        connect(m_clipImporter.get(), &ClipImporter::finished, this, &ProfileController::onPanelVideoImported);
+        connect(m_clipImporter.get(), &ClipImporter::failed, this, &ProfileController::onPanelImportFailed);
+    }
+    m_clipImporter->start(import.path);
+}
+
+void ProfileController::onPanelVideoImported(const ImportedClip &clip)
+{
+    if (!m_panelImport)
+        return;
+    const PanelImport import = *m_panelImport;
+    qint64 bytes = clip.posterJpeg.size();
+    for (const QByteArray &segment : clip.segments)
+        bytes += segment.size();
+    // A video replaces the block's old one: its blobs free their share first.
+    Profile::Page without = m_draft.page();
+    if (const auto [p, b] = Profile::blockIndex(without, quint16(import.blockId)); p >= 0)
+        without.panels[p].blocks[b].video = {};
+    const auto fits = [&] {
+        int count = 0;
+        qint64 used = 0;
+        for (const Profile::NamedMedia &named : Profile::mediaRefs(Profile::normalized(without))) {
+            if (named.kind == Profile::MediaKind::PanelImageMedia || named.kind == Profile::MediaKind::VideoSegmentMedia) {
+                ++count;
+                used += named.ref.bytes;
+            }
+        }
+        return count + int(clip.segments.size()) + 1 <= Profile::PanelBounds::maxMedia
+               && used + bytes <= Profile::PanelBounds::maxMediaBytes;
+    };
+    if (!fits()) {
+        setNotice(QStringLiteral("Your panels are full. Remove a picture or video to add this one."));
+        finishPanelImport();
+        return;
+    }
+    Profile::VideoClip video;
+    for (qsizetype k = 0; k < clip.segments.size(); ++k) {
+        const std::optional<QByteArray> sha256 = storeLocalMedia(Profile::MediaKind::VideoSegmentMedia, clip.segments.at(k));
+        if (!sha256) {
+            setNotice(QStringLiteral("This video could not be saved."));
+            finishPanelImport();
+            return;
+        }
+        video.segments.push_back({*sha256, quint32(clip.segments.at(k).size()), quint16(clip.size.width()),
+                                  quint16(clip.size.height()), clip.durationsMs.at(k)});
+    }
+    if (const std::optional<QByteArray> poster = storeLocalMedia(Profile::MediaKind::PanelImageMedia, clip.posterJpeg))
+        video.poster = {*poster, quint32(clip.posterJpeg.size()), quint16(clip.posterSize.width()),
+                        quint16(clip.posterSize.height()), 0};
+    if (m_draft.setVideo(import.blockId, video)) {
+        saveDraftNow();
+        updateMedia(m_draft, draftMediaSource(), true);
+    }
+    finishPanelImport();
+}
+
+void ProfileController::onPanelImportFailed(const QString &message)
+{
+    setNotice(message);
+    finishPanelImport();
+}
+
+void ProfileController::finishPanelImport()
+{
+    m_panelImport.reset();
+    m_panelProgress = 0;
+    emit importChanged();
+    if (!m_panelQueue.isEmpty()) {
+        startNextPanelImport();
+        return;
+    }
+    finishPendingPublish(true);
 }
 
 } // namespace OpenChat

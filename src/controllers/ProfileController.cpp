@@ -2372,6 +2372,11 @@ QVariantList ProfileController::fontChoices()
             // For the editor's samples in each face ("" = the interface font).
             {QStringLiteral("headingFamily"), ProfileFonts::family(font, ProfileFonts::Role::Heading)},
             {QStringLiteral("nameFamily"), ProfileFonts::family(font, ProfileFonts::Role::Name)},
+            // ...at the face's real size and weight (SPEC §11).
+            {QStringLiteral("headingFactor"), ProfileFonts::sizeFactor(font, ProfileFonts::Role::Heading)},
+            {QStringLiteral("headingBold"), ProfileFonts::useBold(font, ProfileFonts::Role::Heading)},
+            {QStringLiteral("nameFactor"), ProfileFonts::sizeFactor(font, ProfileFonts::Role::Name)},
+            {QStringLiteral("nameBold"), ProfileFonts::useBold(font, ProfileFonts::Role::Name)},
         });
     }
     return list;

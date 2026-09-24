@@ -17,6 +17,7 @@
 #include "domain/ProfilePage.h"
 #include "domain/ProfilePageCodec.h"
 #include "domain/SongContainer.h"
+#include "media/SongCodec.h"
 #include "models/Contact.h"
 #include "models/ContactListModel.h"
 #include "network/RelayClient.h"
@@ -29,6 +30,7 @@
 
 #include <QBuffer>
 #include <QClipboard>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
@@ -599,6 +601,95 @@ private slots:
         QCOMPARE(p.pageState(), int(PageState::StubPage));
         QCOMPARE(p.referrerName(), QString());
         QCOMPARE(p.personHandle(), QString());
+    }
+
+    void referencePagesMatchTheMockups()
+    {
+        // Mock identity is deterministic, and reversible for every id the
+        // reference pages name.
+        const QByteArray digest =
+            QCryptographicHash::hash(QByteArrayLiteral("openchat-mock:michael"), QCryptographicHash::Sha256);
+        QCOMPARE(Reference::mockAccountFor(QStringLiteral("michael")).bytes(), digest.left(AccountId::byteCount));
+        for (const QString &id : {QStringLiteral("michael"), QStringLiteral("tom"), Reference::selfId(),
+                                  QStringLiteral("dana-whitfield"), QStringLiteral("tay-tay")})
+            QCOMPARE(Reference::mockIdFor(Reference::mockAccountFor(id)), id);
+        QCOMPARE(Reference::mockIdFor(AccountId::generate()), QString());
+        QCOMPARE(Reference::rosterIds().size(), 6);
+
+        // One page per mockup, each with its own song.
+        const QList<std::pair<QString, Profile::Preset>> seeded{
+            {QStringLiteral("michael"), Profile::Preset::AeroSkyPreset},
+            {QStringLiteral("jessica"), Profile::Preset::SceneQueenPreset},
+            {QStringLiteral("ryan"), Profile::Preset::Classic06Preset},
+            {QStringLiteral("sarah"), Profile::Preset::GlitterGirlPreset},
+            {QStringLiteral("alex"), Profile::Preset::MidnightEmoPreset}};
+        QSet<QByteArray> songs;
+        for (const auto &[id, preset] : seeded) {
+            const std::optional<Profile::Page> page = Reference::seededPage(id);
+            QVERIFY2(page.has_value(), qPrintable(id));
+            QCOMPARE(page->preset, preset);
+            QCOMPARE(page->theme, Profile::presetTheme(preset));
+            QVERIFY(page->revision > 0);
+            QCOMPARE(*page, Profile::normalized(*page));
+            QCOMPARE(page->topFriends.size(), 8);
+            QVERIFY(page->song.isSet());
+            QCOMPARE(page->song.durationMs, quint32(SongContainer::maxDurationMs));
+            QCOMPARE(Reference::contactForPreset(preset), id);
+            songs.insert(page->song.sha256);
+            // The song is a real container that plays (45 s of silence).
+            const QByteArray blob = Reference::referenceMedia(page->song.sha256);
+            QCOMPARE(pageMediaHash(blob), page->song.sha256);
+            QCOMPARE(qsizetype(page->song.bytes), blob.size());
+            const std::optional<SongContainer> container = decodeSongContainer(blob);
+            QVERIFY(container.has_value());
+            SongDecoder decoder(*container);
+            QVERIFY(decoder.isValid());
+            qint64 decoded = 0;
+            while (!decoder.atEnd()) {
+                const QVector<qint16> pcm = decoder.next();
+                if (pcm.isEmpty())
+                    break;
+                decoded += pcm.size() / decoder.channels();
+            }
+            QCOMPARE(decoded, container->totalSamples);
+        }
+        QCOMPARE(songs.size(), seeded.size()); // no two pages share a song key
+        QVERIFY(!Reference::seededPage(QStringLiteral("tom")).has_value());
+        QCOMPARE(Reference::contactForPreset(Profile::Preset::LinenPreset), QString());
+        QVERIFY(Reference::referenceMedia(pageMediaHash(QByteArrayLiteral("anything else"))).isEmpty());
+        const Profile::Page own = Reference::ownReferencePage();
+        QCOMPARE(own.preset, Profile::Preset::HeadlinerPreset);
+        QCOMPARE(own.content.displayName, QStringLiteral("Daniel"));
+        QVERIFY(own.song.isSet() && !songs.contains(own.song.sha256));
+
+        // Michael's page as final-default.png shows it.
+        const Profile::Page michael = *Reference::seededPage(QStringLiteral("michael"));
+        QCOMPARE(michael.content.displayName, QStringLiteral("Michael"));
+        QCOMPARE(michael.content.headline, QStringLiteral("Shoot film. Drink coffee. Repeat."));
+        QCOMPARE(michael.content.infoLines, (QStringList{QStringLiteral("31 · he/him"), QStringLiteral("Brooklyn, NY"),
+                                                         QStringLiteral("Photographer")}));
+        QCOMPARE(Profile::moodName(michael.content.mood), QStringLiteral("creative"));
+        QCOMPARE(michael.content.songTitle, QStringLiteral("Paper Planes"));
+        QCOMPARE(michael.content.songArtist, QStringLiteral("M.I.A."));
+        QCOMPARE(Profile::hereForText(michael.content.details.hereFor), QStringLiteral("Friends, Networking"));
+        QCOMPARE(Profile::zodiacName(michael.content.details.zodiac), QStringLiteral("Scorpio"));
+        QCOMPARE(michael.topFriends.first().accountId, mockBytes(QStringLiteral("jessica")));
+        QCOMPARE(michael.topFriends.at(4).name, QStringLiteral("Dana Whitfield"));
+
+        // On screen, the song box is there and ready to play.
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        QVERIFY(p.openContact(QStringLiteral("michael")));
+        const ProfilePageObject &view = *p.view();
+        QVERIFY(view.hasSong());
+        QVERIFY(!view.songPending());
+        QVERIFY(!p.pageIncomplete());
+        QCOMPARE(view.songDurationMs(), qint64(SongContainer::maxDurationMs));
+        QCOMPARE(SongLibrary::instance().get(view.songKey()), Reference::referenceMedia(michael.song.sha256));
+        QVERIFY(view.narrowModules().contains(int(Profile::Module::SongModule)));
+        QCOMPARE(view.filledInterestCount(), 6);
+        QCOMPARE(view.filledDetailCount(), 5);
+        QVERIFY(view.hasBlurbs());
     }
 
     // --- The back stack ----------------------------------------------------------

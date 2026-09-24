@@ -3,6 +3,7 @@
 #include "domain/Identifiers.h"
 #include "domain/ProfilePage.h"
 
+#include <QByteArray>
 #include <QString>
 #include <QStringList>
 
@@ -30,6 +31,9 @@ namespace OpenChat::ProfileReferencePages {
 // ryan Classic '06, sarah Glitter Girl, alex Midnight Emo. Everyone else
 // (tom) has none, so their profile is the default page.
 [[nodiscard]] std::optional<Profile::Page> seededPage(const QString &contactId);
+// The blob a reference page's media ref names (each has a song: 45 s of
+// silence, one per page), or empty for any other hash.
+[[nodiscard]] QByteArray referenceMedia(const QByteArray &sha256);
 // The mock contact whose seeded page uses `preset`, or "" when none does.
 [[nodiscard]] QString contactForPreset(Profile::Preset preset);
 // Daniel's band page (Headliner), the mockups' "your own page".

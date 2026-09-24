@@ -1,5 +1,8 @@
 #include "controllers/ProfileReferencePages.h"
 
+#include "domain/ProfilePageCodec.h"
+#include "domain/SongContainer.h"
+
 #include <QCryptographicHash>
 #include <QHash>
 
@@ -28,6 +31,36 @@ struct Spec final {
 
 // A fixed publish time, so every run renders the same page.
 constexpr qint64 referenceRevision = 1'790'000'000'000;
+
+// A reference page's song: 45 s of silent Opus. Each 60 ms packet is a lone
+// table-of-contents byte (SILK narrowband, 60 ms, one frame) without frame
+// data, which a decoder conceals as silence, so the mockups' player shows and
+// plays without shipping audio or running the encoder. Pages differ in the
+// (inaudible) gain, so no two share a song key and moving between them
+// always changes the page's song.
+QByteArray silentSong(int variant)
+{
+    SongContainer song;
+    song.channels = 1;
+    song.frameSamples = 2880;
+    song.preSkip = 312;
+    song.totalSamples = qint64(SongContainer::maxDurationMs) * SongContainer::sampleRate / 1000;
+    song.gainQ8 = -variant;
+    const qint64 packets = (song.preSkip + song.totalSamples + song.frameSamples - 1) / song.frameSamples;
+    song.packets.fill(QByteArray(1, char(0x18)), packets);
+    return encodeSongContainer(song);
+}
+
+Profile::MediaRef songRef(const QByteArray &container)
+{
+    Profile::MediaRef ref;
+    if (const std::optional<SongContainer> song = decodeSongContainer(container)) {
+        ref.sha256 = pageMediaHash(container);
+        ref.bytes = quint32(container.size());
+        ref.durationMs = quint32(song->durationMs());
+    }
+    return ref;
+}
 
 QString slugFor(const QString &label)
 {
@@ -80,7 +113,7 @@ quint8 hereForBits(const QString &text)
     return bits;
 }
 
-Profile::Page build(const Spec &spec)
+Profile::Page build(const Spec &spec, int songVariant)
 {
     Profile::Page page = Profile::applyPreset(Profile::defaultPage(), spec.preset);
     page.revision = referenceRevision;
@@ -90,6 +123,7 @@ Profile::Page build(const Spec &spec)
     content.headline = spec.headline;
     content.infoLines = spec.info;
     content.mood = moodFor(spec.mood);
+    page.song = songRef(silentSong(songVariant));
     content.songTitle = spec.songTitle;
     content.songArtist = spec.songArtist;
     content.aboutMe = spec.aboutMe;
@@ -331,11 +365,25 @@ QStringList rosterIds()
 
 std::optional<Profile::Page> seededPage(const QString &contactId)
 {
-    for (const Spec &spec : specs()) {
-        if (spec.id == contactId)
-            return build(spec);
+    for (qsizetype index = 0; index < specs().size(); ++index) {
+        if (specs().at(index).id == contactId)
+            return build(specs().at(index), int(index) + 1);
     }
     return std::nullopt;
+}
+
+QByteArray referenceMedia(const QByteArray &sha256)
+{
+    // Daniel's song is variant 0, the seeded pages' 1 onwards.
+    static const QHash<QByteArray, QByteArray> songs = [] {
+        QHash<QByteArray, QByteArray> byHash;
+        for (int variant = 0; variant <= int(specs().size()); ++variant) {
+            const QByteArray song = silentSong(variant);
+            byHash.insert(pageMediaHash(song), song);
+        }
+        return byHash;
+    }();
+    return songs.value(sha256);
 }
 
 QString contactForPreset(Profile::Preset preset)
@@ -349,7 +397,7 @@ QString contactForPreset(Profile::Preset preset)
 
 Profile::Page ownReferencePage()
 {
-    return build(danielSpec());
+    return build(danielSpec(), 0);
 }
 
 } // namespace OpenChat::ProfileReferencePages

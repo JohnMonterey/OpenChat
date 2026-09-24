@@ -1108,8 +1108,12 @@ QByteArray ProfileController::blob(const MediaSource &source, const QByteArray &
 {
     if (sha256.size() != 32)
         return {};
-    if (!m_live)
-        return source.owner == MediaSource::Owner::None ? QByteArray() : m_mockMedia.value(sha256);
+    if (!m_live) {
+        if (source.owner == MediaSource::Owner::None)
+            return {};
+        const QByteArray added = m_mockMedia.value(sha256);
+        return added.isEmpty() ? ProfileReferencePages::referenceMedia(sha256) : added;
+    }
     if (!m_sync)
         return {};
     switch (source.owner) {

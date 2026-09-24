@@ -48,13 +48,15 @@ Item {
         return null;
     }
     // The page and the editor may be created in either order when editing
-    // begins, so the editor is looked for again once both exist.
+    // begins, so the editor is looked for until it is there.
     function resolve() {
         if (!page)
             page = findAncestor("profilePage");
         if (!editor)
             editor = findDescendant(page, "profileEditor");
     }
+    // Leaves through the editor, which asks first about unsaved changes.
+    // (Without one the draft is kept anyway: it is autosaved.)
     function leave(proceed) {
         if (editor)
             editor.requestLeave(proceed);
@@ -66,10 +68,17 @@ Item {
     }
 
     height: 48
-    Component.onCompleted: {
-        resolve();
-        if (!editor)
-            Qt.callLater(resolve);
+    Component.onCompleted: resolve()
+
+    Timer {
+        property int attempts: 0
+        interval: 50
+        repeat: true
+        running: bar.editor === null && attempts < 40
+        onTriggered: {
+            ++attempts;
+            bar.resolve();
+        }
     }
 
     // The editor learns about the bar (for F6) and its popups (for popupOpen).
@@ -106,7 +115,11 @@ Item {
         glyphSize: 14
         label: bar.profiles ? bar.profiles.backLabel : "Profile"
         Accessible.name: "Back to your profile"
-        onClicked: bar.leave(() => bar.profiles.endEditing())
+        onClicked: {
+            // The controller outlives the bar, which goes when editing ends.
+            const profiles = bar.profiles;
+            bar.leave(() => profiles.endEditing());
+        }
         Keys.onPressed: event => {
             if (event.key === Qt.Key_Menu || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
                 bar.openHistory();
@@ -136,7 +149,8 @@ Item {
                 text: modelData.name
                 onTriggered: {
                     const index = modelData.index;
-                    bar.leave(() => bar.profiles.popTo(index));
+                    const profiles = bar.profiles;
+                    bar.leave(() => profiles.popTo(index));
                 }
             }
             onObjectAdded: (index, object) => historyMenu.insertItem(index, object)

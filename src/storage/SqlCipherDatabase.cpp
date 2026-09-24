@@ -286,12 +286,13 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
 
   // Every pending migration runs in this one transaction with foreign_keys=ON
   // (configure() set it, and a migration cannot switch it off: the pragma is a
-  // no-op inside a transaction). So a migration that rebuilds a table the way 005 rebuilt outbox (CREATE, copy,
-  // DROP, RENAME) makes the DROP delete every row first and fire each ON
-  // DELETE CASCADE that points at it. That is why no table added by 016 has a
-  // foreign key to contacts: a future rebuild of contacts would otherwise wipe
-  // every stored profile page without a trace. Before rebuilding a table that
-  // others reference, check PRAGMA foreign_key_list of every table.
+  // no-op inside a transaction). So a migration that rebuilds a table the way
+  // 005 rebuilt outbox (CREATE, copy, DROP, RENAME) makes the DROP delete every
+  // row first and fire each ON DELETE CASCADE that points at it. That is why
+  // no table added by 016 has a foreign key to contacts: a future rebuild of
+  // contacts would otherwise wipe every stored profile page without a trace.
+  // Before rebuilding a table that others reference, check PRAGMA
+  // foreign_key_list of every table.
   if (!execute("BEGIN IMMEDIATE;").hasValue())
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
   for (const auto &migration : migrations) {

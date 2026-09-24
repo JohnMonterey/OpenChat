@@ -30,13 +30,11 @@ SecureBuffer databaseKey()
     return SecureBuffer::fromBytes(QByteArrayView(databaseKeyText));
 }
 
-const QStringList pageTables{QStringLiteral("profile_media"),
-                             QStringLiteral("local_profile_page"),
-                             QStringLiteral("contact_pages"),
-                             QStringLiteral("contact_page_media"),
-                             QStringLiteral("page_deliveries"),
-                             QStringLiteral("page_delivery_media"),
-                             QStringLiteral("page_requests")};
+const QStringList pageTables{
+    QStringLiteral("profile_media"),   QStringLiteral("local_profile_page"),
+    QStringLiteral("contact_pages"),   QStringLiteral("contact_page_media"),
+    QStringLiteral("page_deliveries"), QStringLiteral("page_delivery_media"),
+    QStringLiteral("page_requests")};
 
 constexpr int backgroundKind = 1;
 constexpr int songKind = 2;
@@ -47,6 +45,20 @@ QByteArray sha256(QByteArrayView data)
 {
     return QCryptographicHash::hash(data, QCryptographicHash::Sha256);
 }
+
+// The code of a call that failed, or none when it succeeded: comparing this
+// keeps a wrongly accepted call a test failure rather than a throw from
+// Result::error().
+template<typename T>
+std::optional<RepositoryErrorCode> errorCode(const Result<T, RepositoryError> &result)
+{
+    if (result.hasValue())
+        return std::nullopt;
+    return result.error().code;
+}
+
+const std::optional<RepositoryErrorCode> invalidInput = RepositoryErrorCode::InvalidInput;
+const std::optional<RepositoryErrorCode> conflict = RepositoryErrorCode::Conflict;
 
 struct Blob final {
     QByteArray data;
@@ -131,7 +143,7 @@ public:
     {
         return integer("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '"
                        + table.toLatin1() + "'")
-               == 1;
+            == 1;
     }
 
 private:
@@ -159,7 +171,7 @@ bool createAtVersion(const QString &path, int version)
         ++applied;
     }
     return applied == version && raw.exec("COMMIT;")
-           && raw.integer("PRAGMA user_version") == version;
+        && raw.integer("PRAGMA user_version") == version;
 }
 
 bool insertLocalProfile(const RawDatabase &raw, const ProfileId &profileId)
@@ -171,7 +183,7 @@ bool insertLocalProfile(const RawDatabase &raw, const ProfileId &profileId)
         "VALUES(?1, randomblob(16), randomblob(32), randomblob(12), randomblob(32), "
         "randomblob(16), 1000, 'Ada')");
     return statement.isValid() && statement.bindBlob(1, profileId.bytes())
-           && sqlite3_step(statement.get()) == SQLITE_DONE;
+        && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
 // A conversation with one message, in the columns every schema since 003 has.
@@ -188,10 +200,9 @@ bool insertMessage(const RawDatabase &raw, const ConversationId &conversation,
         "client_created_at_ms, delivery_state, flow, body, sent_at_ms) "
         "VALUES(?1, ?2, randomblob(16), 0, X'6869', 2000, 3, 1, 'hi', 2000)");
     return conversationRow.isValid() && conversationRow.bindBlob(1, conversation.bytes())
-           && sqlite3_step(conversationRow.get()) == SQLITE_DONE && messageRow.isValid()
-           && messageRow.bindBlob(1, message.bytes())
-           && messageRow.bindBlob(2, conversation.bytes())
-           && sqlite3_step(messageRow.get()) == SQLITE_DONE;
+        && sqlite3_step(conversationRow.get()) == SQLITE_DONE && messageRow.isValid()
+        && messageRow.bindBlob(1, message.bytes()) && messageRow.bindBlob(2, conversation.bytes())
+        && sqlite3_step(messageRow.get()) == SQLITE_DONE;
 }
 
 bool insertOutbox(const RawDatabase &raw, const EnvelopeId &envelope, const MessageId &message,
@@ -202,8 +213,8 @@ bool insertOutbox(const RawDatabase &raw, const EnvelopeId &envelope, const Mess
         "INSERT INTO outbox(envelope_id, message_id, ciphertext, attempt_count, "
         "next_attempt_at_ms, state) VALUES(?1, ?2, X'00', 0, 0, ?3)");
     return statement.isValid() && statement.bindBlob(1, envelope.bytes())
-           && statement.bindBlob(2, message.bytes()) && statement.bindInt(3, state)
-           && sqlite3_step(statement.get()) == SQLITE_DONE;
+        && statement.bindBlob(2, message.bytes()) && statement.bindInt(3, state)
+        && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
 // One profile database with its local profile row (which the local page
@@ -257,9 +268,9 @@ public:
     // accepted contact.
     [[nodiscard]] bool addContact(const AccountId &account, ContactState state)
     {
-        const ContactRecord record{account,  QStringLiteral("peer"), QStringLiteral("Peer"),
-                                   state,    std::nullopt,           1'000,
-                                   1'000};
+        ContactRecord record{account, QStringLiteral("peer"), QStringLiteral("Peer"), state};
+        record.createdAtMs = 1'000;
+        record.updatedAtMs = 1'000;
         switch (state) {
         case ContactState::PendingOutgoing:
             return contacts->recordOutgoingRequest(record).hasValue();
@@ -267,11 +278,23 @@ public:
             return contacts->recordIncomingRequest(record).hasValue();
         case ContactState::Accepted:
             return contacts->recordIncomingRequest(record).hasValue()
-                   && contacts->markAccepted(account, ConversationId::generate(), 2'000).hasValue();
+                && contacts->markAccepted(account, ConversationId::generate(), 2'000).hasValue();
         case ContactState::Blocked:
             return contacts->block(account, 2'000).hasValue();
         }
         return false;
+    }
+
+    // `from` sends `media` as `kind`, arriving at `atMs`.
+    [[nodiscard]] bool receive(const AccountId &from, int kind, const Blob &media, qint64 atMs)
+    {
+        return pages->putContactMedia(from, kind, media.hash, media.data, atMs).hasValue();
+    }
+
+    // The editor imports `media` into the draft's `kind` slot at `atMs`.
+    [[nodiscard]] bool importIntoDraft(int kind, const Blob &media, qint64 atMs)
+    {
+        return pages->putLocalDraftMedia(kind, media.hash, media.data, atMs).hasValue();
     }
 
     // How many blobs are stored, whoever references them.
@@ -426,13 +449,15 @@ void ProfilePageStoreTest::migrationFromVersion15AddsPageTablesAndHandle()
         QVERIFY(database.storeProfileHandle(profileId, QStringLiteral("ada")).hasValue());
         QCOMPARE(database.loadProfileHandle(profileId).value(), QStringLiteral("ada"));
         // An unknown profile is NotFound, not a silent success.
-        const auto unknown = database.storeProfileHandle(ProfileId::generate(), QStringLiteral("x.y"));
+        const auto unknown
+            = database.storeProfileHandle(ProfileId::generate(), QStringLiteral("x.y"));
         QVERIFY(!unknown.hasValue());
         QCOMPARE(unknown.error(), StorageError::NotFound);
 
         // The repository works on the migrated file.
         SqlCipherProfilePageRepository pages(database, profileId);
-        QVERIFY(pages.saveDraft(QByteArray("core"), std::nullopt, std::nullopt, QString(), 7).hasValue());
+        QVERIFY(pages.saveDraft(QByteArray("core"), std::nullopt, std::nullopt, QString(), 7)
+                    .hasValue());
         QCOMPARE(pages.localPage().value().draftCore, QByteArray("core"));
     }
 
@@ -454,14 +479,13 @@ void ProfilePageStoreTest::migrationFromVersion15AddsPageTablesAndHandle()
     QCOMPARE(raw.columns(QStringLiteral("contact_page_media")),
              QStringList({"account_id", "sha256", "kind", "received_at_ms"}));
     QCOMPARE(raw.columns(QStringLiteral("page_deliveries")),
-             QStringList({"account_id", "device_id", "sent_revision", "sent_at_ms",
-                          "page_capable", "last_answer_at_ms", "answer_window_start_ms",
-                          "answers_in_window"}));
+             QStringList({"account_id", "device_id", "sent_revision", "sent_at_ms", "page_capable",
+                          "last_answer_at_ms", "answer_window_start_ms", "answers_in_window"}));
     QCOMPARE(raw.columns(QStringLiteral("page_delivery_media")),
              QStringList({"account_id", "sha256", "sent_at_ms"}));
     QCOMPARE(raw.columns(QStringLiteral("page_requests")),
-             QStringList({"account_id", "last_request_at_ms", "unanswered",
-                          "media_requested_revision"}));
+             QStringList(
+                 {"account_id", "last_request_at_ms", "unanswered", "media_requested_revision"}));
 }
 
 void ProfilePageStoreTest::migrationFromVersion13StillWorks()
@@ -488,16 +512,17 @@ void ProfilePageStoreTest::migrationFromVersion13StillWorks()
         auto database = std::move(opened).value();
         QVERIFY(database.loadProfileHandle(profileId).value().isEmpty());
         SqlCipherProfilePageRepository pages(database, profileId);
-        QVERIFY(pages.savePublished(QByteArray("page"), 3, std::nullopt, std::nullopt, 9).hasValue());
+        QVERIFY(
+            pages.savePublished(QByteArray("page"), 3, std::nullopt, std::nullopt, 9).hasValue());
     }
 
     RawDatabase raw(path);
     QVERIFY(raw.isOpen());
     QCOMPARE(raw.integer("PRAGMA user_version"), qint64(16));
     const QStringList messageColumns = raw.columns(QStringLiteral("messages"));
-    QVERIFY(messageColumns.contains(QStringLiteral("locally_read")));    // 014
-    QVERIFY(messageColumns.contains(QStringLiteral("quoted_body")));     // 015
-    for (const QString &table : pageTables)                              // 016
+    QVERIFY(messageColumns.contains(QStringLiteral("locally_read"))); // 014
+    QVERIFY(messageColumns.contains(QStringLiteral("quoted_body"))); // 015
+    for (const QString &table : pageTables) // 016
         QVERIFY2(raw.hasTable(table), qPrintable(table));
     // The old history survived every step and reads as already read.
     QCOMPARE(raw.integer("SELECT count(*) FROM messages"), qint64(1));
@@ -557,7 +582,7 @@ void ProfilePageStoreTest::pageTablesHaveNoForeignKeyToContacts()
     const Blob picture = blob('a');
     QVERIFY(store.addContact(alice, ContactState::Accepted));
     QVERIFY(store.pages->storeContactPage(contactPage(alice, 1, "core", picture.hash)).value());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, picture.hash, picture.data, 10).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, picture, 10));
     QVERIFY(store.pages->saveDelivery(PageDelivery{alice}).hasValue());
     QVERIFY(store.pages->recordMediaSent(alice, picture.hash, 11).hasValue());
     QVERIFY(store.pages->saveRequestState(PageRequestState{alice}).hasValue());
@@ -566,7 +591,8 @@ void ProfilePageStoreTest::pageTablesHaveNoForeignKeyToContacts()
     RawDatabase raw(store.path());
     QVERIFY(raw.isOpen());
     for (const QString &table : pageTables)
-        QVERIFY2(!raw.foreignKeyTargets(table).contains(QStringLiteral("contacts")), qPrintable(table));
+        QVERIFY2(!raw.foreignKeyTargets(table).contains(QStringLiteral("contacts")),
+                 qPrintable(table));
     // The pragma really reports foreign keys: the local page's one is there.
     QCOMPARE(raw.foreignKeyTargets(QStringLiteral("local_profile_page")),
              QStringList({QStringLiteral("local_profiles")}));
@@ -641,11 +667,11 @@ void ProfilePageStoreTest::setHandleRejectsNonCanonical()
     auto session = std::move(created).value();
     QVERIFY(session->setHandle(QStringLiteral("ada")).hasValue());
 
-    const QStringList rejected{QStringLiteral("Ada"),       QStringLiteral("@ada"),
-                               QStringLiteral(" ada"),      QStringLiteral("ada "),
-                               QStringLiteral("ad"),        QString(),
+    const QStringList rejected{QStringLiteral("Ada"),          QStringLiteral("@ada"),
+                               QStringLiteral(" ada"),         QStringLiteral("ada "),
+                               QStringLiteral("ad"),           QString(),
                                QStringLiteral("ada lovelace"), QStringLiteral("-ada"),
-                               QStringLiteral("äda"),  QString(33, QLatin1Char('a'))};
+                               QStringLiteral("äda"),          QString(33, QLatin1Char('a'))};
     for (const QString &handle : rejected) {
         const auto result = session->setHandle(handle);
         QVERIFY2(!result.hasValue(), qPrintable(handle));
@@ -653,7 +679,9 @@ void ProfilePageStoreTest::setHandleRejectsNonCanonical()
         QCOMPARE(session->handle(), QStringLiteral("ada"));
     }
     session->lock();
-    QCOMPARE(session->setHandle(QStringLiteral("bob")).error(), ProfileSessionError::NotUnlocked);
+    const auto locked = session->setHandle(QStringLiteral("bob"));
+    QVERIFY(!locked.hasValue());
+    QCOMPARE(locked.error(), ProfileSessionError::NotUnlocked);
 
     auto unlocked = ProfileSession::unlock(profileId, vault, paths);
     QVERIFY(unlocked.hasValue());
@@ -666,8 +694,12 @@ void ProfilePageStoreTest::draftAndPublishedRoundTrip()
     QVERIFY(store.open());
     const QByteArray backgroundHash = blob('b').hash;
     const QByteArray songHash = blob('s').hash;
-    const QString songSource = QStringLiteral(
-        R"({"path":"/home/ada/Music/tüne.wav","startMs":12000,"lengthMs":45000})");
+    // Cores are opaque bytes to the store; these start like real page messages.
+    const QByteArray publishedCore = QByteArray::fromHex("ff01") + "published";
+    const QByteArray draftCore = QByteArray::fromHex("ff02") + "draft";
+    const qint64 revision = 1'700'000'000'000;
+    const QString songSource
+        = QStringLiteral(R"({"path":"/home/ada/Music/tüne.wav","startMs":12000,"lengthMs":45000})");
 
     // Nothing stored yet reads as the defaults.
     auto fresh = store.pages->localPage();
@@ -682,23 +714,21 @@ void ProfilePageStoreTest::draftAndPublishedRoundTrip()
     QCOMPARE(fresh.value().publishedAtMs, qint64(0));
     QVERIFY(store.pages->clearDraft().hasValue()); // harmless without a row
 
-    QVERIFY(store.pages->savePublished(QByteArray("\xFF\x01published", 11), 1'700'000'000'000,
-                                       backgroundHash, songHash, 6'000)
+    QVERIFY(store.pages->savePublished(publishedCore, revision, backgroundHash, songHash, 6'000)
                 .hasValue());
-    QVERIFY(store.pages->saveDraft(QByteArray("\xFF\x02" "draft", 7), backgroundHash, songHash,
-                                   songSource, 5'000)
-                .hasValue());
+    QVERIFY(
+        store.pages->saveDraft(draftCore, backgroundHash, songHash, songSource, 5'000).hasValue());
 
     QVERIFY(store.reopen());
     auto page = store.pages->localPage();
     QVERIFY(page.hasValue());
-    QCOMPARE(page.value().draftCore, QByteArray("\xFF\x02" "draft", 7));
+    QCOMPARE(page.value().draftCore, draftCore);
     QCOMPARE(page.value().draftBackground, std::optional<QByteArray>(backgroundHash));
     QCOMPARE(page.value().draftSong, std::optional<QByteArray>(songHash));
     QCOMPARE(page.value().draftSongSource, songSource);
     QCOMPARE(page.value().draftUpdatedAtMs, qint64(5'000));
-    QCOMPARE(page.value().publishedCore, QByteArray("\xFF\x01published", 11));
-    QCOMPARE(page.value().publishedRevision, qint64(1'700'000'000'000));
+    QCOMPARE(page.value().publishedCore, publishedCore);
+    QCOMPARE(page.value().publishedRevision, revision);
     QCOMPARE(page.value().publishedBackground, std::optional<QByteArray>(backgroundHash));
     QCOMPARE(page.value().publishedSong, std::optional<QByteArray>(songHash));
     QCOMPARE(page.value().publishedAtMs, qint64(6'000));
@@ -713,23 +743,23 @@ void ProfilePageStoreTest::draftAndPublishedRoundTrip()
     QCOMPARE(page.value().draftSong, std::optional<QByteArray>(songHash));
     QVERIFY(page.value().draftSongSource.isEmpty());
     QCOMPARE(page.value().draftUpdatedAtMs, qint64(8'000));
-    QCOMPARE(page.value().publishedCore, QByteArray("\xFF\x01published", 11));
+    QCOMPARE(page.value().publishedCore, publishedCore);
 
     QVERIFY(store.pages->clearDraft().hasValue());
     page = store.pages->localPage();
     QVERIFY(page.value().draftCore.isEmpty());
     QVERIFY(!page.value().draftSong);
     QCOMPARE(page.value().draftUpdatedAtMs, qint64(0));
-    QCOMPARE(page.value().publishedRevision, qint64(1'700'000'000'000));
+    QCOMPARE(page.value().publishedRevision, revision);
     QCOMPARE(page.value().publishedSong, std::optional<QByteArray>(songHash));
 
     // Malformed input is refused and changes nothing.
-    QCOMPARE(store.pages->saveDraft(QByteArray(), std::nullopt, std::nullopt, QString(), 9)
-                 .error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->saveDraft("x", QByteArray(31, 'h'), std::nullopt, QString(), 9)
-                 .error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(
+        errorCode(store.pages->saveDraft(QByteArray(), std::nullopt, std::nullopt, QString(), 9)),
+        invalidInput);
+    QCOMPARE(
+        errorCode(store.pages->saveDraft("x", QByteArray(31, 'h'), std::nullopt, QString(), 9)),
+        invalidInput);
     QVERIFY(store.pages->localPage().value().draftCore.isEmpty());
 }
 
@@ -738,8 +768,9 @@ void ProfilePageStoreTest::savePublishedClearsDraft()
     PageStore store;
     QVERIFY(store.open());
     const QByteArray songHash = blob('s').hash;
-    QVERIFY(store.pages->saveDraft("draft", blob('b').hash, songHash,
-                                   QStringLiteral(R"({"path":"a.wav"})"), 1'000)
+    QVERIFY(store.pages
+                ->saveDraft("draft", blob('b').hash, songHash,
+                            QStringLiteral(R"({"path":"a.wav"})"), 1'000)
                 .hasValue());
     QVERIFY(store.pages->savePublished("page 7", 7, std::nullopt, songHash, 2'000).hasValue());
 
@@ -756,14 +787,16 @@ void ProfilePageStoreTest::savePublishedClearsDraft()
 
     // A publish that is refused (not a newer revision) leaves both the
     // published page and the new draft exactly as they were.
-    QVERIFY(store.pages->saveDraft("draft 2", std::nullopt, std::nullopt, QString(), 3'000).hasValue());
+    QVERIFY(
+        store.pages->saveDraft("draft 2", std::nullopt, std::nullopt, QString(), 3'000).hasValue());
     for (const qint64 stale : {qint64(7), qint64(6)}) {
-        const auto refused = store.pages->savePublished("stale", stale, std::nullopt, std::nullopt, 4'000);
+        const auto refused
+            = store.pages->savePublished("stale", stale, std::nullopt, std::nullopt, 4'000);
         QVERIFY(!refused.hasValue());
-        QCOMPARE(refused.error().code, RepositoryErrorCode::Conflict);
+        QCOMPARE(errorCode(refused), conflict);
     }
-    QCOMPARE(store.pages->savePublished("zero", 0, std::nullopt, std::nullopt, 4'000).error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(errorCode(store.pages->savePublished("zero", 0, std::nullopt, std::nullopt, 4'000)),
+             invalidInput);
     page = store.pages->localPage().value();
     QCOMPARE(page.draftCore, QByteArray("draft 2"));
     QCOMPARE(page.publishedCore, QByteArray("page 7"));
@@ -784,11 +817,9 @@ void ProfilePageStoreTest::localDraftMediaIsReferencedAtOnce()
     const Blob background = blob('b', 50'000);
     const Blob song = blob('s', 70'000);
 
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, replaced.hash, replaced.data, 1'000)
-                .hasValue());
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, background.hash, background.data, 1'000)
-                .hasValue());
-    QVERIFY(store.pages->putLocalDraftMedia(songKind, song.hash, song.data, 1'000).hasValue());
+    QVERIFY(store.importIntoDraft(backgroundKind, replaced, 1'000));
+    QVERIFY(store.importIntoDraft(backgroundKind, background, 1'000));
+    QVERIFY(store.importIntoDraft(songKind, song, 1'000));
 
     // Every slot points at its blob although no draft core was saved yet.
     auto page = store.pages->localPage().value();
@@ -801,14 +832,16 @@ void ProfilePageStoreTest::localDraftMediaIsReferencedAtOnce()
     const auto collected = store.pages->collectGarbage(never, never);
     QVERIFY(collected.hasValue());
     QCOMPARE(collected.value(), 1);
-    QCOMPARE(store.pages->localMedia(background.hash).value(), std::optional<QByteArray>(background.data));
+    QCOMPARE(store.pages->localMedia(background.hash).value(),
+             std::optional<QByteArray>(background.data));
     QCOMPARE(store.pages->localMedia(song.hash).value(), std::optional<QByteArray>(song.data));
     QVERIFY(!store.pages->localMedia(replaced.hash).value());
     QCOMPARE(store.blobCount(), qint64(2));
 
     // Saving the draft keeps the refs it names; the store never had a copy
     // of the replaced blob to hand out again.
-    QVERIFY(store.pages->saveDraft("draft", background.hash, song.hash, QString(), 2'000).hasValue());
+    QVERIFY(
+        store.pages->saveDraft("draft", background.hash, song.hash, QString(), 2'000).hasValue());
     QCOMPARE(store.pages->collectGarbage(never, never).value(), 0);
     QCOMPARE(store.blobCount(), qint64(2));
 }
@@ -820,11 +853,11 @@ void ProfilePageStoreTest::localDraftMediaIsAllOrNothing()
     const Blob picture = blob('p');
 
     // Malformed input never reaches the database.
-    QCOMPARE(store.pages->putLocalDraftMedia(3, picture.hash, picture.data, 1).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->putLocalDraftMedia(backgroundKind, blob('q').hash, picture.data, 1)
-                 .error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(errorCode(store.pages->putLocalDraftMedia(3, picture.hash, picture.data, 1)),
+             invalidInput);
+    QCOMPARE(
+        errorCode(store.pages->putLocalDraftMedia(backgroundKind, blob('q').hash, picture.data, 1)),
+        invalidInput);
     QCOMPARE(store.blobCount(), qint64(0));
 
     // A page store for a profile with no local row cannot point a slot at the
@@ -833,12 +866,12 @@ void ProfilePageStoreTest::localDraftMediaIsAllOrNothing()
     SqlCipherProfilePageRepository orphan(store.database(), ProfileId::generate());
     const auto failed = orphan.putLocalDraftMedia(backgroundKind, picture.hash, picture.data, 1);
     QVERIFY(!failed.hasValue());
-    QCOMPARE(failed.error().code, RepositoryErrorCode::Conflict);
+    QCOMPARE(errorCode(failed), conflict);
     QCOMPARE(store.blobCount(), qint64(0));
 
     // The same blob for the real profile goes in, and the repository is not
     // stuck in a half-open transaction.
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, picture.hash, picture.data, 1).hasValue());
+    QVERIFY(store.importIntoDraft(backgroundKind, picture, 1));
     QCOMPARE(store.blobCount(), qint64(1));
 }
 
@@ -850,10 +883,10 @@ void ProfilePageStoreTest::mediaIsStoredOnceByHash()
     const auto bob = AccountId::generate();
     const Blob picture = blob('p', 20'000);
 
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, picture.hash, picture.data, 1'000).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, picture.hash, picture.data, 2'000).hasValue());
-    QVERIFY(store.pages->putContactMedia(bob, backgroundKind, picture.hash, picture.data, 3'000).hasValue());
-    QVERIFY(store.pages->putContactMedia(bob, backgroundKind, picture.hash, picture.data, 4'000).hasValue());
+    QVERIFY(store.importIntoDraft(backgroundKind, picture, 1'000));
+    QVERIFY(store.receive(alice, backgroundKind, picture, 2'000));
+    QVERIFY(store.receive(bob, backgroundKind, picture, 3'000));
+    QVERIFY(store.receive(bob, backgroundKind, picture, 4'000));
 
     QCOMPARE(store.blobCount(), qint64(1));
     {
@@ -862,7 +895,8 @@ void ProfilePageStoreTest::mediaIsStoredOnceByHash()
         // The first copy stays; later ones only add their sender's record.
         QCOMPARE(raw.integer("SELECT created_at_ms FROM profile_media"), qint64(1'000));
     }
-    QCOMPARE(store.pages->localMedia(picture.hash).value(), std::optional<QByteArray>(picture.data));
+    QCOMPARE(store.pages->localMedia(picture.hash).value(),
+             std::optional<QByteArray>(picture.data));
     QCOMPARE(store.pages->contactMedia(alice, picture.hash, backgroundKind).value(),
              std::optional<QByteArray>(picture.data));
     QCOMPARE(store.pages->contactMedia(bob, picture.hash, backgroundKind).value(),
@@ -872,10 +906,11 @@ void ProfilePageStoreTest::mediaIsStoredOnceByHash()
     // are refused, so they can never stand in for the real blob.
     const Blob real = blob('r');
     const QByteArray forged(1'000, 'f');
-    QCOMPARE(store.pages->putContactMedia(alice, backgroundKind, real.hash, forged, 5'000).error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(
+        errorCode(store.pages->putContactMedia(alice, backgroundKind, real.hash, forged, 5'000)),
+        invalidInput);
     QVERIFY(!store.pages->hasContactMedia(alice, real.hash, backgroundKind).value());
-    QVERIFY(store.pages->putContactMedia(bob, backgroundKind, real.hash, real.data, 6'000).hasValue());
+    QVERIFY(store.receive(bob, backgroundKind, real, 6'000));
     QCOMPARE(store.pages->contactMedia(bob, real.hash, backgroundKind).value(),
              std::optional<QByteArray>(real.data));
 }
@@ -888,7 +923,7 @@ void ProfilePageStoreTest::contactMediaIsScopedByOwnerAndKind()
     const auto bob = AccountId::generate();
     const Blob picture = blob('p');
 
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, picture.hash, picture.data, 1'000).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, picture, 1'000));
 
     QCOMPARE(store.pages->contactMedia(alice, picture.hash, backgroundKind).value(),
              std::optional<QByteArray>(picture.data));
@@ -903,15 +938,14 @@ void ProfilePageStoreTest::contactMediaIsScopedByOwnerAndKind()
     QVERIFY(!store.pages->localMedia(picture.hash).value());
 
     // Once Bob sends it himself, it is his too.
-    QVERIFY(store.pages->putContactMedia(bob, backgroundKind, picture.hash, picture.data, 2'000).hasValue());
+    QVERIFY(store.receive(bob, backgroundKind, picture, 2'000));
     QVERIFY(store.pages->hasContactMedia(bob, picture.hash, backgroundKind).value());
 
-    QCOMPARE(store.pages->contactMedia(alice, QByteArray(31, 'h'), backgroundKind).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->hasContactMedia(alice, picture.hash, 0).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->putContactMedia(alice, 3, picture.hash, picture.data, 1).error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(errorCode(store.pages->contactMedia(alice, QByteArray(31, 'h'), backgroundKind)),
+             invalidInput);
+    QCOMPARE(errorCode(store.pages->hasContactMedia(alice, picture.hash, 0)), invalidInput);
+    QCOMPARE(errorCode(store.pages->putContactMedia(alice, 3, picture.hash, picture.data, 1)),
+             invalidInput);
 }
 
 void ProfilePageStoreTest::pendingContactMediaCountsOnlyUnnamedRows()
@@ -926,22 +960,24 @@ void ProfilePageStoreTest::pendingContactMediaCountsOnlyUnnamedRows()
 
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 0);
     // Media that overtook its core is all pending.
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, background.hash, background.data, 1).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, songKind, song.hash, song.data, 2).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, stray.hash, stray.data, 3).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, background, 1));
+    QVERIFY(store.receive(alice, songKind, song, 2));
+    QVERIFY(store.receive(alice, backgroundKind, stray, 3));
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 3);
 
     // The core adopts the two it names.
-    QVERIFY(store.pages->storeContactPage(contactPage(alice, 1, "core", background.hash, song.hash)).value());
+    QVERIFY(store.pages->storeContactPage(contactPage(alice, 1, "core", background.hash, song.hash))
+                .value());
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
 
     // Bob's rows are his own count, even for a blob Alice's core names.
-    QVERIFY(store.pages->putContactMedia(bob, backgroundKind, background.hash, background.data, 4).hasValue());
+    QVERIFY(store.receive(bob, backgroundKind, background, 4));
     QCOMPARE(store.pages->pendingContactMediaCount(bob).value(), 1);
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
 
     // A core that names a different picture turns the old one pending.
-    QVERIFY(store.pages->storeContactPage(contactPage(alice, 2, "core 2", stray.hash, song.hash)).value());
+    QVERIFY(store.pages->storeContactPage(contactPage(alice, 2, "core 2", stray.hash, song.hash))
+                .value());
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
     QVERIFY(store.pages->storeContactPage(contactPage(alice, 3, "core 3")).value());
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 3);
@@ -956,7 +992,8 @@ void ProfilePageStoreTest::contactPageStoresOnlyNewerRevisions()
     const QByteArray song = blob('s').hash;
 
     QVERIFY(!store.pages->contactPage(alice).value());
-    auto stored = store.pages->storeContactPage(contactPage(alice, 5, "core 5", background, song, 1'000));
+    auto stored
+        = store.pages->storeContactPage(contactPage(alice, 5, "core 5", background, song, 1'000));
     QVERIFY(stored.hasValue());
     QVERIFY(stored.value());
     QVERIFY(store.pages->markViewed(alice, 1'500).hasValue());
@@ -973,8 +1010,8 @@ void ProfilePageStoreTest::contactPageStoresOnlyNewerRevisions()
 
     // The same revision again, or an older one, stores nothing.
     for (const qint64 revision : {qint64(5), qint64(4), qint64(0)}) {
-        stored = store.pages->storeContactPage(contactPage(alice, revision, "replay", std::nullopt,
-                                                           std::nullopt, 2'000));
+        stored = store.pages->storeContactPage(
+            contactPage(alice, revision, "replay", std::nullopt, std::nullopt, 2'000));
         QVERIFY(stored.hasValue());
         QVERIFY(!stored.value());
     }
@@ -984,7 +1021,8 @@ void ProfilePageStoreTest::contactPageStoresOnlyNewerRevisions()
     QCOMPARE(page->receivedAtMs, qint64(1'000));
 
     // A newer one replaces the page but not when it was last viewed.
-    stored = store.pages->storeContactPage(contactPage(alice, 6, "core 6", std::nullopt, song, 3'000));
+    stored
+        = store.pages->storeContactPage(contactPage(alice, 6, "core 6", std::nullopt, song, 3'000));
     QVERIFY(stored.value());
     page = store.pages->contactPage(alice).value();
     QCOMPARE(page->revision, qint64(6));
@@ -1003,12 +1041,12 @@ void ProfilePageStoreTest::contactPageStoresOnlyNewerRevisions()
     QVERIFY(store.pages->markViewed(carol, 9).hasValue());
     QVERIFY(!store.pages->contactPage(carol).value());
 
-    QCOMPARE(store.pages->storeContactPage(contactPage(carol, -1, "x")).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->storeContactPage(contactPage(carol, 1, QByteArray())).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->storeContactPage(contactPage(carol, 1, "x", QByteArray(33, 'h'))).error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(errorCode(store.pages->storeContactPage(contactPage(carol, -1, "x"))), invalidInput);
+    QCOMPARE(errorCode(store.pages->storeContactPage(contactPage(carol, 1, QByteArray()))),
+             invalidInput);
+    QCOMPARE(
+        errorCode(store.pages->storeContactPage(contactPage(carol, 1, "x", QByteArray(33, 'h')))),
+        invalidInput);
 }
 
 void ProfilePageStoreTest::garbageCollectionKeepsEveryReferencedBlob()
@@ -1029,29 +1067,24 @@ void ProfilePageStoreTest::garbageCollectionKeepsEveryReferencedBlob()
     const Blob freshUnreferenced = blob('f');
 
     // Old blobs (t = 1 000) the page still names, and one it stopped naming.
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, publishedBackground.hash,
-                                            publishedBackground.data, 1'000).hasValue());
-    QVERIFY(store.pages->putLocalDraftMedia(songKind, publishedSong.hash, publishedSong.data, 1'000)
-                .hasValue());
-    QVERIFY(store.pages->savePublished("page", 1, publishedBackground.hash, publishedSong.hash, 1'000)
-                .hasValue());
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, oldUnreferenced.hash,
-                                            oldUnreferenced.data, 1'000).hasValue());
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, draftBackground.hash,
-                                            draftBackground.data, 1'000).hasValue());
+    QVERIFY(store.importIntoDraft(backgroundKind, publishedBackground, 1'000));
+    QVERIFY(store.importIntoDraft(songKind, publishedSong, 1'000));
+    QVERIFY(
+        store.pages->savePublished("page", 1, publishedBackground.hash, publishedSong.hash, 1'000)
+            .hasValue());
+    QVERIFY(store.importIntoDraft(backgroundKind, oldUnreferenced, 1'000));
+    QVERIFY(store.importIntoDraft(backgroundKind, draftBackground, 1'000));
     // A fresh song encode (t = 99 000) that a newer one already replaced.
-    QVERIFY(store.pages->putLocalDraftMedia(songKind, freshUnreferenced.hash,
-                                            freshUnreferenced.data, 99'000).hasValue());
-    QVERIFY(store.pages->putLocalDraftMedia(songKind, draftSong.hash, draftSong.data, 99'000).hasValue());
+    QVERIFY(store.importIntoDraft(songKind, freshUnreferenced, 99'000));
+    QVERIFY(store.importIntoDraft(songKind, draftSong, 99'000));
     // Alice's page and its media, and a recent pending blob of hers.
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, contactBackground.hash,
-                                         contactBackground.data, 1'000).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, songKind, contactSong.hash, contactSong.data, 1'000)
-                .hasValue());
-    QVERIFY(store.pages->storeContactPage(contactPage(alice, 3, "core", contactBackground.hash,
-                                                      contactSong.hash, 1'000)).value());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, contactPending.hash,
-                                         contactPending.data, 99'000).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, contactBackground, 1'000));
+    QVERIFY(store.receive(alice, songKind, contactSong, 1'000));
+    QVERIFY(store.pages
+                ->storeContactPage(
+                    contactPage(alice, 3, "core", contactBackground.hash, contactSong.hash, 1'000))
+                .value());
+    QVERIFY(store.receive(alice, backgroundKind, contactPending, 99'000));
     QCOMPARE(store.blobCount(), qint64(9));
 
     // now = 100 000; a day's pending time-to-live and a ten-minute grace.
@@ -1062,7 +1095,8 @@ void ProfilePageStoreTest::garbageCollectionKeepsEveryReferencedBlob()
     QCOMPARE(store.blobCount(), qint64(8));
     QVERIFY(!store.pages->localMedia(oldUnreferenced.hash).value());
     for (const Blob *local : {&publishedBackground, &publishedSong, &draftBackground, &draftSong})
-        QCOMPARE(store.pages->localMedia(local->hash).value(), std::optional<QByteArray>(local->data));
+        QCOMPARE(store.pages->localMedia(local->hash).value(),
+                 std::optional<QByteArray>(local->data));
     QVERIFY(store.pages->hasContactMedia(alice, contactBackground.hash, backgroundKind).value());
     QVERIFY(store.pages->hasContactMedia(alice, contactSong.hash, songKind).value());
     QVERIFY(store.pages->hasContactMedia(alice, contactPending.hash, backgroundKind).value());
@@ -1074,6 +1108,19 @@ void ProfilePageStoreTest::garbageCollectionKeepsEveryReferencedBlob()
     QCOMPARE(store.pages->collectGarbage(now - 86'400'000, never).value(), 0);
     QVERIFY(store.pages->hasContactMedia(alice, contactPending.hash, backgroundKind).value());
     QVERIFY(store.pages->contactPage(alice).value());
+
+    // Publishing the draft empties every draft slot (NULLs in the reference
+    // set must not shield anything) and frees the previous page's blobs.
+    QVERIFY(store.pages->savePublished("page 2", 2, draftBackground.hash, draftSong.hash, now)
+                .hasValue());
+    QCOMPARE(store.pages->collectGarbage(now - 86'400'000, never).value(), 2);
+    QVERIFY(!store.pages->localMedia(publishedBackground.hash).value());
+    QVERIFY(!store.pages->localMedia(publishedSong.hash).value());
+    QCOMPARE(store.pages->localMedia(draftBackground.hash).value(),
+             std::optional<QByteArray>(draftBackground.data));
+    QCOMPARE(store.pages->localMedia(draftSong.hash).value(),
+             std::optional<QByteArray>(draftSong.data));
+    QCOMPARE(store.blobCount(), qint64(5));
 }
 
 void ProfilePageStoreTest::collectionDropsRowsOfNonContacts()
@@ -1096,7 +1143,7 @@ void ProfilePageStoreTest::collectionDropsRowsOfNonContacts()
     for (const AccountId &account : everyone) {
         const Blob own = blob(fill++);
         blobs.insert(account, own);
-        QVERIFY(store.pages->putContactMedia(account, backgroundKind, own.hash, own.data, 1'000).hasValue());
+        QVERIFY(store.receive(account, backgroundKind, own, 1'000));
         QVERIFY(store.pages->storeContactPage(contactPage(account, 2, "core", own.hash)).value());
         PageDelivery delivery{account};
         delivery.sentRevision = 9;
@@ -1112,18 +1159,18 @@ void ProfilePageStoreTest::collectionDropsRowsOfNonContacts()
     const auto keeps = [&](const AccountId &account) {
         const Blob &own = blobs.value(account);
         return store.pages->contactPage(account).value().has_value()
-               && store.pages->hasContactMedia(account, own.hash, backgroundKind).value()
-               && store.pages->delivery(account).value().sentRevision == 9
-               && store.pages->mediaSentAt(account, own.hash).value().has_value()
-               && store.pages->requestState(account).value().unanswered == 3;
+            && store.pages->hasContactMedia(account, own.hash, backgroundKind).value()
+            && store.pages->delivery(account).value().sentRevision == 9
+            && store.pages->mediaSentAt(account, own.hash).value().has_value()
+            && store.pages->requestState(account).value().unanswered == 3;
     };
     const auto forgot = [&](const AccountId &account) {
         const Blob &own = blobs.value(account);
         return !store.pages->contactPage(account).value().has_value()
-               && !store.pages->hasContactMedia(account, own.hash, backgroundKind).value()
-               && store.pages->delivery(account).value().sentRevision == -1
-               && !store.pages->mediaSentAt(account, own.hash).value().has_value()
-               && store.pages->requestState(account).value().unanswered == 0;
+            && !store.pages->hasContactMedia(account, own.hash, backgroundKind).value()
+            && store.pages->delivery(account).value().sentRevision == -1
+            && !store.pages->mediaSentAt(account, own.hash).value().has_value()
+            && store.pages->requestState(account).value().unanswered == 0;
     };
     QVERIFY(keeps(accepted));
     QVERIFY(forgot(incoming));
@@ -1152,9 +1199,9 @@ void ProfilePageStoreTest::pendingMediaExpires()
     const Blob stale = blob('s');
     const Blob recent = blob('r');
 
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, named.hash, named.data, 1'000).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, songKind, stale.hash, stale.data, 1'000).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, recent.hash, recent.data, 50'000).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, named, 1'000));
+    QVERIFY(store.receive(alice, songKind, stale, 1'000));
+    QVERIFY(store.receive(alice, backgroundKind, recent, 50'000));
     QVERIFY(store.pages->storeContactPage(contactPage(alice, 1, "core", named.hash)).value());
 
     // TTL cut-off at 10 000: the old pending row goes (and its blob, which
@@ -1169,7 +1216,7 @@ void ProfilePageStoreTest::pendingMediaExpires()
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
 
     // Sending a pending blob again starts its time-to-live over.
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, recent.hash, recent.data, 90'000).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, recent, 90'000));
     QCOMPARE(store.pages->collectGarbage(60'000, never).value(), 0);
     QVERIFY(store.pages->hasContactMedia(alice, recent.hash, backgroundKind).value());
 
@@ -1274,11 +1321,9 @@ void ProfilePageStoreTest::forgetSentMediaForOneAccountAndExcept()
     QCOMPARE(store.pages->mediaSentAt(bob, third).value(), std::optional<qint64>(400));
 
     // A malformed hash is refused before anything is deleted.
-    QCOMPARE(store.pages->forgetSentMediaExcept({QByteArray()}).error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(errorCode(store.pages->forgetSentMediaExcept({QByteArray()})), invalidInput);
     QCOMPARE(store.pages->mediaSentAt(bob, third).value(), std::optional<qint64>(400));
-    QCOMPARE(store.pages->recordMediaSent(bob, QByteArray(16, 'h'), 1).error().code,
-             RepositoryErrorCode::InvalidInput);
+    QCOMPARE(errorCode(store.pages->recordMediaSent(bob, QByteArray(16, 'h'), 1)), invalidInput);
 
     // A page with no media keeps no records at all.
     QVERIFY(store.pages->forgetSentMediaExcept({}).hasValue());
@@ -1298,7 +1343,8 @@ void ProfilePageStoreTest::requestStateRoundTrip()
     QCOMPARE(state.value().unanswered, 0);
     QCOMPARE(state.value().mediaRequestedRevision, qint64(-1));
 
-    QVERIFY(store.pages->saveRequestState(PageRequestState{alice, 1'234, 4, 1'700'000'000'000}).hasValue());
+    QVERIFY(store.pages->saveRequestState(PageRequestState{alice, 1'234, 4, 1'700'000'000'000})
+                .hasValue());
     QVERIFY(store.reopen());
     state = store.pages->requestState(alice);
     QCOMPARE(state.value().lastRequestAtMs, qint64(1'234));
@@ -1320,18 +1366,19 @@ void ProfilePageStoreTest::evictContactMediaKeepsTheCoreAndSharedBlobs()
     QVERIFY(store.open());
     const auto alice = AccountId::generate();
     const auto bob = AccountId::generate();
-    const Blob background = blob('b', 10'000);   // Alice's alone
-    const Blob song = blob('s', 20'000);         // Bob sent it too
-    const Blob pending = blob('p', 30'000);      // Alice's, not named yet
-    const Blob ours = blob('o', 40'000);         // our own draft uses it
+    const Blob background = blob('b', 10'000); // Alice's alone
+    const Blob song = blob('s', 20'000); // Bob sent it too
+    const Blob pending = blob('p', 30'000); // Alice's, not named yet
+    const Blob ours = blob('o', 40'000); // our own draft uses it
 
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, ours.hash, ours.data, 100).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, background.hash, background.data, 100).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, songKind, song.hash, song.data, 100).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, pending.hash, pending.data, 100).hasValue());
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, ours.hash, ours.data, 100).hasValue());
-    QVERIFY(store.pages->putContactMedia(bob, songKind, song.hash, song.data, 100).hasValue());
-    QVERIFY(store.pages->storeContactPage(contactPage(alice, 4, "alice core", background.hash, song.hash))
+    QVERIFY(store.importIntoDraft(backgroundKind, ours, 100));
+    QVERIFY(store.receive(alice, backgroundKind, background, 100));
+    QVERIFY(store.receive(alice, songKind, song, 100));
+    QVERIFY(store.receive(alice, backgroundKind, pending, 100));
+    QVERIFY(store.receive(alice, backgroundKind, ours, 100));
+    QVERIFY(store.receive(bob, songKind, song, 100));
+    QVERIFY(store.pages
+                ->storeContactPage(contactPage(alice, 4, "alice core", background.hash, song.hash))
                 .value());
     QVERIFY(store.pages->markViewed(alice, 700).hasValue());
     QCOMPARE(store.blobCount(), qint64(4));
@@ -1361,7 +1408,7 @@ void ProfilePageStoreTest::evictContactMediaKeepsTheCoreAndSharedBlobs()
     QCOMPARE(store.pages->localMedia(ours.hash).value(), std::optional<QByteArray>(ours.data));
 
     // A later answer puts her media back.
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, background.hash, background.data, 900).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, background, 900));
     QCOMPARE(store.pages->contactMedia(alice, background.hash, backgroundKind).value(),
              std::optional<QByteArray>(background.data));
 }
@@ -1374,31 +1421,31 @@ void ProfilePageStoreTest::leastRecentlyViewedOrdersByViewThenArrival()
     const auto viewedRecently = AccountId::generate();
     const auto neverViewedOld = AccountId::generate();
     const auto neverViewedNew = AccountId::generate();
-    const auto mediaOnly = AccountId::generate();  // media overtook the core
-    const auto coreOnly = AccountId::generate();   // nothing to evict
+    const auto mediaOnly = AccountId::generate(); // media overtook the core
+    const auto coreOnly = AccountId::generate(); // nothing to evict
     const Blob picture = blob('p');
 
     const auto give = [&](const AccountId &account, qint64 receivedAtMs) {
-        return store.pages->putContactMedia(account, backgroundKind, picture.hash, picture.data, receivedAtMs)
-                   .hasValue()
-               && store.pages->storeContactPage(contactPage(account, 1, "core", picture.hash,
-                                                            std::nullopt, receivedAtMs))
-                      .value();
+        return store.receive(account, backgroundKind, picture, receivedAtMs)
+            && store.pages
+                   ->storeContactPage(
+                       contactPage(account, 1, "core", picture.hash, std::nullopt, receivedAtMs))
+                   .value();
     };
     QVERIFY(give(viewedLong, 100));
     QVERIFY(give(viewedRecently, 50));
     QVERIFY(give(neverViewedOld, 300));
     QVERIFY(give(neverViewedNew, 400));
-    QVERIFY(store.pages->putContactMedia(mediaOnly, backgroundKind, picture.hash, picture.data, 350)
-                .hasValue());
+    QVERIFY(store.receive(mediaOnly, backgroundKind, picture, 350));
     QVERIFY(store.pages->storeContactPage(contactPage(coreOnly, 1, "core")).value());
     QVERIFY(store.pages->markViewed(viewedLong, 1'000).hasValue());
     QVERIFY(store.pages->markViewed(viewedRecently, 2'000).hasValue());
 
     const auto order = store.pages->contactsLeastRecentlyViewed();
     QVERIFY(order.hasValue());
-    QCOMPARE(order.value(), QVector<AccountId>({neverViewedOld, mediaOnly, neverViewedNew,
-                                                viewedLong, viewedRecently}));
+    QCOMPARE(order.value(),
+             QVector<AccountId>(
+                 {neverViewedOld, mediaOnly, neverViewedNew, viewedLong, viewedRecently}));
 }
 
 void ProfilePageStoreTest::receivedMediaBytesCountsOnlyContactMedia()
@@ -1413,21 +1460,21 @@ void ProfilePageStoreTest::receivedMediaBytesCountsOnlyContactMedia()
     const Blob pending = blob('p', 500);
 
     QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(0));
-    QVERIFY(store.pages->putLocalDraftMedia(backgroundKind, ours.hash, ours.data, 1).hasValue());
+    QVERIFY(store.importIntoDraft(backgroundKind, ours, 1));
     QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(0));
 
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, shared.hash, shared.data, 1).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, shared, 1));
     QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(1'000));
     // A blob two contacts sent is stored, and counted, once.
-    QVERIFY(store.pages->putContactMedia(bob, backgroundKind, shared.hash, shared.data, 1).hasValue());
+    QVERIFY(store.receive(bob, backgroundKind, shared, 1));
     QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(1'000));
     // A blob our own page uses is ours, whoever else sent it.
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, ours.hash, ours.data, 1).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, ours, 1));
     QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(1'000));
-    QVERIFY(store.pages->putContactMedia(bob, songKind, bobs.hash, bobs.data, 1).hasValue());
+    QVERIFY(store.receive(bob, songKind, bobs, 1));
     QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(4'000));
     // Pending media takes space like any other.
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, pending.hash, pending.data, 1).hasValue());
+    QVERIFY(store.receive(alice, backgroundKind, pending, 1));
     QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(4'500));
 
     QVERIFY(store.pages->evictContactMedia(bob).hasValue());
@@ -1446,20 +1493,21 @@ void ProfilePageStoreTest::checkConstraintsRejectBadHashesAndOversizeBlobs()
     // The repository refuses bad input itself...
     const QByteArray largest(maxBlobBytes, 'l');
     const QByteArray oversize(maxBlobBytes + 1, 'o');
-    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, sha256(largest), largest, 1).hasValue());
-    QCOMPARE(store.pages->putContactMedia(alice, backgroundKind, sha256(oversize), oversize, 1)
-                 .error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->putContactMedia(alice, backgroundKind, QByteArray(31, 'h'), largest, 1)
-                 .error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->putLocalDraftMedia(songKind, sha256(QByteArray()), QByteArray(), 1).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->savePublished("core", 1, std::nullopt, QByteArray(33, 's'), 1).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->mediaSentAt(alice, QByteArray(31, 'h')).error().code,
-             RepositoryErrorCode::InvalidInput);
-    QCOMPARE(store.pages->localMedia(QByteArray()).error().code, RepositoryErrorCode::InvalidInput);
+    QVERIFY(store.pages->putContactMedia(alice, backgroundKind, sha256(largest), largest, 1)
+                .hasValue());
+    QCOMPARE(errorCode(store.pages->putContactMedia(alice, backgroundKind, sha256(oversize),
+                                                    oversize, 1)),
+             invalidInput);
+    QCOMPARE(errorCode(store.pages->putContactMedia(alice, backgroundKind, QByteArray(31, 'h'),
+                                                    largest, 1)),
+             invalidInput);
+    QCOMPARE(
+        errorCode(store.pages->putLocalDraftMedia(songKind, sha256(QByteArray()), QByteArray(), 1)),
+        invalidInput);
+    QCOMPARE(errorCode(store.pages->savePublished("core", 1, std::nullopt, QByteArray(33, 's'), 1)),
+             invalidInput);
+    QCOMPARE(errorCode(store.pages->mediaSentAt(alice, QByteArray(31, 'h'))), invalidInput);
+    QCOMPARE(errorCode(store.pages->localMedia(QByteArray())), invalidInput);
     store.close();
 
     // ...and the schema holds even for a writer that skips those checks.
@@ -1468,11 +1516,13 @@ void ProfilePageStoreTest::checkConstraintsRejectBadHashesAndOversizeBlobs()
     // Controls: well-formed rows go in, so each refusal below is the CHECK.
     QVERIFY(raw.exec("INSERT INTO profile_media VALUES(randomblob(32), 2, randomblob(229376), 1)"));
     QVERIFY(raw.exec("INSERT INTO profile_media VALUES(randomblob(32), 1, randomblob(1), 1)"));
-    QVERIFY(raw.exec("INSERT INTO local_profile_page(profile_id, draft_background, published_song, "
-                     "published_revision) VALUES(randomblob(16), randomblob(32), randomblob(32), 0)"));
+    QVERIFY(
+        raw.exec("INSERT INTO local_profile_page(profile_id, draft_background, published_song, "
+                 "published_revision) VALUES(randomblob(16), randomblob(32), randomblob(32), 0)"));
     QVERIFY(raw.exec("INSERT INTO contact_pages VALUES(randomblob(16), 0, X'01', randomblob(32), "
                      "randomblob(32), 1, 0)"));
-    QVERIFY(raw.exec("INSERT INTO contact_page_media VALUES(randomblob(16), randomblob(32), 2, 1)"));
+    QVERIFY(
+        raw.exec("INSERT INTO contact_page_media VALUES(randomblob(16), randomblob(32), 2, 1)"));
     QVERIFY(raw.exec("INSERT INTO page_deliveries(account_id, device_id, page_capable) "
                      "VALUES(randomblob(16), randomblob(16), 1)"));
     QVERIFY(raw.exec("INSERT INTO page_delivery_media VALUES(randomblob(16), randomblob(32), 1)"));
@@ -1487,7 +1537,8 @@ void ProfilePageStoreTest::checkConstraintsRejectBadHashesAndOversizeBlobs()
         "INSERT INTO profile_media VALUES(randomblob(32), 1, randomblob(229377), 1)",
         "INSERT INTO local_profile_page(profile_id, draft_background) "
         "VALUES(randomblob(16), randomblob(31))",
-        "INSERT INTO local_profile_page(profile_id, draft_song) VALUES(randomblob(16), randomblob(33))",
+        "INSERT INTO local_profile_page(profile_id, draft_song) VALUES(randomblob(16), "
+        "randomblob(33))",
         "INSERT INTO local_profile_page(profile_id, published_background) "
         "VALUES(randomblob(16), randomblob(16))",
         "INSERT INTO local_profile_page(profile_id, published_song) "

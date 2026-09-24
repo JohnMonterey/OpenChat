@@ -178,9 +178,9 @@ bool run(sqlite3 *database, const char *sql)
     return statement.isValid() && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
-// The first five statements of the collection (§3.5): every page, media,
-// delivery and request row of an account that is not an Accepted (2) contact.
-// The caller owns the transaction.
+// The first step of every collection: every page, media, delivery and request
+// row of an account that is not an Accepted (2) contact, whether they were
+// declined, blocked or never known. The caller owns the transaction.
 bool deleteRowsOfNonContacts(sqlite3 *database)
 {
     return run(database,
@@ -214,13 +214,13 @@ SqlCipherProfilePageRepository::putLocalDraftMedia(int kind, QByteArrayView sha2
                                                    QByteArrayView data, qint64 nowMs)
 {
     if (!isKind(kind) || !isHash(sha256) || !isBlobFor(sha256, data))
-        return failVoid(invalidInput(QStringLiteral("profilepage.localmedia.input")));
+        return failVoid(invalidInput(QStringLiteral("page.localmedia.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
         if (!transaction.isOpen())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.localmedia.begin")));
+            return failVoid(sqliteError(database, QStringLiteral("page.localmedia.begin")));
         if (!insertBlob(database, kind, sha256, data, nowMs))
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.localmedia.blob")));
+            return failVoid(sqliteError(database, QStringLiteral("page.localmedia.blob")));
         Statement statement(database,
                             kind == backgroundKind
                                 ? "INSERT INTO local_profile_page(profile_id, draft_background) "
@@ -231,9 +231,9 @@ SqlCipherProfilePageRepository::putLocalDraftMedia(int kind, QByteArrayView sha2
                                   "draft_song = excluded.draft_song");
         if (!statement.isValid() || !statement.bindBlob(1, m_profileId.bytes())
             || !statement.bindBlob(2, sha256) || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.localmedia.slot")));
+            return failVoid(sqliteError(database, QStringLiteral("page.localmedia.slot")));
         if (!transaction.commit())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.localmedia.commit")));
+            return failVoid(sqliteError(database, QStringLiteral("page.localmedia.commit")));
         return okVoid();
     });
 }
@@ -243,7 +243,7 @@ SqlCipherProfilePageRepository::localMedia(QByteArrayView sha256)
 {
     using Ret = Result<std::optional<QByteArray>, RepositoryError>;
     if (!isHash(sha256))
-        return Ret::failure(invalidInput(QStringLiteral("profilepage.localmedia.hash")));
+        return Ret::failure(invalidInput(QStringLiteral("page.localmedia.hash")));
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
                             "SELECT m.data FROM profile_media m WHERE m.sha256 = ?1 AND EXISTS ("
@@ -252,12 +252,12 @@ SqlCipherProfilePageRepository::localMedia(QByteArrayView sha256)
                             "l.published_background = ?1 OR l.published_song = ?1))");
         if (!statement.isValid() || !statement.bindBlob(1, sha256)
             || !statement.bindBlob(2, m_profileId.bytes()))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.localmedia.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.localmedia.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step == SQLITE_DONE)
             return Ret::success(std::nullopt);
         if (step != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.localmedia.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.localmedia.read")));
         return Ret::success(RepositorySql::blob(statement.get(), 0));
     });
 }
@@ -268,26 +268,27 @@ SqlCipherProfilePageRepository::putContactMedia(const AccountId &account, int ki
                                                 qint64 nowMs)
 {
     if (!isKind(kind) || !isHash(sha256) || !isBlobFor(sha256, data))
-        return failVoid(invalidInput(QStringLiteral("profilepage.contactmedia.input")));
+        return failVoid(invalidInput(QStringLiteral("page.contactmedia.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
         if (!transaction.isOpen())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.contactmedia.begin")));
+            return failVoid(sqliteError(database, QStringLiteral("page.contactmedia.begin")));
         if (!insertBlob(database, kind, sha256, data, nowMs))
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.contactmedia.blob")));
+            return failVoid(sqliteError(database, QStringLiteral("page.contactmedia.blob")));
         // A repeat of a blob this contact already sent refreshes its row: the
         // latest declaration of the kind counts, and a pending blob sent again
         // starts its time-to-live over.
         Statement statement(database,
-                            "INSERT INTO contact_page_media(account_id, sha256, kind, received_at_ms) "
-                            "VALUES(?1, ?2, ?3, ?4) ON CONFLICT(account_id, sha256) DO UPDATE SET "
+                            "INSERT INTO contact_page_media(account_id, sha256, kind, "
+                            "received_at_ms) VALUES(?1, ?2, ?3, ?4) "
+                            "ON CONFLICT(account_id, sha256) DO UPDATE SET "
                             "kind = excluded.kind, received_at_ms = excluded.received_at_ms");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || !statement.bindBlob(2, sha256) || !statement.bindInt(3, kind)
             || !statement.bindInt64(4, nowMs) || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.contactmedia.row")));
+            return failVoid(sqliteError(database, QStringLiteral("page.contactmedia.row")));
         if (!transaction.commit())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.contactmedia.commit")));
+            return failVoid(sqliteError(database, QStringLiteral("page.contactmedia.commit")));
         return okVoid();
     });
 }
@@ -298,7 +299,7 @@ SqlCipherProfilePageRepository::contactMedia(const AccountId &account, QByteArra
 {
     using Ret = Result<std::optional<QByteArray>, RepositoryError>;
     if (!isKind(kind) || !isHash(sha256))
-        return Ret::failure(invalidInput(QStringLiteral("profilepage.contactmedia.input")));
+        return Ret::failure(invalidInput(QStringLiteral("page.contactmedia.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
                             "SELECT m.data FROM contact_page_media c "
@@ -306,12 +307,12 @@ SqlCipherProfilePageRepository::contactMedia(const AccountId &account, QByteArra
                             "WHERE c.account_id = ?1 AND c.sha256 = ?2 AND c.kind = ?3");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || !statement.bindBlob(2, sha256) || !statement.bindInt(3, kind))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.contactmedia.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contactmedia.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step == SQLITE_DONE)
             return Ret::success(std::nullopt);
         if (step != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.contactmedia.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contactmedia.read")));
         return Ret::success(RepositorySql::blob(statement.get(), 0));
     });
 }
@@ -322,7 +323,7 @@ SqlCipherProfilePageRepository::hasContactMedia(const AccountId &account, QByteA
 {
     using Ret = Result<bool, RepositoryError>;
     if (!isKind(kind) || !isHash(sha256))
-        return Ret::failure(invalidInput(QStringLiteral("profilepage.hasmedia.input")));
+        return Ret::failure(invalidInput(QStringLiteral("page.hasmedia.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         // Joined with the blob so "has" always means "can be read".
         Statement statement(database,
@@ -331,10 +332,10 @@ SqlCipherProfilePageRepository::hasContactMedia(const AccountId &account, QByteA
                             "WHERE c.account_id = ?1 AND c.sha256 = ?2 AND c.kind = ?3");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || !statement.bindBlob(2, sha256) || !statement.bindInt(3, kind))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.hasmedia.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.hasmedia.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step != SQLITE_ROW && step != SQLITE_DONE)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.hasmedia.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.hasmedia.read")));
         return Ret::success(step == SQLITE_ROW);
     });
 }
@@ -353,7 +354,7 @@ SqlCipherProfilePageRepository::pendingContactMediaCount(const AccountId &accoun
                             "AND (p.background_sha256 = c.sha256 OR p.song_sha256 = c.sha256))");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || sqlite3_step(statement.get()) != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.pending.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.pending.read")));
         return Ret::success(sqlite3_column_int(statement.get(), 0));
     });
 }
@@ -366,20 +367,20 @@ SqlCipherProfilePageRepository::collectGarbage(qint64 pendingOlderThanMs,
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
         if (!transaction.isOpen())
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.gc.begin")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.gc.begin")));
         if (!deleteRowsOfNonContacts(database))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.gc.contacts")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.gc.contacts")));
 
         // Pending rows (not named by that account's core) older than the TTL.
         Statement pending(database,
-                          "DELETE FROM contact_page_media WHERE received_at_ms < ?1 AND NOT EXISTS ("
-                          "SELECT 1 FROM contact_pages p "
+                          "DELETE FROM contact_page_media WHERE received_at_ms < ?1 "
+                          "AND NOT EXISTS (SELECT 1 FROM contact_pages p "
                           "WHERE p.account_id = contact_page_media.account_id "
                           "AND (p.background_sha256 = contact_page_media.sha256 "
                           "OR p.song_sha256 = contact_page_media.sha256))");
         if (!pending.isValid() || !pending.bindInt64(1, pendingOlderThanMs)
             || sqlite3_step(pending.get()) != SQLITE_DONE)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.gc.pending")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.gc.pending")));
 
         // Blobs nobody references; a freshly stored blob is spared for the
         // grace period. The NULL filters matter: NOT IN over a set holding a
@@ -388,7 +389,8 @@ SqlCipherProfilePageRepository::collectGarbage(qint64 pendingOlderThanMs,
                         "DELETE FROM profile_media WHERE created_at_ms < ?2 AND sha256 NOT IN ("
                         "SELECT draft_background FROM local_profile_page "
                         "WHERE draft_background IS NOT NULL "
-                        "UNION SELECT draft_song FROM local_profile_page WHERE draft_song IS NOT NULL "
+                        "UNION SELECT draft_song FROM local_profile_page "
+                        "WHERE draft_song IS NOT NULL "
                         "UNION SELECT published_background FROM local_profile_page "
                         "WHERE published_background IS NOT NULL "
                         "UNION SELECT published_song FROM local_profile_page "
@@ -396,11 +398,11 @@ SqlCipherProfilePageRepository::collectGarbage(qint64 pendingOlderThanMs,
                         "UNION SELECT sha256 FROM contact_page_media)");
         if (!blobs.isValid() || !blobs.bindInt64(2, localBlobOlderThanMs)
             || sqlite3_step(blobs.get()) != SQLITE_DONE)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.gc.blobs")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.gc.blobs")));
         const int deleted = sqlite3_changes(database);
 
         if (!transaction.commit())
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.gc.commit")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.gc.commit")));
         return Ret::success(deleted);
     });
 }
@@ -414,12 +416,13 @@ Result<qint64, RepositoryError> SqlCipherProfilePageRepository::receivedMediaByt
         // counted against the received-media cap.
         Statement statement(database,
                             "SELECT COALESCE(SUM(length(m.data)), 0) FROM profile_media m "
-                            "WHERE EXISTS (SELECT 1 FROM contact_page_media c WHERE c.sha256 = m.sha256) "
+                            "WHERE EXISTS (SELECT 1 FROM contact_page_media c "
+                            "WHERE c.sha256 = m.sha256) "
                             "AND NOT EXISTS (SELECT 1 FROM local_profile_page l "
                             "WHERE l.draft_background = m.sha256 OR l.draft_song = m.sha256 "
                             "OR l.published_background = m.sha256 OR l.published_song = m.sha256)");
         if (!statement.isValid() || sqlite3_step(statement.get()) != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.received.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.received.read")));
         return Ret::success(sqlite3_column_int64(statement.get(), 0));
     });
 }
@@ -430,42 +433,43 @@ SqlCipherProfilePageRepository::evictContactMedia(const AccountId &account)
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
         if (!transaction.isOpen())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.evict.begin")));
+            return failVoid(sqliteError(database, QStringLiteral("page.evict.begin")));
 
         QVector<QByteArray> hashes;
         {
             Statement statement(database,
                                 "SELECT sha256 FROM contact_page_media WHERE account_id = ?1");
             if (!statement.isValid() || !statement.bindBlob(1, account.bytes()))
-                return failVoid(sqliteError(database, QStringLiteral("profilepage.evict.list")));
+                return failVoid(sqliteError(database, QStringLiteral("page.evict.list")));
             int step = SQLITE_ROW;
             while ((step = sqlite3_step(statement.get())) == SQLITE_ROW)
                 hashes.push_back(RepositorySql::blob(statement.get(), 0));
             if (step != SQLITE_DONE)
-                return failVoid(sqliteError(database, QStringLiteral("profilepage.evict.list")));
+                return failVoid(sqliteError(database, QStringLiteral("page.evict.list")));
         }
 
         Statement rows(database, "DELETE FROM contact_page_media WHERE account_id = ?1");
         if (!rows.isValid() || !rows.bindBlob(1, account.bytes())
             || sqlite3_step(rows.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.evict.rows")));
+            return failVoid(sqliteError(database, QStringLiteral("page.evict.rows")));
 
         // Only the blobs this account alone held go; one another contact also
         // sent, or our own page uses, stays for them.
         for (const QByteArray &hash : std::as_const(hashes)) {
             Statement blob(database,
                            "DELETE FROM profile_media WHERE sha256 = ?1 "
-                           "AND NOT EXISTS (SELECT 1 FROM contact_page_media c WHERE c.sha256 = ?1) "
+                           "AND NOT EXISTS (SELECT 1 FROM contact_page_media c "
+                           "WHERE c.sha256 = ?1) "
                            "AND NOT EXISTS (SELECT 1 FROM local_profile_page l "
                            "WHERE l.draft_background = ?1 OR l.draft_song = ?1 "
                            "OR l.published_background = ?1 OR l.published_song = ?1)");
             if (!blob.isValid() || !blob.bindBlob(1, hash)
                 || sqlite3_step(blob.get()) != SQLITE_DONE)
-                return failVoid(sqliteError(database, QStringLiteral("profilepage.evict.blob")));
+                return failVoid(sqliteError(database, QStringLiteral("page.evict.blob")));
         }
 
         if (!transaction.commit())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.evict.commit")));
+            return failVoid(sqliteError(database, QStringLiteral("page.evict.commit")));
         return okVoid();
     });
 }
@@ -486,17 +490,17 @@ SqlCipherProfilePageRepository::contactsLeastRecentlyViewed()
                             "ORDER BY COALESCE(p.viewed_at_ms, 0), "
                             "COALESCE(p.received_at_ms, a.first_received), a.account_id");
         if (!statement.isValid())
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.lru.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.lru.prepare")));
         QVector<AccountId> accounts;
         int step = SQLITE_ROW;
         while ((step = sqlite3_step(statement.get())) == SQLITE_ROW) {
             const auto account = AccountId::fromBytes(RepositorySql::blob(statement.get(), 0));
             if (!account)
-                return Ret::failure(integrityFailure(QStringLiteral("profilepage.lru.account")));
+                return Ret::failure(integrityFailure(QStringLiteral("page.lru.account")));
             accounts.push_back(*account);
         }
         if (step != SQLITE_DONE)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.lru.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.lru.read")));
         return Ret::success(std::move(accounts));
     });
 }
@@ -506,11 +510,11 @@ Result<void, RepositoryError> SqlCipherProfilePageRepository::dropPagesOfNonCont
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
         if (!transaction.isOpen())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.drop.begin")));
+            return failVoid(sqliteError(database, QStringLiteral("page.drop.begin")));
         if (!deleteRowsOfNonContacts(database))
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.drop.delete")));
+            return failVoid(sqliteError(database, QStringLiteral("page.drop.delete")));
         if (!transaction.commit())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.drop.commit")));
+            return failVoid(sqliteError(database, QStringLiteral("page.drop.commit")));
         return okVoid();
     });
 }
@@ -525,12 +529,12 @@ Result<StoredLocalPage, RepositoryError> SqlCipherProfilePageRepository::localPa
                             "published_background, published_song, published_at_ms "
                             "FROM local_profile_page WHERE profile_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, m_profileId.bytes()))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.local.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.local.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step == SQLITE_DONE)
             return Ret::success(StoredLocalPage{});
         if (step != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.local.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.local.read")));
         sqlite3_stmt *row = statement.get();
         StoredLocalPage page;
         page.draftCore = RepositorySql::blob(row, 0);
@@ -543,7 +547,7 @@ Result<StoredLocalPage, RepositoryError> SqlCipherProfilePageRepository::localPa
             || !readOptionalHash(row, 2, page.draftSong)
             || !readOptionalHash(row, 7, page.publishedBackground)
             || !readOptionalHash(row, 8, page.publishedSong))
-            return Ret::failure(integrityFailure(QStringLiteral("profilepage.local.hash")));
+            return Ret::failure(integrityFailure(QStringLiteral("page.local.hash")));
         return Ret::success(std::move(page));
     });
 }
@@ -555,12 +559,13 @@ SqlCipherProfilePageRepository::saveDraft(QByteArrayView core,
                                           const QString &songSource, qint64 nowMs)
 {
     if (core.isEmpty() || !isOptionalHash(background) || !isOptionalHash(song))
-        return failVoid(invalidInput(QStringLiteral("profilepage.draft.input")));
+        return failVoid(invalidInput(QStringLiteral("page.draft.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
-                            "INSERT INTO local_profile_page(profile_id, draft_core, draft_background, "
-                            "draft_song, draft_song_source, draft_updated_at_ms) "
-                            "VALUES(?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(profile_id) DO UPDATE SET "
+                            "INSERT INTO local_profile_page(profile_id, draft_core, "
+                            "draft_background, draft_song, draft_song_source, "
+                            "draft_updated_at_ms) VALUES(?1, ?2, ?3, ?4, ?5, ?6) "
+                            "ON CONFLICT(profile_id) DO UPDATE SET "
                             "draft_core = excluded.draft_core, "
                             "draft_background = excluded.draft_background, "
                             "draft_song = excluded.draft_song, "
@@ -571,7 +576,7 @@ SqlCipherProfilePageRepository::saveDraft(QByteArrayView core,
             || !bindOptionalBlob(statement, 4, song)
             || !(songSource.isEmpty() ? statement.bindNull(5) : statement.bindText(5, songSource))
             || !statement.bindInt64(6, nowMs) || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.draft.save")));
+            return failVoid(sqliteError(database, QStringLiteral("page.draft.save")));
         return okVoid();
     });
 }
@@ -585,7 +590,7 @@ Result<void, RepositoryError> SqlCipherProfilePageRepository::clearDraft()
                             "draft_updated_at_ms = 0 WHERE profile_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, m_profileId.bytes())
             || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.draft.clear")));
+            return failVoid(sqliteError(database, QStringLiteral("page.draft.clear")));
         return okVoid();
     });
 }
@@ -598,7 +603,7 @@ SqlCipherProfilePageRepository::savePublished(QByteArrayView core, qint64 revisi
     // Revision 0 means "never published" on the wire, so a stored page is at
     // least revision 1.
     if (core.isEmpty() || revision < 1 || !isOptionalHash(background) || !isOptionalHash(song))
-        return failVoid(invalidInput(QStringLiteral("profilepage.publish.input")));
+        return failVoid(invalidInput(QStringLiteral("page.publish.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         // One statement, so the new page and the cleared draft commit together.
         // The WHERE refuses a revision that is not above the stored one.
@@ -614,15 +619,16 @@ SqlCipherProfilePageRepository::savePublished(QByteArrayView core, qint64 revisi
                             "published_at_ms = excluded.published_at_ms, "
                             "draft_core = NULL, draft_background = NULL, draft_song = NULL, "
                             "draft_song_source = NULL, draft_updated_at_ms = 0 "
-                            "WHERE excluded.published_revision > local_profile_page.published_revision");
+                            "WHERE excluded.published_revision > "
+                            "local_profile_page.published_revision");
         if (!statement.isValid() || !statement.bindBlob(1, m_profileId.bytes())
             || !statement.bindBlob(2, core) || !statement.bindInt64(3, revision)
             || !bindOptionalBlob(statement, 4, background) || !bindOptionalBlob(statement, 5, song)
             || !statement.bindInt64(6, nowMs) || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.publish.save")));
+            return failVoid(sqliteError(database, QStringLiteral("page.publish.save")));
         if (sqlite3_changes(database) == 0)
             return failVoid(error(RepositoryErrorCode::Conflict,
-                                  QStringLiteral("profilepage.publish.revision")));
+                                  QStringLiteral("page.publish.revision")));
         return okVoid();
     });
 }
@@ -634,14 +640,15 @@ SqlCipherProfilePageRepository::contactPage(const AccountId &account)
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
                             "SELECT revision, core, background_sha256, song_sha256, "
-                            "received_at_ms, viewed_at_ms FROM contact_pages WHERE account_id = ?1");
+                            "received_at_ms, viewed_at_ms FROM contact_pages "
+                            "WHERE account_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes()))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.contact.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contact.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step == SQLITE_DONE)
             return Ret::success(std::nullopt);
         if (step != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.contact.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contact.read")));
         sqlite3_stmt *row = statement.get();
         StoredContactPage page{account};
         page.revision = sqlite3_column_int64(row, 0);
@@ -649,7 +656,7 @@ SqlCipherProfilePageRepository::contactPage(const AccountId &account)
         page.receivedAtMs = sqlite3_column_int64(row, 4);
         page.viewedAtMs = sqlite3_column_int64(row, 5);
         if (!readOptionalHash(row, 2, page.background) || !readOptionalHash(row, 3, page.song))
-            return Ret::failure(integrityFailure(QStringLiteral("profilepage.contact.hash")));
+            return Ret::failure(integrityFailure(QStringLiteral("page.contact.hash")));
         return Ret::success(std::move(page));
     });
 }
@@ -660,14 +667,15 @@ SqlCipherProfilePageRepository::storeContactPage(const StoredContactPage &page)
     using Ret = Result<bool, RepositoryError>;
     if (page.revision < 0 || page.core.isEmpty() || !isOptionalHash(page.background)
         || !isOptionalHash(page.song))
-        return Ret::failure(invalidInput(QStringLiteral("profilepage.contact.input")));
+        return Ret::failure(invalidInput(QStringLiteral("page.contact.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         // The WHERE makes "only newer revisions" part of the write itself, so
         // no read-then-write window exists between two arrivals.
         Statement statement(database,
-                            "INSERT INTO contact_pages(account_id, revision, core, background_sha256, "
-                            "song_sha256, received_at_ms, viewed_at_ms) "
-                            "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(account_id) DO UPDATE SET "
+                            "INSERT INTO contact_pages(account_id, revision, core, "
+                            "background_sha256, song_sha256, received_at_ms, viewed_at_ms) "
+                            "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) "
+                            "ON CONFLICT(account_id) DO UPDATE SET "
                             "revision = excluded.revision, core = excluded.core, "
                             "background_sha256 = excluded.background_sha256, "
                             "song_sha256 = excluded.song_sha256, "
@@ -677,9 +685,10 @@ SqlCipherProfilePageRepository::storeContactPage(const StoredContactPage &page)
             || !statement.bindInt64(2, page.revision) || !statement.bindBlob(3, page.core)
             || !bindOptionalBlob(statement, 4, page.background)
             || !bindOptionalBlob(statement, 5, page.song)
-            || !statement.bindInt64(6, page.receivedAtMs) || !statement.bindInt64(7, page.viewedAtMs)
+            || !statement.bindInt64(6, page.receivedAtMs)
+            || !statement.bindInt64(7, page.viewedAtMs)
             || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.contact.store")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contact.store")));
         return Ret::success(sqlite3_changes(database) > 0);
     });
 }
@@ -692,7 +701,7 @@ Result<void, RepositoryError> SqlCipherProfilePageRepository::markViewed(const A
                             "UPDATE contact_pages SET viewed_at_ms = ?2 WHERE account_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || !statement.bindInt64(2, nowMs) || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.viewed.update")));
+            return failVoid(sqliteError(database, QStringLiteral("page.viewed.update")));
         return okVoid();
     });
 }
@@ -707,18 +716,18 @@ SqlCipherProfilePageRepository::delivery(const AccountId &account)
                             "last_answer_at_ms, answer_window_start_ms, answers_in_window "
                             "FROM page_deliveries WHERE account_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes()))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.delivery.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.delivery.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step == SQLITE_DONE)
             return Ret::success(PageDelivery{account});
         if (step != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.delivery.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.delivery.read")));
         sqlite3_stmt *row = statement.get();
         PageDelivery delivery{account};
         if (sqlite3_column_type(row, 0) != SQLITE_NULL) {
             const auto device = DeviceId::fromBytes(RepositorySql::blob(row, 0));
             if (!device)
-                return Ret::failure(integrityFailure(QStringLiteral("profilepage.delivery.device")));
+                return Ret::failure(integrityFailure(QStringLiteral("page.delivery.device")));
             delivery.device = *device;
         }
         delivery.sentRevision = sqlite3_column_int64(row, 1);
@@ -756,7 +765,7 @@ SqlCipherProfilePageRepository::saveDelivery(const PageDelivery &delivery)
             || !statement.bindInt64(7, delivery.answerWindowStartMs)
             || !statement.bindInt(8, delivery.answersInWindow)
             || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.delivery.save")));
+            return failVoid(sqliteError(database, QStringLiteral("page.delivery.save")));
         return okVoid();
     });
 }
@@ -766,19 +775,19 @@ SqlCipherProfilePageRepository::mediaSentAt(const AccountId &account, QByteArray
 {
     using Ret = Result<std::optional<qint64>, RepositoryError>;
     if (!isHash(sha256))
-        return Ret::failure(invalidInput(QStringLiteral("profilepage.sent.hash")));
+        return Ret::failure(invalidInput(QStringLiteral("page.sent.hash")));
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
                             "SELECT sent_at_ms FROM page_delivery_media "
                             "WHERE account_id = ?1 AND sha256 = ?2");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || !statement.bindBlob(2, sha256))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.sent.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.sent.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step == SQLITE_DONE)
             return Ret::success(std::nullopt);
         if (step != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.sent.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.sent.read")));
         return Ret::success(sqlite3_column_int64(statement.get(), 0));
     });
 }
@@ -788,7 +797,7 @@ SqlCipherProfilePageRepository::recordMediaSent(const AccountId &account, QByteA
                                                 qint64 nowMs)
 {
     if (!isHash(sha256))
-        return failVoid(invalidInput(QStringLiteral("profilepage.sent.hash")));
+        return failVoid(invalidInput(QStringLiteral("page.sent.hash")));
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
                             "INSERT INTO page_delivery_media(account_id, sha256, sent_at_ms) "
@@ -797,7 +806,7 @@ SqlCipherProfilePageRepository::recordMediaSent(const AccountId &account, QByteA
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || !statement.bindBlob(2, sha256) || !statement.bindInt64(3, nowMs)
             || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.sent.record")));
+            return failVoid(sqliteError(database, QStringLiteral("page.sent.record")));
         return okVoid();
     });
 }
@@ -809,7 +818,7 @@ SqlCipherProfilePageRepository::forgetSentMedia(const AccountId &account)
         Statement statement(database, "DELETE FROM page_delivery_media WHERE account_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.sent.forget")));
+            return failVoid(sqliteError(database, QStringLiteral("page.sent.forget")));
         return okVoid();
     });
 }
@@ -818,10 +827,10 @@ Result<void, RepositoryError>
 SqlCipherProfilePageRepository::forgetSentMediaExcept(const QVector<QByteArray> &keep)
 {
     if (keep.size() > maxKeptHashes)
-        return failVoid(invalidInput(QStringLiteral("profilepage.sent.keepcount")));
+        return failVoid(invalidInput(QStringLiteral("page.sent.keepcount")));
     for (const QByteArray &hash : keep) {
         if (!isHash(hash))
-            return failVoid(invalidInput(QStringLiteral("profilepage.sent.keephash")));
+            return failVoid(invalidInput(QStringLiteral("page.sent.keephash")));
     }
     // One placeholder per kept hash; with nothing to keep, every record goes.
     QByteArray sql("DELETE FROM page_delivery_media");
@@ -837,13 +846,13 @@ SqlCipherProfilePageRepository::forgetSentMediaExcept(const QVector<QByteArray> 
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database, sql.constData());
         if (!statement.isValid())
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.sent.except")));
+            return failVoid(sqliteError(database, QStringLiteral("page.sent.except")));
         for (qsizetype index = 0; index < keep.size(); ++index) {
             if (!statement.bindBlob(static_cast<int>(index + 1), keep.at(index)))
-                return failVoid(sqliteError(database, QStringLiteral("profilepage.sent.except")));
+                return failVoid(sqliteError(database, QStringLiteral("page.sent.except")));
         }
         if (sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.sent.except")));
+            return failVoid(sqliteError(database, QStringLiteral("page.sent.except")));
         return okVoid();
     });
 }
@@ -857,12 +866,12 @@ SqlCipherProfilePageRepository::requestState(const AccountId &account)
                             "SELECT last_request_at_ms, unanswered, media_requested_revision "
                             "FROM page_requests WHERE account_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes()))
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.request.prepare")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.request.prepare")));
         const int step = sqlite3_step(statement.get());
         if (step == SQLITE_DONE)
             return Ret::success(PageRequestState{account});
         if (step != SQLITE_ROW)
-            return Ret::failure(sqliteError(database, QStringLiteral("profilepage.request.read")));
+            return Ret::failure(sqliteError(database, QStringLiteral("page.request.read")));
         PageRequestState state{account};
         state.lastRequestAtMs = sqlite3_column_int64(statement.get(), 0);
         state.unanswered = sqlite3_column_int(statement.get(), 1);
@@ -887,7 +896,7 @@ SqlCipherProfilePageRepository::saveRequestState(const PageRequestState &state)
             || !statement.bindInt(3, state.unanswered)
             || !statement.bindInt64(4, state.mediaRequestedRevision)
             || sqlite3_step(statement.get()) != SQLITE_DONE)
-            return failVoid(sqliteError(database, QStringLiteral("profilepage.request.save")));
+            return failVoid(sqliteError(database, QStringLiteral("page.request.save")));
         return okVoid();
     });
 }

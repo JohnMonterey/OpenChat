@@ -30,8 +30,10 @@ public:
     [[nodiscard]] Result<int, RepositoryError>
     collectGarbage(qint64 pendingOlderThanMs, qint64 localBlobOlderThanMs) override;
     [[nodiscard]] Result<qint64, RepositoryError> receivedMediaBytes() override;
-    [[nodiscard]] Result<void, RepositoryError> evictContactMedia(const AccountId &account) override;
-    [[nodiscard]] Result<QVector<AccountId>, RepositoryError> contactsLeastRecentlyViewed() override;
+    [[nodiscard]] Result<void, RepositoryError>
+    evictContactMedia(const AccountId &account) override;
+    [[nodiscard]] Result<QVector<AccountId>, RepositoryError>
+    contactsLeastRecentlyViewed() override;
     [[nodiscard]] Result<void, RepositoryError> dropPagesOfNonContacts() override;
     [[nodiscard]] Result<StoredLocalPage, RepositoryError> localPage() override;
     [[nodiscard]] Result<void, RepositoryError>
@@ -44,9 +46,10 @@ public:
                   const std::optional<QByteArray> &song, qint64 nowMs) override;
     [[nodiscard]] Result<std::optional<StoredContactPage>, RepositoryError>
     contactPage(const AccountId &account) override;
-    [[nodiscard]] Result<bool, RepositoryError> storeContactPage(const StoredContactPage &page) override;
-    [[nodiscard]] Result<void, RepositoryError> markViewed(const AccountId &account,
-                                                           qint64 nowMs) override;
+    [[nodiscard]] Result<bool, RepositoryError>
+    storeContactPage(const StoredContactPage &page) override;
+    [[nodiscard]] Result<void, RepositoryError>
+    markViewed(const AccountId &account, qint64 nowMs) override;
     [[nodiscard]] Result<PageDelivery, RepositoryError> delivery(const AccountId &account) override;
     [[nodiscard]] Result<void, RepositoryError> saveDelivery(const PageDelivery &delivery) override;
     [[nodiscard]] Result<std::optional<qint64>, RepositoryError>

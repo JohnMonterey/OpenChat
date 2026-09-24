@@ -36,8 +36,10 @@ FocusScope {
     // The open fade (SPEC §17) has finished; at once without animations.
     readonly property bool settled: d.settled
     readonly property bool animationsAllowed: ProfileRenderPolicy.animationsAllowed
-    // What the body shows: the draft while editing, else the page on screen.
-    readonly property var shownPage: profiles.editing ? profiles.draft : profiles.view
+    // What the body shows: while editing, the preview's page (the draft, or
+    // the draft with the preset being tried on), else the page on screen.
+    readonly property var shownPage: profiles.editing ? (profiles.tryOnPreset >= 0 ? profiles.tryOn : profiles.draft)
+                                                      : profiles.view
     readonly property alias songPlayer: player
     readonly property alias localAvatarFileDialog: avatarDialog
     readonly property Item editor: bodyEditor.item

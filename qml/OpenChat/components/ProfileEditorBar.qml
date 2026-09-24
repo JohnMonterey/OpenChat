@@ -132,6 +132,7 @@ Item {
             model: bar.profiles ? bar.profiles.history : []
             delegate: AeroMenuItem {
                 required property var modelData
+                objectName: "profileEditorHistory_" + modelData.index
                 text: modelData.name
                 onTriggered: {
                     const index = modelData.index;

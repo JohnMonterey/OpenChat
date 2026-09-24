@@ -31,7 +31,8 @@ Item {
     property int dragModule: -1
     property point dragPoint: Qt.point(0, 0)
     property string dragName: ""
-    // Where a row dragged over the other column will land when dropped.
+    // Where the dragged row will land: the column, and its place among that
+    // column's other rows.
     property int dropColumn: -1
     property int dropIndex: -1
 
@@ -82,36 +83,32 @@ Item {
     function startDrag(module, name, point) {
         dragName = name;
         dragModule = module;
+        const column = arrangement.find(entry => entry.module === module).column;
+        dropColumn = column;
+        dropIndex = indexIn(column, module);
         dragPoint = point;
-        profiles.beginGesture("layout:drag");
     }
-    // Within its column the row moves as it is dragged, so the preview
-    // reorders live; over the other column an insertion line shows where it
-    // will land, and it moves there on the drop. (A move between columns
-    // rebuilds both lists, which would take the drag away from the grip.)
+    // The row follows the pointer and an insertion line shows where it will
+    // land; it moves there on the drop, as one undo step (each module move
+    // is a history step of its own, so a live reorder would be several).
     function dragTo(point) {
         dragPoint = point;
         const target = dropTarget(point);
-        const column = arrangement.find(entry => entry.module === dragModule).column;
-        if (target.column === column) {
-            dropColumn = -1;
-            dropIndex = -1;
-            if (target.index !== indexIn(column, dragModule))
-                move(dragModule, column, target.index);
-        } else {
-            dropColumn = target.column;
-            dropIndex = target.index;
-        }
+        dropColumn = target.column;
+        dropIndex = target.index;
     }
     function endDrag() {
         if (dragModule < 0)
             return;
-        if (dropColumn >= 0)
-            move(dragModule, dropColumn, dropIndex);
+        const module = dragModule;
+        const column = arrangement.find(entry => entry.module === module).column;
+        const moved = dropColumn !== column || dropIndex !== indexIn(column, module);
+        const target = { column: dropColumn, index: dropIndex };
         dragModule = -1;
         dropColumn = -1;
         dropIndex = -1;
-        profiles.endGesture();
+        if (moved && target.column >= 0)
+            move(module, target.column, target.index);
     }
     function focusField(field) {
         layouts.forceActiveFocus(Qt.OtherFocusReason);
@@ -217,6 +214,13 @@ Item {
             // row's own chips must not end the row's hover (and hide the chip).
             readonly property bool hot: rowHover.hovered || (list.activeFocus && list.focusIndex === index)
             readonly property bool lifted: tab.dragModule === module
+            // This row's place among its column's rows other than the dragged one.
+            readonly property int place: {
+                const dragged = tab.dragModule >= 0 ? list.rows.findIndex(item => item.module === tab.dragModule) : -1;
+                return dragged >= 0 && dragged < index ? index - 1 : index;
+            }
+            readonly property bool lastPlace: place === list.rows.filter(item => item.module !== tab.dragModule).length - 1
+            readonly property bool dropHere: tab.dragModule >= 0 && !lifted && tab.dropColumn === list.moduleColumn
             objectName: "profileLayoutRow_" + module
             width: column.width
             height: 34
@@ -239,10 +243,12 @@ Item {
                 border.color: row.hot || row.lifted ? Theme.focusBorder : Theme.buttonBorder
                 Rectangle { x: 4; y: 1; width: parent.width - 8; height: 1; color: Theme.gloss }
             }
-            // Where the dragged row now sits, or will land from the other column.
+            // The insertion line: above the row the drop goes before, or
+            // under the last row for a drop at the end.
             Item {
-                visible: row.lifted || (tab.dropColumn === list.moduleColumn && tab.dropIndex === row.index)
-                y: -3
+                objectName: "profileLayoutInsertionLine"
+                visible: row.dropHere && (tab.dropIndex === row.place || (row.lastPlace && tab.dropIndex === row.place + 1))
+                y: tab.dropIndex === row.place ? -3 : row.height + 1
                 width: parent.width
                 height: 2
                 Rectangle { x: 6; width: parent.width - 6; height: 2; radius: 1; color: Theme.focusBorder }

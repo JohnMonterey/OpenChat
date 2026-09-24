@@ -371,6 +371,15 @@ public:
         return itemIn(item(control), QStringLiteral("profileSegment_") + label);
     }
     [[nodiscard]] QObject *popup(const QString &name) const { return object(name); }
+    // Cancels a file dialog the editor opened; the window gets the focus back
+    // as it would from the desktop.
+    void closeDialog(QObject *dialog)
+    {
+        QMetaObject::invokeMethod(dialog, "close");
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        m_window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(m_window.get()));
+    }
     [[nodiscard]] bool isOpen(const QString &name) const
     {
         QObject *found = popup(name);
@@ -1038,22 +1047,48 @@ private slots:
         f.key(Qt::Key_Left, Qt::AltModifier);
         QVERIFY(order(Profile::Column::NarrowColumn).contains(int(M::HandleModule)));
 
-        // Dragging by the grip reorders live and is one undo step.
+        // Dragging by the grip: the row follows the pointer, a line shows
+        // where it lands, and the drop moves it as one undo step.
+        const auto drag = [&f](QQuickItem *from, QQuickItem *onto, QPointF at) {
+            QQuickItem *grip = f.itemIn(from, QStringLiteral("profileLayoutGrip"));
+            f.settle(grip);
+            const QPoint start = grip->mapToScene(QPointF(grip->width() / 2, grip->height() / 2)).toPoint();
+            const QPoint target = onto->mapToScene(at).toPoint();
+            QTest::mousePress(f.window(), Qt::LeftButton, Qt::NoModifier, start);
+            for (int step = 1; step <= 6; ++step)
+                QTest::mouseMove(f.window(), start + (target - start) * step / 6);
+            return target;
+        };
+        const auto lineShown = [&f] {
+            for (QQuickItem *line : f.items(QStringLiteral("profileLayoutInsertionLine"))) {
+                if (EditorFixture::isShown(line))
+                    return true;
+            }
+            return false;
+        };
         const QList<int> wideBefore = order(Profile::Column::WideColumn);
         QCOMPARE(wideBefore.first(), int(M::SongModule)); // Headliner leads with the song
-        QQuickItem *friends = f.item(QStringLiteral("profileLayoutRow_%1").arg(int(M::TopFriendsModule)));
-        QQuickItem *grip = f.itemIn(friends, QStringLiteral("profileLayoutGrip"));
         QQuickItem *song = f.item(QStringLiteral("profileLayoutRow_%1").arg(int(M::SongModule)));
-        f.scrollTo(song);
-        const QPoint start = grip->mapToScene(QPointF(grip->width() / 2, grip->height() / 2)).toPoint();
-        const QPoint target = song->mapToScene(QPointF(20, 4)).toPoint();
-        QTest::mousePress(f.window(), Qt::LeftButton, Qt::NoModifier, start);
-        for (int step = 1; step <= 6; ++step)
-            QTest::mouseMove(f.window(), start + (target - start) * step / 6);
+        QPoint dropAt = drag(f.item(QStringLiteral("profileLayoutRow_%1").arg(int(M::TopFriendsModule))), song, QPointF(20, 4));
         QVERIFY(EditorFixture::isShown(f.item(QStringLiteral("profileLayoutDragRow"))));
-        QTRY_COMPARE(order(Profile::Column::WideColumn).first(), int(M::TopFriendsModule));
-        QTest::mouseRelease(f.window(), Qt::LeftButton, Qt::NoModifier, target);
+        QTRY_VERIFY(lineShown());
+        QCOMPARE(order(Profile::Column::WideColumn), wideBefore); // nothing moves before the drop
+        QTest::mouseRelease(f.window(), Qt::LeftButton, Qt::NoModifier, dropAt);
         QVERIFY(!EditorFixture::isShown(f.item(QStringLiteral("profileLayoutDragRow"))));
+        QVERIFY(!lineShown());
+        QCOMPARE(order(Profile::Column::WideColumn),
+                 (QList<int>{int(M::TopFriendsModule), int(M::SongModule), int(M::BlurbsModule)}));
+        profiles.undo();
+        QCOMPARE(order(Profile::Column::WideColumn), wideBefore);
+
+        // A drop at the end of the other column moves it across.
+        QQuickItem *lastWide = f.item(QStringLiteral("profileLayoutRow_%1").arg(wideBefore.last()));
+        dropAt = drag(f.item(QStringLiteral("profileLayoutRow_%1").arg(int(M::DetailsModule))), lastWide,
+                      QPointF(20, lastWide->height() - 4));
+        QTRY_VERIFY(lineShown());
+        QTest::mouseRelease(f.window(), Qt::LeftButton, Qt::NoModifier, dropAt);
+        QCOMPARE(order(Profile::Column::WideColumn), wideBefore + QList<int>{int(M::DetailsModule)});
+        QVERIFY(!order(Profile::Column::NarrowColumn).contains(int(M::DetailsModule)));
         profiles.undo();
         QCOMPARE(order(Profile::Column::WideColumn), wideBefore);
 
@@ -1166,6 +1201,11 @@ private slots:
         dialog->setProperty("selectedFile", QUrl::fromLocalFile(path));
         QMetaObject::invokeMethod(dialog, "accepted");
         QVERIFY(profiles.songImporting());
+        // Listen waits for the cut: "Preparing…", disabled.
+        QQuickItem *preparing = f.visibleItem(QStringLiteral("profileSongListenButton"));
+        QTRY_VERIFY(preparing);
+        QCOMPARE(preparing->property("label").toString(), QStringLiteral("Preparing…"));
+        QVERIFY(!preparing->isEnabled());
         QTRY_VERIFY_WITH_TIMEOUT(!profiles.songImporting() && f.draft().hasSong(), 20'000);
         QCOMPARE(f.text(QStringLiteral("profileSongFileName")), QStringLiteral("tune.wav"));
         QVERIFY(f.text(QStringLiteral("profileSongFileFormat")).startsWith(QStringLiteral("WAV · 0:52")));
@@ -1237,6 +1277,19 @@ private slots:
         QVERIFY(!f.draft().hasBackgroundImage());
         QCOMPARE(f.item(QStringLiteral("profileChoosePictureButton"))->property("label").toString(),
                  QStringLiteral("Choose picture…"));
+        // A solid colour has nothing to fade to.
+        f.click(f.segment(QStringLiteral("profileBackgroundStyle"), QStringLiteral("Solid")));
+        QCOMPARE(f.draft().backgroundKind(), int(Profile::BackgroundKind::SolidBackground));
+        QVERIFY(!f.item(QStringLiteral("profileFadeColourWell"))->isEnabled());
+        f.click(f.segment(QStringLiteral("profileBackgroundStyle"), QStringLiteral("Gradient")));
+        QVERIFY(f.item(QStringLiteral("profileFadeColourWell"))->isEnabled());
+        // Picture with no picture yet asks for one (the file dialog) first.
+        QObject *pictureDialog = f.object(QStringLiteral("profileBackgroundFileDialog"));
+        QSignalSpy asked(pictureDialog, SIGNAL(visibleChanged()));
+        f.click(f.segment(QStringLiteral("profileBackgroundStyle"), QStringLiteral("Picture")));
+        QCOMPARE(f.draft().backgroundKind(), int(Profile::BackgroundKind::GradientBackground));
+        QTRY_VERIFY(pictureDialog->property("visible").toBool());
+        f.closeDialog(pictureDialog);
 
         QObject *dialog = f.object(QStringLiteral("profileBackgroundFileDialog"));
         QVERIFY(dialog);
@@ -1279,6 +1332,131 @@ private slots:
         QVERIFY(!f.draft().hasBackgroundImage());
         QCOMPARE(f.draft().backgroundKind(), int(Profile::BackgroundKind::SolidBackground));
         QVERIFY(!EditorFixture::isShown(f.item(QStringLiteral("profilePictureThumbnail"))));
+    }
+
+    void boxesTabBordersCornersAndStrips()
+    {
+        EditorFixture f(QSize(1024, 900));
+        QVERIFY(f.ready());
+        f.openTab(QStringLiteral("boxes"));
+        ProfileController &profiles = f.profiles();
+
+        // Double needs 3 px or more: the hint says so below that.
+        QQuickItem *hint = f.item(QStringLiteral("profileDoubleBorderHint"));
+        f.click(f.segment(QStringLiteral("profileBorderWidth"), QStringLiteral("1")));
+        f.click(f.segment(QStringLiteral("profileBorderStyle"), QStringLiteral("Double")));
+        QCOMPARE(f.draft().borderStyle(), int(Profile::BorderStyle::DoubleBorder));
+        QTRY_VERIFY(EditorFixture::isShown(hint));
+        f.click(f.segment(QStringLiteral("profileBorderWidth"), QStringLiteral("3")));
+        QCOMPARE(f.draft().borderWidth(), 3);
+        QTRY_VERIFY(!EditorFixture::isShown(hint));
+
+        // Corners, the neon edge and the table style.
+        f.click(f.item(QStringLiteral("profileCorner_10")));
+        QCOMPARE(f.draft().boxRadius(), int(Profile::BoxRadius::RoundCorners));
+        f.click(f.item(QStringLiteral("profileCorner_0")));
+        QCOMPARE(f.draft().boxRadius(), int(Profile::BoxRadius::SquareCorners));
+        const bool glow = f.draft().boxGlow();
+        f.click(QStringLiteral("profileNeonEdge"));
+        QCOMPARE(f.draft().boxGlow(), !glow);
+        f.click(f.segment(QStringLiteral("profileTableStyle"), QStringLiteral("Lines")));
+        QCOMPARE(f.draft().tableStyle(), int(Profile::TableStyle::LineTable));
+
+        // Strip styles, drawn in the strip's own colour.
+        f.click(f.item(QStringLiteral("profileStripTile_%1").arg(int(Profile::HeaderStyle::NoHeader))));
+        QCOMPARE(f.draft().headerStyle(), int(Profile::HeaderStyle::NoHeader));
+        f.click(f.item(QStringLiteral("profileStripTile_%1").arg(int(Profile::HeaderStyle::FlatHeader))));
+        QCOMPARE(f.draft().headerStyle(), int(Profile::HeaderStyle::FlatHeader));
+
+        // A different strip for the right column brings its three wells.
+        QQuickItem *altFill = f.item(QStringLiteral("profileAltStripColourWell"));
+        if (f.draft().altHeader())
+            f.click(QStringLiteral("profileAltHeader"));
+        QVERIFY(!EditorFixture::isShown(altFill));
+        f.click(QStringLiteral("profileAltHeader"));
+        QVERIFY(f.draft().altHeader());
+        QTRY_VERIFY(EditorFixture::isShown(altFill));
+        QVERIFY(EditorFixture::isShown(f.item(QStringLiteral("profileAltStripTextWell"))));
+        QVERIFY(EditorFixture::isShown(f.item(QStringLiteral("profileAltBorderColourWell"))));
+        QCOMPARE(f.item(QStringLiteral("profileAltStripTextWell"))->property("inkRole").toInt(),
+                 int(Profile::InkRole::AltHeaderTextInk));
+
+        // See-through runs 0–40%, i.e. opacity 100–60; a drag is one step.
+        QQuickItem *slider = f.item(QStringLiteral("profileSeeThrough"));
+        f.settle(slider);
+        const QPoint left = slider->mapToScene(QPointF(9, slider->height() / 2)).toPoint();
+        const QPoint right = slider->mapToScene(QPointF(slider->width() - 9, slider->height() / 2)).toPoint();
+        while (profiles.canUndo())
+            profiles.undo();
+        const int opacity = f.draft().boxOpacity();
+        QTest::mousePress(f.window(), Qt::LeftButton, Qt::NoModifier, left);
+        QCOMPARE(f.draft().boxOpacity(), 100);
+        for (int step = 1; step <= 5; ++step)
+            QTest::mouseMove(f.window(), left + (right - left) * step / 5);
+        QTest::mouseRelease(f.window(), Qt::LeftButton, Qt::NoModifier, right);
+        QCOMPARE(f.draft().boxOpacity(), 60);
+        QCOMPARE(f.text(QStringLiteral("profileSeeThroughValue")), QStringLiteral("40%"));
+        QTRY_VERIFY_WITH_TIMEOUT(profiles.canUndo(), 2000);
+        QTest::qWait(500); // the drag's step closes once the knob rests
+        profiles.undo();
+        QCOMPARE(f.draft().boxOpacity(), opacity);
+        QVERIFY(!profiles.canUndo());
+    }
+
+    void aboutTabPictureMoodDetailsAndNameHint()
+    {
+        EditorFixture f(QSize(1024, 900));
+        QVERIFY(f.ready());
+        f.openTab(QStringLiteral("about"));
+
+        // Change picture… is the page's own picture dialog.
+        QObject *dialog = f.object(QStringLiteral("localAvatarFileDialog"));
+        QVERIFY(dialog);
+        f.click(QStringLiteral("profileChangePictureButton"));
+        QTRY_VERIFY(dialog->property("visible").toBool());
+        f.closeDialog(dialog);
+
+        // The name is page-only, and says so.
+        QQuickItem *name = f.item(QStringLiteral("profileField_displayName"));
+        bool hinted = false;
+        for (QQuickItem *child : name->parentItem()->childItems()) {
+            if (child->property("text").toString().startsWith(QStringLiteral("Shown on your profile page")))
+                hinted = EditorFixture::isShown(child);
+        }
+        QVERIFY(hinted);
+
+        // Mood: the painted face and the word.
+        QQuickItem *mood = f.item(QStringLiteral("profileMoodButton"));
+        QCOMPARE(mood->property("text").toString(), QStringLiteral("rockin'"));
+
+        // Details: the fold counts what is filled, Here for picks several.
+        QQuickItem *details = f.item(QStringLiteral("profileDetailsFold"));
+        QCOMPARE(details->property("note").toString(), QStringLiteral("%1 of 6 filled").arg(f.draft().filledDetailCount()));
+        QVERIFY(!details->property("expanded").toBool());
+        f.click(details, QPointF(40, 17));
+        QTRY_VERIFY(details->property("expanded").toBool());
+        f.draft().setHereFor(0);
+        f.click(QStringLiteral("profileHereForButton"));
+        QTRY_VERIFY(f.isOpen(QStringLiteral("profileHereForMenu")));
+        f.click(f.visibleItem(QStringLiteral("profileHereFor_%1").arg(int(Profile::HereForMusic))));
+        QTRY_VERIFY(!f.isOpen(QStringLiteral("profileHereForMenu")));
+        f.click(QStringLiteral("profileHereForButton"));
+        QTRY_VERIFY(f.isOpen(QStringLiteral("profileHereForMenu")));
+        f.click(f.visibleItem(QStringLiteral("profileHereFor_%1").arg(int(Profile::HereForFriends))));
+        QCOMPARE(f.draft().hereFor(), int(Profile::HereForMusic | Profile::HereForFriends));
+        QTRY_COMPARE(f.item(QStringLiteral("profileHereForButton"))->property("text").toString(),
+                     QStringLiteral("Friends, Music"));
+        // Zodiac.
+        f.click(QStringLiteral("profileZodiacButton"));
+        QTRY_VERIFY(f.isOpen(QStringLiteral("profileZodiacMenu")));
+        f.click(f.visibleItem(QStringLiteral("profileZodiac_%1").arg(int(Profile::Zodiac::Aries))));
+        QCOMPARE(f.draft().zodiac(), int(Profile::Zodiac::Aries));
+        QTRY_COMPARE(f.item(QStringLiteral("profileZodiacButton"))->property("text").toString(), QStringLiteral("Aries"));
+        // A detail field edits its own field.
+        f.focusField(QStringLiteral("profileField_hometown"));
+        f.type(QStringLiteral("Olympia"));
+        QCOMPARE(f.draft().hometown(), QStringLiteral("Olympia"));
+        QCOMPARE(f.frame()->property("editingTarget").toString(), QStringLiteral("details"));
     }
 
     // --- Save, discard, leaving ----------------------------------------------
@@ -1413,6 +1591,37 @@ private slots:
         QTRY_VERIFY(!f.isOpen(QStringLiteral("profileLeaveDialog")));
         QCOMPARE(f.window()->property("closeOutcome").toString(), QStringLiteral("closed"));
         QVERIFY(!profiles.draftDirty());
+
+        // The Back chip's history menu leaves through the dialog too.
+        {
+            Profile::Page jessica = *Reference::seededPage(QStringLiteral("jessica"));
+            jessica.topFriends.prepend({Reference::mockAccountFor(Reference::selfId()).bytes(), QStringLiteral("Daniel")});
+            profiles.setMockPage(QStringLiteral("jessica"), jessica);
+            profiles.endEditing();
+            QVERIFY(profiles.openContact(QStringLiteral("jessica")));
+            QVERIFY(profiles.openTopFriend(0)); // yourself, from her Friend Space
+            QVERIFY(profiles.isOwnProfile());
+            QCOMPARE(profiles.depth(), 2);
+            QVERIFY(profiles.beginEditing());
+            QVERIFY(f.waitForEditor());
+            f.draft().setHeadline(QStringLiteral("Unsaved words"));
+            f.click(f.item(QStringLiteral("profileEditorBackButton")), QPointF(10, 10), Qt::RightButton);
+            QTRY_VERIFY(f.isOpen(QStringLiteral("profileEditorHistoryMenu")));
+            QVERIFY(f.editor()->property("popupOpen").toBool());
+            QQuickItem *entry = nullptr;
+            QTRY_VERIFY((entry = f.visibleItem(QStringLiteral("profileEditorHistory_0"))));
+            f.click(entry);
+            QTRY_VERIFY(f.isOpen(QStringLiteral("profileLeaveDialog")));
+            QCOMPARE(profiles.depth(), 2);
+            f.click(QStringLiteral("profileLeaveDiscardButton"));
+            QCOMPARE(profiles.depth(), 1);
+            QVERIFY(!profiles.editing());
+            QCOMPARE(profiles.personId(), QStringLiteral("jessica"));
+            QTRY_COMPARE(f.editor(), nullptr);
+            profiles.openOwn();
+            QVERIFY(profiles.beginEditing());
+            QVERIFY(f.waitForEditor());
+        }
 
         // Save saves, then leaves.
         f.draft().setHeadline(QStringLiteral("Saved words"));
@@ -1696,6 +1905,22 @@ private slots:
         QTRY_VERIFY(!f.isOpen(QStringLiteral("profileColorPicker")));
         QCOMPARE(f.draft().backgroundColor1(), base);
         QVERIFY(!f.isOpen(QStringLiteral("profileLeaveDialog")));
+
+        // Esc in a text field puts back what it held when it took focus
+        // (one Esc), and only then goes on to the page.
+        f.openTab(QStringLiteral("about"));
+        f.focusField(QStringLiteral("profileField_headline"));
+        f.key(Qt::Key_End);
+        f.type(QStringLiteral(" and more"));
+        QCOMPARE(f.draft().headline(), QStringLiteral("Unsaved and more"));
+        f.key(Qt::Key_Escape);
+        QCOMPARE(f.draft().headline(), QStringLiteral("Unsaved"));
+        QCOMPARE(f.text(f.input(QStringLiteral("profileField_headline"))), QStringLiteral("Unsaved"));
+        QVERIFY(!f.isOpen(QStringLiteral("profileLeaveDialog")));
+        f.key(Qt::Key_Escape);
+        QTRY_VERIFY(f.isOpen(QStringLiteral("profileLeaveDialog")));
+        f.key(Qt::Key_Escape);
+        QTRY_VERIFY(!f.isOpen(QStringLiteral("profileLeaveDialog")));
 
         // With nothing open, Esc asks about the unsaved changes.
         f.editor()->forceActiveFocus();

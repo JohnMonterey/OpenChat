@@ -65,7 +65,9 @@ struct BackdropSpec final {
 // Paints the whole backdrop into `rect` (base, pattern, aurora), `zoom`
 // scaling everything (0.55 for preset miniatures, 0.5 for pattern swatches).
 void paintBackdrop(QPainter &painter, const QRectF &rect, const BackdropSpec &spec, qreal zoom = 1.0);
-// The motif layer alone, over whatever `painter` already holds.
+// The motif layer alone, over the spec's own base already painted in `rect`
+// (paintBackdrop's first step): the zebra's bands are filled with the ink
+// premixed with that base.
 void paintMotif(QPainter &painter, const QRectF &rect, const BackdropSpec &spec);
 
 void clearTileCache();

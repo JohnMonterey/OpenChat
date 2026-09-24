@@ -641,43 +641,94 @@ void paintCyberGrid(QPainter &p, qreal w, qreal h, const BackdropSpec &spec, qre
     p.drawLine(QPointF(0, horizon), QPointF(w, horizon));
 }
 
+// The ink premixed with the backdrop's base at the pattern opacity, as an
+// opaque vertical gradient over the viewport: mixing is linear, so this is
+// exactly the ink laid over the c1 → c2 base. Shapes filled with it can
+// overlap freely without darkening each other, and it costs one plain fill.
+QLinearGradient premixedInk(const BackdropSpec &spec, qreal h)
+{
+    const bool gradient = spec.kind != Profile::BackgroundKind::SolidBackground && spec.color1 != spec.color2;
+    QLinearGradient ink(0, 0, 0, h);
+    ink.setColorAt(0, Readability::mix(spec.color1, spec.ink, spec.opacity));
+    ink.setColorAt(1, Readability::mix(gradient ? spec.color2 : spec.color1, spec.ink, spec.opacity));
+    return ink;
+}
+
 void paintHalftone(QPainter &p, qreal w, qreal h, const BackdropSpec &spec, qreal s)
 {
     // The dot size follows a low-frequency field across the whole viewport,
-    // which is why this motif is not a tile.
-    const qreal G = 13 * s;
-    QPainterPath dots;
-    int row = 0;
-    for (qreal y = 0; y < h + G; y += G, ++row) {
-        for (qreal x = (row & 1) * G * 0.5; x < w + G; x += G) {
+    // which is why this motif is not a tile. A viewport holds tens of
+    // thousands of dots, so each size is rendered once as a small sprite
+    // (radius in quarter device pixels, centred on a pixel corner or a pixel
+    // centre) and blitted at whole device pixels: the dots stay exact and the
+    // whole field costs milliseconds, where filling them as paths costs
+    // seconds on a 4K screen.
+    const qreal scale = CosmeticPaint::deviceScale(p);
+    const int pitchPx = std::max(2, int(std::lround(13 * s * scale)));
+    const qreal G = pitchPx / scale;
+    const QColor ink = withAlpha(spec.ink, spec.opacity);
+    QHash<int, QImage> sprites;
+    const auto sprite = [&](int quarters, bool halfPixel) -> const QImage & {
+        const int key = quarters * 2 + (halfPixel ? 1 : 0);
+        auto it = sprites.find(key);
+        if (it == sprites.end()) {
+            const qreal radius = quarters / 4.0;
+            const int half = int(std::ceil(radius)) + 2;
+            QImage dot(2 * half + 1, 2 * half + 1, QImage::Format_ARGB32_Premultiplied);
+            dot.fill(Qt::transparent);
+            QPainter dp(&dot);
+            dp.setRenderHint(QPainter::Antialiasing, true);
+            dp.setPen(Qt::NoPen);
+            dp.setBrush(ink);
+            dp.drawEllipse(QPointF(half + (halfPixel ? 0.5 : 0.0), half), radius, radius);
+            dp.end();
+            dot.setDevicePixelRatio(scale);
+            it = sprites.insert(key, dot);
+        }
+        return *it;
+    };
+    for (int row = 0; row * G < h + G; ++row) {
+        const int yPx = row * pitchPx;
+        const qreal y = yPx / scale;
+        // Odd rows sit half a pitch across (on a pixel centre when the pitch
+        // is odd).
+        const int offsetDoubled = (row & 1) * pitchPx; // in half device pixels
+        for (int column = 0; column * G < w + G; ++column) {
+            const int xHalfPx = offsetDoubled + 2 * column * pitchPx;
+            const qreal x = xHalfPx / (2 * scale);
             const qreal f = 0.5 + 0.5 * std::sin(x / 190 + y / 260) * std::cos(y / 170 - x / 420);
             const qreal radius = G * 0.46 * (0.18 + 0.82 * f);
-            if (radius > 0.6)
-                dots.addEllipse(QPointF(x, y), radius, radius);
+            if (radius <= 0.6)
+                continue;
+            const int quarters = std::max(1, int(std::lround(radius * scale * 4)));
+            const QImage &dot = sprite(quarters, xHalfPx & 1);
+            const int half = (dot.width() - 1) / 2;
+            p.drawImage(QPointF((xHalfPx / 2 - half) / scale, (yPx - half) / scale), dot);
         }
     }
-    p.fillPath(dots, withAlpha(spec.ink, spec.opacity));
 }
 
 void paintZebra(QPainter &p, qreal w, qreal h, const BackdropSpec &spec, qreal s)
 {
     // Procedural bands, each with its own phases, tilted 0.5 across the whole
-    // viewport: not a repeating tile. The bands are one path filled once, so
-    // where two touch they do not darken each other.
+    // viewport: not a repeating tile. Neighbouring bands cross and merge;
+    // filled with the opaque premixed ink they merge seamlessly, as in the
+    // mockup, where a translucent ink would brighten every crossing.
     const qreal Z = 34 * s;
     const qreal tilt = 0.5;
     Random random(7);
-    QPainterPath bands;
-    bands.setFillRule(Qt::WindingFill);
-    const auto addBand = [&bands](const std::vector<QPointF> &top, const std::vector<QPointF> &bottom) {
-        QPainterPath band;
-        band.moveTo(top.front());
-        for (std::size_t i = 1; i < top.size(); ++i)
-            band.lineTo(top[i]);
+    const QBrush ink(premixedInk(spec, h));
+    const auto addBand = [&p, &ink](const std::vector<QPointF> &top, const std::vector<QPointF> &bottom) {
+        QPolygonF band;
+        band.reserve(qsizetype(top.size() + bottom.size()));
+        for (const QPointF &point : top)
+            band.push_back(point);
         for (auto it = bottom.rbegin(); it != bottom.rend(); ++it)
-            band.lineTo(*it);
-        band.closeSubpath();
-        bands.addPath(band);
+            band.push_back(*it);
+        QPainterPath path;
+        path.addPolygon(band);
+        path.closeSubpath();
+        p.fillPath(path, ink);
     };
     // The mockup starts 0.9 viewport heights up; a window much wider than
     // tall needs the tilted bands to start higher still to reach its corner.
@@ -707,7 +758,6 @@ void paintZebra(QPainter &p, qreal w, qreal h, const BackdropSpec &spec, qreal s
         if (top.size() > 1)
             addBand(top, bottom);
     }
-    p.fillPath(bands, withAlpha(spec.ink, spec.opacity));
 }
 
 } // namespace

@@ -400,6 +400,22 @@ private slots:
         QVERIFY(differingPixels(image, renderBackdrop(spec, QSize(480, 360))) > 200);
     }
 
+    // The viewport motifs repaint a whole window on every resize, so they
+    // must stay cheap (a path per halftone dot took seconds on a 4K screen).
+    void viewportMotifsPaintQuickly()
+    {
+        for (const Motif motif : {Motif::Halftone, Motif::Zebra, Motif::Bubbles, Motif::CyberGrid}) {
+            Motifs::BackdropSpec spec;
+            spec.motif = motif;
+            spec.scale = Profile::MotifScale::SmallMotif;
+            QElapsedTimer timer;
+            timer.start();
+            const QImage image = renderBackdrop(spec, QSize(1920, 1080));
+            QVERIFY2(timer.elapsed() < 400, qPrintable(QStringLiteral("%1: %2 ms").arg(motifSlug(motif)).arg(timer.elapsed())));
+            QVERIFY(inkedShare(image, spec.color1, 6) > 0.01);
+        }
+    }
+
     void motifTilesAreTransparentWithCutHoles()
     {
         const QColor ink(0xC0, 0x10, 0x60);

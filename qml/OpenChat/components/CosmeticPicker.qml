@@ -313,7 +313,8 @@ Item {
                         width: 18
                         height: 18
                         radius: 9
-                        border.color: Theme.switchBottom
+                        // The rim every Aero check orb shares (SPEC §18.1).
+                        border.color: Theme.accentOrbRim
                         gradient: Gradient {
                             GradientStop { position: 0; color: Theme.switchTop }
                             GradientStop { position: 1; color: Theme.switchBottom }

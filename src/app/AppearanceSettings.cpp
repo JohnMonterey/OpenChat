@@ -17,6 +17,7 @@ const QString beadKey = QStringLiteral("Appearance/presenceBead");
 const QString flairKey = QStringLiteral("Appearance/nameFlair");
 const QString sceneKey = QStringLiteral("Appearance/profileScene");
 const QString bubbleKey = QStringLiteral("Appearance/bubbleSkin");
+const QString plainProfilesKey = QStringLiteral("Appearance/plainProfiles");
 
 // A stored id this build knows in `category`, or empty.
 QString knownCosmetic(const QSettings &settings, const QString &key, const QString &category)
@@ -36,6 +37,7 @@ AppearanceSettings::AppearanceSettings(QObject *parent) : QObject(parent)
     m_nameFlair = knownCosmetic(settings, flairKey, QStringLiteral("flair"));
     m_profileScene = knownCosmetic(settings, sceneKey, QStringLiteral("scene"));
     m_bubbleSkin = knownCosmetic(settings, bubbleKey, QStringLiteral("bubble"));
+    m_plainProfiles = settings.value(plainProfilesKey, false).toBool();
     // Nothing is worn, or prepared, until ownership is known.
     applyPalette();
 }
@@ -204,6 +206,17 @@ void AppearanceSettings::setDarkMode(bool enabled)
     settings.sync();
     applyPalette();
     emit darkModeChanged();
+}
+
+void AppearanceSettings::setPlainProfiles(bool plain)
+{
+    if (plain == m_plainProfiles)
+        return;
+    m_plainProfiles = plain;
+    QSettings settings;
+    settings.setValue(plainProfilesKey, plain);
+    settings.sync();
+    emit plainProfilesChanged();
 }
 
 void AppearanceSettings::applyPalette()

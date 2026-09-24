@@ -79,6 +79,10 @@
 #include "case/DailyCaseController.h"
 #include "case/RelayCaseService.h"
 #include "cosmetics/CosmeticTypes.h"
+#include "controllers/ProfileController.h"
+#include "controllers/ProfileReferencePages.h"
+#include "domain/ProfilePage.h"
+#include "profile/ProfileQmlTypes.h"
 #include "app/TransportSettings.h"
 #include "call/UdpCallMediaPath.h"
 #include "render/CallVideoItem.h"
@@ -182,6 +186,9 @@ void registerQmlTypes()
     qmlRegisterType<OpenChat::TextLineSpacing>("OpenChat.Native", 1, 0, "TextLineSpacing");
     // Avatar frames, presence beads, name flair and profile scenes.
     OpenChat::registerCosmeticQmlTypes();
+    // The profile pages' painted pieces, song player and Profile enums. Their
+    // fonts are registered only when a page first opens.
+    OpenChat::registerProfileQmlTypes();
     qmlRegisterUncreatableType<OpenChat::ChatController>(
         "OpenChat.Native", 1, 0, "ChatController",
         QStringLiteral("ChatController is provided by the application"));
@@ -234,6 +241,110 @@ void scheduleCaptureIfRequested(QCommandLineParser &parser, QQuickWindow *window
     QTimer::singleShot(delay, window, [window, capturePath] {
         const bool saved = window->grabWindow().save(capturePath, "PNG");
         QCoreApplication::exit(saved ? EXIT_SUCCESS : EXIT_FAILURE);
+    });
+}
+
+// Profile pages keep their media uploads and their answers to page requests
+// back while a call rings, runs or is just over, so the call keeps the link.
+// Every surface that has both controllers wires this the same way.
+void followCallsInProfiles(OpenChat::ChatController &chats, OpenChat::CallController &calls)
+{
+    OpenChat::ProfileController *profiles = chats.profiles();
+    profiles->setCallActive(calls.inCall());
+    QObject::connect(&calls, &OpenChat::CallController::callChanged, profiles,
+                     [profiles, &calls] { profiles->setCallActive(calls.inCall()); });
+}
+
+// The first item named `name` in the window's visual tree, depth first.
+QQuickItem *findVisualItem(QQuickItem *item, const QString &name)
+{
+    if (item == nullptr)
+        return nullptr;
+    if (item->objectName() == name)
+        return item;
+    const QList<QQuickItem *> children = item->childItems();
+    for (QQuickItem *child : children) {
+        if (QQuickItem *found = findVisualItem(child, name))
+            return found;
+    }
+    return nullptr;
+}
+
+// The profile preset a --profile slug names ("scene-queen", "classic-06", ...).
+std::optional<OpenChat::Profile::Preset> presetForSlug(const QString &slug)
+{
+    using OpenChat::Profile::Preset;
+    for (int value = int(Preset::AeroSkyPreset); value <= int(Preset::ChromeY2KPreset); ++value) {
+        if (OpenChat::Profile::presetSlug(Preset(value)) == slug)
+            return Preset(value);
+    }
+    return std::nullopt;
+}
+
+QStringList presetSlugs()
+{
+    using OpenChat::Profile::Preset;
+    QStringList slugs;
+    for (int value = int(Preset::AeroSkyPreset); value <= int(Preset::ChromeY2KPreset); ++value)
+        slugs.append(OpenChat::Profile::presetSlug(Preset(value)));
+    return slugs;
+}
+
+// How long the --profile capture waits for the page's open fade to finish
+// before judging what is on screen. The fade is 140 ms; the rest is slack for
+// a loaded machine, inside the capture test's three seconds.
+constexpr int profileSettleLimitMs = 1200;
+
+// The --profile capture. Once the delay has passed and the page has settled,
+// the window is saved only when the profile really is on screen: open, on the
+// contact `personId`, the page in the window, and their own custom page (not
+// the default page or a stub). Anything else exits non-zero, so a capture of
+// the chat window underneath can never pass for a profile.
+void scheduleProfileCaptureIfRequested(QCommandLineParser &parser, QQuickWindow *window,
+                                       const QCommandLineOption &captureOption,
+                                       const QCommandLineOption &delayOption,
+                                       OpenChat::ProfileController *profiles,
+                                       const QString &personId)
+{
+    if (!parser.isSet(captureOption))
+        return;
+    bool delayValid = false;
+    const int requestedDelay = parser.value(delayOption).toInt(&delayValid);
+    const int delay = delayValid ? std::max(0, requestedDelay) : 500;
+    const QString capturePath = QDir::current().absoluteFilePath(parser.value(captureOption));
+    QTimer::singleShot(delay, window, [window, capturePath, profiles, personId] {
+        auto *poll = new QTimer(window);
+        poll->setInterval(20);
+        auto waited = std::make_shared<QElapsedTimer>();
+        waited->start();
+        QObject::connect(poll, &QTimer::timeout, window,
+                         [window, capturePath, profiles, personId, poll, waited] {
+            QQuickItem *page = findVisualItem(window->contentItem(), QStringLiteral("profilePage"));
+            const bool settled = page != nullptr && page->property("settled").toBool();
+            if (!settled && waited->elapsed() < profileSettleLimitMs)
+                return;
+            poll->stop();
+            const bool onScreen = page != nullptr && page->isVisible();
+            const bool custom =
+                profiles->pageState() == int(OpenChat::Profile::PageState::CustomPage);
+            if (!profiles->isOpen() || profiles->personId() != personId || !onScreen || !custom) {
+                const QString pageItem = page == nullptr ? QStringLiteral("missing")
+                    : onScreen                           ? QStringLiteral("shown")
+                                                         : QStringLiteral("hidden");
+                qWarning().noquote()
+                    << QStringLiteral("OpenChat: --profile did not put %1's page on screen "
+                                      "(open: %2, person: \"%3\", page item: %4, page state: %5).")
+                           .arg(personId,
+                                profiles->isOpen() ? QStringLiteral("yes") : QStringLiteral("no"),
+                                profiles->personId(), pageItem,
+                                QString::number(profiles->pageState()));
+                QCoreApplication::exit(EXIT_FAILURE);
+                return;
+            }
+            const bool saved = window->grabWindow().save(capturePath, "PNG");
+            QCoreApplication::exit(saved ? EXIT_SUCCESS : EXIT_FAILURE);
+        });
+        poll->start();
     });
 }
 
@@ -441,6 +552,7 @@ private:
         }
         m_contactController = std::make_unique<OpenChat::ContactController>();
         m_callController = std::make_unique<OpenChat::CallController>();
+        followCallsInProfiles(*m_chatController, *m_callController);
         // Install the live seams only when the contact services came up
         // (m_contactRequests implies a live relay/session/engine). Otherwise both
         // controllers stay in their harmless mock state.
@@ -841,9 +953,14 @@ private:
                         "Log in with your username and password to try again."));
                     return;
                 }
-                // A login confirms the canonical username; keep the name in step.
-                if (m_bootstrap && m_session)
+                // A login confirms the canonical username; keep the name in step,
+                // and remember the handle itself: the profile page shows it
+                // ("OpenChat handle:") and the editor's name hint names it. If
+                // it could not be stored, the profile asks the relay for it.
+                if (m_bootstrap && m_session) {
                     (void)m_session->setDisplayName(m_bootstrap->handle());
+                    (void)m_session->setHandle(m_bootstrap->handle());
+                }
                 m_pendingProfileId.reset(); // committed and live
                 if (m_onboardingController)
                     m_onboardingController->onSubmitSucceeded(recoveryCode);
@@ -1170,18 +1287,27 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
     OpenChat::CallController callController;
     callController.setLocalIdentity(chatController.localUserName(),
                                     chatController.localAvatarKey());
+    followCallsInProfiles(chatController, callController);
+    // The reference mock's people, by the accounts its profiles know them by,
+    // so a tile whose camera is off opens that person's profile.
+    const auto mockAccount = [](const QString &id) {
+        return OpenChat::ProfileReferencePages::mockAccountFor(id).toHex();
+    };
     if (group) {
         // A group call mid-way through ringing: one member talking, one still
         // ringing, one who declined, so every participant state is on screen.
         OpenChat::CallParticipantRow jessica{QStringLiteral("d1"), QStringLiteral("Jessica"),
                                              QStringLiteral("jessica"), QString(), true, false,
                                              true, 0.42};
+        jessica.accountId = mockAccount(QStringLiteral("jessica"));
         OpenChat::CallParticipantRow michael{QStringLiteral("d2"), QStringLiteral("Michael"),
                                              QStringLiteral("michael"), QStringLiteral("Ringing…"),
                                              false, true, false, 0.0};
+        michael.accountId = mockAccount(QStringLiteral("michael"));
         OpenChat::CallParticipantRow ryan{QStringLiteral("d3"), QStringLiteral("Ryan"),
                                           QStringLiteral("ryan"), QStringLiteral("Declined"),
                                           false, false, false, 0.0};
+        ryan.accountId = mockAccount(QStringLiteral("ryan"));
         callController.enableForGroupPreview(OpenChat::CallState::Active,
                                              QStringLiteral("Weekend plans"),
                                              {jessica, michael, ryan});
@@ -1193,6 +1319,8 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
             incoming ? OpenChat::CallState::Ringing : OpenChat::CallState::Active,
             QStringLiteral("Jessica"), QStringLiteral("jessica"),
             /*remoteSpeaking=*/!incoming, /*localSpeaking=*/false);
+        // The call is Jessica's chat's, so the far end's tile opens her profile.
+        callController.setPreviewCallChatId(QStringLiteral("jessica"));
     }
 
     if (video) {
@@ -1283,6 +1411,72 @@ int runCallWindow(QGuiApplication &application, QCommandLineParser &parser,
         }
     }
 
+    return application.exec();
+}
+
+// Loads the chat window on the reference mock and opens the profile page that
+// wears the preset `slug`: the mock contact whose own page uses it, or
+// Michael's page restyled with it when nobody's does. Committable preview path
+// used to launch and capture a profile page; capture_profile runs it, and its
+// capture only succeeds with that page really on screen (see
+// scheduleProfileCaptureIfRequested). Contact and call controllers are the
+// harmless previews, so the page offers what a contact's page offers.
+int runProfileWindow(QGuiApplication &application, QCommandLineParser &parser, const QString &slug,
+                     const QCommandLineOption &captureOption,
+                     const QCommandLineOption &delayOption, const QCommandLineOption &widthOption,
+                     const QCommandLineOption &heightOption)
+{
+    namespace Profile = OpenChat::Profile;
+    namespace ReferencePages = OpenChat::ProfileReferencePages;
+    const std::optional<Profile::Preset> preset = presetForSlug(slug);
+    if (!preset) {
+        qWarning().noquote() << QStringLiteral("OpenChat: unknown --profile preset \"%1\"; use one of %2.")
+                                    .arg(slug, presetSlugs().join(QStringLiteral(", ")));
+        return EXIT_FAILURE;
+    }
+
+    OpenChat::ChatController chatController;
+    OpenChat::ContactController contactController;
+    contactController.enableForPreview();
+    OpenChat::CallController callController;
+    callController.setLocalIdentity(chatController.localUserName(),
+                                    chatController.localAvatarKey());
+    followCallsInProfiles(chatController, callController);
+    OpenChat::ProfileController *profiles = chatController.profiles();
+    QString contactId = ReferencePages::contactForPreset(*preset);
+    if (contactId.isEmpty()) {
+        contactId = QStringLiteral("michael");
+        profiles->setMockPage(contactId,
+                              Profile::applyPreset(ReferencePages::seededPage(contactId)
+                                                       .value_or(Profile::defaultPage()),
+                                                   *preset));
+    }
+
+    QQmlApplicationEngine engine;
+    engine.setInitialProperties(
+        {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+         {QStringLiteral("contactController"), QVariant::fromValue(&contactController)},
+         {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+    QObject::connect(
+        &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
+        [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
+    engine.loadFromModule("OpenChat", "Main");
+
+    if (engine.rootObjects().isEmpty())
+        return EXIT_FAILURE;
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window)
+        return EXIT_FAILURE;
+
+    applyWindowSizing(parser, window, widthOption, heightOption);
+    // Opened the way a click on their picture in the sidebar opens it.
+    if (!profiles->openContact(contactId)) {
+        qWarning().noquote() << QStringLiteral("OpenChat: --profile could not open %1's profile.")
+                                    .arg(contactId);
+        return EXIT_FAILURE;
+    }
+    scheduleProfileCaptureIfRequested(parser, window, captureOption, delayOption, profiles,
+                                      contactId);
     return application.exec();
 }
 
@@ -1626,6 +1820,11 @@ int main(int argc, char *argv[])
         QStringLiteral("call-zoom"),
         QStringLiteral("Preview the far end's share or camera enlarged over the window "
                        "(combine with --call-video or --call-screen)."));
+    const QCommandLineOption profileOption(
+        QStringLiteral("profile"),
+        QStringLiteral("Preview a contact's profile page in the style of preset <slug>: %1.")
+            .arg(presetSlugs().join(QStringLiteral(", "))),
+        QStringLiteral("slug"));
     const QCommandLineOption crashReportOption(
         QStringLiteral("crash-report"),
         QStringLiteral("Show a crash report (OpenChat relaunches itself with this after a crash)."),
@@ -1647,8 +1846,9 @@ int main(int argc, char *argv[])
                        onboardingRecoveryOption, onboardingLoginOption,
                        onboardingFilledOption, addContactOption, verifyOption, callOption,
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
-                       callPickerOption, callFullscreenOption, callZoomOption, crashReportOption,
-                       crashTestOption, screenCheckOption, uglyVoiceDebugOption});
+                       callPickerOption, callFullscreenOption, callZoomOption, profileOption,
+                       crashReportOption, crashTestOption, screenCheckOption,
+                       uglyVoiceDebugOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -1698,6 +1898,12 @@ int main(int argc, char *argv[])
     if (parser.isSet(verifyOption))
         return runVerifyWindow(application, parser, captureOption, delayOption, widthOption,
                                heightOption);
+
+    // Profile preview: a contact's page in one preset's style, checked before
+    // the plain capture path so --profile <slug> --capture routes here.
+    if (parser.isSet(profileOption))
+        return runProfileWindow(application, parser, parser.value(profileOption), captureOption,
+                                delayOption, widthOption, heightOption);
 
     // Call preview: render the in-call surface with a mock controller, checked
     // before the plain capture path so --call --capture routes here.

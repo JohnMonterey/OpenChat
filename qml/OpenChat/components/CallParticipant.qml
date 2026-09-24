@@ -42,6 +42,10 @@ Item {
     // Asks for this person's camera to be enlarged over the window. Carries
     // the video view itself, so whoever grows it can show the same frames.
     signal enlargeRequested(Item videoItem)
+    // Whether the picture opens this person's profile (SPEC §12): only while
+    // it is a picture, since a live camera already means "enlarge".
+    property bool profileClickable: false
+    signal profileRequested()
     readonly property real pictureWidth: cameraEnabled
         ? Math.min(videoMaxWidth, videoMaxHeight * videoAspect) : avatarSize
     readonly property real pictureHeight: cameraEnabled ? pictureWidth / videoAspect : avatarSize
@@ -98,6 +102,13 @@ Item {
             cornerRadius: 6
             avatarKey: participant.avatarKey
             frameId: participant.cameraEnabled ? "" : participant.frameId
+        }
+        ProfileAvatarAffordance {
+            objectName: "participantAvatarAffordance"
+            target: pictureAvatar
+            visible: participant.profileClickable && !participant.cameraEnabled
+            accessibleName: "View " + participant.name + "'s profile"
+            onClicked: participant.profileRequested()
         }
 
         CallVideoItem {

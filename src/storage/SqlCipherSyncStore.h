@@ -33,7 +33,11 @@ struct PendingHandshakeRecord final {
 //
 // The non-atomic query methods (hasSeen / claimDue / markAccepted /
 // scheduleRetry / advanceDeliveryState) reuse the exact SQL and lease / backoff
-// / monotonic-delivery-state semantics of the existing repositories.
+// / monotonic-delivery-state semantics of the existing repositories, with one
+// addition: markAccepted, failSend and failEnvelope also delete the envelope
+// they settle, in the same transaction, when no messages row stands behind it
+// (a settled control envelope is never read again). SqlCipherOutboxRepository
+// does not do this.
 class SqlCipherSyncStore final : public SyncStore
 {
 public:

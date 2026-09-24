@@ -471,10 +471,21 @@ void ContactController::createMyInvite()
     m_inviteConnections << connect(m_relay, &RelayClient::inviteCreationFailed, this, [this] {
         clearInviteConnections();
         setStatus(Status::Error, QStringLiteral("Couldn't create an invite. Try again."));
+        emit inviteFailed();
     });
     m_inviteConnections << connect(m_relay, &RelayClient::authExpired, this, [this] {
         clearInviteConnections();
         setStatus(Status::Error, QStringLiteral("Couldn't create an invite. Try again."));
+        emit inviteFailed();
+    });
+    // An endpoint the client refuses to use fails before any request goes
+    // out, so a caller waiting for the invite is told rather than left waiting.
+    m_inviteConnections << connect(m_relay, &RelayClient::transportError, this, [this](RelayTransportError error) {
+        if (error != RelayTransportError::InsecureEndpoint)
+            return;
+        clearInviteConnections();
+        setStatus(Status::Error, QStringLiteral("Couldn't create an invite. Try again."));
+        emit inviteFailed();
     });
     m_relay->createInvite();
 }

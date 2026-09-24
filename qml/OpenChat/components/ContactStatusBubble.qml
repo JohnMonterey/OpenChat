@@ -7,6 +7,11 @@ Item {
     id: bubble
     required property Item target
     required property string statusText
+    // A person's name adds the way into their profile as a second line
+    // (SPEC §12); alone when there is no status. Empty for a group.
+    property string profileName: ""
+    readonly property bool hasStatus: statusText.trim().length > 0
+    readonly property bool hasProfileLine: profileName.length > 0
     property bool shown: false
     property real noseY: height / 2
 
@@ -14,9 +19,12 @@ Item {
     // or intercepting its clicks. Ownership remains with the contact delegate.
     parent: target.Window.contentItem
     z: 30
-    width: Math.min(280, Math.max(86, naturalText.implicitWidth + 36),
+    width: Math.min(280, Math.max(86, (hasStatus ? naturalText.implicitWidth : 0) + 36,
+                                  hasProfileLine ? naturalProfileLine.implicitWidth + 56 : 0),
                     parent ? parent.width - 24 : 280)
-    height: caption.implicitHeight + 24
+    height: (hasStatus ? caption.implicitHeight : 0)
+            + (hasStatus && hasProfileLine ? 6 : 0)
+            + (hasProfileLine ? profileLine.height : 0) + 24
     visible: opacity > 0
     opacity: shown ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 120 } }
@@ -99,6 +107,7 @@ Item {
         objectName: "contactStatusBubbleText"
         x: 22; y: 12
         width: parent.width - 36
+        visible: bubble.hasStatus
         text: bubble.statusText
         textFormat: Text.PlainText
         wrapMode: Text.Wrap
@@ -106,5 +115,45 @@ Item {
         font.family: Theme.uiFont
         font.pixelSize: 13
         renderType: Text.NativeRendering
+    }
+
+    Text {
+        id: naturalProfileLine
+        visible: false
+        text: profileLineText.text
+        font.family: Theme.uiFont
+        font.pixelSize: 12
+    }
+    Item {
+        id: profileLine
+        objectName: "contactStatusBubbleProfileLine"
+        x: 22
+        y: bubble.hasStatus ? caption.y + caption.implicitHeight + 6 : 12
+        width: parent.width - 36
+        height: Math.max(14, profileLineText.implicitHeight)
+        visible: bubble.hasProfileLine
+
+        ProfileGlyph {
+            id: profileLineGlyph
+            anchors.verticalCenter: parent.verticalCenter
+            width: 14
+            height: 14
+            kind: "idCard"
+            ink: Theme.categoryText
+        }
+        Text {
+            id: profileLineText
+            anchors.left: profileLineGlyph.right
+            anchors.leftMargin: 6
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Click the picture to view " + bubble.profileName + "'s profile"
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Theme.categoryText
+            font.family: Theme.uiFont
+            font.pixelSize: 12
+            renderType: Text.NativeRendering
+        }
     }
 }

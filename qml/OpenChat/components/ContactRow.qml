@@ -23,14 +23,22 @@ Item {
     property bool statusBubbleEnabled: true
     property bool statusBubbleReady: false
     property bool statusBubbleDismissed: false
-    readonly property bool avatarHovered: statusBubbleEnabled && visible && rowMouse.containsMouse
+    // The pointer is on the picture rather than the rest of the row: a click
+    // there opens the person's profile (SPEC §12). The row's one MouseArea
+    // decides, from the same hit test the status bubble uses.
+    readonly property bool pointerOnAvatar: visible && rowMouse.containsMouse
         && rowMouse.mouseX >= avatarImage.x && rowMouse.mouseX < avatarImage.x + avatarImage.width
         && rowMouse.mouseY >= avatarImage.y && rowMouse.mouseY < avatarImage.y + avatarImage.height
-        && statusText.trim().length > 0
+    // The bubble carries the status line and, for a person, the way into
+    // their profile, so a person without a status still gets one; a group
+    // only has its status line to show.
+    readonly property bool avatarHovered: statusBubbleEnabled && pointerOnAvatar
+        && (!isGroup || statusText.trim().length > 0)
+    // Arriving at or leaving the picture starts the bubble afresh: a click
+    // dismisses it only while the pointer stays where it clicked.
     onAvatarHoveredChanged: {
         statusBubbleReady = false;
-        if (!avatarHovered)
-            statusBubbleDismissed = false;
+        statusBubbleDismissed = false;
     }
     // The text block starts one avatar-margin right of the avatar; the bead
     // follows the name on its own line so the status line gets the full width.
@@ -40,6 +48,9 @@ Item {
         return PeerCosmetics.revision >= 0 && !row.isGroup ? PeerCosmetics.item(row.contactId, slot) : "";
     }
     signal activated(string contactId)
+    signal profileRequested(string contactId)
+    // A right click on a person's row: its category shows "View profile".
+    signal contextMenuRequested(string contactId)
 
     implicitHeight: 60
 
@@ -64,6 +75,17 @@ Item {
         height: width
         avatarKey: row.avatarKey
         frameId: row.worn("frame")
+    }
+
+    // Rings and the profile badge over a person's picture while the pointer
+    // is on it; the row's MouseArea handles the click.
+    ProfileAvatarAffordance {
+        objectName: "contactAvatarAffordance"
+        target: avatarImage
+        interactive: false
+        visible: !row.isGroup
+        hovered: row.pointerOnAvatar && !row.isGroup
+        pressed: hovered && rowMouse.pressed
     }
 
     Text {
@@ -154,10 +176,21 @@ Item {
         id: rowMouse
         anchors.fill: parent
         hoverEnabled: true
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
         cursorShape: Qt.PointingHandCursor
-        onClicked: {
+        onClicked: mouse => {
             row.statusBubbleDismissed = true;
-            row.activated(row.contactId);
+            if (mouse.button === Qt.RightButton) {
+                if (!row.isGroup)
+                    row.contextMenuRequested(row.contactId);
+                return;
+            }
+            // The picture opens the profile; the rest of the row still
+            // selects the chat.
+            if (!row.isGroup && row.pointerOnAvatar)
+                row.profileRequested(row.contactId);
+            else
+                row.activated(row.contactId);
         }
     }
 
@@ -170,6 +203,7 @@ Item {
         objectName: "contactStatusBubble_" + row.contactId
         target: avatarImage
         statusText: row.statusText
+        profileName: row.isGroup ? "" : row.name
         shown: row.avatarHovered && row.statusBubbleReady && !row.statusBubbleDismissed
     }
 }

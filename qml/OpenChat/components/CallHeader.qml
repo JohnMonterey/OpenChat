@@ -36,6 +36,9 @@ Item {
     signal fullscreenToggled
     // Raised by any zoom chip on any picture here, with the video view to copy.
     signal enlargeRequested(Item videoItem)
+    // A picture (camera off) asked for that person's profile; `self` for our
+    // own tile. The window opens it.
+    signal profileRequested(string accountId, string name, string avatarKey, bool self)
     readonly property bool isGroupCall: controller.isGroupCall === true
     readonly property bool hasVideo: controller.cameraEnabled || controller.remoteCameraEnabled
     readonly property real videoWidth: Math.max(100,
@@ -125,6 +128,8 @@ Item {
             speaking: callHeader.controller.localSpeaking
             level: callHeader.controller.localLevel
             muted: callHeader.controller.muted
+            profileClickable: true
+            onProfileRequested: callHeader.profileRequested("", name, "", true)
         }
 
         Repeater {
@@ -136,6 +141,10 @@ Item {
                 // picture, speaking ring, camera) by role name; the rest are the
                 // group-only roles declared here.
                 required property string deviceId
+                // The member's account (contacts and strangers alike); empty
+                // for someone the group roster never named, whose picture
+                // then opens nothing.
+                required property string accountId
                 required property string stateText
                 required property bool joined
                 required property bool ringing
@@ -150,6 +159,8 @@ Item {
                 caption: stateText
                 dimmed: !joined && !ringing
                 onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
+                profileClickable: accountId.length > 0
+                onProfileRequested: callHeader.profileRequested(accountId, name, avatarKey, false)
             }
         }
     }
@@ -182,6 +193,8 @@ Item {
             speaking: callHeader.controller.localSpeaking
             level: callHeader.controller.localLevel
             muted: callHeader.controller.muted
+            profileClickable: true
+            onProfileRequested: callHeader.profileRequested("", name, "", true)
         }
 
         // A quiet reminder of who is connected to whom, sitting between the two
@@ -223,6 +236,10 @@ Item {
                      ? callHeader.controller.peerStateText : ""
             dimmed: caption.length > 0
             onEnlargeRequested: videoItem => callHeader.enlargeRequested(videoItem)
+            // The call's chat is the far end's contact id.
+            profileClickable: (callHeader.controller.callChatId || "").length > 0
+            onProfileRequested: callHeader.profileRequested(callHeader.controller.callChatId, name,
+                                                            avatarKey, false)
         }
     }
 

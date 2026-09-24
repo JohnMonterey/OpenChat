@@ -81,7 +81,26 @@ Item {
                 height: contactRowDelegate.favorite === category.favoriteCategory ? category.rowHeight : 0
                 visible: height > 0
                 onActivated: contactId => category.controller.selectContact(contactId)
+                onProfileRequested: contactId => category.controller.profiles.openContact(contactId)
+                onContextMenuRequested: contactId => {
+                    rowMenu.contactId = contactId;
+                    rowMenu.popup();
+                }
             }
+        }
+    }
+
+    // One menu for the whole category: a right click on a person's row.
+    AeroMenu {
+        id: rowMenu
+        objectName: "contactRowMenu"
+        property string contactId: ""
+        width: 180
+
+        AeroMenuItem {
+            objectName: "viewProfileMenuItem"
+            text: "View profile"
+            onTriggered: category.controller.profiles.openContact(rowMenu.contactId)
         }
     }
 }

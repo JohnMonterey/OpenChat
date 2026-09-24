@@ -36,6 +36,14 @@ class AppearanceSettings final : public QObject
     // follows the account to every device. Adopting it never asks the relay to
     // equip anything; equipping here does, through equipRequested().
     Q_PROPERTY(QVariantMap loadout READ loadout WRITE setLoadout NOTIFY loadoutChanged)
+    // Settings → Appearance → Profiles, also switched from a profile's top
+    // bar: other people's profile pages drawn in OpenChat's own look (Aero
+    // Sky for the current mode, standard fonts, no name effects, patterns,
+    // pictures or falling effects) instead of the style their owner chose.
+    // Their words, layout, Top Friends and song stay. Never applies to the
+    // user's own page or the editor. Local only.
+    Q_PROPERTY(bool plainProfiles READ plainProfiles WRITE setPlainProfiles NOTIFY
+                   plainProfilesChanged)
 public:
     explicit AppearanceSettings(QObject *parent = nullptr);
     bool darkMode() const { return m_darkMode; }
@@ -57,6 +65,9 @@ public:
     QVariantMap loadout() const;
     void setLoadout(const QVariantMap &loadout);
     bool owns(const QString &id) const { return m_ownershipKnown && m_owned.contains(id); }
+
+    bool plainProfiles() const { return m_plainProfiles; }
+    void setPlainProfiles(bool plain);
 signals:
     void darkModeChanged();
     void avatarFrameChanged();
@@ -69,6 +80,7 @@ signals:
     // Something was equipped here (`itemId` empty: the slot was cleared), for
     // the authority to hold.
     void equipRequested(const QString &slot, const QString &itemId);
+    void plainProfilesChanged();
 private:
     // One equipped cosmetic: its field, kind, settings key and change signal.
     struct EquipSlot
@@ -92,6 +104,7 @@ private:
     QString m_bubbleSkin;
     QStringList m_owned;
     bool m_ownershipKnown = false;
+    bool m_plainProfiles = false;
 };
 
 } // namespace OpenChat

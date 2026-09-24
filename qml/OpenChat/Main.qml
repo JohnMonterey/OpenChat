@@ -126,16 +126,96 @@ Window {
     title: "OpenChat"
     color: Theme.contentBackground
 
+    // Messages that arrive while a profile covers the chat stay unread.
     Binding {
         target: root.chatController
         property: "conversationVisible"
         value: root.active && root.visible && root.visibility !== Window.Minimized
+               && !root.chatController.profiles.open
+    }
+
+    // A profile page covers the whole window (SPEC §1.1). It follows the
+    // viewer's theme and their Plain style choice.
+    readonly property var profiles: root.chatController.profiles
+    Binding {
+        target: root.profiles
+        property: "darkMode"
+        value: Theme.darkMode
+    }
+    Binding {
+        target: root.profiles
+        property: "plainStyle"
+        value: AppearanceSettings.plainProfiles
+    }
+    // Whether the page exists: from the moment a profile opens until its
+    // 120 ms close fade has run after the last one is popped (at once
+    // without animations). Only this handler changes it, so the page is
+    // never torn down and rebuilt in the middle of a close.
+    property bool profileShown: root.profiles.open
+    Timer {
+        id: profileCloseTimer
+        interval: 130
+        onTriggered: root.profileShown = root.profiles.open
+    }
+    // Where the keyboard was before a profile opened, so closing it puts the
+    // keyboard back (a typed Item property is nulled if that item goes away).
+    property Item focusBeforeProfile: null
+    onActiveFocusItemChanged: {
+        if (!root.profiles.open && !root.profileShown)
+            root.focusBeforeProfile = root.activeFocusItem;
+    }
+    Connections {
+        target: root.profiles
+        function onNavigationChanged() {
+            if (root.profiles.open) {
+                profileCloseTimer.stop();
+                root.profileShown = true;
+                return;
+            }
+            if (ProfileRenderPolicy.animationsAllowed)
+                profileCloseTimer.restart();
+            else
+                root.profileShown = false;
+            // After this signal has re-enabled the chat surface: a disabled
+            // item cannot take the keyboard.
+            Qt.callLater(root.restoreFocusAfterProfile);
+        }
+    }
+    // Only when the keyboard is still on the closing page (or nowhere): an
+    // action that left the page for the chat has already put it in the
+    // composer, and that is where it belongs.
+    function restoreFocusAfterProfile() {
+        if (root.profiles.open || !root.focusBeforeProfile)
+            return;
+        for (let item = root.activeFocusItem; item !== null; item = item.parent) {
+            if (item === profileLoader) {
+                root.focusBeforeProfile.forceActiveFocus();
+                return;
+            }
+        }
+        if (root.activeFocusItem === null || root.activeFocusItem === root.contentItem)
+            root.focusBeforeProfile.forceActiveFocus();
+    }
+    // The Safety Number dialog floats above the page; the ✓ appears once the
+    // contact is verified.
+    Connections {
+        target: root.contactController
+        ignoreUnknownSignals: true
+        function onSafetyNumberOpenChanged() {
+            if (!root.contactController.safetyNumberOpen && root.profiles.open)
+                root.profiles.refresh();
+        }
     }
 
     Item {
         id: applicationSurface
         anchors.fill: parent
         clip: true
+        // Under an open profile the chat takes no input at all, and once the
+        // page has faded in it stops rendering: no scene, frame or call video
+        // is painted behind a page that covers it.
+        enabled: !root.profiles.open
+        visible: !(root.profiles.open && profileLoader.item && profileLoader.item.settled)
 
         ContactSidebar {
             id: sidebar
@@ -211,6 +291,9 @@ Window {
                         zoom: mediaZoom
                         onFullscreenToggled: root.callFullscreen = !root.callFullscreen
                         onEnlargeRequested: videoItem => mediaZoom.enlarge(videoItem)
+                        onProfileRequested: (accountId, name, avatarKey, self) => self
+                            ? root.profiles.openOwn(Profile.FromCall)
+                            : root.profiles.openPerson(accountId, name, avatarKey)
                     }
                 }
 
@@ -391,6 +474,24 @@ Window {
         }
     }
 
+    // The profile page: over the sidebar and every pane, under the Add
+    // Contact and Safety Number dialogs (declared after it, so they float
+    // above), the screen-share picker and an enlarged picture. Built only
+    // while a profile is open or fading out.
+    Loader {
+        id: profileLoader
+        objectName: "profileLoader"
+        anchors.fill: parent
+        active: root.profileShown
+        sourceComponent: ProfilePage {
+            profiles: root.profiles
+            chatController: root.chatController
+            contactController: root.contactController
+            callController: root.callController
+            onPlainStyleChangeRequested: plain => AppearanceSettings.plainProfiles = plain
+        }
+    }
+
     Loader {
         active: root.caseRequested
         sourceComponent: DailyCaseModal {
@@ -467,10 +568,74 @@ Window {
 
     // Escape hands the window back when the call fills it. The enlarged
     // picture has its own Escape and goes first, so one press closes one thing.
+    // An open profile covers the call and takes Escape itself.
+    readonly property bool contactDialogOpen: root.contactController !== null
+        && (root.contactController.safetyNumberOpen || root.contactController.dialogOpen)
     Shortcut {
         sequences: ["Escape"]
-        enabled: root.callFullscreen && !mediaZoom.expanded
+        enabled: root.callFullscreen && !mediaZoom.expanded && !root.profiles.open
+                 && !root.contactDialogOpen
         onActivated: root.callFullscreen = false
+    }
+    // The Safety Number and Add Contact dialogs close on Escape too, and
+    // before anything under them (a profile they were opened from).
+    Shortcut {
+        sequences: ["Escape"]
+        enabled: root.contactDialogOpen && !mediaZoom.expanded
+        onActivated: {
+            if (root.contactController.safetyNumberOpen)
+                root.contactController.closeSafetyNumber();
+            else
+                root.contactController.closeDialog();
+        }
+    }
+
+    // The page's keys, one gated place for all of them: nothing reaches the
+    // page while something floats above it (an enlarged picture, the Safety
+    // Number or Add Contact dialog, the case, or a menu, popover or dialog of
+    // the page itself), so one press of Escape closes one thing.
+    readonly property bool profileKeysEnabled: root.profiles.open && profileLoader.item !== null
+        && !mediaZoom.expanded
+        && !root.contactDialogOpen
+        && !root.caseRequested
+        && !profileLoader.item.popupOpen
+    Shortcut {
+        sequences: ["Escape"]
+        enabled: root.profileKeysEnabled
+        onActivated: profileLoader.item.handleEscape()
+    }
+    Shortcut {
+        sequences: ["Alt+Left"]
+        enabled: root.profileKeysEnabled && !root.profiles.editing
+        onActivated: profileLoader.item.handleBack()
+    }
+    // The selected one-to-one chat's profile, from anywhere in the window
+    // (the composer included). A group has none.
+    Shortcut {
+        sequence: "Ctrl+I"
+        enabled: !root.profiles.open && root.chatController.hasCurrentContact
+                 && !root.chatController.currentIsGroup
+        onActivated: root.profiles.openContact(root.chatController.currentContactId)
+    }
+
+    // Closing the window while your own page has unsaved changes asks first
+    // (SPEC §14.12). Only without a notification-area icon: with one, a close
+    // only hides the window (the autosaved draft is safe), and the closes
+    // that do arrive belong to a Quit, which must not be held up.
+    property bool closeConfirmed: false
+    onClosing: close => {
+        if (root.closeConfirmed) {
+            root.closeConfirmed = false;
+            return;
+        }
+        if (root.tray === null && root.profiles.editing && root.profiles.draftDirty
+                && profileLoader.item) {
+            close.accepted = false;
+            profileLoader.item.requestWindowClose(() => {
+                root.closeConfirmed = true;
+                root.close();
+            });
+        }
     }
 
     Connections {

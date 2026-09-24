@@ -6,9 +6,11 @@
 #include <QStringList>
 #include <QUrl>
 
+#include <memory>
 #include <optional>
 
 #include "call/CallEngine.h"
+#include "controllers/ProfileController.h"
 #include "domain/ChatTypes.h"
 #include "domain/Identifiers.h"
 #include "domain/ProfileUpdate.h"
@@ -101,6 +103,9 @@ class ChatController final : public QObject
                    currentSettingsCategoryChanged)
     Q_PROPERTY(QStringList currentSettingsElements READ currentSettingsElements NOTIFY
                    currentSettingsCategoryChanged)
+    // Profile pages: every surface that shows a person's picture opens their
+    // profile through this one instance.
+    Q_PROPERTY(OpenChat::ProfileController *profiles READ profiles CONSTANT)
 
 public:
     bool conversationVisible() const { return m_conversationVisible; }
@@ -179,6 +184,7 @@ public:
     [[nodiscard]] int currentSettingsCategory() const;
     [[nodiscard]] QString currentSettingsCategoryName() const;
     [[nodiscard]] QStringList currentSettingsElements() const;
+    [[nodiscard]] ProfileController *profiles() const noexcept { return m_profiles.get(); }
     void setPresenceRelay(RelayClient *relay);
     [[nodiscard]] bool localOnline() const { return m_localOnline; }
     [[nodiscard]] bool isLive() const noexcept { return m_live; }
@@ -462,6 +468,10 @@ private:
     QHash<QString, LiveGroup> m_liveGroups;        // keyed by "group:" + ConversationId hex
     QHash<QByteArray, QString> m_contactByConversation; // ConversationId bytes -> Contact.id
     int m_mockGroupCounter = 0;
+    // Declared last, so it is destroyed first: it reads the roster and the
+    // local profile above until its very end (its destructor saves the
+    // editor's pending draft). Not a QObject child, for the same reason.
+    std::unique_ptr<ProfileController> m_profiles;
 };
 
 } // namespace OpenChat

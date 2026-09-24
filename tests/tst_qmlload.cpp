@@ -1,6 +1,9 @@
 #include <QColor>
 #include <QClipboard>
+#include <QDir>
 #include <QGuiApplication>
+#include <QPointer>
+#include <QRegularExpression>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QFile>
@@ -52,6 +55,9 @@
 #include "render/CallVideoItem.h"
 #include "render/BubbleBackground.h"
 #include "cosmetics/BubbleSkins.h"
+#include "controllers/ProfileController.h"
+#include "controllers/ProfileReferencePages.h"
+#include "ProfileQmlHarness.h"
 
 namespace {
 
@@ -317,6 +323,62 @@ QColor trayColour(const QIcon &icon)
 
 } // namespace
 
+namespace {
+
+// The profile tests' window: Main, with whatever controllers the test hands
+// in, shown and exposed; null if it failed to load.
+QQuickWindow *showMain(QQmlApplicationEngine &engine, const QVariantMap &properties)
+{
+    engine.setInitialProperties(properties);
+    engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+    engine.loadFromModule("OpenChat", "Main");
+    if (engine.rootObjects().size() != 1)
+        return nullptr;
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window)
+        return nullptr;
+    window->show();
+    window->requestActivate();
+    return QTest::qWaitForWindowExposed(window) ? window : nullptr;
+}
+
+QPoint centreOf(QQuickItem *item)
+{
+    return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+}
+
+// The profile page Main shows, once it has faded in; null while none is.
+QQuickItem *settledProfilePage(QQuickWindow *window)
+{
+    auto *page = findVisualItem(window->contentItem(), QStringLiteral("profilePage"));
+    return page && page->property("settled").toBool() && page->isVisible() ? page : nullptr;
+}
+
+bool profileLoaderActive(QQuickWindow *window)
+{
+    auto *loader = window->findChild<QQuickItem *>(QStringLiteral("profileLoader"));
+    return loader && loader->property("active").toBool();
+}
+
+// Saves the window under OPENCHAT_PROFILE_CAPTURES, when set, as <name>.png.
+void captureProfileShot(QQuickWindow *window, const QString &name)
+{
+    const QString directory = qEnvironmentVariable("OPENCHAT_PROFILE_CAPTURES");
+    if (directory.isEmpty())
+        return;
+    QDir().mkpath(directory);
+    QVERIFY(window->grabWindow().save(QDir(directory).filePath(name + QStringLiteral(".png"))));
+}
+
+// Every warning that points at a line of QML fails the profile tests: a
+// broken binding on an avatar or the page is a bug, not noise.
+void failOnQmlWarnings()
+{
+    QTest::failOnWarning(QRegularExpression(QStringLiteral("\\.qml:\\d+")));
+}
+
+} // namespace
+
 class QmlLoadTest final : public QObject
 {
     Q_OBJECT
@@ -327,6 +389,8 @@ private slots:
         QSettings settings;
         settings.setValue(QStringLiteral("Appearance/darkMode"), false);
         settings.remove(QStringLiteral("Appearance/bubbleSkin"));
+        settings.remove(QStringLiteral("Appearance/plainProfiles"));
+        OpenChat::ProfileQmlHarness::resetProfileSingletons();
     }
 
     void dailyCaseInteraction()
@@ -1335,6 +1399,7 @@ private slots:
             {QStringLiteral("Custom Vocal FX"), QStringLiteral("customVocalFxPanel")},
             {QStringLiteral("Connection"), QStringLiteral("connectionSettingsPanel")},
             {QStringLiteral("Theme"), QStringLiteral("darkModeSwitch")},
+            {QStringLiteral("Profiles"), QStringLiteral("plainProfilesSwitch")},
             {QStringLiteral("Avatar frame"), QStringLiteral("cosmeticPicker_frame")},
             {QStringLiteral("Name flair"), QStringLiteral("cosmeticPicker_flair")},
             {QStringLiteral("Presence bead"), QStringLiteral("cosmeticPicker_bead")},
@@ -3196,13 +3261,37 @@ private slots:
         QTRY_VERIFY(!bubble->isVisible());
         QTest::mouseMove(window, avatarPoint);
         QTRY_COMPARE(bubble->opacity(), 1.0);
+        // The bubble also offers the way into the profile.
+        auto *profileLine = bubble->findChild<QQuickItem *>(QStringLiteral("contactStatusBubbleProfileLine"));
+        QVERIFY(profileLine && profileLine->isVisible());
+
+        // The picture opens Alex's profile and leaves the open chat alone; the
+        // rest of the row still selects the chat.
+        OpenChat::ProfileController *profiles = controller.profiles();
+        const QString openChat = controller.currentContactId();
+        QVERIFY(openChat != QStringLiteral("alex"));
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, avatarPoint);
-        QCOMPARE(controller.currentContactId(), QStringLiteral("alex"));
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->personId(), QStringLiteral("alex"));
+        QCOMPARE(controller.currentContactId(), openChat);
         QTRY_VERIFY(!bubble->isVisible());
+        profiles->closeAll();
+        auto *profileLoader = window->findChild<QQuickItem *>(QStringLiteral("profileLoader"));
+        QVERIFY(profileLoader);
+        QTRY_VERIFY(!profileLoader->property("active").toBool());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, namePoint);
+        QCOMPARE(controller.currentContactId(), QStringLiteral("alex"));
+        QVERIFY(!profiles->isOpen());
+
+        // Without a status line a person's bubble still says how to reach
+        // their profile, on its own.
         QTest::mouseMove(window, namePoint);
         QVERIFY(row->setProperty("statusText", QString()));
         QTest::mouseMove(window, avatarPoint);
-        QVERIFY(!row->property("avatarHovered").toBool());
+        QVERIFY(row->property("avatarHovered").toBool());
+        QTRY_COMPARE(bubble->opacity(), 1.0);
+        QVERIFY(profileLine->isVisible());
+        QVERIFY(!text->isVisible());
     }
 
     void localProfileEditorsAreWiredToTheController()
@@ -3221,9 +3310,12 @@ private slots:
         window->show();
         QVERIFY(QTest::qWaitForWindowExposed(window));
 
-        // Everything is present but dormant: no shades, no menu, no editor.
+        // Everything is present but dormant: no rings, shades, menu or editor.
+        // Your own picture opens your profile now, so its hover is the profile
+        // rings, and the picture dialog lives on that page, not here.
         auto *avatarButton = findVisualItem(window->contentItem(), QStringLiteral("localAvatarButton"));
-        auto *avatarShade = findVisualItem(window->contentItem(), QStringLiteral("localAvatarHoverShade"));
+        auto *avatarShade = avatarButton ? findVisualItem(avatarButton, QStringLiteral("profileAffordanceRings"))
+                                         : nullptr;
         auto *statusEditor = findVisualItem(window->contentItem(), QStringLiteral("localStatusEditor"));
         auto *statusShade = findVisualItem(window->contentItem(), QStringLiteral("localStatusHoverShade"));
         auto *statusText = findVisualItem(window->contentItem(), QStringLiteral("localStatusText"));
@@ -3234,7 +3326,7 @@ private slots:
         auto *notice = findVisualItem(window->contentItem(), QStringLiteral("profileNotice"));
         QVERIFY(avatarButton && avatarShade && statusEditor && statusShade && statusText
                 && statusInput && presenceButton && presenceShade && presenceMenu && notice);
-        QVERIFY(root->findChild<QObject *>(QStringLiteral("localAvatarFileDialog")));
+        QVERIFY(!root->findChild<QObject *>(QStringLiteral("localAvatarFileDialog")));
         QVERIFY(!avatarShade->isVisible());
         QVERIFY(!statusShade->isVisible());
         QVERIFY(!statusInput->isVisible());
@@ -3243,8 +3335,8 @@ private slots:
         QVERIFY(!notice->isVisible());
         QCOMPARE(statusText->property("text").toString(), QStringLiteral("Available"));
 
-        // Hovering the picture darkens it and shows the plus; hovering the
-        // status line tints the field; hovering the bead darkens it.
+        // Hovering the picture rings it; hovering the status line tints the
+        // field; hovering the bead darkens it.
         const auto centre = [](QQuickItem *item) {
             return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
         };
@@ -3334,6 +3426,13 @@ private slots:
         QVERIFY(avatar);
         QTRY_COMPARE(avatar->property("avatarKey").toString(), controller.localAvatarKey());
         QVERIFY(controller.localAvatarKey().startsWith(QStringLiteral("blob:")));
+
+        // Clicking your own picture opens your profile, where the picture
+        // dialog now lives.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre(avatarButton));
+        QTRY_VERIFY(controller.profiles()->isOpen());
+        QVERIFY(controller.profiles()->isOwnProfile());
+        QTRY_VERIFY(root->findChild<QObject *>(QStringLiteral("localAvatarFileDialog")));
     }
 
     void unknownAvatarUsesNeutralFallback()
@@ -5170,57 +5269,638 @@ private slots:
                                         QStringLiteral("jessica"), false, false);
         QTRY_VERIFY(window->isVisible());
     }
+
+    // --- Profile pages in the window (ARCH §9.9) ---------------------------
+
+    void contactRowPictureHoverShowsTheAffordance()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *category = window->findChild<QQuickItem *>(QStringLiteral("contactsCategory"));
+        QVERIFY(category);
+        auto *row = findVisualItem(category, QStringLiteral("contactRow_alex"));
+        QVERIFY(row);
+        auto *avatar = row->findChild<QQuickItem *>(QStringLiteral("contactAvatar"));
+        auto *affordance = row->findChild<QQuickItem *>(QStringLiteral("contactAvatarAffordance"));
+        QVERIFY(avatar && affordance);
+        auto *rings = findVisualItem(affordance, QStringLiteral("profileAffordanceRings"));
+        QVERIFY(rings);
+
+        // The rest of the row is the chat; only the picture lights up.
+        QTest::mouseMove(window, row->mapToScene(QPointF(row->width() - 30, 14)).toPoint());
+        QVERIFY(!rings->isVisible());
+        QTest::mouseMove(window, centreOf(avatar));
+        QTRY_VERIFY(rings->isVisible());
+        QTRY_COMPARE(rings->opacity(), 1.0);
+        QVERIFY(row->property("pointerOnAvatar").toBool());
+        captureProfileShot(window, QStringLiteral("in-context-row-hover"));
+        QTest::mouseMove(window, row->mapToScene(QPointF(row->width() - 30, 14)).toPoint());
+        QTRY_VERIFY(!rings->isVisible());
+    }
+
+    void ownSidebarAvatarOpensOwnProfile()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *affordance = findVisualItem(window->contentItem(), QStringLiteral("localAvatarAffordance"));
+        QVERIFY(affordance);
+        QCOMPARE(affordance->property("accessibleName").toString(), QStringLiteral("View your profile"));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(affordance));
+        OpenChat::ProfileController *profiles = controller.profiles();
+        QTRY_VERIFY(profiles->isOpen());
+        QVERIFY(profiles->isOwnProfile());
+        QTRY_VERIFY(settledProfilePage(window));
+        // "Change picture" belongs to your own page now.
+        QVERIFY(window->findChild<QObject *>(QStringLiteral("localAvatarFileDialog")));
+        captureProfileShot(window, QStringLiteral("in-context-own-profile"));
+    }
+
+    void conversationHeaderAvatarOpensProfile()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        const QString contact = controller.currentContactId();
+        QVERIFY(!contact.isEmpty());
+        auto *affordance =
+            findVisualItem(window->contentItem(), QStringLiteral("conversationAvatarAffordance"));
+        QVERIFY(affordance && affordance->isVisible());
+        QCOMPARE(affordance->property("shownBadgeSize").toInt(), 22); // the 68 px picture's badge
+        OpenChat::ProfileController *profiles = controller.profiles();
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(affordance));
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->personId(), contact);
+        QCOMPARE(profiles->origin(), int(OpenChat::Profile::Origin::FromChat));
+        QTRY_VERIFY(settledProfilePage(window));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!profiles->isOpen());
+        QTRY_VERIFY(!profileLoaderActive(window));
+
+        // The picture is a Tab stop: Enter opens the profile from the keyboard.
+        affordance->forceActiveFocus(Qt::TabFocusReason);
+        QVERIFY(affordance->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->personId(), contact);
+    }
+
+    void groupHeaderAvatarDoesNothing()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QVector<OpenChat::Contact> contacts;
+        for (int i = 0; i < controller.contacts()->rowCount(); ++i)
+            contacts.append(*controller.contacts()->contactAt(i));
+        OpenChat::Contact group;
+        group.id = QStringLiteral("weekend");
+        group.name = QStringLiteral("Weekend plans");
+        group.avatarKey = QStringLiteral("group");
+        group.isGroup = true;
+        contacts.append(group);
+        controller.contacts()->setContacts(contacts);
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        // A group's row: no rings on its picture, and the picture selects the
+        // chat like the rest of the row.
+        auto *category = window->findChild<QQuickItem *>(QStringLiteral("contactsCategory"));
+        auto *row = category ? findVisualItem(category, QStringLiteral("contactRow_weekend")) : nullptr;
+        QVERIFY(row);
+        auto *rowAffordance = row->findChild<QQuickItem *>(QStringLiteral("contactAvatarAffordance"));
+        auto *rowPicture = row->findChild<QQuickItem *>(QStringLiteral("contactAvatar"));
+        QVERIFY(rowAffordance && rowPicture);
+        QVERIFY(!rowAffordance->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(rowPicture));
+        QTRY_COMPARE(controller.currentContactId(), QStringLiteral("weekend"));
+        QVERIFY(!controller.profiles()->isOpen());
+        // The header's picture opens nothing for a group either. (Only a live
+        // session knows its groups, so this preview's header cannot hide its
+        // rings; the controller refuses a group all the same.)
+        auto *header = findVisualItem(window->contentItem(), QStringLiteral("conversationHeader"));
+        auto *picture = header ? findVisualItem(header, QStringLiteral("roundedAvatarArtwork")) : nullptr;
+        QVERIFY(picture);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(picture));
+        QTest::qWait(200);
+        QVERIFY(!controller.profiles()->isOpen());
+        QVERIFY(!controller.profiles()->openContact(QStringLiteral("weekend")));
+    }
+
+    void requestRowAvatarOpensStubWithAcceptDecline()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        contactController.addMockRequest(QStringLiteral("Grace"), QStringLiteral("wants to chat with you"));
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine,
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        QVERIFY(window);
+        OpenChat::RequestListModel *model = contactController.requests();
+        QCOMPARE(model->count(), 1);
+        const QString requestId = model->data(model->index(0), OpenChat::RequestListModel::IdRole).toString();
+        auto *panel = window->findChild<QQuickItem *>(QStringLiteral("requestsPanel"));
+        QVERIFY(panel);
+        auto *row = findVisualItem(panel, QStringLiteral("requestRow_") + requestId);
+        QVERIFY(row);
+        auto *identity = findVisualItem(row, QStringLiteral("requestIdentityArea"));
+        auto *affordance = findVisualItem(row, QStringLiteral("requestAvatarAffordance"));
+        QVERIFY(identity && affordance && affordance->isVisible());
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(affordance));
+        OpenChat::ProfileController *profiles = chatController.profiles();
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->relationship(), int(OpenChat::Profile::Relationship::IncomingRequestPerson));
+        QCOMPARE(profiles->requestId(), requestId);
+        QCOMPARE(profiles->pageState(), int(OpenChat::Profile::PageState::StubPage));
+        QTRY_VERIFY(settledProfilePage(window));
+        auto *accept = findVisualItem(window->contentItem(), QStringLiteral("profileAcceptButton"));
+        auto *decline = findVisualItem(window->contentItem(), QStringLiteral("profileDeclineButton"));
+        QVERIFY(accept && accept->isVisible());
+        QVERIFY(decline && decline->isVisible());
+        captureProfileShot(window, QStringLiteral("in-context-request-stub"));
+
+        // Decline really declines, and leaves the stub.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(decline));
+        QTRY_COMPARE(model->count(), 0);
+        QTRY_VERIFY(!profiles->isOpen());
+    }
+
+    void directoryResultAvatarOpensStub()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        contactController.setMockDirectory({QStringLiteral("alice")});
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine,
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        QVERIFY(window);
+        chatController.setSearchQuery(QStringLiteral("alice"));
+        contactController.lookup(QStringLiteral("alice"));
+        QTRY_COMPARE(contactController.lookupState(), OpenChat::ContactController::LookupState::Found);
+        auto *affordance = findVisualItem(window->contentItem(), QStringLiteral("directoryAvatarAffordance"));
+        QVERIFY(affordance);
+        QTRY_VERIFY(affordance->isVisible());
+        QCOMPARE(affordance->property("accessibleName").toString(), QStringLiteral("Open @alice"));
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(affordance));
+        OpenChat::ProfileController *profiles = chatController.profiles();
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->relationship(), int(OpenChat::Profile::Relationship::StrangerPerson));
+        QCOMPARE(profiles->origin(), int(OpenChat::Profile::Origin::FromSearch));
+        QTRY_VERIFY(settledProfilePage(window));
+        // The one real action for a stranger found by handle.
+        auto *send = findVisualItem(window->contentItem(), QStringLiteral("profileSendRequestButton"));
+        QVERIFY(send && send->isVisible());
+    }
+
+    void callTilesOpenProfilesWhenCameraIsOff()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine,
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        QVERIFY(window);
+        OpenChat::ProfileController *profiles = chatController.profiles();
+
+        // One-to-one: the far end's picture opens their page, ours our own.
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        callController.setPreviewCallChatId(QStringLiteral("jessica"));
+        QCoreApplication::processEvents();
+        auto *remote = window->findChild<QQuickItem *>(QStringLiteral("remoteParticipant"));
+        auto *local = window->findChild<QQuickItem *>(QStringLiteral("localParticipant"));
+        QVERIFY(remote && local);
+        auto *remoteAffordance = findVisualItem(remote, QStringLiteral("participantAvatarAffordance"));
+        auto *localAffordance = findVisualItem(local, QStringLiteral("participantAvatarAffordance"));
+        QVERIFY(remoteAffordance && localAffordance);
+        QTRY_VERIFY(remoteAffordance->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(remoteAffordance));
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->personId(), QStringLiteral("jessica"));
+        QCOMPARE(profiles->relationship(), int(OpenChat::Profile::Relationship::ContactPerson));
+        profiles->closeAll();
+        QTRY_VERIFY(!profileLoaderActive(window));
+        QTRY_VERIFY(localAffordance->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(localAffordance));
+        QTRY_VERIFY(profiles->isOpen());
+        QVERIFY(profiles->isOwnProfile());
+        profiles->closeAll();
+        QTRY_VERIFY(!profileLoaderActive(window));
+
+        // A group: members the roster names open (a contact's page or a
+        // stranger's stub); a member it never named opens nothing.
+        OpenChat::CallParticipantRow jessica{QStringLiteral("d1"), QStringLiteral("Jessica"),
+                                             QStringLiteral("jessica"), QString(), true, false, false, 0.0};
+        jessica.accountId = OpenChat::ProfileReferencePages::mockAccountFor(QStringLiteral("jessica")).toHex();
+        OpenChat::CallParticipantRow stranger{QStringLiteral("d2"), QStringLiteral("Dana"),
+                                              QStringLiteral("userpfp_none"), QString(), true, false, false, 0.0};
+        stranger.accountId = OpenChat::ProfileReferencePages::mockAccountFor(QStringLiteral("dana-whitfield")).toHex();
+        OpenChat::CallParticipantRow unnamed{QStringLiteral("d3"), QStringLiteral("Someone"),
+                                             QStringLiteral("userpfp_none"), QString(), true, false, false, 0.0};
+        callController.enableForGroupPreview(OpenChat::CallState::Active, QStringLiteral("Weekend plans"),
+                                             {jessica, stranger, unnamed});
+        QCoreApplication::processEvents();
+        auto *jessicaTile = findVisualItem(window->contentItem(), QStringLiteral("groupParticipant_d1"));
+        auto *strangerTile = findVisualItem(window->contentItem(), QStringLiteral("groupParticipant_d2"));
+        auto *unnamedTile = findVisualItem(window->contentItem(), QStringLiteral("groupParticipant_d3"));
+        QVERIFY(jessicaTile && strangerTile && unnamedTile);
+        auto *jessicaAffordance = findVisualItem(jessicaTile, QStringLiteral("participantAvatarAffordance"));
+        auto *strangerAffordance = findVisualItem(strangerTile, QStringLiteral("participantAvatarAffordance"));
+        auto *unnamedAffordance = findVisualItem(unnamedTile, QStringLiteral("participantAvatarAffordance"));
+        QVERIFY(jessicaAffordance && strangerAffordance && unnamedAffordance);
+        // Wait for the Flow to lay the tiles out side by side.
+        QTRY_VERIFY(strangerTile->x() > jessicaTile->x() + jessicaTile->width() / 2
+                    || strangerTile->y() > jessicaTile->y());
+        QTRY_VERIFY(jessicaAffordance->isVisible());
+        QVERIFY(!unnamedAffordance->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(jessicaAffordance));
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->personId(), QStringLiteral("jessica"));
+        profiles->closeAll();
+        QTRY_VERIFY(!profileLoaderActive(window));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(strangerAffordance));
+        QTRY_VERIFY(profiles->isOpen());
+        QCOMPARE(profiles->relationship(), int(OpenChat::Profile::Relationship::StrangerPerson));
+        profiles->closeAll();
+        QTRY_VERIFY(!profileLoaderActive(window));
+
+        // A live camera keeps meaning "enlarge": no profile affordance on it.
+        QVERIFY(jessicaTile->setProperty("cameraEnabled", true));
+        QTRY_VERIFY(!jessicaAffordance->isVisible());
+    }
+
+    void profileStaysOpenWhenACallRings()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine,
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        QVERIFY(window);
+        OpenChat::ProfileController *profiles = chatController.profiles();
+        QVERIFY(profiles->openContact(QStringLiteral("jessica")));
+        QTRY_VERIFY(settledProfilePage(window));
+        callController.enableForPreview(OpenChat::CallState::Ringing, QStringLiteral("Ryan"),
+                                        QStringLiteral("ryan"), false, false);
+        QCoreApplication::processEvents();
+        // A profile never hides a call: the page stays and shows the strip.
+        QTest::qWait(200);
+        QVERIFY(profiles->isOpen());
+        auto *strip = findVisualItem(window->contentItem(), QStringLiteral("profileCallStripLoader"));
+        QVERIFY(strip);
+        QTRY_VERIFY(strip->isVisible() && strip->height() > 0);
+        captureProfileShot(window, QStringLiteral("in-context-ringing"));
+    }
+
+    void escapeClosesProfileNotFullscreenCall()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController chatController;
+        OpenChat::CallController callController;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine,
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("callController"), QVariant::fromValue(&callController)}});
+        QVERIFY(window);
+        callController.enableForPreview(OpenChat::CallState::Active, QStringLiteral("Jessica"),
+                                        QStringLiteral("jessica"), false, false);
+        QCoreApplication::processEvents();
+        QVERIFY(window->setProperty("callFullscreen", true));
+        OpenChat::ProfileController *profiles = chatController.profiles();
+        QVERIFY(profiles->openContact(QStringLiteral("michael")));
+        QTRY_VERIFY(settledProfilePage(window));
+        // One press closes one thing: the page first, then the full screen.
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!profiles->isOpen());
+        QVERIFY(window->property("callFullscreen").toBool());
+        QTRY_VERIFY(!profileLoaderActive(window));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!window->property("callFullscreen").toBool());
+    }
+
+    void escapeWithTheSafetyNumberOpenClosesOnlyTheDialog()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine,
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        QVERIFY(window);
+        OpenChat::ProfileController *profiles = chatController.profiles();
+        QVERIFY(profiles->openContact(QStringLiteral("michael")));
+        QTRY_VERIFY(settledProfilePage(window));
+        contactController.openSafetyNumberPreview();
+        QTRY_VERIFY(contactController.safetyNumberOpen());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!contactController.safetyNumberOpen());
+        QTest::qWait(100);
+        QVERIFY(profiles->isOpen());
+        // The next press is the page's.
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!profiles->isOpen());
+    }
+
+    void dialogsFloatAboveTheProfile()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController chatController;
+        OpenChat::ContactController contactController;
+        contactController.enableForPreview();
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine,
+            {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)},
+             {QStringLiteral("contactController"), QVariant::fromValue(&contactController)}});
+        QVERIFY(window);
+        QVERIFY(chatController.profiles()->openContact(QStringLiteral("michael")));
+        QTRY_VERIFY(settledProfilePage(window));
+        contactController.openSafetyNumberPreview();
+        auto *dialog = window->findChild<QQuickItem *>(QStringLiteral("safetyNumberDialog"));
+        QTRY_VERIFY(dialog = window->findChild<QQuickItem *>(QStringLiteral("safetyNumberDialog")));
+        QVERIFY(dialog->isVisible());
+        // Siblings stack in declaration order: the dialog's loader comes after
+        // the page's, so it draws and takes the pointer above it.
+        auto *pageLoader = window->findChild<QQuickItem *>(QStringLiteral("profileLoader"));
+        QVERIFY(pageLoader);
+        QQuickItem *dialogLoader = dialog;
+        while (dialogLoader && dialogLoader->parentItem() != pageLoader->parentItem())
+            dialogLoader = dialogLoader->parentItem();
+        QVERIFY(dialogLoader);
+        const QList<QQuickItem *> siblings = pageLoader->parentItem()->childItems();
+        QVERIFY(siblings.indexOf(dialogLoader) > siblings.indexOf(pageLoader));
+        QVERIFY(dialogLoader->z() >= pageLoader->z());
+        captureProfileShot(window, QStringLiteral("in-context-safety-number"));
+    }
+
+    void typingOnAProfileNeverReachesTheComposer()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *input = findVisualItem(window->contentItem(), QStringLiteral("messageInput"));
+        QVERIFY(input);
+        QTRY_VERIFY(input->hasActiveFocus());
+        const int messagesBefore = controller.messages()->rowCount();
+        QTest::keyClick(window, Qt::Key_I, Qt::ControlModifier);
+        QTRY_VERIFY(settledProfilePage(window));
+        QVERIFY(!input->hasActiveFocus());
+        typeText(window, QStringLiteral("hello"));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTest::qWait(100);
+        QCOMPARE(controller.messages()->rowCount(), messagesBefore);
+        QCOMPARE(input->property("text").toString(), QString());
+    }
+
+    void sidebarUnderThePageGetsNoHover()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QVector<OpenChat::Contact> contacts;
+        for (int i = 0; i < controller.contacts()->rowCount(); ++i) {
+            auto contact = *controller.contacts()->contactAt(i);
+            if (contact.id == QStringLiteral("alex"))
+                contact.statusText = QStringLiteral("Back after coffee");
+            contacts.append(contact);
+        }
+        controller.contacts()->setContacts(contacts);
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *category = window->findChild<QQuickItem *>(QStringLiteral("contactsCategory"));
+        auto *row = category ? findVisualItem(category, QStringLiteral("contactRow_alex")) : nullptr;
+        QVERIFY(row);
+        auto *avatar = row->findChild<QQuickItem *>(QStringLiteral("contactAvatar"));
+        auto *bubble = row->findChild<QQuickItem *>(QStringLiteral("contactStatusBubble_alex"));
+        QVERIFY(avatar && bubble);
+        const QPoint avatarPoint = centreOf(avatar);
+        QVERIFY(controller.profiles()->openContact(QStringLiteral("michael")));
+        QTRY_VERIFY(settledProfilePage(window));
+        QTest::mouseMove(window, avatarPoint);
+        QTest::qWait(500);
+        QVERIFY(!bubble->isVisible());
+        QVERIFY(!row->property("pointerOnAvatar").toBool());
+    }
+
+    void messagesArrivingUnderThePageStayUnread()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        const bool readBefore = controller.conversationVisible();
+        QVERIFY(controller.profiles()->openContact(QStringLiteral("michael")));
+        QTRY_VERIFY(!controller.conversationVisible());
+        controller.profiles()->closeAll();
+        QTRY_COMPARE(controller.conversationVisible(), readBefore);
+    }
+
+    void clickingTheEmptyTopBarDoesNotEditStatus()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *statusEditor = findVisualItem(window->contentItem(), QStringLiteral("localStatusEditor"));
+        auto *statusInput = findVisualItem(window->contentItem(), QStringLiteral("localStatusInput"));
+        QVERIFY(statusEditor && statusInput);
+        const QPoint underneath = centreOf(statusEditor);
+        QVERIFY(controller.profiles()->openContact(QStringLiteral("michael")));
+        QTRY_VERIFY(settledProfilePage(window));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, underneath);
+        QTest::qWait(100);
+        QVERIFY(!statusInput->isVisible());
+        QVERIFY(controller.profiles()->isOpen());
+    }
+
+    void focusReturnsAfterClosing()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *input = findVisualItem(window->contentItem(), QStringLiteral("messageInput"));
+        QVERIFY(input);
+        QTRY_VERIFY(input->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_I, Qt::ControlModifier);
+        QTRY_VERIFY(settledProfilePage(window));
+        QVERIFY(!input->hasActiveFocus());
+        auto *page = settledProfilePage(window);
+        QVERIFY(page);
+        const QPointer<QQuickItem> firstPage(page);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!controller.profiles()->isOpen());
+        QTRY_VERIFY(input->hasActiveFocus());
+        // The page that fades out is the page that was open, not a new one,
+        // and once it has gone the keyboard is still with the composer.
+        QTRY_VERIFY(!profileLoaderActive(window));
+        QVERIFY(firstPage.isNull());
+        QVERIFY(input->hasActiveFocus());
+    }
+
+    void sendMessageFromAProfileFocusesTheComposer()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *search = findVisualItem(window->contentItem(), QStringLiteral("contactSearch"));
+        auto *input = findVisualItem(window->contentItem(), QStringLiteral("messageInput"));
+        QVERIFY(search && input);
+        // The keyboard was in the search field when the profile opened...
+        search->forceActiveFocus();
+        QTRY_VERIFY(search->hasActiveFocus());
+        QVERIFY(controller.profiles()->openContact(QStringLiteral("jessica")));
+        QTRY_VERIFY(settledProfilePage(window));
+        auto *message = findVisualItem(window->contentItem(), QStringLiteral("profileAction_message"));
+        QVERIFY(message && message->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(message));
+        // ...but Send Message leaves it in Jessica's composer, not back there.
+        QTRY_VERIFY(!controller.profiles()->isOpen());
+        QTRY_COMPARE(controller.currentContactId(), QStringLiteral("jessica"));
+        QTRY_VERIFY(input->hasActiveFocus());
+        QTRY_VERIFY(!profileLoaderActive(window));
+        QVERIFY(input->hasActiveFocus());
+        QVERIFY(!search->hasActiveFocus());
+    }
+
+    void ctrlIOpensTheSelectedChatsProfile()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        QVERIFY(controller.selectContact(QStringLiteral("ryan")));
+        QTest::keyClick(window, Qt::Key_I, Qt::ControlModifier);
+        QTRY_VERIFY(controller.profiles()->isOpen());
+        QCOMPARE(controller.profiles()->personId(), QStringLiteral("ryan"));
+        // Pressed again on the page it does not stack another copy.
+        QTest::keyClick(window, Qt::Key_I, Qt::ControlModifier);
+        QTest::qWait(100);
+        QCOMPARE(controller.profiles()->depth(), 1);
+    }
+
+    void viewProfileContextMenu()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *category = window->findChild<QQuickItem *>(QStringLiteral("contactsCategory"));
+        auto *row = category ? findVisualItem(category, QStringLiteral("contactRow_jessica")) : nullptr;
+        QVERIFY(row);
+        const QString openChat = controller.currentContactId();
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier,
+                          row->mapToScene(QPointF(row->width() - 40, row->height() / 2)).toPoint());
+        QQuickItem *item = nullptr;
+        QTRY_VERIFY((item = findVisualItem(window->contentItem(), QStringLiteral("viewProfileMenuItem")))
+                    && item->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(item));
+        QTRY_VERIFY(controller.profiles()->isOpen());
+        QCOMPARE(controller.profiles()->personId(), QStringLiteral("jessica"));
+        // A right click neither selects the chat nor opens it.
+        QCOMPARE(controller.currentContactId(), openChat);
+    }
+
+    void plainProfilesSettingSwitch()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            QStringLiteral("OpenChat.Native"), QStringLiteral("AppearanceSettings"));
+        QVERIFY(appearance);
+        appearance->setPlainProfiles(false);
+        OpenChat::ProfileController *profiles = controller.profiles();
+        QVERIFY(profiles->openContact(QStringLiteral("jessica")));
+        QTRY_VERIFY(settledProfilePage(window));
+        QCOMPARE(profiles->pageState(), int(OpenChat::Profile::PageState::CustomPage));
+        QVERIFY(!profiles->plainStyle());
+        // The top bar's switch writes the setting, and every page follows it.
+        auto *toggle = findVisualItem(window->contentItem(), QStringLiteral("profilePlainStyleSwitch"));
+        QVERIFY(toggle && toggle->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(toggle));
+        QTRY_VERIFY(appearance->plainProfiles());
+        QTRY_VERIFY(profiles->plainStyle());
+        captureProfileShot(window, QStringLiteral("in-context-plain-style"));
+        // And the setting (Settings › Appearance) drives the page back.
+        appearance->setPlainProfiles(false);
+        QTRY_VERIFY(!profiles->plainStyle());
+    }
+
+    void profileFitsMinimumWindow()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        window->resize(window->minimumSize());
+        QTRY_COMPARE(window->width(), 720);
+        QVERIFY(controller.profiles()->openContact(QStringLiteral("sarah")));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = settledProfilePage(window)));
+        QCOMPARE(page->width(), qreal(window->width()));
+        auto *flickable = findVisualItem(page, QStringLiteral("profilePageFlickable"));
+        QVERIFY(flickable);
+        // Nothing sideways: the page scrolls down only.
+        QVERIFY(flickable->property("contentWidth").toReal() <= flickable->width() + 0.5);
+        auto *wide = findVisualItem(page, QStringLiteral("profileWideColumn"));
+        auto *narrow = findVisualItem(page, QStringLiteral("profileNarrowColumn"));
+        QVERIFY(wide && narrow);
+        // Two columns hold down to the minimum window (SPEC §3.1).
+        QVERIFY(wide->isVisible() && narrow->isVisible());
+        QVERIFY(wide->mapToScene(QPointF(wide->width(), 0)).x() <= window->width());
+        captureProfileShot(window, QStringLiteral("in-context-minimum"));
+    }
 };
 
-int main(int argc, char **argv)
-{
-    qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
-    qputenv("QT_QUICK_BACKEND", QByteArrayLiteral("software"));
-    QGuiApplication application(argc, argv);
-    QCoreApplication::setOrganizationName(QStringLiteral("OpenChatTests"));
-    QCoreApplication::setApplicationName(QStringLiteral("qml-appearance"));
-    QTemporaryDir settingsDirectory;
-    qputenv("XDG_DATA_HOME", settingsDirectory.path().toUtf8());
-    QSettings::setDefaultFormat(QSettings::IniFormat);
-    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDirectory.path());
-    qmlRegisterType<OpenChat::DailyCaseController>("OpenChat.Native", 1, 0, "DailyCaseController");
-    qmlRegisterSingletonType<OpenChat::AppearanceSettings>(
-        "OpenChat.Native", 1, 0, "AppearanceSettings",
-        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::AppearanceSettings; });
-    qmlRegisterSingletonType<OpenChat::MicrophoneSettings>(
-        "OpenChat.Native", 1, 0, "MicrophoneSettings",
-        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MicrophoneSettings; });
-    qmlRegisterSingletonType<OpenChat::VoiceEffectHost>(
-        "OpenChat.Native", 1, 0, "VoiceEffectHost",
-        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::VoiceEffectHost; });
-    qmlRegisterSingletonType<OpenChat::MemorySettings>(
-        "OpenChat.Native", 1, 0, "MemorySettings",
-        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::MemorySettings; });
-    qmlRegisterSingletonType<OpenChat::TransportSettings>(
-        "OpenChat.Native", 1, 0, "TransportSettings",
-        [](QQmlEngine *, QJSEngine *) -> QObject * { return new OpenChat::TransportSettings; });
-    qmlRegisterType<OpenChat::BubbleBackground>(
-        "OpenChat.Native", 1, 0, "BubbleBackground");
-    qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
-    qmlRegisterType<OpenChat::AvatarArtwork>(
-        "OpenChat.Native", 1, 0, "AvatarArtwork");
-    qmlRegisterType<OpenChat::ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
-    qmlRegisterType<OpenChat::TextLineSpacing>("OpenChat.Native", 1, 0, "TextLineSpacing");
-    OpenChat::registerCosmeticQmlTypes();
-    qmlRegisterUncreatableType<OpenChat::ChatController>(
-        "OpenChat.Native", 1, 0, "ChatController",
-        QStringLiteral("ChatController is provided by the application"));
-    qmlRegisterUncreatableType<OpenChat::OnboardingController>(
-        "OpenChat.Native", 1, 0, "OnboardingController",
-        QStringLiteral("OnboardingController is provided by the application"));
-    qmlRegisterUncreatableType<OpenChat::ContactController>(
-        "OpenChat.Native", 1, 0, "ContactController",
-        QStringLiteral("ContactController is provided by the application"));
-    qmlRegisterUncreatableType<OpenChat::VoiceDebugController>(
-        "OpenChat.Native", 1, 0, "VoiceDebugController",
-        QStringLiteral("VoiceDebugController is provided by the application"));
-    QmlLoadTest test;
-    return QTest::qExec(&test, argc, argv);
-}
+// One registration list for every suite that hosts the app's QML
+// (tests/ProfileQmlHarness.h), so they never drift apart.
+OPENCHAT_PROFILE_QML_TEST_MAIN(QmlLoadTest, "qml-appearance")
 
 #include "tst_qmlload.moc"

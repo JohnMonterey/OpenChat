@@ -209,6 +209,8 @@ void CallController::callContact(const QString &contactId)
     peer.contactId = route->contactId;
     peer.displayName = route->displayName;
     peer.avatarKey = route->avatarKey;
+    // A live one-to-one chat is keyed by the peer's account.
+    peer.accountId = route->contactId;
     (void)m_engine->placeCall(peer);
 }
 
@@ -1014,6 +1016,10 @@ void CallController::syncParticipants()
         row.avatarKey = route ? route->avatarKey : participant.peer.avatarKey;
         if (row.avatarKey.isEmpty())
             row.avatarKey = QStringLiteral("userpfp_none");
+        // What the tile opens the member's profile with. A contact's roster
+        // id is their account too, for a peer that came without one.
+        row.accountId = participant.peer.accountId.isEmpty() ? participant.peer.contactId
+                                                             : participant.peer.accountId;
         row.stateText = callParticipantStateName(participant.state);
         row.joined = participant.state == CallParticipantState::Joined;
         row.ringing = participant.state == CallParticipantState::Ringing
@@ -1142,6 +1148,14 @@ void CallController::setPreviewCallInCurrentChat(bool inCurrentChat)
     if (m_engine != nullptr || m_callInCurrentChat == inCurrentChat)
         return;
     m_callInCurrentChat = inCurrentChat;
+    emit callChanged();
+}
+
+void CallController::setPreviewCallChatId(const QString &chatId)
+{
+    if (m_engine != nullptr || m_callChatId == chatId)
+        return;
+    m_callChatId = chatId;
     emit callChanged();
 }
 

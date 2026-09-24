@@ -206,12 +206,30 @@ class SyncEngine final : public QObject
     Q_OBJECT
 
 public:
+    // See Config::maxDrainBacklogBytes.
+    static constexpr qint64 defaultMaxDrainBacklogBytes = 256 * 1024;
+
     struct Config final {
         AccountId localAccountId;
         DeviceId localDeviceId;
         int maxSendAttempts = 8;
         int drainBatch = 32;
         qint64 leaseMs = 30'000;
+        // The outbox drain hands the link another envelope only while the
+        // transport's unsent bytes are at or below this, so large envelopes
+        // (page media, 240 KiB each) never pile up megabytes deep in the TLS
+        // buffer. A transport that cannot say (-1) is never held back; <= 0
+        // disables.
+        //
+        // Call media shares the link as disposable datagrams, which the relay
+        // client drops while more than 128 KiB is unsent; the largest is a
+        // camera frame of at most 96 KiB. So media alone never leaves much
+        // more than 224 KiB waiting, and this gate sits above that: any lower,
+        // and video on an uplink slower than the camera would hold every chat
+        // message, receipt and call signal back for the whole call, where
+        // they must instead go first and cost the video frames.
+        // SyncCallTransport.cpp asserts the relation.
+        qint64 maxDrainBacklogBytes = defaultMaxDrainBacklogBytes;
     };
 
     // signer produces the Ed25519 signature over the canonical envelope signing
@@ -312,6 +330,9 @@ public:
                        const QByteArray &payload);
     // What the transport has queued and not yet written, or -1 if unknown.
     [[nodiscard]] qint64 pendingSendBytes() const;
+    // Whether the relay link is up right now. Callers that pace their own
+    // traffic wait for linkUp() rather than queueing sends while it is down.
+    [[nodiscard]] bool isLinkUp() const;
 
     // Processes an inbound envelope with its relay sequence.
     void handleEnvelope(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence);
@@ -366,6 +387,10 @@ signals:
                               const OpenChat::DeviceId &senderDevice,
                               const QList<QByteArray> &members);
     void failedClosed();
+    // The relay link (re)connected. Emitted after the engine has resumed its
+    // own outbox, so anything a listener sends in response leaves behind the
+    // envelopes that were already waiting.
+    void linkUp();
     // An inbound contact-handshake Welcome was durably stashed (not auto-joined).
     void handshakeReceived(const OpenChat::AccountId &sender, const OpenChat::DeviceId &senderDevice,
                            const OpenChat::ConversationId &conversation, qint64 receivedAtMs);

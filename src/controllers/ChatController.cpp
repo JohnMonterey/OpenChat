@@ -79,7 +79,8 @@ QStringList settingsElementsForCategory(int index)
         return {QStringLiteral("Input"), QStringLiteral("Custom Vocal FX"),
                 QStringLiteral("Connection")};
     case 2:
-        return {QStringLiteral("Theme")};
+        // Profiles: whether other people's pages keep their own look.
+        return {QStringLiteral("Theme"), QStringLiteral("Profiles")};
     case 3:
         // One picker per kind of collectible, profile pieces before messages.
         return {QStringLiteral("Avatar frame"), QStringLiteral("Name flair"),
@@ -132,6 +133,7 @@ void giveMockId(Message &message)
 
 ChatController::ChatController(QObject *parent)
     : QObject(parent)
+    , m_profiles(std::make_unique<ProfileController>(*this))
 {
     m_contacts.setContacts(referenceContacts());
     QVector<Message> michael = michaelConversation();
@@ -1169,6 +1171,8 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
 
     loadRoster();
     emit chatUnreadCountChanged();
+    // Profile pages ride the same session and engine, over the roster just loaded.
+    m_profiles->setLiveServices(session, engine, requests);
 }
 
 void ChatController::setPresenceRelay(RelayClient *relay)
@@ -1200,6 +1204,8 @@ void ChatController::setPresenceRelay(RelayClient *relay)
     }
     refreshPresence();
     requestPeerLoadouts();
+    // The same relay confirms handles for profiles (own and strangers').
+    m_profiles->setRelay(relay);
 }
 
 void ChatController::requestPeerLoadouts()
@@ -1391,6 +1397,9 @@ ChatController::groupCallRouteFor(const QString &chatId) const
         peer.contactId = member.contactId;
         peer.displayName = memberName(member);
         peer.avatarKey = member.avatarKey;
+        // Every member's account, contact or not, so their call tile can
+        // open their profile (a stub for someone who is not a contact here).
+        peer.accountId = member.account.toHex();
         route.members.append(peer);
     }
     return route;

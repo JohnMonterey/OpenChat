@@ -300,6 +300,10 @@ public:
     // Whether the previewed call is on the open conversation (true by default,
     // so every existing preview shows the surface).
     void setPreviewCallInCurrentChat(bool inCurrentChat);
+    // The chat the previewed call belongs to (callChatId, empty by default), so
+    // the one-to-one far-end tile has someone to open without an engine. Never
+    // reachable from a live session.
+    void setPreviewCallChatId(const QString &chatId);
 
 signals:
     void callChanged();

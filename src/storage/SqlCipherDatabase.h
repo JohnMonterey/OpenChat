@@ -19,6 +19,7 @@ namespace OpenChat {
 class SqlCipherChatRepository;
 class SqlCipherContactRepository;
 class SqlCipherOutboxRepository;
+class SqlCipherProfilePageRepository;
 class SqlCipherSyncRepository;
 class SqlCipherSyncStore;
 
@@ -85,6 +86,12 @@ public:
   storeProfileDisplayName(const ProfileId &profileId, const QString &displayName);
   [[nodiscard]] Result<QString, StorageError>
   loadProfileDisplayName(const ProfileId &profileId);
+  // The account's canonical @handle (migration 016). Stored as given: the
+  // session validates it. Reads back empty until one has been stamped.
+  [[nodiscard]] Result<void, StorageError>
+  storeProfileHandle(const ProfileId &profileId, const QString &handle);
+  [[nodiscard]] Result<QString, StorageError>
+  loadProfileHandle(const ProfileId &profileId);
   // The local user's self-published profile (migration 012). An empty picture
   // is stored as NULL and read back empty.
   [[nodiscard]] Result<void, StorageError>
@@ -97,6 +104,7 @@ private:
   friend class SqlCipherChatRepository;
   friend class SqlCipherContactRepository;
   friend class SqlCipherOutboxRepository;
+  friend class SqlCipherProfilePageRepository;
   friend class SqlCipherSyncRepository;
   friend class SqlCipherSyncStore;
 

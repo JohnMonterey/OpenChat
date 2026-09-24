@@ -5,15 +5,16 @@ import OpenChat.Native
 
 // The editor's vertical tab rail (SPEC §14.2): the generator sites' tab strip
 // turned on its side, on the sidebar's own surface, in two groups, Design (how
-// the page looks) and Content (what it says). The rail is one Tab stop: ↑/↓
-// move to the next tab (Ctrl+1…9 are the editor's). The chosen tab is
-// `profiles.lastTab`, which the controller remembers for this viewer.
+// the page looks) and Content (what it says). The rail is one Tab stop, the
+// chosen tab, which has the keyboard focus itself (a screen reader announces
+// each): ↑/↓ move to the next tab (Ctrl+1…9 are the editor's). The chosen tab
+// is `profiles.lastTab`, which the controller remembers for this viewer.
 //
 // This file also carries the editor's small shared chrome, as inline
 // components the rest of the editor uses as ProfileEditorRail.Glyph,
 // ProfileEditorRail.Button, ProfileEditorRail.DefaultButton and
 // ProfileEditorRail.Tip (see below).
-Item {
+FocusScope {
     id: rail
     objectName: "profileEditorRail"
 
@@ -39,9 +40,28 @@ Item {
         if (profiles && index >= 0 && index < tabs.length)
             profiles.lastTab = index;
     }
+    function findTab(root, name) {
+        for (let i = 0; i < root.children.length; ++i) {
+            const child = root.children[i];
+            if (child.objectName === name)
+                return child;
+            const found = findTab(child, name);
+            if (found)
+                return found;
+        }
+        return null;
+    }
+    // The focus sits on the chosen tab while the rail has it.
+    function focusChosen() {
+        const chosen = tabs[currentIndex];
+        const item = chosen ? findTab(tabColumn, "profileEditorTab_" + chosen.name) : null;
+        if (item && rail.activeFocus && !item.activeFocus)
+            item.forceActiveFocus(Qt.TabFocusReason);
+    }
 
     width: 76
-    activeFocusOnTab: true
+    onActiveFocusChanged: if (activeFocus) focusChosen()
+    onCurrentIndexChanged: focusChosen()
     Accessible.role: Accessible.PageTabList
     Accessible.name: "Editor tabs"
     Keys.onUpPressed: choose(Math.max(0, currentIndex - 1))
@@ -516,6 +536,7 @@ Item {
     Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.rule }
 
     Column {
+        id: tabColumn
         y: 4
         width: parent.width - 1
 
@@ -560,6 +581,8 @@ Item {
                         objectName: "profileEditorTab_" + modelData.name
                         width: parent.width
                         height: rail.tabHeight
+                        // Until the focus has left it, the focused tab stays one.
+                        activeFocusOnTab: selected || activeFocus
                         Accessible.role: Accessible.PageTab
                         Accessible.name: modelData.label
                         Accessible.selected: selected

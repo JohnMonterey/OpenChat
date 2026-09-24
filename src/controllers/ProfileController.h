@@ -186,6 +186,9 @@ public:
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void copyHandle();
     Q_INVOKABLE void copyText(const QString &text, const QString &notice);
+    // A line for the page's notice that copies nothing (an action the page
+    // offered could not be done: "Couldn't create an invite. Try again.").
+    Q_INVOKABLE void showNotice(const QString &notice);
     Q_INVOKABLE void clearNotice();
 
     // Own page editing
@@ -202,7 +205,9 @@ public:
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
     Q_INVOKABLE void beginGesture(const QString &key);
-    Q_INVOKABLE void endGesture();
+    // Closes the open gesture; with a key, only when that gesture is the one
+    // open (a timer that closes its own gesture late never closes another's).
+    Q_INVOKABLE void endGesture(const QString &key = QString());
     Q_INVOKABLE void importBackground(const QUrl &file);
     Q_INVOKABLE void removeBackgroundImage();
     Q_INVOKABLE void importSong(const QUrl &file);
@@ -233,6 +238,9 @@ public:
     // Tests: the importer the Song tab's work runs on (its encode hook holds
     // a window encode in flight).
     [[nodiscard]] SongImporter &songImporterForTesting() { return songImporter(); }
+    // Tests: the importer the Background tab's pictures go through (its work
+    // hook holds an import in flight, so a Save really has to wait).
+    [[nodiscard]] ProfileBackgroundImporter &backgroundImporterForTesting() { return backgroundImporter(); }
 
     [[nodiscard]] bool isOpen() const noexcept { return !m_stack.isEmpty(); }
     [[nodiscard]] int depth() const noexcept { return int(m_stack.size()); }

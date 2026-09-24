@@ -56,7 +56,7 @@ Item {
         profiles.beginGesture("background:pattern");
         draft.motif = motif;
         draft.backgroundKind = Profile.PatternBackground;
-        profiles.endGesture();
+        profiles.endGesture("background:pattern");
     }
     function focusField(field) {
         style.forceActiveFocus(Qt.OtherFocusReason);
@@ -73,11 +73,19 @@ Item {
     }
 
     // A slider drag, or a run of arrow presses, is one undo step: the
-    // gesture closes once the knob has rested for 400 ms.
+    // gesture closes once the knob has rested for 400 ms, or when the tab
+    // goes first (Ctrl+3 while it still moves). Only its own gesture: a
+    // colour picker opened meanwhile has one of its own.
     Timer {
         id: sliderRest
         interval: 400
-        onTriggered: tab.profiles.endGesture()
+        onTriggered: tab.profiles.endGesture("background:strength")
+    }
+    Component.onDestruction: {
+        if (sliderRest.running && tab.profiles) {
+            sliderRest.stop();
+            tab.profiles.endGesture("background:strength");
+        }
     }
 
     Column {

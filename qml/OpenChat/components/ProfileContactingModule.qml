@@ -11,8 +11,10 @@ import OpenChat.Native
 // Picture and Copy Invite Link. Chat-bound actions close the profile and
 // switch to the Chat section before they act.
 //
-// The grid is one Tab stop: the arrows move, Enter or Space activates. In the
-// editor preview it shows the contact view at full strength and is inert.
+// The grid is one Tab stop: the arrows move the keyboard focus from cell to
+// cell (each cell takes it, so a screen reader announces the action), Enter
+// or Space activates. In the editor preview it shows the contact view at full
+// strength and is inert.
 ProfileBox {
     id: module
     objectName: "profileContactingBox"
@@ -114,16 +116,16 @@ ProfileBox {
         }
     }
 
+    // Each press asks for a new invite and copies that one, never one made
+    // before (an invite works once): it arrives at once in the mock and from
+    // the relay otherwise, through myInviteChanged either way.
     function copyInvite() {
         const contacts = module.view ? module.view.contactController : null;
         if (!contacts)
             return;
         module.invitePending = true;
         contacts.createMyInvite();
-        module.finishInvite();
     }
-
-    // The invite arrives at once in the mock and from the relay otherwise.
     function finishInvite() {
         const contacts = module.view ? module.view.contactController : null;
         if (!module.invitePending || !contacts || !contacts.inviteReady)
@@ -131,21 +133,49 @@ ProfileBox {
         module.invitePending = false;
         module.profiles.copyText(contacts.myInvite, "Copied invite link");
     }
+    // No invite came: say so, and stop waiting, so an invite made later
+    // (the Add Contact dialog's) is never copied unasked.
+    function inviteFailed() {
+        if (!module.invitePending)
+            return;
+        module.invitePending = false;
+        module.profiles.showNotice("Couldn't create an invite. Try again.");
+    }
 
     Connections {
         target: module.view ? module.view.contactController : null
         ignoreUnknownSignals: true
         function onMyInviteChanged() { module.finishInvite(); }
+        function onInviteFailed() { module.inviteFailed(); }
     }
 
-    Item {
+    FocusScope {
         id: grid
         objectName: "profileContactingGrid"
         width: parent.width
         height: cells.height
-        activeFocusOnTab: !module.inert && module.actions.length > 0
         property int current: 0
-        onActiveFocusChanged: if (activeFocus) current = Math.min(current, Math.max(0, module.actions.length - 1))
+        readonly property bool reachable: !module.inert && module.actions.length > 0
+        // The cell Tab lands on, and the one with the focus while it is here.
+        readonly property int tabIndex: Math.max(0, Math.min(current, module.actions.length - 1))
+        // From `current` itself: tabIndex may not have caught up yet.
+        function focusCurrent() {
+            const cell = cellRepeater.itemAt(Math.max(0, Math.min(grid.current, module.actions.length - 1)));
+            if (cell && grid.activeFocus && !cell.activeFocus)
+                cell.forceActiveFocus(Qt.TabFocusReason);
+        }
+        onActiveFocusChanged: {
+            if (activeFocus) {
+                current = tabIndex;
+                focusCurrent();
+            }
+        }
+        onCurrentChanged: focusCurrent()
+        Timer {
+            id: refocus
+            interval: 0
+            onTriggered: grid.focusCurrent()
+        }
 
         Accessible.role: Accessible.List
         Accessible.name: module.title
@@ -179,7 +209,13 @@ ProfileBox {
             rowSpacing: 2
             columnSpacing: 4
             Repeater {
+                id: cellRepeater
                 model: module.actions
+                // A cell rebuilt under the keyboard (a call began) takes it back.
+                onItemAdded: (index, item) => {
+                    if (grid.activeFocus && index === grid.tabIndex)
+                        refocus.restart();
+                }
                 ProfileActionCell {
                     required property var modelData
                     required property int index
@@ -194,7 +230,9 @@ ProfileBox {
                     reason: modelData.reason || ""
                     badge: modelData.badge === true
                     inert: module.inert
-                    keyboardFocus: grid.activeFocus && grid.current === index
+                    // The focused cell stays a Tab stop until the focus has left it.
+                    activeFocusOnTab: (grid.reachable && index === grid.tabIndex) || activeFocus
+                    keyboardFocus: activeFocus
                     onActivated: {
                         grid.current = index;
                         module.run(modelData);

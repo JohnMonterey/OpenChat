@@ -42,10 +42,20 @@ Item {
 
     implicitHeight: column.y + column.implicitHeight + 16
 
+    // A slider drag, or a run of arrow presses, is one undo step: the
+    // gesture closes once the knob has rested for 400 ms, or when the tab
+    // goes first (Ctrl+2 while it still moves). Only its own gesture: a
+    // colour picker opened meanwhile has one of its own.
     Timer {
         id: sliderRest
         interval: 400
-        onTriggered: tab.profiles.endGesture()
+        onTriggered: tab.profiles.endGesture("boxes:see-through")
+    }
+    Component.onDestruction: {
+        if (sliderRest.running && tab.profiles) {
+            sliderRest.stop();
+            tab.profiles.endGesture("boxes:see-through");
+        }
     }
 
     Column {

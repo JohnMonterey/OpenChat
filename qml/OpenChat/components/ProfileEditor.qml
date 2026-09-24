@@ -6,7 +6,9 @@ import OpenChat.Native
 // The owner's editor (SPEC §14): the tab rail (76) and the panel (300) docked
 // left, and the live preview taking the rest. Entering, the rail and panel
 // slide in from x −376 over 140 ms while the preview reflows at once; Preview
-// in the bar slides them out the same way (`previewOnly`). Both are instant
+// in the bar slides them out the same way (`previewOnly`). Leaving, the page
+// keeps the editor for slideOut(): the preview gives way to the page itself
+// underneath and the rail and panel slide off over it. All of it is instant
 // when animations are off (Low memory mode, reduced motion).
 //
 // Clicking a box in the preview opens its tab and field (SPEC §14.4). The
@@ -17,11 +19,13 @@ import OpenChat.Native
 // unsaved changes goes through requestLeave(), which asks with the leave
 // dialog; a surviving draft is offered at the top of the panel.
 //
-// ProfilePage hosts it while `profiles.editing`. The host may set any of the
-// inputs below; those it leaves unset come from the ProfilePage around the
-// editor (objectName "profilePage", ARCH §8.1): its profiles and controllers,
-// its SongPlayer ("profileSongPlayer") and its picture FileDialog
-// ("localAvatarFileDialog"), so the editor works however the page loads it.
+// ProfilePage hosts it while `profiles.editing` and while it slides out. The
+// host may set any of the inputs below; those it leaves unset come from the
+// ProfilePage around the editor (objectName "profilePage", ARCH §8.1): its
+// profiles and controllers, its SongPlayer ("profileSongPlayer") and its
+// picture FileDialog ("localAvatarFileDialog"), so the editor works however
+// the page loads it. A leave whose Save waits for an import goes on through
+// the page (leaveAfterPublish), which outlives the editor.
 FocusScope {
     id: editor
     objectName: "profileEditor"
@@ -47,7 +51,8 @@ FocusScope {
     readonly property bool animated: ProfileRenderPolicy.animationsAllowed
     readonly property bool shortcutsEnabled: visible && profiles !== null && profiles.editing && !popupOpen
                                              && !(page && page.popupOpen === true)
-    // The preview target "Show me" points at for a moment.
+    // What "Show me" pulses in the preview for a moment (SPEC §9): the text
+    // an adjustment changed, by kind (ProfilePageView.pulseTarget).
     property string pulseTarget: ""
 
     // Where each preview target is edited (SPEC §14.4); app-owned boxes
@@ -68,8 +73,9 @@ FocusScope {
 
     // A pending "leave" (Back, Esc, the history menu, closing the window).
     property var pendingLeave: null
-    // A leave waiting for a Save that waits for an import ("Saving…").
-    property var leaveAfterPublish: null
+    // Editing has ended: the rail and panel are sliding away (slideOut()).
+    property bool leaving: false
+    signal slidOut()
 
     // Opens tab `name`. Focus goes to `field` in it (a preview target's
     // field), to its first control for "", or stays on the rail for null.
@@ -89,9 +95,11 @@ FocusScope {
         if (entry)
             openTab(entry[0], entry[1]);
     }
+    // An ink role (Profile.InkRole), or -1 for the boxes' own adjustments.
     function showMe(role) {
-        const targets = { 0: "aboutMe", 1: "details", 2: "contacting", 3: "name", 4: "strip", 5: "strip" };
-        pulseTarget = targets[role] || "backdrop";
+        const kinds = { 0: "body", 1: "label", 2: "link", 3: "name", 4: "strip", 5: "altStrip" };
+        pulseTarget = ""; // asked again: the pulse starts over
+        pulseTarget = kinds[role] || "boxes";
         pulseTimer.restart();
     }
     // Leaves the editor through `proceed` (end editing, pop to a page, close
@@ -103,6 +111,15 @@ FocusScope {
         }
         pendingLeave = proceed;
         leaveDialog.open();
+    }
+    // Editing has ended and the page shows under the editor: the rail and
+    // panel slide off over it, then slidOut() tells the page to let go.
+    function slideOut() {
+        leaving = true;
+        if (slide >= 1)
+            slidOut();
+        else
+            slide = 1;
     }
     function openColorPicker(well) {
         if (colorPicker.opened)
@@ -168,15 +185,23 @@ FocusScope {
         slide = previewOnly ? 1 : 0;
     }
     onPreviewOnlyChanged: slide = previewOnly ? 1 : 0
+    onSlideChanged: {
+        if (leaving && slide >= 1)
+            slidOut();
+    }
+    // Nothing of a leaving editor answers the pointer or the keyboard.
+    enabled: !leaving
 
+    // Two pulses of 600 ms.
     Timer {
         id: pulseTimer
-        interval: 1500
+        interval: 1200
         onTriggered: editor.pulseTarget = ""
     }
 
     ProfilePreviewFrame {
         id: preview
+        visible: !editor.leaving
         x: editor.previewOnly ? 0 : rail.width + panelArea.width
         width: editor.width - x
         height: editor.height
@@ -185,14 +210,15 @@ FocusScope {
         contactController: editor.contactController
         callController: editor.callController
         songPlayer: editor.songPlayer
-        editingTarget: editor.pulseTarget.length > 0 ? editor.pulseTarget : panel.editingTarget
+        editingTarget: panel.editingTarget
+        pulseTarget: editor.pulseTarget
         onEditRequested: target => editor.handleEditRequest(target)
     }
 
     Rectangle {
         // Under the rail and panel while they slide in: the preview has
         // already moved over, so the strip they cross is the panel's surface.
-        visible: editor.slide > 0 && !editor.previewOnly
+        visible: editor.slide > 0 && !editor.previewOnly && !editor.leaving
         width: rail.width + panelArea.width
         height: editor.height
         color: Theme.contentBackground
@@ -237,7 +263,10 @@ FocusScope {
             if (!profiles || !profiles.publish())
                 return; // the reason shows as the page's notice; the owner stays
             if (profiles.publishPending) {
-                editor.leaveAfterPublish = proceed; // "Saving…" until the import lands
+                // "Saving…" until the import lands. That save ends editing and
+                // takes this editor with it, so the page, which stays, goes on.
+                if (proceed && editor.page && typeof editor.page.leaveAfterPublish === "function")
+                    editor.page.leaveAfterPublish(proceed);
                 return;
             }
             if (proceed)
@@ -253,22 +282,6 @@ FocusScope {
                 proceed();
         }
         onKeepEditingChosen: editor.pendingLeave = null
-    }
-
-    Connections {
-        target: editor.profiles
-        function onPublished() {
-            const proceed = editor.leaveAfterPublish;
-            editor.leaveAfterPublish = null;
-            if (proceed)
-                proceed();
-        }
-        function onPublishedChanged() {
-            // The Save it waited for gave up (an import failed): stay.
-            if (editor.leaveAfterPublish && editor.profiles && !editor.profiles.publishPending
-                && editor.profiles.editing)
-                editor.leaveAfterPublish = null;
-        }
     }
 
     Shortcut {

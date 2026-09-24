@@ -41,6 +41,9 @@ Item {
     // Your own photo or "Change Picture" was chosen: the page opens the
     // picture dialog it owns.
     signal changePictureRequested()
+    // The preview only: the kind of text "Show me" pulses for a moment (SPEC
+    // §9): "body", "label", "link", "name", "strip", "altStrip" or "boxes".
+    property string pulseTarget: ""
 
     readonly property bool preview: mode === "preview"
     readonly property var render: page ? page.render : null
@@ -145,7 +148,7 @@ Item {
         pageView.pendingScroll = Math.max(0, pageView.profiles.entryScrollY);
         pageView.anchorKey = "";
         pendingScrollExpiry.restart();
-        Qt.callLater(pageView.flushPendingScroll);
+        flushSoon.restart();
     }
     function maxScroll() {
         return Math.max(0, flick.contentHeight - flick.height);
@@ -214,7 +217,19 @@ Item {
     onWidthChanged: {
         pageView.anchorLocked = true;
         anchorUnlock.restart();
-        Qt.callLater(pageView.restoreAnchor);
+        anchorSoon.restart();
+    }
+    // The next turn of the event loop, by timers the view owns: nothing
+    // deferred runs after the view is gone (editing replaces it at once).
+    Timer {
+        id: flushSoon
+        interval: 0
+        onTriggered: pageView.flushPendingScroll()
+    }
+    Timer {
+        id: anchorSoon
+        interval: 0
+        onTriggered: pageView.restoreAnchor()
     }
     Timer {
         id: anchorUnlock
@@ -237,6 +252,37 @@ Item {
         function onNavigationChanged() {
             if (pageView.profiles.open)
                 pageView.applyNavigationScroll();
+        }
+    }
+
+    // SPEC §16.1: the focused item stays in view. Tab, or an arrow that moves
+    // to another action or friend (each takes the focus itself), scrolls just
+    // enough to show it with its focus ring and halo.
+    function revealFocus() {
+        const item = pageView.Window.activeFocusItem;
+        if (!item || item === flick)
+            return;
+        let inside = false;
+        for (let at = item.parent; at; at = at.parent) {
+            if (at === content) {
+                inside = true;
+                break;
+            }
+        }
+        if (!inside)
+            return;
+        const ring = 8;
+        const top = item.mapToItem(content, 0, 0).y - ring;
+        const bottom = top + item.height + 2 * ring;
+        if (top < flick.contentY)
+            flick.contentY = Math.max(0, top);
+        else if (bottom > flick.contentY + flick.height)
+            flick.contentY = Math.min(pageView.maxScroll(), bottom - flick.height);
+    }
+    Connections {
+        target: pageView.Window.window
+        function onActiveFocusItemChanged() {
+            pageView.revealFocus();
         }
     }
     // A restored position waits for the columns to grow back to it, but
@@ -310,7 +356,7 @@ Item {
             if (!pageView.preview)
                 reportScroll.restart();
         }
-        onContentHeightChanged: Qt.callLater(pageView.flushPendingScroll)
+        onContentHeightChanged: flushSoon.restart()
         onMovementStarted: {
             pageView.pendingScroll = -1;
             pageView.anchorLocked = false;
@@ -392,6 +438,7 @@ Item {
             readonly property string moduleKey: modelData
             readonly property Item module: loader.item
             readonly property bool placeholder: pageView.preview && module !== null && module.hasPreviewContent === false
+            readonly property var pulse: pageView.pulseOf(slot.moduleKey, slot.module)
             objectName: "profileModule_" + moduleKey
             width: parent ? parent.width : 0
             height: loader.item ? loader.item.implicitHeight : 0
@@ -417,6 +464,8 @@ Item {
                     radius: slot.module && slot.module.radius !== undefined ? slot.module.radius : 5
                     placeholder: slot.placeholder
                     placeholderText: pageView.placeholderOf(slot.moduleKey)
+                    pulse: slot.pulse.on
+                    pulseItem: slot.pulse.item
                     onActivated: target => pageView.editRequested(target)
                 }
             }
@@ -477,6 +526,39 @@ Item {
         if (module.headerItem && module.showHeader)
             regions.unshift({ target: "strip", item: module.headerItem });
         return regions;
+    }
+    // Where "Show me" pulses (SPEC §9): every box that carries the ink an
+    // adjustment changed, the app's own boxes too; for the name and the
+    // header strips just those. {on, item}: item null rings the whole box.
+    function pulseOf(key, module) {
+        const kind = pageView.pulseTarget;
+        const off = { on: false, item: null };
+        if (!pageView.preview || kind.length === 0 || !module)
+            return off;
+        const blurbs = "m" + Profile.BlurbsModule;
+        const interests = "m" + Profile.InterestsModule;
+        const details = "m" + Profile.DetailsModule;
+        switch (kind) {
+        case "body":
+            return { on: key === blurbs || key === interests || key === details, item: null };
+        case "label":
+            return { on: key === interests || key === details, item: null };
+        case "link":
+            return { on: key === "contacting" || key === "m" + Profile.HandleModule
+                         || key === "m" + Profile.TopFriendsModule, item: null };
+        case "name":
+            return key === "identity" && module.nameItem ? { on: true, item: module.nameItem } : off;
+        case "strip":
+        case "altStrip": {
+            if (!module.headerItem || !module.showHeader)
+                return off;
+            // Without its own right-column strip, the wide family wears the
+            // main one.
+            const alt = module.alt === true && pageView.render !== null && pageView.render.altHeader;
+            return alt === (kind === "altStrip") ? { on: true, item: module.headerItem } : off;
+        }
+        }
+        return { on: true, item: null }; // the boxes themselves
     }
     function inertTipOf(key) {
         switch (key) {

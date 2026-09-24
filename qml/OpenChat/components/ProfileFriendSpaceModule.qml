@@ -2,8 +2,9 @@ import QtQuick
 import OpenChat
 
 // "<First>'s Friend Space (Top N)" (SPEC §5.8): four tiles to a row, the
-// name above the picture. The grid is one Tab stop: the arrows move between
-// tiles and Enter or Space opens one. In the page view a tile opens that
+// name above the picture. The grid is one Tab stop: the arrows move the
+// keyboard focus between tiles (each takes it, so a screen reader announces
+// the friend) and Enter or Space opens one. In the page view a tile opens that
 // friend's page (or a stub); in the editor preview it opens the Top Friends
 // tab instead.
 ProfileBox {
@@ -25,14 +26,32 @@ ProfileBox {
             module.view.activateTopFriend(index);
     }
 
-    Item {
+    FocusScope {
         id: grid
         objectName: "profileFriendGrid"
         width: parent.width
         height: tiles.height
-        activeFocusOnTab: module.friends.length > 0
         property int current: 0
-        onActiveFocusChanged: if (activeFocus) current = Math.min(current, Math.max(0, module.friends.length - 1))
+        // The tile Tab lands on, and the one with the focus while it is here.
+        readonly property int tabIndex: Math.max(0, Math.min(current, module.friends.length - 1))
+        // From `current` itself: tabIndex may not have caught up yet.
+        function focusCurrent() {
+            const tile = tileRepeater.itemAt(Math.max(0, Math.min(grid.current, module.friends.length - 1)));
+            if (tile && grid.activeFocus && !tile.activeFocus)
+                tile.forceActiveFocus(Qt.TabFocusReason);
+        }
+        onActiveFocusChanged: {
+            if (activeFocus) {
+                current = tabIndex;
+                focusCurrent();
+            }
+        }
+        onCurrentChanged: focusCurrent()
+        Timer {
+            id: refocus
+            interval: 0
+            onTriggered: grid.focusCurrent()
+        }
 
         Accessible.role: Accessible.List
         Accessible.name: module.title
@@ -69,7 +88,13 @@ ProfileBox {
             columnSpacing: 10
             rowSpacing: 12
             Repeater {
+                id: tileRepeater
                 model: module.friends
+                // A tile rebuilt under the keyboard (a refresh) takes it back.
+                onItemAdded: (index, item) => {
+                    if (grid.activeFocus && index === grid.tabIndex)
+                        refocus.restart();
+                }
                 ProfileFriendTile {
                     required property var modelData
                     required property int index
@@ -78,7 +103,9 @@ ProfileBox {
                     render: module.render
                     size: module.tileSize
                     pictureRadius: module.pictureRadius
-                    keyboardFocus: grid.activeFocus && grid.current === index
+                    // The focused tile stays a Tab stop until the focus has left it.
+                    activeFocusOnTab: index === grid.tabIndex || activeFocus
+                    keyboardFocus: activeFocus
                     onActivated: {
                         grid.current = index;
                         module.open(index);

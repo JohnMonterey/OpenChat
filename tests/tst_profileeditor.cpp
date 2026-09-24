@@ -1,13 +1,10 @@
 // The owner's editor in QML (ARCH §9.8): tests/qml/ProfileEditorHarness.qml
-// hosts ProfileEditorBar and ProfileEditor as the profile page does, over the
-// reference mock's ChatController, and every test drives them the way a
-// person would (mouse, keys, focus) and checks the draft, the controller and
-// what is on screen. Every QML warning fails the test.
-//
-// The preview is the page kit's ProfilePageView. Until it lands (the
-// scaffold's placeholder is an empty Item) the preview shows nothing, and the
-// parts of clickingAModuleOpensItsTabAndField and appOwnedBoxesAreInert that
-// click real modules say so and check only the editor's side.
+// hosts the real ProfilePage the way Main.qml does, over the reference mock's
+// ChatController, so ProfileEditorBar and ProfileEditor are the page's own
+// (its top bar, its Escape and window-close routing, its song player). Every
+// test drives them the way a person would (mouse, keys, focus) and checks the
+// draft, the controller and what is on screen. The preview is the page kit's
+// real ProfilePageView. Every QML warning fails the test.
 //
 // OPENCHAT_PROFILE_CAPTURES=<dir> also saves the editor's states at the
 // mockups' sizes (final/final-editor-*.png), light and dark.
@@ -20,6 +17,7 @@
 #include "controllers/ProfilePageObject.h"
 #include "controllers/ProfileReferencePages.h"
 #include "domain/ProfilePage.h"
+#include "profile/ProfileBackgroundImage.h"
 #include "profile/ProfileReadability.h"
 #include "profile/ProfileRenderPolicy.h"
 #include "profile/SongPlayer.h"
@@ -28,6 +26,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QDir>
+#include <QPointer>
 #include <QFile>
 #include <QFont>
 #include <QImage>
@@ -36,6 +35,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QSemaphore>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -127,6 +127,38 @@ void appendChunk(QByteArray &out, const char *id, const QByteArray &payload)
     return image.save(path, "PNG") ? path : QString();
 }
 
+// Holds the Background tab's imports on the worker until release(), so a Save
+// really has to wait for one ("Saving…") however fast the machine is.
+class ImportGate final
+{
+public:
+    explicit ImportGate(ProfileController &profiles)
+        : m_importer(profiles.backgroundImporterForTesting())
+    {
+        m_importer.setWorkHookForTesting([started = m_started, go = m_go] {
+            started->release();
+            (void)go->tryAcquire(1, 30'000);
+        });
+    }
+    ~ImportGate()
+    {
+        m_go->release(); // no worker is left waiting
+        m_importer.setWorkHookForTesting({});
+    }
+    ImportGate(const ImportGate &) = delete;
+    ImportGate &operator=(const ImportGate &) = delete;
+
+    // The import is under way on the worker.
+    [[nodiscard]] bool waitStarted() { return m_started->tryAcquire(1, 10'000); }
+    void release() { m_go->release(); }
+
+private:
+    ProfileBackgroundImporter &m_importer;
+    // Shared with the worker's copy of the hook, which may outlive the gate.
+    std::shared_ptr<QSemaphore> m_started = std::make_shared<QSemaphore>();
+    std::shared_ptr<QSemaphore> m_go = std::make_shared<QSemaphore>();
+};
+
 // A sound card that plays nothing: Listen presses play on the page's player.
 class SilentOutput final : public SongOutput
 {
@@ -192,15 +224,20 @@ public:
         QTest::mouseMove(m_window.get(), QPoint(2, 2));
         return waitForEditor();
     }
+    // The page's open fade has finished and the rail and panel are in.
     [[nodiscard]] bool waitForEditor()
     {
-        return QTest::qWaitFor([this] { return editor() && editor()->property("slide").toReal() == 0.0; });
+        return QTest::qWaitFor([this] {
+            return page() && page()->property("settled").toBool() && editor()
+                   && editor()->property("slide").toReal() == 0.0;
+        });
     }
 
     [[nodiscard]] ChatController &chat() { return m_chat; }
     [[nodiscard]] ProfileController &profiles() { return *m_chat.profiles(); }
     [[nodiscard]] ProfilePageObject &draft() { return *m_chat.profiles()->draft(); }
     [[nodiscard]] QQuickWindow *window() const { return m_window.get(); }
+    [[nodiscard]] QQuickItem *page() const { return item(QStringLiteral("profilePage")); }
     [[nodiscard]] QQuickItem *editor() const { return item(QStringLiteral("profileEditor")); }
     [[nodiscard]] QQuickItem *bar() const { return item(QStringLiteral("profileEditorBar")); }
     [[nodiscard]] QQuickItem *frame() const { return item(QStringLiteral("profilePreviewFrame")); }
@@ -644,6 +681,57 @@ private slots:
         QVERIFY(f.profiles().editing());
     }
 
+    // SPEC §14.13 by keyboard: Enter on a swatch takes it and keeps it (the
+    // picker closes); Space takes it and stays, so Esc can still put back
+    // "was". The × is a Tab stop that keeps the colour too.
+    void colorPickerSwatchesByKeyboard()
+    {
+        EditorFixture f;
+        QVERIFY(f.ready());
+        f.openTab(QStringLiteral("background"));
+        const QColor original = f.draft().backgroundColor1();
+        const auto openPicker = [&f] {
+            f.click(QStringLiteral("profileBaseColourWell"));
+            QTRY_VERIFY(f.isOpen(QStringLiteral("profileColorPicker")));
+        };
+
+        openPicker();
+        QQuickItem *classics = f.item(QStringLiteral("profileColorPickerClassics"));
+        classics->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_COMPARE(f.focused(), f.item(QStringLiteral("profileClassicSwatch_000000")));
+        f.key(Qt::Key_Right);
+        QCOMPARE(f.focused(), f.item(QStringLiteral("profileClassicSwatch_ffffff")));
+        f.key(Qt::Key_Return);
+        QTRY_VERIFY(!f.isOpen(QStringLiteral("profileColorPicker")));
+        QCOMPARE(f.draft().backgroundColor1(), QColor(QStringLiteral("#ffffff")));
+        QCOMPARE(f.profiles().recentColors().value(0).value<QColor>(), QColor(QStringLiteral("#ffffff")));
+        f.profiles().undo();
+        QCOMPARE(f.draft().backgroundColor1(), original);
+        f.profiles().redo();
+
+        openPicker();
+        classics = f.item(QStringLiteral("profileColorPickerClassics"));
+        classics->forceActiveFocus(Qt::TabFocusReason);
+        f.key(Qt::Key_Right);
+        f.key(Qt::Key_Right);
+        f.key(Qt::Key_Space);
+        QCOMPARE(f.draft().backgroundColor1(), QColor(QStringLiteral("#ff2e97")));
+        QVERIFY(f.isOpen(QStringLiteral("profileColorPicker")));
+        f.key(Qt::Key_Escape);
+        QTRY_VERIFY(!f.isOpen(QStringLiteral("profileColorPicker")));
+        QCOMPARE(f.draft().backgroundColor1(), QColor(QStringLiteral("#ffffff")));
+
+        // The × by keyboard keeps what is picked.
+        openPicker();
+        f.click(QStringLiteral("profileClassicSwatch_39ff14"));
+        QQuickItem *close = f.item(QStringLiteral("profileColorPickerClose"));
+        QVERIFY(close->activeFocusOnTab());
+        close->forceActiveFocus(Qt::TabFocusReason);
+        f.key(Qt::Key_Space);
+        QTRY_VERIFY(!f.isOpen(QStringLiteral("profileColorPicker")));
+        QCOMPARE(f.draft().backgroundColor1(), QColor(QStringLiteral("#39ff14")));
+    }
+
     void colorPickerReadabilityLine()
     {
         EditorFixture f; // Headliner: dark boxes
@@ -713,10 +801,58 @@ private slots:
         QVERIFY(EditorFixture::isShown(notice));
         QVERIFY(notice->property("entries").toList().size() >= 1);
 
-        // "Show me" points the preview at a box that shows it, for a moment.
+        // "Show me" pulses what the adjustment changed (SPEC §9): every box in
+        // the link ink, the app's own Contacting box too, with a ring and no
+        // chip; it never claims a box is being edited.
+        const auto pulsing = [&f](const QString &module) {
+            QQuickItem *slot = f.itemIn(f.frame(), QStringLiteral("profileModule_") + module);
+            QQuickItem *ring = slot ? f.itemIn(slot, QStringLiteral("profilePreviewPulse")) : nullptr;
+            return ring && ring->isVisible();
+        };
+        const QString friends = QStringLiteral("m%1").arg(int(Profile::Module::TopFriendsModule));
+        const QString details = QStringLiteral("m%1").arg(int(Profile::Module::DetailsModule));
+        const QString editingBefore = f.frame()->property("editingTarget").toString();
         f.click(QStringLiteral("profileReadabilityShowMe"));
-        QCOMPARE(f.frame()->property("editingTarget").toString(), QStringLiteral("contacting"));
-        QTRY_COMPARE_WITH_TIMEOUT(f.frame()->property("editingTarget").toString(), QString(), 3000);
+        QCOMPARE(f.frame()->property("pulseTarget").toString(), QStringLiteral("link"));
+        QCOMPARE(f.frame()->property("editingTarget").toString(), editingBefore);
+        QVERIFY(pulsing(QStringLiteral("contacting")));
+        QVERIFY(pulsing(friends));
+        QVERIFY(!pulsing(details));
+        QVERIFY(!pulsing(QStringLiteral("identity")));
+        for (QQuickItem *decor : f.items(QStringLiteral("profilePreviewDecor"), f.frame()))
+            QVERIFY(!decor->property("editing").toBool());
+        // Twice, 600 ms each: the ring blinks, then goes.
+        QQuickItem *ring = f.itemIn(f.itemIn(f.frame(), QStringLiteral("profileModule_contacting")),
+                                    QStringLiteral("profilePreviewPulse"));
+        int blinks = 0;
+        bool lit = false;
+        QElapsedTimer watching;
+        watching.start();
+        while (watching.elapsed() < 1500) {
+            const qreal opacity = ring->isVisible() ? ring->opacity() : 0.0;
+            if (!lit && opacity > 0.9) {
+                lit = true;
+                ++blinks;
+            } else if (lit && opacity < 0.5) {
+                lit = false;
+            }
+            QTest::qWait(10);
+        }
+        QCOMPARE(blinks, 2);
+        QTRY_COMPARE_WITH_TIMEOUT(f.frame()->property("pulseTarget").toString(), QString(), 3000);
+        QVERIFY(!pulsing(QStringLiteral("contacting")));
+
+        // The name's ink rings just the name.
+        f.editor()->setProperty("pulseTarget", QString());
+        QMetaObject::invokeMethod(f.editor(), "showMe", Q_ARG(QVariant, int(Profile::InkRole::NameInk)));
+        QVERIFY(pulsing(QStringLiteral("identity")));
+        QVERIFY(!pulsing(QStringLiteral("contacting")));
+        QQuickItem *identity = f.itemIn(f.frame(), QStringLiteral("profileModule_identity"));
+        QQuickItem *name = f.itemIn(identity, QStringLiteral("profileNameText"));
+        QQuickItem *nameRing = f.itemIn(identity, QStringLiteral("profilePreviewPulse"));
+        QVERIFY(name && nameRing);
+        QVERIFY(nameRing->height() < identity->height() / 2);
+        QTRY_COMPARE_WITH_TIMEOUT(f.frame()->property("pulseTarget").toString(), QString(), 3000);
 
         // A readable colour: the check again, and no notice.
         f.draft().setLinkColor(QColor(0xf0, 0xf0, 0xf0));
@@ -795,6 +931,11 @@ private slots:
         QTRY_COMPARE(f.frame()->property("shownPage").value<QObject *>(), profiles.tryOn());
         QVERIFY(EditorFixture::isShown(f.item(QStringLiteral("profileTryOnPill"))));
         QCOMPARE(f.text(QStringLiteral("profileTryOnPillText")), QStringLiteral("Trying on Chrome Y2K. Click to keep it."));
+        // The page's one song player follows the page in the preview.
+        auto *player = qobject_cast<SongPlayer *>(f.object(QStringLiteral("profileSongPlayer")));
+        QVERIFY(player);
+        QCOMPARE(f.page()->property("shownPage").value<QObject *>(), profiles.tryOn());
+        QCOMPARE(player->songKey(), profiles.tryOn()->songKey());
         // The draft itself does not change.
         QCOMPARE(profiles.draft()->preset(), int(Profile::Preset::HeadlinerPreset));
         QVERIFY(!profiles.canUndo());
@@ -803,7 +944,16 @@ private slots:
         f.hover(f.item(QStringLiteral("profileEditorRail")));
         QTRY_COMPARE(profiles.tryOnPreset(), -1);
         QTRY_COMPARE(f.frame()->property("shownPage").value<QObject *>(), profiles.draft());
+        QCOMPARE(f.page()->property("shownPage").value<QObject *>(), profiles.draft());
         QVERIFY(!EditorFixture::isShown(f.item(QStringLiteral("profileTryOnPill"))));
+
+        // Resting on the chosen preset tries nothing on: that is the look
+        // the owner already has (with any changes of theirs).
+        f.hover(f.item(QStringLiteral("profileThemeTile_headliner")));
+        QTest::qWait(400);
+        QCOMPARE(profiles.tryOnPreset(), -1);
+        QVERIFY(!EditorFixture::isShown(f.item(QStringLiteral("profileTryOnPill"))));
+        f.hover(f.item(QStringLiteral("profileEditorRail")));
 
         // A click applies it: one undo step.
         f.click(f.item(QStringLiteral("profileThemeTile_linen")));
@@ -813,17 +963,114 @@ private slots:
         profiles.undo();
         QCOMPARE(profiles.draft()->preset(), int(Profile::Preset::HeadlinerPreset));
 
-        // Keyboard: the grid is one Tab stop on the chosen tile; resting on a
-        // tile tries it on, Enter applies it.
+        // Keyboard: the grid is one Tab stop on the chosen tile, which takes
+        // the focus itself (a screen reader announces each tile); landing on
+        // it tries nothing on. An arrow moves the focus to the next tile and
+        // resting there tries it on, Enter applies it.
         f.hover(f.item(QStringLiteral("profileEditorRail")));
         QQuickItem *grid = f.item(QStringLiteral("profileThemesGrid"));
         grid->forceActiveFocus(Qt::TabFocusReason);
         QCOMPARE(grid->property("focusIndex").toInt(), 7); // Headliner
+        QCOMPARE(f.focused(), f.item(QStringLiteral("profileThemeTile_headliner")));
+        QTest::qWait(400);
+        QCOMPARE(profiles.tryOnPreset(), -1);
         f.key(Qt::Key_Down); // Chrome Y2K, under it
+        QCOMPARE(f.focused(), chrome);
+        QTRY_COMPARE(profiles.tryOnPreset(), int(Profile::Preset::ChromeY2KPreset));
+        // Back up onto the chosen tile puts the draft back.
+        f.key(Qt::Key_Up);
+        QTRY_COMPARE(profiles.tryOnPreset(), -1);
+        f.key(Qt::Key_Down);
         QTRY_COMPARE(profiles.tryOnPreset(), int(Profile::Preset::ChromeY2KPreset));
         f.key(Qt::Key_Return);
         QCOMPARE(profiles.draft()->preset(), int(Profile::Preset::ChromeY2KPreset));
         QCOMPARE(profiles.tryOnPreset(), -1);
+    }
+
+    // SPEC §16.3: the editor's one-Tab-stop groups (the rail, a segmented
+    // control, a tile grid) put the keyboard focus on the choice itself, so
+    // a screen reader announces each arrow press ("Background, page tab",
+    // "Solid, radio button, checked"), and only one item of a group is a Tab
+    // stop.
+    void keyboardFocusIsOnTheChoiceItself()
+    {
+        EditorFixture f; // Headliner
+        QVERIFY(f.ready());
+        const auto tabStopsIn = [&f](const QString &group, const QString &prefix) {
+            int stops = 0;
+            QList<QQuickItem *> pending{f.item(group)};
+            while (!pending.isEmpty()) {
+                QQuickItem *at = pending.takeFirst();
+                if (at->objectName().startsWith(prefix) && at->activeFocusOnTab())
+                    ++stops;
+                pending.append(at->childItems());
+            }
+            return stops;
+        };
+
+        // The rail: the chosen tab has the focus; ↓ moves it with the choice.
+        f.item(QStringLiteral("profileEditorRail"))->forceActiveFocus(Qt::TabFocusReason);
+        QCOMPARE(f.focused(), f.item(QStringLiteral("profileEditorTab_themes")));
+        f.key(Qt::Key_Down);
+        QCOMPARE(f.profiles().lastTab(), int(EditorTab::BackgroundTab));
+        QCOMPARE(f.focused(), f.item(QStringLiteral("profileEditorTab_background")));
+        QCOMPARE(f.focused()->property("objectName").toString(), QStringLiteral("profileEditorTab_background"));
+        QCOMPARE(tabStopsIn(QStringLiteral("profileEditorRail"), QStringLiteral("profileEditorTab_")), 1);
+        QTRY_VERIFY(f.tabItem(QStringLiteral("background")));
+
+        // A segmented control: the chosen segment has the focus, and moves.
+        QQuickItem *style = f.item(QStringLiteral("profileBackgroundStyle"));
+        style->forceActiveFocus(Qt::TabFocusReason);
+        QCOMPARE(f.focused(), f.segment(QStringLiteral("profileBackgroundStyle"), QStringLiteral("Pattern")));
+        f.key(Qt::Key_Left);
+        QCOMPARE(f.draft().backgroundKind(), int(Profile::BackgroundKind::GradientBackground));
+        QCOMPARE(f.focused(), f.segment(QStringLiteral("profileBackgroundStyle"), QStringLiteral("Gradient")));
+        QCOMPARE(tabStopsIn(QStringLiteral("profileBackgroundStyle"), QStringLiteral("profileSegment_")), 1);
+        // Tab leaves the control in one press.
+        f.key(Qt::Key_Tab);
+        QVERIFY(!style->hasActiveFocus());
+
+        // A tile grid: the chosen tile, then wherever the arrows take it.
+        f.draft().setBackgroundKind(int(Profile::BackgroundKind::PatternBackground));
+        QQuickItem *patterns = f.item(QStringLiteral("profilePatternGrid"));
+        patterns->forceActiveFocus(Qt::TabFocusReason);
+        const int chosen = patterns->property("currentIndex").toInt();
+        QVERIFY(chosen >= 0);
+        const auto tileAt = [patterns](int index) {
+            QVariant tile;
+            QMetaObject::invokeMethod(patterns, "itemAt", Q_RETURN_ARG(QVariant, tile), Q_ARG(QVariant, index));
+            return tile.value<QQuickItem *>();
+        };
+        QCOMPARE(patterns->property("focusIndex").toInt(), chosen);
+        QCOMPARE(f.focused(), tileAt(chosen));
+        f.key(chosen > 0 ? Qt::Key_Left : Qt::Key_Right);
+        QCOMPARE(f.focused(), tileAt(chosen > 0 ? chosen - 1 : chosen + 1));
+        QCOMPARE(f.focused()->property("objectName").toString().startsWith(QStringLiteral("profilePatternTile_")), true);
+        QCOMPARE(tabStopsIn(QStringLiteral("profilePatternGrid"), QStringLiteral("profilePatternTile_")), 1);
+        QVERIFY(patterns->hasActiveFocus());
+    }
+
+    // An edited chosen preset: focus or the pointer resting on its own tile
+    // never shows the preset without the owner's changes.
+    void themesNeverTryOnTheChosenPreset()
+    {
+        EditorFixture f; // Headliner
+        QVERIFY(f.ready());
+        ProfileController &profiles = f.profiles();
+        f.draft().setBoxOpacity(84);
+        QVERIFY(f.draft().styleEditedSincePreset());
+        // Tab from the rail lands on the chosen tile.
+        f.item(QStringLiteral("profileEditorRail"))->forceActiveFocus(Qt::TabFocusReason);
+        f.key(Qt::Key_Tab);
+        QCOMPARE(f.focused(), f.item(QStringLiteral("profileThemeTile_headliner")));
+        QTest::qWait(400);
+        QCOMPARE(profiles.tryOnPreset(), -1);
+        QCOMPARE(f.frame()->property("shownPage").value<QObject *>(), profiles.draft());
+        f.hover(f.item(QStringLiteral("profileThemeTile_headliner")));
+        QTest::qWait(400);
+        QCOMPARE(profiles.tryOnPreset(), -1);
+        QVERIFY(!EditorFixture::isShown(f.item(QStringLiteral("profileTryOnPill"))));
+        QCOMPARE(f.draft().boxOpacity(), 84);
     }
 
     void presetTagsDefaultAndEdited()
@@ -1504,20 +1751,120 @@ private slots:
         ProfileController &profiles = f.profiles();
         QSignalSpy published(&profiles, &ProfileController::published);
         f.draft().setHeadline(QStringLiteral("With a picture"));
+        // The import stays under way until the test lets it go.
+        ImportGate gate(profiles);
         profiles.importBackground(QUrl::fromLocalFile(path));
         QVERIFY(profiles.backgroundImporting());
+        QVERIFY(gate.waitStarted());
 
         QQuickItem *save = f.item(QStringLiteral("profileSaveButton"));
         f.click(save);
         // "Saving…" inside the button until the picture is in, then it saves.
         QVERIFY(profiles.publishPending());
-        QCOMPARE(save->property("label").toString(), QStringLiteral("Saving…"));
+        QTRY_COMPARE(save->property("label").toString(), QStringLiteral("Saving…"));
         QVERIFY(!save->isEnabled());
         QVERIFY(profiles.editing());
+        QTest::qWait(50);
         QCOMPARE(published.count(), 0);
+        gate.release();
         QTRY_COMPARE_WITH_TIMEOUT(published.count(), 1, 20'000);
         QVERIFY(!profiles.editing());
         QVERIFY(profiles.view()->hasBackgroundImage());
+    }
+
+    // The leave dialog's Save may have to wait for an import too. The save
+    // ends editing and takes the editor with it, and the page still goes on:
+    // it closes the window, or pops to the page chosen from the history.
+    void leaveDialogSaveWaitsForAnImportThenLeaves()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = writePicture(dir, QStringLiteral("big.png"), QSize(1600, 1000));
+        EditorFixture f;
+        QVERIFY(f.ready());
+        ProfileController &profiles = f.profiles();
+        QSignalSpy published(&profiles, &ProfileController::published);
+
+        // Closing the window.
+        {
+            f.draft().setHeadline(QStringLiteral("Saved on the way out"));
+            ImportGate gate(profiles);
+            profiles.importBackground(QUrl::fromLocalFile(path));
+            QVERIFY(gate.waitStarted());
+            QMetaObject::invokeMethod(f.window(), "closeWindow");
+            QTRY_VERIFY(f.isOpen(QStringLiteral("profileLeaveDialog")));
+            f.click(QStringLiteral("profileLeaveSaveButton"));
+            QTRY_VERIFY(!f.isOpen(QStringLiteral("profileLeaveDialog")));
+            QVERIFY(profiles.publishPending());
+            QVERIFY(profiles.editing());
+            QCOMPARE(f.window()->property("closeOutcome").toString(), QString());
+            gate.release();
+            QTRY_COMPARE_WITH_TIMEOUT(published.count(), 1, 20'000);
+            QVERIFY(!profiles.editing());
+            QCOMPARE(f.window()->property("closeOutcome").toString(), QStringLiteral("closed"));
+            QCOMPARE(profiles.view()->headline(), QStringLiteral("Saved on the way out"));
+        }
+
+        // A page from the history menu.
+        Profile::Page jessica = *Reference::seededPage(QStringLiteral("jessica"));
+        jessica.topFriends.prepend({Reference::mockAccountFor(Reference::selfId()).bytes(), QStringLiteral("Daniel")});
+        profiles.setMockPage(QStringLiteral("jessica"), jessica);
+        profiles.closeAll();
+        QVERIFY(profiles.openContact(QStringLiteral("jessica")));
+        QVERIFY(profiles.openTopFriend(0)); // yourself, from her Friend Space
+        QVERIFY(profiles.beginEditing());
+        QVERIFY(f.waitForEditor());
+        {
+            f.draft().setHeadline(QStringLiteral("Saved before going back"));
+            ImportGate gate(profiles);
+            profiles.importBackground(QUrl::fromLocalFile(path));
+            QVERIFY(gate.waitStarted());
+            f.click(f.item(QStringLiteral("profileEditorBackButton")), QPointF(10, 10), Qt::RightButton);
+            QQuickItem *entry = nullptr;
+            QTRY_VERIFY((entry = f.visibleItem(QStringLiteral("profileEditorHistory_0"))));
+            f.click(entry);
+            QTRY_VERIFY(f.isOpen(QStringLiteral("profileLeaveDialog")));
+            f.click(QStringLiteral("profileLeaveSaveButton"));
+            QTRY_VERIFY(!f.isOpen(QStringLiteral("profileLeaveDialog")));
+            QVERIFY(profiles.publishPending());
+            QCOMPARE(profiles.depth(), 2);
+            gate.release();
+            QTRY_COMPARE_WITH_TIMEOUT(published.count(), 2, 20'000);
+            QTRY_COMPARE(profiles.depth(), 1);
+            QCOMPARE(profiles.personId(), QStringLiteral("jessica"));
+            QVERIFY(!profiles.editing());
+            QTRY_COMPARE(f.editor(), nullptr);
+        }
+
+        // A save that gives up (the import failed) leaves nothing behind: the
+        // owner stays, and a later save does not suddenly leave.
+        QVERIFY(profiles.openTopFriend(0));
+        QVERIFY(profiles.beginEditing());
+        QVERIFY(f.waitForEditor());
+        {
+            const QString broken = dir.filePath(QStringLiteral("broken.png"));
+            QFile file(broken);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("not a picture");
+            file.close();
+            f.draft().setHeadline(QStringLiteral("Stays"));
+            ImportGate gate(profiles);
+            profiles.importBackground(QUrl::fromLocalFile(broken));
+            QVERIFY(gate.waitStarted());
+            QMetaObject::invokeMethod(f.window(), "closeWindow");
+            QTRY_VERIFY(f.isOpen(QStringLiteral("profileLeaveDialog")));
+            f.click(QStringLiteral("profileLeaveSaveButton"));
+            QVERIFY(profiles.publishPending());
+            gate.release();
+            QTRY_VERIFY_WITH_TIMEOUT(!profiles.publishPending(), 20'000);
+            QVERIFY(profiles.editing());
+            QCOMPARE(f.window()->property("closeOutcome").toString(), QString());
+            // The next save is just a save.
+            f.click(f.item(QStringLiteral("profileSaveButton")));
+            QTRY_COMPARE(published.count(), 3);
+            QTest::qWait(50);
+            QCOMPARE(f.window()->property("closeOutcome").toString(), QString());
+        }
     }
 
     void discardPopoverRestoresPublished()
@@ -1618,6 +1965,17 @@ private slots:
             QVERIFY(f.editor()->property("popupOpen").toBool());
             QQuickItem *entry = nullptr;
             QTRY_VERIFY((entry = f.visibleItem(QStringLiteral("profileEditorHistory_0"))));
+            // The page's own history rows (SPEC §1.2): Jessica's 20 px
+            // picture and her name, as plain text.
+            QCOMPARE(entry->property("text").toString(), QStringLiteral("Jessica"));
+            QQuickItem *avatar = f.itemIn(entry, QStringLiteral("profileHistoryAvatar"));
+            QVERIFY(avatar && avatar->isVisible());
+            QCOMPARE(avatar->width(), 20.0);
+            QVERIFY(!avatar->property("avatarKey").toString().isEmpty());
+            QQuickItem *name = f.itemIn(entry, QStringLiteral("profileHistoryName"));
+            QVERIFY(name);
+            QCOMPARE(name->property("textFormat").toInt(), 0 /* PlainText */);
+            QCOMPARE(name->property("text").toString(), QStringLiteral("Jessica"));
             f.click(entry);
             QTRY_VERIFY(f.isOpen(QStringLiteral("profileLeaveDialog")));
             QCOMPARE(profiles.depth(), 2);
@@ -1737,6 +2095,62 @@ private slots:
         QCOMPARE(f.draft().headline(), typed);
     }
 
+    // A slider's run of changes is one step that ends with its tab: what the
+    // next tab changes is a step of its own. And the slider's rest timer only
+    // ever closes its own gesture, never a colour picker's opened meanwhile.
+    void sliderStepsEndWithTheirTab()
+    {
+        EditorFixture f; // Headliner: a pattern background
+        QVERIFY(f.ready());
+        ProfileController &profiles = f.profiles();
+        const int kind = f.draft().backgroundKind();
+        QVERIFY(kind != int(Profile::BackgroundKind::SolidBackground));
+
+        // See-through by keyboard, then Ctrl+2 before the knob has rested.
+        f.openTab(QStringLiteral("boxes"));
+        const int opacity = f.draft().boxOpacity();
+        f.item(QStringLiteral("profileSeeThrough"))->forceActiveFocus(Qt::TabFocusReason);
+        f.key(Qt::Key_Right);
+        f.key(Qt::Key_Right);
+        const int moved = f.draft().boxOpacity();
+        QVERIFY(moved != opacity);
+        f.key(Qt::Key_2, Qt::ControlModifier);
+        QTRY_VERIFY(f.tabItem(QStringLiteral("background")));
+        f.click(f.segment(QStringLiteral("profileBackgroundStyle"), QStringLiteral("Solid")));
+        QCOMPARE(f.draft().backgroundKind(), int(Profile::BackgroundKind::SolidBackground));
+        // Two steps, undone one at a time.
+        profiles.undo();
+        QCOMPARE(f.draft().backgroundKind(), kind);
+        QCOMPARE(f.draft().boxOpacity(), moved);
+        profiles.undo();
+        QCOMPARE(f.draft().boxOpacity(), opacity);
+        QVERIFY(!profiles.canUndo());
+
+        // See-through, then the box colour's picker before the knob rests:
+        // the whole picker session stays one step when the slider's timer
+        // fires under it.
+        f.openTab(QStringLiteral("boxes"));
+        const QColor fill = f.draft().boxFill();
+        f.item(QStringLiteral("profileSeeThrough"))->forceActiveFocus(Qt::TabFocusReason);
+        f.key(Qt::Key_Right);
+        const int nudged = f.draft().boxOpacity();
+        QVERIFY(nudged != opacity);
+        f.click(QStringLiteral("profileBoxColourWell"));
+        QTRY_VERIFY(f.isOpen(QStringLiteral("profileColorPicker")));
+        QTest::qWait(500); // the slider's rest timer has fired
+        f.click(QStringLiteral("profileClassicSwatch_ff0000"));
+        f.click(QStringLiteral("profileClassicSwatch_00c853"));
+        QCOMPARE(f.draft().boxFill(), QColor(0x00, 0xc8, 0x53));
+        f.click(QStringLiteral("profileColorPickerClose"));
+        QTRY_VERIFY(!f.isOpen(QStringLiteral("profileColorPicker")));
+        profiles.undo();
+        QCOMPARE(f.draft().boxFill(), fill);
+        QCOMPARE(f.draft().boxOpacity(), nudged);
+        profiles.undo();
+        QCOMPARE(f.draft().boxOpacity(), opacity);
+        QVERIFY(!profiles.canUndo());
+    }
+
     void previewToggleHidesRailAndPanel()
     {
         EditorFixture f;
@@ -1795,6 +2209,54 @@ private slots:
         f.click(QStringLiteral("profilePreviewToggle"));
         QCOMPARE(f.item(QStringLiteral("profileEditorRail"))->x(), -376.0);
         ProfileRenderPolicy::instance().setLowMemoryMode(false);
+    }
+
+    // SPEC §17 / ARCH §8.2: leaving the editor, the page's own view is back
+    // underneath at once and the rail and panel slide off over it in 140 ms;
+    // at once without animations.
+    void leavingSlidesTheEditorOut()
+    {
+        {
+            EditorFixture f;
+            QVERIFY(f.ready());
+            QPointer<QQuickItem> editor = f.editor();
+            QPointer<QQuickItem> rail = f.item(QStringLiteral("profileEditorRail"));
+            QVERIFY(editor && rail);
+            QCOMPARE(rail->x(), 0.0);
+            QElapsedTimer clock;
+            clock.start();
+            f.profiles().endEditing();
+            QVERIFY(editor);
+            QVERIFY(editor->property("leaving").toBool());
+            QVERIFY(!editor->isEnabled());
+            QVERIFY(!EditorFixture::isShown(f.frame())); // the preview gives way to the page
+            QQuickItem *view = f.visibleItem(QStringLiteral("profilePageView"));
+            QVERIFY(view);
+            QVERIFY(!EditorFixture::isInside(view, editor));
+            QCOMPARE(view->property("mode").toString(), QStringLiteral("view"));
+            QVERIFY(rail->isVisible());
+            QTRY_VERIFY(!editor);
+            QVERIFY2(clock.elapsed() >= 120, qPrintable(QString::number(clock.elapsed())));
+
+            // Back in before a slide out has finished: a fresh editor.
+            QVERIFY(f.profiles().beginEditing());
+            QVERIFY(f.waitForEditor());
+            editor = f.editor();
+            f.profiles().endEditing();
+            QVERIFY(f.profiles().beginEditing());
+            QVERIFY(f.waitForEditor());
+            QVERIFY(f.editor() != nullptr);
+            QVERIFY(!f.editor()->property("leaving").toBool());
+            QVERIFY(EditorFixture::isShown(f.frame()));
+            QTRY_VERIFY(!editor);
+        }
+        ProfileRenderPolicy::instance().setReducedMotion(true);
+        EditorFixture f;
+        QVERIFY(f.ready());
+        f.profiles().endEditing();
+        QCOMPARE(f.editor(), nullptr);
+        QVERIFY(f.visibleItem(QStringLiteral("profilePageView")));
+        ProfileRenderPolicy::instance().setReducedMotion(false);
     }
 
     void previewCaptionFollowsWidth()
@@ -1878,19 +2340,24 @@ private slots:
         // clicks on its boxes through editRequested.
         QQuickItem *view = f.frame()->property("view").value<QQuickItem *>();
         QVERIFY(view);
-        if (view->property("page").isValid()) {
-            QCOMPARE(view->property("page").value<QObject *>(), f.profiles().draft());
-            QCOMPARE(view->property("mode").toString(), QStringLiteral("preview"));
-            // The view marks what the panel is editing, and nothing while
-            // focus is elsewhere (as now, on the rail).
-            QCOMPARE(view->property("editingTarget").toString(), QString());
-            QMetaObject::invokeMethod(f.frame(), "editRequested", Q_ARG(QString, QStringLiteral("interests")));
-            QTRY_COMPARE(view->property("editingTarget").toString(), QStringLiteral("interests"));
-            QMetaObject::invokeMethod(view, "editRequested", Q_ARG(QString, QStringLiteral("song")));
-            QCOMPARE(f.profiles().lastTab(), int(EditorTab::SongTab));
-        } else {
-            qInfo("The page kit's ProfilePageView has not landed: its bindings are checked once it has.");
-        }
+        QCOMPARE(view->objectName(), QStringLiteral("profilePageView"));
+        QCOMPARE(view->property("page").value<QObject *>(), f.profiles().draft());
+        QCOMPARE(view->property("mode").toString(), QStringLiteral("preview"));
+        // The view marks what the panel is editing, and nothing while
+        // focus is elsewhere (as now, on the rail).
+        QCOMPARE(view->property("editingTarget").toString(), QString());
+        QMetaObject::invokeMethod(f.frame(), "editRequested", Q_ARG(QString, QStringLiteral("interests")));
+        QTRY_COMPARE(view->property("editingTarget").toString(), QStringLiteral("interests"));
+        QMetaObject::invokeMethod(view, "editRequested", Q_ARG(QString, QStringLiteral("song")));
+        QCOMPARE(f.profiles().lastTab(), int(EditorTab::SongTab));
+        // A real click on a box of the preview asks for its tab too.
+        f.profiles().setLastTab(int(EditorTab::LayoutTab));
+        QQuickItem *headline = f.visibleItem(QStringLiteral("profileHeadline"));
+        QVERIFY(headline);
+        QVERIFY(EditorFixture::isInside(headline, view));
+        f.click(headline);
+        QTRY_COMPARE(f.profiles().lastTab(), int(EditorTab::AboutTab));
+        QTRY_VERIFY(f.focusIn(QStringLiteral("profileField_headline")));
     }
 
     void appOwnedBoxesAreInert()
@@ -1906,15 +2373,14 @@ private slots:
             QVERIFY(!f.profiles().draftDirty());
         }
         // Clicking the page's own Contacting box in the preview does nothing.
-        if (QQuickItem *contacting = f.visibleItem(QStringLiteral("profileContactingBox"))) {
-            f.click(contacting);
-            QTest::qWait(50);
-            QCOMPARE(f.profiles().lastTab(), int(EditorTab::TextTab));
-            QVERIFY(f.profiles().editing());
-            QVERIFY(!f.profiles().draftDirty());
-        } else {
-            qInfo("The page kit's Contacting box has not landed: clicking it is checked once it has.");
-        }
+        QQuickItem *contacting = f.visibleItem(QStringLiteral("profileContactingBox"));
+        QVERIFY(contacting);
+        QVERIFY(EditorFixture::isInside(contacting, f.frame()));
+        f.click(contacting);
+        QTest::qWait(50);
+        QCOMPARE(f.profiles().lastTab(), int(EditorTab::TextTab));
+        QVERIFY(f.profiles().editing());
+        QVERIFY(!f.profiles().draftDirty());
     }
 
     void escapeWithAMenuOpenClosesOnlyTheMenu()

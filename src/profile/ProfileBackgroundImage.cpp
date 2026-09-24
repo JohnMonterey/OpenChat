@@ -227,7 +227,9 @@ void ProfileBackgroundImporter::start(const QString &path, const QColor &matte)
     job->owner = this;
     m_job = job;
     setProgress(0);
-    QThreadPool::globalInstance()->start([job, path, matte] {
+    QThreadPool::globalInstance()->start([job, path, matte, hook = m_workHook] {
+        if (hook)
+            hook();
         const auto result = processProfileBackgroundFile(
             path, matte, {},
             [job](qreal value) { Job::post(job, [value](ProfileBackgroundImporter *owner) { owner->setProgress(value); }); },
@@ -248,6 +250,11 @@ void ProfileBackgroundImporter::start(const QString &path, const QColor &matte)
             });
         }
     });
+}
+
+void ProfileBackgroundImporter::setWorkHookForTesting(std::function<void()> hook)
+{
+    m_workHook = std::move(hook);
 }
 
 void ProfileBackgroundImporter::cancel()

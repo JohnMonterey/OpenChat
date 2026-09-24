@@ -1823,6 +1823,35 @@ private slots:
         p.undo();
         QCOMPARE(d.motifOpacity(), 40);
 
+        // A keyed end closes only that gesture: a slider's late rest timer
+        // leaves the colour picker's session whole.
+        p.beginGesture(QStringLiteral("boxes:see-through"));
+        d.setMotifOpacity(50);
+        p.beginGesture(QStringLiteral("colour:Box colour"));
+        d.setMotifOpacity(60);
+        p.endGesture(QStringLiteral("boxes:see-through")); // not open: nothing
+        d.setMotifOpacity(70);
+        p.endGesture(QStringLiteral("colour:Box colour"));
+        d.setMotifOpacity(80); // a step of its own
+        p.undo();
+        QCOMPARE(d.motifOpacity(), 70);
+        p.undo();
+        QCOMPARE(d.motifOpacity(), 50);
+        p.undo();
+        QCOMPARE(d.motifOpacity(), 40);
+
+        // Leaving a tab ends its gesture (the slider or field that held it
+        // goes with the tab): the next tab's change is a step of its own.
+        p.setLastTab(int(Profile::EditorTab::BoxesTab));
+        p.beginGesture(QStringLiteral("boxes:see-through"));
+        d.setMotifOpacity(55);
+        p.setLastTab(int(Profile::EditorTab::BackgroundTab));
+        d.setMotifOpacity(65);
+        p.undo();
+        QCOMPARE(d.motifOpacity(), 55);
+        p.undo();
+        QCOMPARE(d.motifOpacity(), 40);
+
         // A controller edit inside an open gesture is a step of its own.
         p.beginGesture(QStringLiteral("c"));
         d.setMotifOpacity(21);

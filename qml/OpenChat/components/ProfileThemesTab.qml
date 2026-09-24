@@ -4,11 +4,14 @@ import OpenChat.Native
 
 // Themes (SPEC §14.5, `final-editor-themes.png`): the ten presets as live
 // miniatures carrying the owner's own name (ProfilePresetThumb), two to a row.
-// Resting on a tile for 250 ms, by pointer or keyboard, tries the preset on in
-// the preview; moving away puts the draft back. A click, Enter or Space
-// applies it (one undo step). The chosen preset wears a check orb and an
-// amber "edited" tag once any knob differs from it; Aero Sky is tagged
-// "default". The footer resets the style to the preset or picks a surprise.
+// Resting on a tile for 250 ms, by pointer or keyboard (an arrow onto it; Tab
+// into the grid only lands on the chosen tile), tries the preset on in the
+// preview; moving away, or resting on the chosen preset, puts the draft back:
+// the look the owner already has is never "tried on", which would hide their
+// own changes to it. A click, Enter or Space applies it (one undo step). The
+// chosen preset wears a check orb and an amber "edited" tag once any knob
+// differs from it; Aero Sky is tagged "default". The footer resets the style
+// to the preset or picks a surprise.
 Item {
     id: tab
     objectName: "profileThemesTab"
@@ -55,8 +58,9 @@ Item {
         id: tryOnTimer
         interval: 250
         onTriggered: {
-            if (tab.profiles && tab.restingPreset >= 0)
-                tab.profiles.setTryOnPreset(tab.restingPreset);
+            if (!tab.profiles || !tab.draft || tab.restingPreset < 0)
+                return;
+            tab.profiles.setTryOnPreset(tab.restingPreset === tab.draft.preset ? -1 : tab.restingPreset);
         }
     }
 

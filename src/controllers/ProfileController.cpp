@@ -1351,6 +1351,11 @@ void ProfileController::copyText(const QString &text, const QString &notice)
     setNotice(notice);
 }
 
+void ProfileController::showNotice(const QString &notice)
+{
+    setNotice(notice);
+}
+
 void ProfileController::clearNotice()
 {
     setNotice({});
@@ -1799,8 +1804,10 @@ void ProfileController::beginGesture(const QString &key)
     emitHistoryIfChanged(couldUndo, couldRedo);
 }
 
-void ProfileController::endGesture()
+void ProfileController::endGesture(const QString &key)
 {
+    if (!key.isEmpty() && m_history.gestureKey() != key)
+        return;
     closeGesture();
 }
 
@@ -1950,6 +1957,10 @@ void ProfileController::setLastTab(int tab)
 {
     if (tab < int(Profile::EditorTab::ThemesTab) || tab > int(Profile::EditorTab::LayoutTab) || tab == m_lastTab)
         return;
+    // Every gesture belongs to a control of the tab being left (a slider
+    // resting, a field's focus period), which goes with it: what follows in
+    // the next tab is a step of its own.
+    closeGesture();
     m_lastTab = tab;
     QSettings settings;
     settings.setValue(lastTabKey, tab);

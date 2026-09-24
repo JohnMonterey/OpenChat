@@ -14,7 +14,7 @@ Item {
     property var render: null
     property int size: 85
     property real pictureRadius: 4
-    // The grid holds keyboard focus; this tile is its current one.
+    // The keyboard focus is on this tile (the grid moves it between tiles).
     property bool keyboardFocus: false
     signal activated()
 

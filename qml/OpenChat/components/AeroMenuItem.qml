@@ -10,8 +10,10 @@ MenuItem {
     rightPadding: 24
     hoverEnabled: true
 
+    // Labels are often names (devices, presets, people): never markup.
     contentItem: Text {
         text: item.text
+        textFormat: Text.PlainText
         color: item.enabled ? Theme.textPrimary : Theme.textSecondary
         font.family: Theme.uiFont
         font.pixelSize: 13

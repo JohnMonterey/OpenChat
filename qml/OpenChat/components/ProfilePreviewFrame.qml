@@ -11,9 +11,8 @@ import OpenChat.Native
 //
 // The page is the page kit's ProfilePageView. It is created from its file and
 // handed every frozen input it declares (ARCH §8.1: page, profiles, the three
-// controllers, songPlayer, mode, editingTarget), and its editRequested(target)
-// is passed on, so the editor also loads while the page kit is still the
-// scaffold's placeholder.
+// controllers, songPlayer, mode, editingTarget, and pulseTarget for Show me),
+// and its editRequested(target) is passed on.
 Item {
     id: frame
     objectName: "profilePreviewFrame"
@@ -25,6 +24,8 @@ Item {
     property var songPlayer: null
     // The preview target whose field has focus in the panel ("Editing").
     property string editingTarget: ""
+    // What "Show me" pulses for a moment (ProfilePageView.pulseTarget).
+    property string pulseTarget: ""
     signal editRequested(string target)
 
     readonly property var wantedPage: profiles ? (profiles.tryOnPreset >= 0 ? profiles.tryOn : profiles.draft) : null
@@ -144,7 +145,8 @@ Item {
             callController: () => frame.callController,
             songPlayer: () => frame.songPlayer,
             mode: () => "preview",
-            editingTarget: () => frame.editingTarget
+            editingTarget: () => frame.editingTarget,
+            pulseTarget: () => frame.pulseTarget
         };
         for (const name in inputs) {
             if (name in item)

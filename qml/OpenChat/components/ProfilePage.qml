@@ -88,6 +88,13 @@ FocusScope {
         }
         proceed();
     }
+    // The leave dialog's Save had to wait for an import ("Saving…"). The
+    // save ends editing, which takes the editor away before it could go on,
+    // so the page runs `proceed` (close the window, pop to a page) once the
+    // save is published, and forgets it if the save gives up.
+    function leaveAfterPublish(proceed) {
+        d.leaveAfterPublish = proceed;
+    }
     function openChangePicture() {
         avatarDialog.open();
     }
@@ -112,6 +119,12 @@ FocusScope {
         property var pending: []
         // 0 → 1 while opening, back to 0 while closing.
         property real reveal: 0
+        // The editor is loaded: while editing, and while its rail and panel
+        // slide away when editing ends (editorLeaving).
+        property bool editorShown: false
+        property bool editorLeaving: false
+        // What a Save that waited for an import leaves to (leaveAfterPublish).
+        property var leaveAfterPublish: null
 
         function runPending() {
             const actions = d.pending;
@@ -125,8 +138,34 @@ FocusScope {
     transform: Translate { y: 12 * (1 - d.reveal) }
 
     Component.onCompleted: {
+        d.editorShown = root.profiles.editing;
         root.forceActiveFocus();
         root.reveal();
+    }
+
+    // Editing began or ended. Ending, the page view is back underneath at
+    // once and the editor stays for its 140 ms slide out (SPEC §17), at
+    // once without animations.
+    function syncEditor() {
+        if (root.profiles.editing) {
+            if (d.editorLeaving) {
+                // Back in while the last one was still leaving: a fresh editor.
+                d.editorLeaving = false;
+                d.editorShown = false;
+            }
+            d.editorShown = true;
+            return;
+        }
+        if (!d.editorShown || d.editorLeaving)
+            return;
+        const editor = bodyEditor.item;
+        if (root.animationsAllowed && d.settled && root.profiles.open && editor
+                && typeof editor.slideOut === "function") {
+            d.editorLeaving = true;
+            editor.slideOut();
+            return;
+        }
+        d.editorShown = false;
     }
 
     // The open motion: fade in and rise 12 px over 140 ms (at once without
@@ -182,6 +221,9 @@ FocusScope {
 
     Connections {
         target: root.profiles
+        function onEditingChanged() {
+            root.syncEditor();
+        }
         function onNavigationChanged() {
             if (root.profiles.open) {
                 // Opened again while it was fading out.
@@ -202,6 +244,15 @@ FocusScope {
         function onPublished(offline) {
             toast.show(offline ? "Saved. It will be sent when you're back online."
                                : "Saved. Your contacts will see it the next time they open your profile.");
+            const proceed = d.leaveAfterPublish;
+            d.leaveAfterPublish = null;
+            if (proceed)
+                proceed();
+        }
+        function onPublishedChanged() {
+            // The save it waited for gave up (an import failed): stay.
+            if (d.leaveAfterPublish && !root.profiles.publishPending && root.profiles.editing)
+                d.leaveAfterPublish = null;
         }
     }
 
@@ -312,12 +363,13 @@ FocusScope {
             }
         }
         // The editor (U8). Its inputs are set when it declares them, so the
-        // two can grow apart without a load failure.
+        // two can grow apart without a load failure. It outlives editing by
+        // its slide out (syncEditor).
         Loader {
             id: bodyEditor
             objectName: "profileEditorLoader"
             anchors.fill: parent
-            active: root.profiles.editing
+            active: d.editorShown
             sourceComponent: ProfileEditor {}
             onLoaded: {
                 const editor = bodyEditor.item;
@@ -332,6 +384,16 @@ FocusScope {
                 for (const name in inputs) {
                     if (name in editor)
                         editor[name] = Qt.binding(inputs[name]);
+                }
+            }
+            Connections {
+                target: bodyEditor.item
+                ignoreUnknownSignals: true
+                function onSlidOut() {
+                    if (!d.editorLeaving)
+                        return;
+                    d.editorLeaving = false;
+                    d.editorShown = false;
                 }
             }
         }

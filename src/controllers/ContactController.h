@@ -148,6 +148,9 @@ signals:
     void dialogOpenChanged();
     void statusChanged();
     void myInviteChanged();
+    // createMyInvite() could not get an invite from the relay (the status
+    // says so too). A caller waiting for a fresh invite stops waiting.
+    void inviteFailed();
     void safetyNumberChanged();
     void lookupChanged();
     // A roster contact's handle became known through a reverse directory

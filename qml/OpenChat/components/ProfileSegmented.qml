@@ -3,28 +3,38 @@ import OpenChat
 
 // The editor's segmented control (SPEC §14.3): joined segments in a 28 px
 // strip with radius 4, the chosen one wearing the switch's blue gradient with
-// a white label. One Tab stop; ←/→ move the choice at once (a segment is a
-// radio button), Home/End jump to the ends. `activated` reports a choice made
-// here; `currentIndex` follows the model, so a refused choice snaps back.
-Item {
+// a white label. One Tab stop, the chosen segment; ←/→ move the choice at once
+// (a segment is a radio button, and the keyboard focus moves with the choice,
+// so a screen reader announces each), Home/End jump to the ends. `activated`
+// reports a choice made here; `currentIndex` follows the model, so a refused
+// choice snaps back.
+FocusScope {
     id: segmented
 
     property var options: []
     property int currentIndex: -1
     property int fontPixelSize: 13
     property string accessibleName: ""
+    readonly property int tabIndex: Math.max(0, Math.min(options.length - 1, currentIndex))
     signal activated(int index)
 
     function choose(index) {
         if (index >= 0 && index < options.length && index !== currentIndex)
             activated(index);
     }
+    // The focus sits on the chosen segment while the control has it.
+    function focusChosen() {
+        const part = segments.itemAt(tabIndex);
+        if (part && segmented.activeFocus && !part.activeFocus)
+            part.forceActiveFocus(Qt.TabFocusReason);
+    }
 
     implicitWidth: 240
     implicitHeight: 28
     height: implicitHeight
     opacity: enabled ? 1 : 0.55
-    activeFocusOnTab: true
+    onActiveFocusChanged: if (activeFocus) focusChosen()
+    onTabIndexChanged: focusChosen()
     Accessible.role: Accessible.Grouping
     Accessible.name: accessibleName
     Keys.onLeftPressed: choose(Math.max(0, currentIndex - 1))
@@ -51,6 +61,7 @@ Item {
         anchors.fill: parent
 
         Repeater {
+            id: segments
             model: segmented.options
 
             Item {
@@ -59,6 +70,8 @@ Item {
                 required property int index
                 readonly property bool chosen: index === segmented.currentIndex
                 objectName: "profileSegment_" + modelData
+                // The focused one stays a Tab stop until the focus has left it.
+                activeFocusOnTab: index === segmented.tabIndex || activeFocus
                 width: segmented.options.length > 0 ? segmented.width / segmented.options.length : 0
                 height: segmented.height
                 Accessible.role: Accessible.RadioButton

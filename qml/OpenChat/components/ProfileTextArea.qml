@@ -62,7 +62,7 @@ Item {
             if (profiles && gestureKey.length > 0)
                 profiles.beginGesture(gestureKey);
         } else if (profiles && gestureKey.length > 0) {
-            profiles.endGesture();
+            profiles.endGesture(gestureKey);
         }
     }
     function revert() {

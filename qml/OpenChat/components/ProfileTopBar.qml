@@ -218,6 +218,8 @@ Item {
                 editorBar.profiles = Qt.binding(() => bar.profiles);
             if ("page" in editorBar)
                 editorBar.page = Qt.binding(() => bar.page);
+            if ("editor" in editorBar)
+                editorBar.editor = Qt.binding(() => bar.page && bar.page.editor !== undefined ? bar.page.editor : null);
         }
     }
 }

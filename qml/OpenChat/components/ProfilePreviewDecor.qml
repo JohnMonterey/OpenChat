@@ -10,7 +10,10 @@ import OpenChat.Native
 // keeps the outline with an "Editing" chip. App-owned boxes (Contacting, the
 // banner, the handle) stay at full strength but inert: hover shows a quiet
 // outline and a "Shown by OpenChat" lock chip that explains itself. An empty
-// module shows as a dashed placeholder that invites filling it in.
+// module shows as a dashed placeholder that invites filling it in. "Show me"
+// (SPEC §9) blinks a 2 px focusBorder ring twice, 600 ms each, around the text
+// a readability adjustment changed (`pulseItem`, or the whole module), on the
+// app's own boxes too and with no chip; steady while animations are off.
 Item {
     id: decor
     objectName: "profilePreviewDecor"
@@ -26,6 +29,8 @@ Item {
     property real radius: 0
     property bool placeholder: false
     property string placeholderText: ""
+    property bool pulse: false
+    property Item pulseItem: null
     signal activated(string target)
 
     readonly property bool hovered: area.containsMouse || chipArea.containsMouse
@@ -146,6 +151,36 @@ Item {
                 }
             }
         }
+    }
+
+    Rectangle {
+        id: pulseRing
+        objectName: "profilePreviewPulse"
+        readonly property rect ringRect: decor.pulse && decor.pulseItem
+                                         ? decor.pulseItem.mapToItem(decor, 0, 0, decor.pulseItem.width,
+                                                                     decor.pulseItem.height)
+                                         : Qt.rect(0, 0, decor.width, decor.height)
+        visible: decor.pulse
+        x: ringRect.x - 4
+        y: ringRect.y - 4
+        width: ringRect.width + 8
+        height: ringRect.height + 8
+        radius: (decor.pulseItem ? 3 : decor.radius) + 3
+        color: "transparent"
+        border.width: 2
+        border.color: Theme.focusBorder
+
+        SequentialAnimation on opacity {
+            running: decor.pulse && ProfileRenderPolicy.animationsAllowed
+            loops: 2
+            NumberAnimation { from: 0; to: 1; duration: 150; easing.type: Easing.InOutQuad }
+            PauseAnimation { duration: 300 }
+            NumberAnimation { from: 1; to: 0; duration: 150; easing.type: Easing.InOutQuad }
+        }
+    }
+    onPulseChanged: {
+        if (pulse && !ProfileRenderPolicy.animationsAllowed)
+            pulseRing.opacity = 1;
     }
 
     MouseArea {

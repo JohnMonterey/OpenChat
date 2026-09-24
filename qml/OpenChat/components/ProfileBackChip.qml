@@ -37,48 +37,58 @@ ProfileChipButton {
 
         Instantiator {
             model: back.profiles ? back.profiles.history : []
-            delegate: MenuItem {
-                id: entry
-                required property var modelData
+            delegate: HistoryItem {
                 objectName: "profileHistoryItem"
-                implicitWidth: 230
-                implicitHeight: 32
-                leftPadding: 8
-                rightPadding: 12
-                hoverEnabled: true
-                text: modelData.name
-                onTriggered: back.historyChosen(entry.modelData.index)
-
-                contentItem: Row {
-                    spacing: 8
-                    Avatar {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 20
-                        height: 20
-                        cornerRadius: 3
-                        avatarKey: entry.modelData.avatarKey || "userpfp_none"
-                    }
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: entry.availableWidth - 28
-                        elide: Text.ElideRight
-                        text: entry.text
-                        textFormat: Text.PlainText
-                        color: Theme.textPrimary
-                        font.family: Theme.uiFont
-                        font.pixelSize: 13
-                        renderType: Text.NativeRendering
-                    }
-                }
-                background: Rectangle {
-                    radius: 3
-                    color: entry.highlighted ? Theme.navSelected : "transparent"
-                    border.width: entry.highlighted ? 1 : 0
-                    border.color: Theme.focusBorder
-                }
+                onTriggered: back.historyChosen(modelData.index)
             }
             onObjectAdded: (index, object) => history.insertItem(index, object)
             onObjectRemoved: (index, object) => history.removeItem(object)
+        }
+    }
+
+    // One row of a history menu, this chip's and the editor bar's alike
+    // (ProfileBackChip.HistoryItem): the person's 20 px picture and their
+    // name, which is theirs to choose and so always plain text. `modelData`
+    // is an entry of profiles.history ({index, name, avatarKey}).
+    component HistoryItem: MenuItem {
+        id: entry
+        required property var modelData
+        implicitWidth: 230
+        implicitHeight: 32
+        leftPadding: 8
+        rightPadding: 12
+        hoverEnabled: true
+        text: modelData.name
+        Accessible.name: modelData.name
+
+        contentItem: Row {
+            spacing: 8
+            Avatar {
+                objectName: "profileHistoryAvatar"
+                anchors.verticalCenter: parent.verticalCenter
+                width: 20
+                height: 20
+                cornerRadius: 3
+                avatarKey: entry.modelData.avatarKey || "userpfp_none"
+            }
+            Text {
+                objectName: "profileHistoryName"
+                anchors.verticalCenter: parent.verticalCenter
+                width: entry.availableWidth - 28
+                elide: Text.ElideRight
+                text: entry.text
+                textFormat: Text.PlainText
+                color: Theme.textPrimary
+                font.family: Theme.uiFont
+                font.pixelSize: 13
+                renderType: Text.NativeRendering
+            }
+        }
+        background: Rectangle {
+            radius: 3
+            color: entry.highlighted ? Theme.navSelected : "transparent"
+            border.width: entry.highlighted ? 1 : 0
+            border.color: Theme.focusBorder
         }
     }
 }

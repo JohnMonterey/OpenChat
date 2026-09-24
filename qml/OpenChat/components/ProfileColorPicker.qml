@@ -12,9 +12,10 @@ import OpenChat.Native
 // what the page will really show.
 //
 // Every change previews live through the well's `picked`, and the whole
-// session is one undo step (a gesture on the controller). Enter, the ×, or a
-// click outside keep the colour (it joins Recent); Esc puts back the colour
-// the well had ("was") and closes.
+// session is one undo step (a gesture on the controller). Enter (on a swatch
+// too: it takes that colour first; Space only takes it), the ×, or a click
+// outside keep the colour (it joins Recent); Esc puts back the colour the well
+// had ("was") and closes.
 Popup {
     id: picker
     objectName: "profileColorPicker"
@@ -34,6 +35,8 @@ Popup {
     property real saturation: 0
     property real brightness: 1
     property bool reverting: false
+    // This session's undo gesture, closed (only it) when the picker closes.
+    property string gestureKey: ""
 
     readonly property int inkRole: well ? well.inkRole : -1
     readonly property var report: inkRole >= 0 && profiles ? profiles.contrastFor(inkRole, value) : ({})
@@ -62,8 +65,9 @@ Popup {
         saturation = target.color.hsvSaturation;
         brightness = target.color.hsvValue;
         reverting = false;
+        gestureKey = "colour:" + target.pickerTitle;
         if (profiles)
-            profiles.beginGesture("colour:" + target.pickerTitle);
+            profiles.beginGesture(gestureKey);
         open();
     }
     // A colour from a swatch or the hex field: its own hue, unless it has none.
@@ -113,7 +117,7 @@ Popup {
         if (!reverting && profiles)
             profiles.rememberColor(value);
         if (profiles)
-            profiles.endGesture();
+            profiles.endGesture(gestureKey);
         if (well)
             well.forceActiveFocus(Qt.PopupFocusReason);
         well = null;
@@ -225,20 +229,36 @@ Popup {
                     renderType: Text.NativeRendering
                 }
                 Item {
+                    id: closeButton
                     objectName: "profileColorPickerClose"
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     width: 18
                     height: 18
+                    // Closes keeping the colour, like Enter.
+                    activeFocusOnTab: true
                     Accessible.role: Accessible.Button
                     Accessible.name: "Close"
+                    Accessible.onPressAction: picker.commit()
+                    Keys.onReturnPressed: picker.commit()
+                    Keys.onEnterPressed: picker.commit()
+                    Keys.onSpacePressed: picker.commit()
                     ProfileEditorRail.Glyph {
                         anchors.centerIn: parent
                         width: 14
                         height: 14
                         kind: "cross"
-                        ink: closeMouse.containsMouse ? Theme.focusBorder : Theme.iconInk
+                        ink: closeMouse.containsMouse || closeButton.activeFocus ? Theme.focusBorder : Theme.iconInk
                         stroke: 1.8
+                    }
+                    Rectangle {
+                        visible: closeButton.activeFocus
+                        anchors.fill: parent
+                        anchors.margins: -2
+                        radius: 3
+                        color: "transparent"
+                        border.width: 2
+                        border.color: Theme.focusBorder
                     }
                     MouseArea {
                         id: closeMouse
@@ -269,6 +289,7 @@ Popup {
                     ringRadius: 3
                     currentIndex: -1
                     onActivated: index => picker.takeColour(model[index])
+                    onSubmitted: picker.commit()
                     delegate: Swatch {
                         required property var modelData
                         required property int index
@@ -304,6 +325,7 @@ Popup {
                     rowSpacing: 5
                     ringRadius: 3
                     onActivated: index => picker.takeColour(picker.classics[index])
+                    onSubmitted: picker.commit()
                     delegate: Swatch {
                         required property var modelData
                         required property int index
@@ -548,6 +570,7 @@ Popup {
                     columns: 8
                     ringRadius: 3
                     onActivated: index => picker.takeColour(model[index])
+                    onSubmitted: picker.commit()
                     delegate: Swatch {
                         required property var modelData
                         required property int index

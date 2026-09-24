@@ -48,12 +48,20 @@ Item {
         return null;
     }
     // The page and the editor may be created in either order when editing
-    // begins, so the editor is looked for until it is there.
+    // begins, so the editor is looked for until it is there (unless the host
+    // binds it, as ProfileTopBar does). Only a find is assigned: a miss must
+    // not replace the host's binding.
     function resolve() {
-        if (!page)
-            page = findAncestor("profilePage");
-        if (!editor)
-            editor = findDescendant(page, "profileEditor");
+        if (!page) {
+            const foundPage = findAncestor("profilePage");
+            if (foundPage)
+                page = foundPage;
+        }
+        if (!editor) {
+            const foundEditor = findDescendant(page, "profileEditor");
+            if (foundEditor)
+                editor = foundEditor;
+        }
     }
     // Leaves through the editor, which asks first about unsaved changes.
     // (Without one the draft is kept anyway: it is autosaved.)
@@ -138,15 +146,15 @@ Item {
             historyMenu.popup(backChip, 0, backChip.height + 4);
     }
 
+    // The same rows as the page's Back chip menu (a picture and the name).
     AeroMenu {
         id: historyMenu
         objectName: "profileEditorHistoryMenu"
+        width: 240
         Instantiator {
             model: bar.profiles ? bar.profiles.history : []
-            delegate: AeroMenuItem {
-                required property var modelData
+            delegate: ProfileBackChip.HistoryItem {
                 objectName: "profileEditorHistory_" + modelData.index
-                text: modelData.name
                 onTriggered: {
                     const index = modelData.index;
                     const profiles = bar.profiles;

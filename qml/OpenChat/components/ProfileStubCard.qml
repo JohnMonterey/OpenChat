@@ -57,7 +57,11 @@ Item {
         }
         if (requestedHandle.length > 0 && requestedHandle === handle)
             return "requested";
-        if (handle.length > 0 && !profiles.personHandlePending && contactController.enabled && !profiles.personBlocked)
+        // The relay is still being asked for their handle ("looking up…"
+        // under the name): nothing to offer yet, and nothing to ask for.
+        if (profiles.personHandlePending)
+            return "pending";
+        if (handle.length > 0 && contactController.enabled && !profiles.personBlocked)
             return "add";
         return "ask";
     }
@@ -333,11 +337,13 @@ Item {
                     Text {
                         objectName: "profileStubStatus"
                         visible: stub.actionMode === "sent" || stub.actionMode === "requested"
-                                 || stub.actionMode === "ask"
+                                 || stub.actionMode === "ask" || stub.actionMode === "pending"
                         anchors.verticalCenter: parent.verticalCenter
                         width: parent.width
                         wrapMode: Text.Wrap
                         text: {
+                            if (stub.actionMode === "pending")
+                                return "Looking up their handle…";
                             if (stub.actionMode === "ask")
                                 return "Ask " + stub.first + " for their handle to add them.";
                             if (stub.actionMode === "requested" && stub.contactController) {

@@ -7,6 +7,7 @@
 // show (final/*.png), for review side by side.
 
 #include "ProfileQmlHarness.h"
+#include "relay/RelayTestSupport.h"
 
 #include "controllers/CallController.h"
 #include "controllers/ChatController.h"
@@ -17,6 +18,7 @@
 #include "domain/ProfilePage.h"
 #include "models/ContactListModel.h"
 #include "models/RequestListModel.h"
+#include "network/RelayClient.h"
 #include "profile/ProfileAmbientItem.h"
 #include "profile/ProfileMediaStore.h"
 #include "profile/ProfileNameTextItem.h"
@@ -25,10 +27,13 @@
 
 #include <QAudioFormat>
 #include <QBuffer>
+#include <QCborMap>
+#include <QCborValue>
 #include <QClipboard>
 #include <QColor>
 #include <QDir>
 #include <QFile>
+#include <QFont>
 #include <QImage>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -772,6 +777,78 @@ private slots:
         }
     }
 
+    // Copy Invite Link over a real RelayClient and the fake HTTPS relay: each
+    // press copies the invite that press asked for, never one made before it
+    // (an invite works once), and says so when the relay has none to give.
+    void copyInviteLinkCopiesTheInviteItAskedFor()
+    {
+        RelayTest::CertAuthority ca;
+        RelayTest::FakeHttpsServer server(RelayTest::serverConfig(ca.localhostLeaf()));
+        QVERIFY(server.isListening());
+        const QString path = QStringLiteral("/v1/invites");
+        const auto minted = [](char fill) {
+            QCborMap response;
+            response.insert(QLatin1StringView("token"), QByteArray(32, fill));
+            response.insert(QLatin1StringView("expires_at_ms"), qint64(1'700'000'123'000));
+            return RelayTest::FakeHttpsServer::Response{200, response.toCborValue().toCbor(), -1};
+        };
+        const auto linkOf = [](char fill) {
+            return QString::fromLatin1(QByteArray(32, fill).toBase64(QByteArray::Base64UrlEncoding
+                                                                     | QByteArray::OmitTrailingEquals));
+        };
+        RelayEndpoints endpoints;
+        endpoints.invites = server.url(path);
+        endpoints.authRefresh = server.url(QStringLiteral("/auth/refresh"));
+        endpoints.live = QUrl(QStringLiteral("wss://localhost:1/live"));
+        RelayCredentials credentials;
+        credentials.accessToken = [] { return QByteArrayLiteral("access-token"); };
+        credentials.refreshToken = [] { return QByteArrayLiteral("refresh-token"); };
+        RelayClient relay(DeviceId::generate(), AccountId::generate(), endpoints, credentials);
+        relay.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+
+        Stage stage;
+        stage.contacts = std::make_unique<ContactController>();
+        // An invite this session made earlier (the Add Contact dialog's).
+        stage.contacts->setMockInvite(QStringLiteral("already-shared"));
+        stage.contacts->setLiveServices(nullptr, &relay, nullptr, nullptr);
+        QVERIFY(stage.load());
+        QVERIFY(openPerson(stage, Reference::selfId()));
+        QTRY_COMPARE(stage.actions(), (QStringList{"edit", "picture", "invite"}));
+        QClipboard *clipboard = QGuiApplication::clipboard();
+        clipboard->setText(QStringLiteral("untouched"));
+
+        // The first press waits for the relay's invite, then copies it.
+        server.enqueue(path, minted('\x11'));
+        stage.click(stage.action(QStringLiteral("invite")));
+        QCOMPARE(clipboard->text(), QStringLiteral("untouched"));
+        QTRY_COMPARE(clipboard->text(), linkOf('\x11'));
+        QTRY_COMPARE(stage.text(QStringLiteral("profilePageNoticeText")), QStringLiteral("Copied invite link"));
+
+        // The second copies a new one, not the first again.
+        stage.profiles().clearNotice();
+        server.enqueue(path, minted('\x22'));
+        stage.click(stage.action(QStringLiteral("invite")));
+        QTRY_COMPARE(clipboard->text(), linkOf('\x22'));
+        QTRY_COMPARE(stage.text(QStringLiteral("profilePageNoticeText")), QStringLiteral("Copied invite link"));
+        QCOMPARE(server.requestCount(path), 2);
+
+        // No invite: the page says so and the clipboard keeps what it had.
+        stage.profiles().clearNotice();
+        server.enqueue(path, {500, {}, -1});
+        stage.click(stage.action(QStringLiteral("invite")));
+        QTRY_COMPARE(stage.text(QStringLiteral("profilePageNoticeText")),
+                     QStringLiteral("Couldn't create an invite. Try again."));
+        QCOMPARE(clipboard->text(), linkOf('\x22'));
+
+        // An invite made elsewhere afterwards is never copied unasked.
+        server.enqueue(path, minted('\x33'));
+        stage.contacts->createMyInvite();
+        QTRY_COMPARE(stage.contacts->myInvite(), linkOf('\x33'));
+        QTest::qWait(50);
+        QCOMPARE(clipboard->text(), linkOf('\x22'));
+        QCOMPARE(server.requestCount(path), 4);
+    }
+
     void callActionsDisableOrMergeDuringCalls()
     {
         Stage stage;
@@ -867,8 +944,16 @@ private slots:
     void songPlayerSurvivesRefreshesAndArrivals()
     {
         Stage stage;
+        // Michael's page, first without any details (no Details box).
+        Profile::Page seeded = Reference::seededPage(QStringLiteral("michael")).value();
+        seeded.content.details = {};
+        stage.profiles().setMockPage(QStringLiteral("michael"), seeded);
         QVERIFY(stage.load());
         QVERIFY(openPerson(stage, QStringLiteral("michael")));
+        QCOMPARE(stage.item(QStringLiteral("profileDetailsBox")), nullptr);
+        QQuickItem *imageLayer = stage.item(QStringLiteral("profileImageLayer"));
+        QVERIFY(imageLayer);
+        QVERIFY(!imageLayer->property("ready").toBool());
         auto *player = stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer"));
         QVERIFY(player);
         QVERIFY(!player->songKey().isEmpty());
@@ -878,17 +963,30 @@ private slots:
         QTRY_VERIFY(player->playing());
 
         // The 5 s refresh, an unchanged page arriving again, and a newer page
-        // that adds a box: the same player, still playing, never reloaded.
+        // whose arrival adds a box (its details) and a background picture:
+        // the same player, still playing, never reloaded.
         stage.profiles().refresh();
-        const Profile::Page seeded = Reference::seededPage(QStringLiteral("michael")).value();
         stage.profiles().setMockPage(QStringLiteral("michael"), seeded);
         Profile::Page newer = seeded;
         newer.revision += 1;
         newer.content.details.hometown = QStringLiteral("Queens, NY");
         newer.content.details.occupation = QStringLiteral("Photographer");
+        newer.background = stage.profiles().addMockMedia(Profile::MediaKind::BackgroundImageMedia,
+                                                         jpegOf(QColor(200, 30, 30), QColor(30, 30, 200)));
+        QVERIFY(newer.background.isSet());
+        newer.theme.backgroundKind = Profile::BackgroundKind::ImageBackground;
         stage.profiles().setMockPage(QStringLiteral("michael"), newer);
-        QTRY_COMPARE(stage.text(QStringLiteral("profileTableValue")).isEmpty(), false);
+        // The newer page is on screen: its Details box and its picture.
         QTRY_VERIFY(stage.item(QStringLiteral("profileDetailsBox")));
+        QTRY_VERIFY([&] {
+            for (QQuickItem *value : itemsNamed(stage.item(QStringLiteral("profileDetailsBox")),
+                                                QStringLiteral("profileTableValue"))) {
+                if (value->property("text").toString() == QStringLiteral("Queens, NY"))
+                    return true;
+            }
+            return false;
+        }());
+        QTRY_VERIFY(stage.item(QStringLiteral("profileImageLayer"))->property("ready").toBool());
         QCOMPARE(stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer")), player);
         QCOMPARE(stage.page()->findChildren<SongPlayer *>().size(), 1);
         QCOMPARE(sources.count(), 0);
@@ -1143,44 +1241,186 @@ private slots:
     void friendGridKeyboardNavigation()
     {
         Stage stage;
+        stage.contacts = std::make_unique<ContactController>();
         QVERIFY(stage.load());
         QVERIFY(openPerson(stage, QStringLiteral("michael")));
 
         // Tab order (SPEC §16.1): Back, Plain style, Contacting, Copy, the
-        // song orb, then the Friend Space grid.
+        // song orb, then the Friend Space grid. A grid's Tab stop is its
+        // first cell or tile, which takes the focus itself.
         QStringList order;
         for (int i = 0; i < 6; ++i) {
             stage.key(Qt::Key_Tab);
             QQuickItem *focused = stage.window->activeFocusItem();
             order.append(focused ? focused->objectName() : QString());
         }
-        QCOMPARE(order, (QStringList{"profileBackButton", "profilePlainStyleSwitch", "profileContactingGrid",
-                                     "profileCopyHandleButton", "profileSongOrb", "profileFriendGrid"}));
+        QCOMPARE(order, (QStringList{"profileBackButton", "profilePlainStyleSwitch", "profileAction_message",
+                                     "profileCopyHandleButton", "profileSongOrb", "profileFriendTile"}));
 
-        QQuickItem *grid = stage.window->activeFocusItem();
+        QQuickItem *grid = stage.item(QStringLiteral("profileFriendGrid"));
+        QVERIFY(grid);
+        const auto tiles = [&] { return itemsNamed(grid, QStringLiteral("profileFriendTile")); };
         const auto current = [&] { return grid->property("current").toInt(); };
+        // The tile under the keyboard has the focus itself (a screen reader
+        // announces "<name>, open profile, button" at each arrow) and wears
+        // the ring; the grid stays one Tab stop.
         const auto lit = [&](int index) {
-            QList<QQuickItem *> tiles = itemsNamed(grid, QStringLiteral("profileFriendTile"));
-            return tiles.value(index) && tiles.value(index)->property("keyboardFocus").toBool();
+            QQuickItem *tile = tiles().value(index);
+            return tile && tile->hasActiveFocus() && stage.window->activeFocusItem() == tile
+                   && tile->property("keyboardFocus").toBool();
+        };
+        const auto tabStops = [&] {
+            int stops = 0;
+            for (QQuickItem *tile : tiles())
+                stops += tile->activeFocusOnTab() ? 1 : 0;
+            return stops;
         };
         QCOMPARE(current(), 0);
         QVERIFY(lit(0));
+        QVERIFY(grid->hasActiveFocus());
         stage.key(Qt::Key_Right);
         stage.key(Qt::Key_Right);
         QCOMPARE(current(), 2);
         QVERIFY(lit(2) && !lit(0));
+        QCOMPARE(tabStops(), 1);
         stage.key(Qt::Key_Down);
         QCOMPARE(current(), 6);
+        QVERIFY(lit(6));
         stage.key(Qt::Key_Left);
         QCOMPARE(current(), 5);
         stage.key(Qt::Key_Up);
         QCOMPARE(current(), 1);
-        const QString name = itemsNamed(grid, QStringLiteral("profileFriendTile"))
-                                 .value(1)->property("friend").toMap().value(QStringLiteral("name")).toString();
+        QVERIFY(lit(1));
+        QCOMPARE(tabStops(), 1);
+
+        // The Contacting grid likewise: the arrows move the focus itself
+        // from action to action.
+        QQuickItem *contacting = stage.item(QStringLiteral("profileContactingGrid"));
+        contacting->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_COMPARE(stage.window->activeFocusItem(), stage.action(QStringLiteral("message")));
+        stage.key(Qt::Key_Right);
+        QCOMPARE(stage.window->activeFocusItem(), stage.action(QStringLiteral("safety")));
+        QVERIFY(stage.action(QStringLiteral("safety"))->property("keyboardFocus").toBool());
+        QVERIFY(!stage.action(QStringLiteral("message"))->property("keyboardFocus").toBool());
+        grid->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(lit(1));
+        const QString name = tiles().value(1)->property("friend").toMap().value(QStringLiteral("name")).toString();
         QVERIFY(!name.isEmpty());
         stage.key(Qt::Key_Return);
         QTRY_COMPARE(stage.profiles().depth(), 2);
         QCOMPARE(stage.profiles().personName(), name);
+    }
+
+    // SPEC §16.1: reveal() keeps the focused item in view. At the minimum
+    // window the song orb and the Friend Space start below the fold; Tab and
+    // the arrows scroll just enough to show what has the focus.
+    void focusedItemsScrollIntoView()
+    {
+        Stage stage;
+        QVERIFY(stage.load(QSize(720, 560)));
+        QVERIFY(openPerson(stage, QStringLiteral("michael")));
+        QQuickItem *flick = stage.item(QStringLiteral("profilePageFlickable"));
+        QVERIFY(flick);
+        const auto inView = [flick](QQuickItem *item) {
+            const QRectF rect = item->mapRectToItem(flick, QRectF(0, 0, item->width(), item->height()));
+            return rect.top() >= 0 && rect.bottom() <= flick->height();
+        };
+        const auto tiles = [&stage] {
+            return itemsNamed(stage.item(QStringLiteral("profileFriendGrid")), QStringLiteral("profileFriendTile"));
+        };
+        QVERIFY(tiles().size() >= 5);
+        QCOMPARE(flick->property("contentY").toReal(), 0.0);
+        QVERIFY(!inView(tiles().last()));
+
+        QQuickItem *orb = stage.item(QStringLiteral("profileSongOrb"));
+        for (int i = 0; i < 10 && stage.window->activeFocusItem() != orb; ++i)
+            stage.key(Qt::Key_Tab);
+        QCOMPARE(stage.window->activeFocusItem(), orb);
+        QTRY_VERIFY(inView(orb));
+
+        stage.key(Qt::Key_Tab);
+        QCOMPARE(stage.window->activeFocusItem(), tiles().first());
+        QTRY_VERIFY(inView(tiles().first()));
+        stage.key(Qt::Key_End);
+        QTRY_COMPARE(stage.window->activeFocusItem(), tiles().last());
+        QTRY_VERIFY(inView(tiles().last()));
+        // Shift+Tab back up the page from its foot: the Contacting box comes
+        // back into view.
+        QQuickItem *message = stage.action(QStringLiteral("message"));
+        flick->setProperty("contentY", flick->property("contentHeight").toReal() - flick->height());
+        QVERIFY(!inView(message));
+        for (int i = 0; i < 10 && stage.window->activeFocusItem() != message; ++i)
+            stage.key(Qt::Key_Tab, Qt::ShiftModifier);
+        QCOMPARE(stage.window->activeFocusItem(), message);
+        QTRY_VERIFY(inView(message));
+    }
+
+    // SPEC §5.5: a table's labels share one size and one line. At the 720 px
+    // minimum the label column is at its 80 px floor, so they all step down
+    // together to fit the widest, and no row is taller than what it paints.
+    void tableLabelsShareOneSize()
+    {
+        Stage stage;
+        QVERIFY(stage.load(QSize(720, 560)));
+        QVERIFY(openPerson(stage, QStringLiteral("michael")));
+        QQuickItem *box = stage.item(QStringLiteral("profileDetailsBox"));
+        QVERIFY(box);
+        const QList<QQuickItem *> labels = itemsNamed(box, QStringLiteral("profileTableLabel"));
+        QVERIFY(labels.size() >= 4);
+        QQuickItem *table = labels.first()->parentItem()->parentItem();
+        QCOMPARE(table->property("labelWidth").toInt(), 80);
+        const int base = table->property("basePixelSize").toInt();
+        const int size = labels.first()->property("font").value<QFont>().pixelSize();
+        QVERIFY2(size < base, qPrintable(QStringLiteral("%1 of %2").arg(size).arg(base)));
+        QVERIFY(size >= 11);
+        QList<qreal> singleLineRows;
+        for (QQuickItem *label : labels) {
+            QCOMPARE(label->property("font").value<QFont>().pixelSize(), size);
+            QCOMPARE(label->property("lineCount").toInt(), 1);
+            QVERIFY2(!label->property("truncated").toBool(), qPrintable(label->property("text").toString()));
+            QQuickItem *row = label->parentItem();
+            const QList<QQuickItem *> values = itemsNamed(row, QStringLiteral("profileTableValue"));
+            QCOMPARE(values.size(), 1);
+            if (values.first()->property("lineCount").toInt() == 1)
+                singleLineRows.append(row->height());
+        }
+        QVERIFY(singleLineRows.size() >= 3);
+        for (const qreal height : singleLineRows)
+            QCOMPARE(height, singleLineRows.first());
+
+        // At the default window the labels keep the page's own size.
+        stage.window->resize(QSize(1280, 900));
+        QTRY_VERIFY(table->property("labelWidth").toInt() > 90);
+        QTRY_COMPARE(labels.first()->property("font").value<QFont>().pixelSize(), base);
+    }
+
+    // SPEC §13: while the relay is still asked for a stranger's handle
+    // ("looking up…"), the stub says so quietly and never tells the viewer to
+    // ask for a handle it may have in a moment; the request button follows
+    // once the relay confirms the handle.
+    void stubWaitsForTheHandleLookup()
+    {
+        // A relay that refuses on the spot: the lookup stays pending until
+        // the test answers for it.
+        RelayClient relay(DeviceId::generate(), AccountId::generate(), RelayEndpoints{}, RelayCredentials{});
+        Stage stage;
+        stage.contacts = std::make_unique<ContactController>();
+        stage.contacts->enableForPreview();
+        stage.profiles().setRelay(&relay);
+        QVERIFY(stage.load());
+        QVERIFY(openPerson(stage, QStringLiteral("michael")));
+        QVERIFY(stage.profiles().openTopFriend(4)); // Dana Whitfield, not a contact
+        QTRY_VERIFY(stage.item(QStringLiteral("profileStubCard")));
+        QVERIFY(stage.profiles().personHandlePending());
+        QCOMPARE(stage.text(QStringLiteral("profileStubHandle")), QStringLiteral("looking up…"));
+        QCOMPARE(stage.text(QStringLiteral("profileStubStatus")), QStringLiteral("Looking up their handle…"));
+        QCOMPARE(stage.item(QStringLiteral("profileSendRequestButton")), nullptr);
+
+        relay.accountResolved(Reference::mockAccountFor(QStringLiteral("dana-whitfield")), QStringLiteral("Dana.W"));
+        QTRY_VERIFY(stage.item(QStringLiteral("profileSendRequestButton")));
+        QCOMPARE(stage.text(QStringLiteral("profileStubHandle")), QStringLiteral("@dana.w"));
+        QCOMPARE(stage.item(QStringLiteral("profileStubStatus")), nullptr);
+        stage.profiles().setRelay(nullptr);
     }
 
     void escapeAndBackPopTheStack()
@@ -1224,6 +1464,21 @@ private slots:
         // Newest first: the second page, then Michael.
         QCOMPARE(rows.at(0)->property("text").toString(), second);
         QCOMPARE(rows.at(1)->property("text").toString(), QStringLiteral("Michael"));
+        // Each row: the 20 px picture and the name, as plain text.
+        for (QQuickItem *row : rows) {
+            const QList<QQuickItem *> avatars = itemsNamed(row, QStringLiteral("profileHistoryAvatar"));
+            QCOMPARE(avatars.size(), 1);
+            QCOMPARE(avatars.first()->width(), 20.0);
+            QVERIFY(!avatars.first()->property("avatarKey").toString().isEmpty());
+            int texts = 0;
+            for (QQuickItem *item : allItems(row)) {
+                if (!isA(item, "QQuickText"))
+                    continue;
+                ++texts;
+                QCOMPARE(item->property("textFormat").toInt(), 0 /* PlainText */);
+            }
+            QVERIFY(texts >= 1);
+        }
 
         // Escape closes only the menu.
         stage.key(Qt::Key_Escape);
@@ -1768,10 +2023,10 @@ private slots:
             QTRY_VERIFY(shown(preview, QStringLiteral("profileContactingBox")));
             stage.hover(shown(preview, QStringLiteral("profileContactingBox")));
         } else if (shot == QStringLiteral("final-affordance-focus")) {
-            // Keyboard focus on a Top Friend: the rings without the badge.
+            // Keyboard focus on a Top Friend: the rings without the badge. The
+            // page scrolls the focused tile into view by itself.
             QVERIFY(open(Preset::AeroSkyPreset));
             QQuickItem *grid = stage.item(QStringLiteral("profileFriendGrid"));
-            stage.item(QStringLiteral("profilePageFlickable"))->setProperty("contentY", 260);
             grid->forceActiveFocus();
             stage.key(Qt::Key_Right);
         }

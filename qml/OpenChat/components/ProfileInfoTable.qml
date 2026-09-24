@@ -7,6 +7,11 @@ import OpenChat.Native
 // cells 3 px apart, radius 2, 7/5 px padding. Lines: rows padded 6 px with a
 // faint rule between them. The inks and cell fills come from the renderer,
 // already held at 4.5:1 against their cells.
+//
+// The labels share one size and one line. At the narrowest columns (the
+// label column's 80 px floor) the whole table's labels step down together,
+// by as much as the widest of them needs and never below 11 px; a label
+// still too wide after that elides.
 Column {
     id: table
     property var render: null
@@ -14,8 +19,32 @@ Column {
     property var rows: []
     readonly property bool cells: render !== null && render.tableStyle === Profile.CellTable
     readonly property int labelWidth: Math.max(80, Math.min(104, Math.round(width * 0.30)))
+    // The label's room: 7 px of cell padding each side, or (Lines) the 6 px
+    // before the value.
+    readonly property int labelRoom: cells ? labelWidth - 14 : labelWidth - 6
+    readonly property int basePixelSize: render ? render.labelPixelSize : 13
+    // The widest label at the base size (reading the metrics' font makes
+    // this follow the face, size and weight).
+    readonly property real widestLabel: {
+        let widest = 0;
+        const font = labelMetrics.font;
+        for (let i = 0; i < rows.length; ++i)
+            widest = Math.max(widest, labelMetrics.advanceWidth(rows[i].label));
+        return font ? Math.ceil(widest) + 1 : 0;
+    }
+    readonly property int labelPixelSize: widestLabel <= labelRoom
+                                          ? basePixelSize
+                                          : Math.max(Math.min(11, basePixelSize),
+                                                     Math.floor(basePixelSize * labelRoom / widestLabel))
 
     spacing: cells ? 3 : 0
+
+    FontMetrics {
+        id: labelMetrics
+        font.family: table.render && table.render.labelFamily.length > 0 ? table.render.labelFamily : Theme.uiFont
+        font.pixelSize: table.basePixelSize
+        font.bold: table.render ? table.render.labelBold : true
+    }
 
     Repeater {
         model: table.rows
@@ -52,18 +81,14 @@ Column {
                 objectName: "profileTableLabel"
                 x: table.cells ? 7 : 0
                 y: table.cells ? 5 : 6
-                width: table.labelWidth - 12
-                // At the narrowest column a long label ("Occupation")
-                // steps down a pixel or two rather than break mid-word.
-                wrapMode: Text.WordWrap
-                fontSizeMode: Text.HorizontalFit
-                minimumPixelSize: Math.max(9, font.pixelSize - 2)
+                width: table.labelRoom
+                elide: Text.ElideRight
                 text: row.modelData.label
                 textFormat: Text.PlainText
                 color: table.render ? (table.cells ? table.render.cellLabelInk : table.render.labelColor) : "black"
-                font.family: table.render && table.render.labelFamily.length > 0 ? table.render.labelFamily : Theme.uiFont
-                font.pixelSize: table.render ? table.render.labelPixelSize : 13
-                font.bold: table.render ? table.render.labelBold : true
+                font.family: labelMetrics.font.family
+                font.pixelSize: table.labelPixelSize
+                font.bold: labelMetrics.font.bold
                 renderType: Text.NativeRendering
             }
             Text {

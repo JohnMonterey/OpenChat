@@ -5,6 +5,7 @@
 #include "crypto/MlsClient.h"
 #include "domain/Contact.h"
 #include "models/RequestListModel.h"
+#include "network/RelayClient.h"
 #include "network/SyncEngine.h"
 #include "protocol/CiphertextEnvelope.h"
 #include "security/KeyVault.h"
@@ -139,6 +140,7 @@ private slots:
     void mockAddResolvesToSuccess();
     void addByInviteRejectsUndecodableCode();
     void inviteRoundTripsBase64Url();
+    void inviteFailureEndsTheWait();
     void mockAcceptDeclineBlockRemoveRow();
     void openResetsStatusAndTogglesDialog();
     void mockSafetyNumberReflectsPresetAndToggles();
@@ -359,6 +361,40 @@ void ContactControllerTest::inviteRoundTripsBase64Url()
     controller.setMockInvite(QStringLiteral("OPENCHAT-INV-9F3K"));
     QVERIFY(controller.inviteReady());
     QCOMPARE(controller.myInvite(), QStringLiteral("OPENCHAT-INV-9F3K"));
+}
+
+void ContactControllerTest::inviteFailureEndsTheWait()
+{
+    // createMyInvite ends in myInviteChanged or in inviteFailed, never in a
+    // silence: the earlier invite stays and the status says why.
+    ContactController controller;
+    controller.setMockInvite(QStringLiteral("earlier"));
+
+    // An endpoint the client refuses (not HTTPS) fails on the spot.
+    RelayClient refusing(DeviceId::generate(), AccountId::generate(), RelayEndpoints{}, RelayCredentials{});
+    controller.setLiveServices(nullptr, &refusing, nullptr, nullptr);
+    QSignalSpy failed(&controller, &ContactController::inviteFailed);
+    QSignalSpy invites(&controller, &ContactController::myInviteChanged);
+    controller.createMyInvite();
+    QCOMPARE(failed.count(), 1);
+    QCOMPARE(invites.count(), 0);
+    QCOMPARE(controller.status(), ContactController::Status::Error);
+    QCOMPARE(controller.myInvite(), QStringLiteral("earlier"));
+
+    // A relay that cannot be reached fails once its request does.
+    RelayEndpoints endpoints;
+    endpoints.invites = QUrl(QStringLiteral("https://127.0.0.1:1/v1/invites"));
+    RelayCredentials credentials;
+    credentials.accessToken = [] { return QByteArrayLiteral("access"); };
+    credentials.refreshToken = [] { return QByteArrayLiteral("refresh"); };
+    RelayClient unreachable(DeviceId::generate(), AccountId::generate(), endpoints, credentials);
+    controller.setLiveServices(nullptr, &unreachable, nullptr, nullptr);
+    controller.createMyInvite();
+    QCOMPARE(controller.status(), ContactController::Status::Working);
+    QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 2, 20'000);
+    QCOMPARE(invites.count(), 0);
+    QCOMPARE(controller.status(), ContactController::Status::Error);
+    QCOMPARE(controller.myInvite(), QStringLiteral("earlier"));
 }
 
 void ContactControllerTest::mockAcceptDeclineBlockRemoveRow()

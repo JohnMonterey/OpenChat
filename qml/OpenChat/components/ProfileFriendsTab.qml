@@ -56,7 +56,7 @@ Item {
         if (dragFrom >= 0) {
             if (dragTo >= 0 && dragTo !== dragFrom)
                 profiles.moveTopFriend(dragFrom, dragTo);
-            profiles.endGesture();
+            profiles.endGesture("friends:drag");
         }
         dragFrom = -1;
         dragTo = -1;

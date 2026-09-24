@@ -21,7 +21,7 @@ Item {
     property string reason: ""
     // A green ✓ orb after the label (a verified safety number).
     property bool badge: false
-    // The grid keeps keyboard focus; this is its current cell.
+    // The keyboard focus is on this cell (the grid moves it between cells).
     property bool keyboardFocus: false
     // The editor preview shows the box at full strength but inert.
     property bool inert: false

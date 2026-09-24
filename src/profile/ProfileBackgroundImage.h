@@ -66,6 +66,9 @@ public:
     void cancel();
     [[nodiscard]] bool busy() const noexcept { return m_job != nullptr; }
     [[nodiscard]] qreal progress() const noexcept { return m_progress; }
+    // Runs on the worker before each import that starts after this call, so
+    // a test can hold an import "under way" for as long as it needs.
+    void setWorkHookForTesting(std::function<void()> hook);
 
 signals:
     void progressChanged(qreal progress);
@@ -80,6 +83,7 @@ private:
 
     std::shared_ptr<Job> m_job;
     qreal m_progress = 0;
+    std::function<void()> m_workHook; // copied into each job as it starts
 };
 
 } // namespace OpenChat

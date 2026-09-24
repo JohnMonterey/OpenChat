@@ -117,7 +117,7 @@ Item {
             lineHeight: 1.05
             renderType: Text.NativeRendering
         }
-        Item { width: 1; height: 14 }
+        Item { width: 1; height: 12 }
 
         ProfileTileGrid {
             id: grid
@@ -126,7 +126,7 @@ Item {
             model: tab.profiles ? tab.profiles.presets : []
             columns: 2
             columnSpacing: 10
-            rowSpacing: 12
+            rowSpacing: 10
             ringRadius: 7
             currentIndex: {
                 const presets = tab.profiles ? tab.profiles.presets : [];

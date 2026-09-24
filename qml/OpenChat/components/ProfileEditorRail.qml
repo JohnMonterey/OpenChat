@@ -8,6 +8,11 @@ import OpenChat.Native
 // the page looks) and Content (what it says). The rail is one Tab stop: ↑/↓
 // move to the next tab (Ctrl+1…9 are the editor's). The chosen tab is
 // `profiles.lastTab`, which the controller remembers for this viewer.
+//
+// This file also carries the editor's small shared chrome, as inline
+// components the rest of the editor uses as ProfileEditorRail.Glyph,
+// ProfileEditorRail.Button, ProfileEditorRail.DefaultButton and
+// ProfileEditorRail.Tip (see below).
 Item {
     id: rail
     objectName: "profileEditorRail"
@@ -43,10 +48,10 @@ Item {
     Keys.onDownPressed: choose(Math.min(tabs.length - 1, currentIndex + 1))
 
     // The editor's small shared chrome lives here, beside the rail that uses
-    // it most: its line glyphs and its two button looks. The bar, the tabs,
-    // the dialogs and the preview frame use them as ProfileEditorRail.Glyph,
-    // ProfileEditorRail.Button and ProfileEditorRail.DefaultButton, so the
-    // editor keeps one drawing of each and needs nothing from the page kit.
+    // it most: its line glyphs, its two button looks and its tooltip. The bar,
+    // the tabs, the dialogs and the preview frame use them, so the editor
+    // keeps one drawing of each and needs nothing of the page kit but the
+    // page view it previews.
 
     // A chip-sized Aero button (the mockups' ChromeButton): flat
     // buttonBackground, 1 px buttonBorder, radius 4 and a gloss line, with an

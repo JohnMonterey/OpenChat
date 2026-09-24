@@ -396,7 +396,7 @@ Item {
             height: 28
             Text {
                 anchors.verticalCenter: parent.verticalCenter
-                width: parent.width - 56
+                width: parent.width - 50
                 elide: Text.ElideRight
                 text: "Different strip for the right column"
                 color: Theme.textPrimary

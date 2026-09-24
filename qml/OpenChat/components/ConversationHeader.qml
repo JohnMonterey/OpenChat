@@ -31,6 +31,41 @@ Item {
         avatarKey: header.controller.currentAvatarKey
     }
 
+    // The person's picture opens their profile (SPEC §12): the rings and the
+    // 22 px badge on hover, a Tab stop for the keyboard, "View profile" on a
+    // right click. A group's picture opens nothing.
+    readonly property bool profileOpenable: !header.isGroup && header.controller.hasCurrentContact
+    function openProfile() {
+        if (header.profileOpenable)
+            header.controller.profiles.openContact(header.controller.currentContactId);
+    }
+    MouseArea {
+        objectName: "conversationAvatarMenuArea"
+        anchors.fill: contactAvatar
+        visible: header.profileOpenable
+        acceptedButtons: Qt.RightButton
+        onClicked: avatarMenu.popup()
+    }
+    ProfileAvatarAffordance {
+        objectName: "conversationAvatarAffordance"
+        target: contactAvatar
+        visible: header.profileOpenable
+        keyboardFocusable: true
+        accessibleName: "View " + header.controller.currentContactName + "'s profile"
+        onClicked: header.openProfile()
+    }
+    AeroMenu {
+        id: avatarMenu
+        objectName: "conversationAvatarMenu"
+        width: 180
+
+        AeroMenuItem {
+            objectName: "conversationViewProfileItem"
+            text: "View profile"
+            onTriggered: header.openProfile()
+        }
+    }
+
     // The name. For a group it is the title, and editable the same way the
     // status line is: click to type, Enter or leaving commits, Escape reverts.
     Item {

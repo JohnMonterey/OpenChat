@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Dialogs
 import OpenChat
 import OpenChat.Native
 
@@ -113,59 +112,28 @@ Item {
             frameId: sidebar.avatarFrame
         }
 
-        // Hovering the picture darkens it and shows a "+"; clicking opens the
-        // platform file chooser for a new picture. Invisible until hovered, so
-        // the default rendering is untouched.
+        // Your own picture opens your profile, like every other person's
+        // picture (SPEC §12); changing it lives on that page and in the editor.
         Item {
             id: avatarChanger
             objectName: "localAvatarButton"
             anchors.fill: localAvatar
-            readonly property bool hovered: avatarMouse.containsMouse
 
-            Rectangle {
-                objectName: "localAvatarHoverShade"
-                anchors.fill: parent
-                radius: localAvatar.cornerRadius
-                color: "#66000000"
-                visible: avatarChanger.hovered
-            }
-            Rectangle {
-                anchors.centerIn: parent
-                width: 16
-                height: 3
-                radius: 1
-                color: "white"
-                visible: avatarChanger.hovered
-            }
-            Rectangle {
-                anchors.centerIn: parent
-                width: 3
-                height: 16
-                radius: 1
-                color: "white"
-                visible: avatarChanger.hovered
-            }
+            ProfileAvatarAffordance {
+                id: localAvatarAffordance
+                objectName: "localAvatarAffordance"
+                // The picture's geometry, in this container's coordinates.
+                width: parent.width
+                height: parent.height
+                cornerRadius: localAvatar.cornerRadius
+                accessibleName: "View your profile"
+                onClicked: sidebar.controller.profiles.openOwn()
 
-            MouseArea {
-                id: avatarMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: avatarFileDialog.open()
+                ProfileTip {
+                    visible: localAvatarAffordance.pointerOver
+                    text: "View your profile"
+                }
             }
-        }
-
-        // The native picker on every desktop (macOS/Windows/GTK or the portal
-        // on Linux, with Qt's own dialog as the fallback). The chosen file is
-        // scaled and compressed locally before anything is stored or sent.
-        FileDialog {
-            id: avatarFileDialog
-            objectName: "localAvatarFileDialog"
-            title: "Choose a profile picture"
-            fileMode: FileDialog.OpenFile
-            nameFilters: ["Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)",
-                          "All files (*)"]
-            onAccepted: sidebar.controller.setLocalAvatarFromFile(selectedFile)
         }
 
         Text {
@@ -545,6 +513,19 @@ Item {
                         height: width
                         avatarKey: "userpfp_none"
                     }
+                    // Not a contact yet: the picture opens their private stub
+                    // (SPEC §13), with the real way to add them.
+                    ProfileAvatarAffordance {
+                        objectName: "directoryAvatarAffordance"
+                        target: directoryAvatar
+                        visible: sidebar.contactController !== null
+                        accessibleName: sidebar.contactController
+                                        ? "Open @" + sidebar.contactController.lookupHandle : ""
+                        onClicked: {
+                            if (sidebar.contactController)
+                                sidebar.controller.profiles.openHandle(sidebar.contactController.lookupHandle);
+                        }
+                    }
 
                     Text {
                         objectName: "directoryResultName"
@@ -754,6 +735,7 @@ Item {
                             objectName: "requestRow_" + requestRowDelegate.requestId
                             width: requestsColumn.width
                             controller: sidebar.contactController
+                            profiles: sidebar.controller.profiles
                         }
                     }
                 }

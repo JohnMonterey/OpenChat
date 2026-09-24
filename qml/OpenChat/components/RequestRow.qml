@@ -18,8 +18,16 @@ Item {
     required property string subtitle
     required property string handle
     property var controller
+    // The profile controller: the picture and the name open the sender's
+    // private stub, with Accept and Decline (SPEC §13). Null: nothing opens.
+    property var profiles: null
 
     implicitHeight: 64
+
+    function openStub() {
+        if (row.profiles)
+            row.profiles.openRequest(row.requestId, row.accountId, row.displayName, row.handle);
+    }
 
     Avatar {
         id: avatarImage
@@ -28,6 +36,14 @@ Item {
         width: 40
         height: 40
         avatarKey: "userpfp_none"
+    }
+    ProfileAvatarAffordance {
+        objectName: "requestAvatarAffordance"
+        target: avatarImage
+        interactive: false
+        visible: row.profiles !== null
+        hovered: identityMouse.containsMouse
+        pressed: identityMouse.pressed
     }
 
     // The Aero treatment shared by both actions: a three-stop vertical gradient
@@ -152,7 +168,22 @@ Item {
         }
     }
 
+    // The picture and the name column: one target for the sender's stub.
+    MouseArea {
+        id: identityMouse
+        objectName: "requestIdentityArea"
+        x: avatarImage.x
+        y: 0
+        width: identity.x + identity.width - x
+        height: parent.height
+        enabled: row.profiles !== null
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: row.openStub()
+    }
+
     Column {
+        id: identity
         anchors.left: avatarImage.right
         anchors.leftMargin: 10
         anchors.right: actions.left

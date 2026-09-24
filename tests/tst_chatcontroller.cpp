@@ -26,12 +26,19 @@
 #include "domain/ProfileUpdate.h"
 #include "render/AvatarStore.h"
 
+#include "app/ProfilePageSync.h"
+#include "controllers/ProfileController.h"
+#include "controllers/ProfilePageObject.h"
+#include "domain/ProfilePage.h"
+#include "domain/ProfilePageCodec.h"
+
 #include <QBuffer>
 #include <QClipboard>
 #include <QCryptographicHash>
 #include <QFile>
 #include <QGuiApplication>
 #include <QImage>
+#include <QMetaProperty>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -141,6 +148,8 @@ struct LiveFixture final {
     OpenChat::DeviceId peerDevice = OpenChat::DeviceId::generate();
     OpenChat::ConversationId conversation = OpenChat::ConversationId::generate();
     quint64 sequence = 0;
+    // What decryptedProfilePayloads() already opened, by index into sent.
+    QHash<qsizetype, QByteArray> profilePlaintexts;
 
     bool setUp()
     {
@@ -262,6 +271,28 @@ std::optional<OpenChat::ProfileUpdateMessage> lastProfileSentTo(LiveFixture &liv
     return std::nullopt;
 }
 
+// Every ProfileUpdate envelope the fake transport saw, as the peer decrypts
+// it. An MLS ciphertext opens only once, so each envelope is decrypted the
+// first time it is seen and its plaintext kept; a failed decryption is an
+// empty entry. Tests that use this must not also use lastProfileSentTo().
+QVector<QByteArray> decryptedProfilePayloads(LiveFixture &live)
+{
+    using namespace OpenChat;
+    QVector<QByteArray> payloads;
+    for (qsizetype index = 0; index < live.transport->sent.size(); ++index) {
+        const CiphertextEnvelopeV1 &envelope = live.transport->sent.at(index);
+        if (envelope.messageKind != EnvelopeMessageKind::ProfileUpdate)
+            continue;
+        if (!live.profilePlaintexts.contains(index)) {
+            auto processed = live.peer->process(live.conversation, envelope.ciphertext);
+            live.profilePlaintexts.insert(index, processed.hasValue() ? processed.value().applicationData
+                                                                      : QByteArray());
+        }
+        payloads.append(live.profilePlaintexts.value(index));
+    }
+    return payloads;
+}
+
 int countProfileUpdates(const LiveFixture &live)
 {
     int count = 0;
@@ -349,6 +380,26 @@ class ChatControllerTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        // Every live controller here also runs profile page sync. Its
+        // background page requests (production: up to two minutes after
+        // start, under a minute after an acceptance) are pushed an hour out,
+        // so the ProfileUpdate counts below are only what each test does.
+        OpenChat::ProfilePageSync::Limits limits;
+        limits.acceptRequestDelayMs = 60LL * 60 * 1000;
+        limits.acceptRequestJitterMs = 1;
+        limits.startupRequestJitterMs = 60LL * 60 * 1000;
+        limits.missingMediaGraceMs = 60LL * 60 * 1000;
+        OpenChat::ProfileController::setSyncTuningForTesting(
+            OpenChat::ProfileController::SyncTuning{{}, [](qint64 bound) { return bound - 1; }, limits});
+    }
+
+    void cleanupTestCase()
+    {
+        OpenChat::ProfileController::setSyncTuningForTesting(std::nullopt);
+    }
+
     void startsOnMichaelWithReferenceConversation()
     {
         ChatController controller;
@@ -1640,6 +1691,107 @@ private slots:
         auto published = lastProfileSentTo(live);
         QVERIFY(published.has_value());
         QCOMPARE(published->statusText, QStringLiteral("Hello, new friend"));
+    }
+
+    void chatControllerOwnsAProfileController()
+    {
+        ChatController controller;
+        OpenChat::ProfileController *profiles = controller.profiles();
+        QVERIFY(profiles != nullptr);
+        QCOMPARE(controller.profiles(), profiles);
+        // QML reads it as a constant property: every avatar site in the
+        // window opens profiles through this one instance.
+        const QMetaObject *meta = controller.metaObject();
+        const QMetaProperty property = meta->property(meta->indexOfProperty("profiles"));
+        QVERIFY(property.isValid());
+        QVERIFY(property.isConstant());
+        QVERIFY(!property.isWritable());
+        QCOMPARE(controller.property("profiles").value<OpenChat::ProfileController *>(), profiles);
+        // It is not a QObject child: the controller's own member order, not
+        // QObject's child teardown, decides when it goes.
+        QVERIFY(!controller.children().contains(profiles));
+        // It runs the reference mock until live services arrive.
+        QVERIFY(profiles->sync() == nullptr);
+        QVERIFY(profiles->openContact(QStringLiteral("michael")));
+        QCOMPARE(profiles->personName(), controller.contacts()->contactById(QStringLiteral("michael"))->name);
+    }
+
+    void profileControllerDiesBeforeTheRoster()
+    {
+        // Run under MALLOC_PERTURB_: the profile controller reads the roster
+        // and the local profile to its very end (its destructor saves the
+        // editor's draft), so it must be destroyed before them.
+        auto controller = std::make_unique<ChatController>();
+        OpenChat::ProfileController *profiles = controller->profiles();
+        QStringList order;
+        connect(profiles, &QObject::destroyed, this, [&order] { order.append(QStringLiteral("profiles")); });
+        connect(controller->contacts(), &QObject::destroyed, this,
+                [&order] { order.append(QStringLiteral("roster")); });
+        connect(controller->messages(), &QObject::destroyed, this,
+                [&order] { order.append(QStringLiteral("messages")); });
+        // Leave it mid-edit, with a Top Friend tile resolved from the roster.
+        profiles->openOwn();
+        QVERIFY(profiles->beginEditing());
+        QVERIFY(profiles->addTopFriend(QStringLiteral("jessica")));
+        profiles->draft()->setHeadline(QStringLiteral("unsaved"));
+        controller.reset();
+        QCOMPARE(order.value(0), QStringLiteral("profiles"));
+        QVERIFY(order.contains(QStringLiteral("roster")));
+        QVERIFY(order.contains(QStringLiteral("messages")));
+    }
+
+    void liveProfilesPublishThroughTheChatController()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        ProfileController &profiles = *controller.profiles();
+        QVERIFY(profiles.sync() != nullptr);
+
+        // Nothing is sent for pages until one is published.
+        QTest::qWait(50);
+        QCOMPARE(countProfileUpdates(live), 0);
+
+        profiles.openOwn();
+        QVERIFY(profiles.beginEditing());
+        profiles.draft()->setHeadline(QStringLiteral("Hello from my page"));
+        QVERIFY(profiles.publish());
+        const qint64 revision = profiles.publishedRevision();
+        QVERIFY(revision > 0);
+        QTRY_COMPARE(countProfileUpdates(live), 1);
+        // Published once, delivered once: nothing more follows.
+        QTest::qWait(100);
+        QCOMPARE(countProfileUpdates(live), 1);
+
+        const CiphertextEnvelopeV1 &envelope = live.transport->sent.last();
+        QCOMPARE(envelope.messageKind, EnvelopeMessageKind::ProfileUpdate);
+        QCOMPARE(envelope.recipientDeviceId.bytes(), live.peerDevice.bytes());
+        QCOMPARE(envelope.conversationId.bytes(), live.conversation.bytes());
+        const QVector<QByteArray> payloads = decryptedProfilePayloads(live);
+        QCOMPARE(payloads.size(), 1);
+        QCOMPARE(classifyProfilePayload(payloads.first()), ProfilePayloadKind::PageCore);
+        const std::optional<Profile::Page> page = decodePageCore(payloads.first());
+        QVERIFY(page.has_value());
+        QCOMPARE(page->revision, revision);
+        QCOMPARE(page->content.headline, QStringLiteral("Hello from my page"));
+        // A 0.2.8 client's decoder ignores it: it is not a legacy profile.
+        QVERIFY(!decodeProfileUpdate(payloads.first()).has_value());
+        QVERIFY(!live.session->syncEngine()->isFailedClosed());
+
+        // A status edit still goes out as the legacy profile, alongside.
+        controller.setLocalStatusText(QStringLiteral("Status still works"));
+        QCOMPARE(countProfileUpdates(live), 2);
+        const QVector<QByteArray> both = decryptedProfilePayloads(live);
+        QCOMPARE(both.size(), 2);
+        QCOMPARE(both.first(), payloads.first()); // decrypted once, served from the cache
+        QCOMPARE(classifyProfilePayload(both.last()), ProfilePayloadKind::Legacy);
+        const auto legacy = decodeProfileUpdate(both.last());
+        QVERIFY(legacy.has_value());
+        QCOMPARE(legacy->statusText, QStringLiteral("Status still works"));
     }
 
     void inboundProfileUpdateChangesTheContactRow()

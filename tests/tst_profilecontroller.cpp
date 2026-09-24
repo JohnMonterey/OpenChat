@@ -44,7 +44,9 @@
 #include <QtEndian>
 #include <QtTest/QtTest>
 
+#include <array>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <numbers>
 #include <optional>
@@ -128,6 +130,14 @@ void useFixtureTime(PageSyncTest::TwoPeerFixture &fixture)
     return image.save(path, "PNG") ? path : QString();
 }
 
+// Gives the viewer a picture of their own: a real one, which cannot pass for
+// the "userpfp_none" placeholder strangers and pictureless contacts get.
+[[nodiscard]] bool setOwnPicture(ChatController &chat, const QTemporaryDir &dir, const QString &name,
+                                 const QSize &size)
+{
+    return chat.setLocalAvatarFromFile(QUrl::fromLocalFile(writePicture(dir, name, size)));
+}
+
 void appendLe16(QByteArray &out, quint16 value)
 {
     char bytes[2];
@@ -153,7 +163,9 @@ void appendChunk(QByteArray &out, const char *id, const QByteArray &payload)
 
 // A 48 kHz mono 16-bit WAV: `silence` seconds of nothing, then a tone whose
 // level swells, so the waveform has a shape; tagged with a title and artist.
-[[nodiscard]] QString writeSong(const QTemporaryDir &dir, const QString &name, double seconds, double silence)
+[[nodiscard]] QString writeSong(const QTemporaryDir &dir, const QString &name, double seconds, double silence,
+                                const QByteArray &title = QByteArrayLiteral("Paper Planes"),
+                                const QByteArray &artist = QByteArrayLiteral("M.I.A."))
 {
     constexpr int rate = 48'000;
     const qsizetype frames = qsizetype(seconds * rate);
@@ -172,8 +184,8 @@ void appendChunk(QByteArray &out, const char *id, const QByteArray &payload)
     appendLe16(format, 2);
     appendLe16(format, 16);
     QByteArray info("INFO");
-    appendChunk(info, "INAM", QByteArray("Paper Planes") + '\0');
-    appendChunk(info, "IART", QByteArray("M.I.A.") + '\0');
+    appendChunk(info, "INAM", title + '\0');
+    appendChunk(info, "IART", artist + '\0');
     QByteArray body("WAVE");
     appendChunk(body, "fmt ", format);
     appendChunk(body, "LIST", info);
@@ -391,11 +403,17 @@ private slots:
 
     void opensOwnProfileWithLocalIdentity()
     {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
         ChatController chat;
         ProfileController &p = *chat.profiles();
         chat.setLocalUserName(QStringLiteral("Daniel Reyes"));
         chat.setLocalStatusText(QStringLiteral("Recording all week"));
         chat.setLocalPresence(int(Presence::Busy));
+        // A picture of your own, so it cannot pass for the placeholder.
+        QVERIFY(setOwnPicture(chat, dir, QStringLiteral("me.png"), {240, 240}));
+        const QString picture = chat.localAvatarKey();
+        QVERIFY(picture != QStringLiteral("userpfp_none"));
 
         chat.setNavSection(ChatController::NavSection::Call);
         p.openOwn();
@@ -407,7 +425,7 @@ private slots:
         QCOMPARE(p.localAccountId(), mockHex(Reference::selfId()));
         QCOMPARE(p.personName(), QStringLiteral("Daniel Reyes"));
         QCOMPARE(p.personFirstName(), QStringLiteral("Daniel"));
-        QCOMPARE(p.personAvatarKey(), chat.localAvatarKey());
+        QCOMPARE(p.personAvatarKey(), picture);
         QCOMPARE(p.personPresence(), int(Presence::Busy));
         QVERIFY(!p.personOnline());
         QCOMPARE(p.personStatusLine(), QStringLiteral("Recording all week"));
@@ -421,6 +439,12 @@ private slots:
         QCOMPARE(p.personPresence(), int(Presence::Available));
         QVERIFY(p.personOnline());
         QVERIFY(person.count() >= 1);
+        // A new picture reaches the open page, once.
+        person.clear();
+        QVERIFY(setOwnPicture(chat, dir, QStringLiteral("new.png"), {200, 260}));
+        QVERIFY(chat.localAvatarKey() != picture);
+        QCOMPARE(p.personAvatarKey(), chat.localAvatarKey());
+        QCOMPARE(person.count(), 1);
 
         // Once published, the page on screen is the owner's own.
         p.setMockPage(Reference::selfId(), Reference::ownReferencePage());
@@ -442,8 +466,9 @@ private slots:
         QTest::newRow("contact") << 0 << int(Relationship::ContactPerson) << QStringLiteral("jessica")
                                  << QStringLiteral("Jessica") << int(PageState::CustomPage) << QString()
                                  << QStringLiteral("jessica");
+        // "<own>": the viewer's own picture, set by the test.
         QTest::newRow("self") << 1 << int(Relationship::SelfPerson) << Reference::selfId() << QStringLiteral("Daniel")
-                              << int(PageState::DefaultPage) << QString() << QStringLiteral("userpfp_none");
+                              << int(PageState::DefaultPage) << QString() << QStringLiteral("<own>");
         QTest::newRow("stranger") << 2 << int(Relationship::StrangerPerson) << QStringLiteral("dana-whitfield")
                                   << QStringLiteral("Dana Whitfield") << int(PageState::StubPage)
                                   << QStringLiteral("Michael") << QStringLiteral("userpfp_none");
@@ -459,8 +484,14 @@ private slots:
         QFETCH(QString, referrer);
         QFETCH(QString, avatarKey);
 
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
         ChatController chat;
         chat.setLocalUserName(QStringLiteral("Daniel"));
+        QVERIFY(setOwnPicture(chat, dir, QStringLiteral("me.png"), {240, 240}));
+        QVERIFY(chat.localAvatarKey() != QStringLiteral("userpfp_none"));
+        if (avatarKey == QStringLiteral("<own>"))
+            avatarKey = chat.localAvatarKey();
         ProfileController &p = *chat.profiles();
         Profile::Page michael = *Reference::seededPage(QStringLiteral("michael"));
         // The owner's labels; the viewer's own names win for people they know.
@@ -749,6 +780,35 @@ private slots:
         QCOMPARE(navigation.count(), 0);
     }
 
+    void loopsAreCaughtWhateverOpenedTheEntry()
+    {
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        // Found in Search by handle: an entry that names a handle, not an
+        // account. Jessica's page names Michael first.
+        p.openHandle(QStringLiteral("michael"));
+        QCOMPARE(p.personId(), QStringLiteral("michael"));
+        QVERIFY(p.openTopFriend(0));
+        QCOMPARE(p.personId(), QStringLiteral("jessica"));
+        QCOMPARE(tile(*p.view(), 0).value(QStringLiteral("accountId")).toString(), mockHex(QStringLiteral("michael")));
+        // Michael's tile is the Michael Search opened: back to him, no loop.
+        QVERIFY(p.openTopFriend(0));
+        QCOMPARE(p.depth(), 1);
+        QCOMPARE(p.personId(), QStringLiteral("michael"));
+        QCOMPARE(p.origin(), int(Origin::FromSearch));
+        QCOMPARE(p.backLabel(), QStringLiteral("Search"));
+
+        // A page opened by handle that lists its own owner is the page on
+        // screen: clicking that tile does nothing.
+        Profile::Page michael = *Reference::seededPage(QStringLiteral("michael"));
+        michael.topFriends.prepend({mockBytes(QStringLiteral("michael")), QStringLiteral("Me, myself")});
+        p.setMockPage(QStringLiteral("michael"), michael);
+        QSignalSpy navigation(&p, &ProfileController::navigationChanged);
+        QVERIFY(!p.openTopFriend(0));
+        QCOMPARE(p.depth(), 1);
+        QCOMPARE(navigation.count(), 0);
+    }
+
     void backLabelNamesTheDestination()
     {
         ChatController chat;
@@ -866,8 +926,13 @@ private slots:
 
     void topFriendTilesUseTheViewersNamesForContacts()
     {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
         ChatController chat;
         chat.setLocalUserName(QStringLiteral("Daniel"));
+        QVERIFY(setOwnPicture(chat, dir, QStringLiteral("me.png"), {240, 240}));
+        const QString picture = chat.localAvatarKey();
+        QVERIFY(picture != QStringLiteral("userpfp_none"));
         ProfileController &p = *chat.profiles();
         Profile::Page michael = *Reference::seededPage(QStringLiteral("michael"));
         michael.topFriends = {{mockBytes(QStringLiteral("jessica")), QStringLiteral("Jess the Mess")},
@@ -889,7 +954,7 @@ private slots:
                                              {QStringLiteral("isSelf"), false}}));
         // The viewer themself: their own name and picture.
         QCOMPARE(tile(view, 1).value(QStringLiteral("name")).toString(), QStringLiteral("Daniel"));
-        QCOMPARE(tile(view, 1).value(QStringLiteral("avatarKey")).toString(), chat.localAvatarKey());
+        QCOMPARE(tile(view, 1).value(QStringLiteral("avatarKey")).toString(), picture);
         QCOMPARE(tile(view, 1).value(QStringLiteral("isSelf")).toBool(), true);
         QCOMPARE(tile(view, 1).value(QStringLiteral("isContact")).toBool(), false);
         // Anyone else: the owner's label, over a monogram only.
@@ -916,6 +981,15 @@ private slots:
         QCOMPARE(tile(view, 0).value(QStringLiteral("name")).toString(), QStringLiteral("Jessica M."));
         QCOMPARE(tile(view, 0).value(QStringLiteral("initials")).toString(), QStringLiteral("JM"));
         QCOMPARE(lists.count(), 1);
+
+        // A new picture of your own reaches your tile on their page, once;
+        // their page's person is not you, so it does not change.
+        QSignalSpy person(&p, &ProfileController::personChanged);
+        QVERIFY(setOwnPicture(chat, dir, QStringLiteral("new.png"), {200, 260}));
+        QVERIFY(chat.localAvatarKey() != picture);
+        QCOMPARE(tile(view, 1).value(QStringLiteral("avatarKey")).toString(), chat.localAvatarKey());
+        QCOMPARE(lists.count(), 2);
+        QCOMPARE(person.count(), 0);
     }
 
     void stubNameIsTheRelayHandleOnceKnown()
@@ -964,6 +1038,72 @@ private slots:
         QCOMPARE(p.personHandle(), QString());
         p.refresh();
         QCOMPARE(asked, 2);
+    }
+
+    void unansweredHandleLookupsAreAskedAgain()
+    {
+        // The lookups' clock is the test's.
+        qint64 now = 1'000'000;
+        ProfileController::setSyncTuningForTesting(
+            ProfileController::SyncTuning{[&now] { return now; }, {}, PageSyncTest::quietLimits()});
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        // Directory endpoints left unset: every lookup is refused on the spot
+        // with a transport error, never with an answer about the account.
+        RelayClient relay(DeviceId::generate(), AccountId::generate(), RelayEndpoints{}, RelayCredentials{});
+        int asked = 0;
+        connect(&relay, &RelayClient::transportError, this, [&asked] { ++asked; });
+        p.setRelay(&relay);
+        QVERIFY(p.openContact(QStringLiteral("michael")));
+        QVERIFY(p.openTopFriend(4)); // Dana Whitfield, not a contact
+        QCOMPARE(asked, 1);
+        QVERIFY(p.personHandlePending());
+
+        // No answer ever comes: after the timeout it counts as failed (the
+        // label stays, no longer "pending"), and is asked again at the
+        // failed pace.
+        now += ProfileController::handleLookupTimeoutMs - 1;
+        p.refresh();
+        QVERIFY(p.personHandlePending());
+        QCOMPARE(asked, 1);
+        now += 1;
+        p.refresh();
+        QVERIFY(!p.personHandlePending());
+        QCOMPARE(p.personName(), QStringLiteral("Dana Whitfield"));
+        QCOMPARE(asked, 1);
+        now += ProfileController::handleRetryMs - 1;
+        p.refresh();
+        QCOMPARE(asked, 1);
+        now += 1;
+        p.refresh();
+        QCOMPARE(asked, 2);
+        QVERIFY(p.personHandlePending());
+
+        // A session refused mid-refresh says only authExpired: the lookup
+        // failed, and waits out the failed pace.
+        QSignalSpy person(&p, &ProfileController::personChanged);
+        relay.authExpired();
+        QVERIFY(!p.personHandlePending());
+        QCOMPARE(person.count(), 1);
+        p.refresh();
+        QCOMPARE(asked, 2);
+
+        now += ProfileController::handleRetryMs;
+        p.refresh();
+        QCOMPARE(asked, 3);
+        QVERIFY(p.personHandlePending());
+
+        // A new relay session asks again whatever the last one left
+        // unanswered, without waiting for the timeout.
+        now += 10;
+        relay.connected();
+        QCOMPARE(asked, 4);
+        QVERIFY(p.personHandlePending());
+
+        // And an answer still lands.
+        relay.accountResolved(Reference::mockAccountFor(QStringLiteral("dana-whitfield")), QStringLiteral("dana.w"));
+        QVERIFY(!p.personHandlePending());
+        QCOMPARE(p.personName(), QStringLiteral("dana.w"));
     }
 
     void editingIsAPropertyOfTheTopEntry()
@@ -1184,15 +1324,20 @@ private slots:
         for (QSignalSpy *spy : {&style, &content, &lists, &media, &render, &person})
             QCOMPARE(spy->count(), 0);
 
-        // A new revision that only changes words changes only the words.
+        // A new revision that only changes words: the words, and the
+        // revision (a style-group property, ARCH §7.3), but never the
+        // resolved style, the media, the lists or the person.
         Profile::Page changed = same;
+        changed.revision = same.revision + 1;
         changed.content.headline = QStringLiteral("New headline");
         p.setMockPage(QStringLiteral("michael"), changed);
         QCOMPARE(view.headline(), QStringLiteral("New headline"));
+        QCOMPARE(view.revision(), changed.revision);
         QCOMPARE(content.count(), 1);
-        QCOMPARE(style.count(), 0);
+        QCOMPARE(style.count(), 1);
         QCOMPARE(render.count(), 0);
         QCOMPARE(media.count(), 0);
+        QCOMPARE(lists.count(), 0);
         QCOMPARE(person.count(), 0);
     }
 
@@ -1373,6 +1518,64 @@ private slots:
         QCOMPARE(p.publishedRevision(), revision);
         QVERIFY(p.editing());
         QVERIFY(!p.notice().isEmpty());
+    }
+
+    void publishWaitsForASongImport()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString song = writeSong(dir, QStringLiteral("save.wav"), 52.0, 3.0);
+        QVERIFY(!song.isEmpty());
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        QSignalSpy published(&p, &ProfileController::published);
+
+        // Saved while the file is analysed: the page goes out once its cut is in.
+        p.importSong(QUrl::fromLocalFile(song));
+        QVERIFY(p.songImporting());
+        QVERIFY(p.publish());
+        QVERIFY(p.publishPending());
+        QVERIFY(p.editing());
+        QCOMPARE(published.count(), 0);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.publishPending(), 90'000);
+        QCOMPARE(published.count(), 1);
+        QVERIFY(!p.editing());
+        QVERIFY(!p.songImporting());
+        QVERIFY(p.view()->hasSong());
+        QVERIFY(!p.view()->songPending());
+        QCOMPARE(p.view()->songTitle(), QStringLiteral("Paper Planes"));
+        const QString firstCut = p.view()->songKey();
+        const qint64 defaultStart = p.songWindowStartMs();
+        QVERIFY(defaultStart != 4'000);
+
+        // Saved while a moved window waits for the handle to rest: the new
+        // cut is what goes out, not the one it replaces.
+        QVERIFY(p.beginEditing());
+        p.setSongWindow(4'000);
+        QVERIFY(p.songImporting());
+        QVERIFY(p.publish());
+        QVERIFY(p.publishPending());
+        QTRY_VERIFY_WITH_TIMEOUT(!p.publishPending(), 90'000);
+        QCOMPARE(published.count(), 2);
+        QVERIFY(!p.editing());
+        QVERIFY(p.view()->songKey() != firstCut);
+        QCOMPARE(p.songWindowStartMs(), 4'000); // the published song's own window
+
+        // A song that fails holds the page back, and says why.
+        const qint64 revision = p.publishedRevision();
+        QVERIFY(p.beginEditing());
+        p.draft()->setHeadline(QStringLiteral("Second try"));
+        p.importSong(QUrl::fromLocalFile(dir.filePath(QStringLiteral("gone.wav"))));
+        QVERIFY(p.publish());
+        QVERIFY(p.publishPending());
+        QTRY_VERIFY_WITH_TIMEOUT(!p.publishPending(), 20'000);
+        QCOMPARE(published.count(), 2);
+        QCOMPARE(p.publishedRevision(), revision);
+        QVERIFY(p.editing());
+        QVERIFY(!p.notice().isEmpty());
+        QCOMPARE(p.view()->songKey(), p.draft()->songKey()); // the draft keeps its song
     }
 
     void publishedSignalReportsOffline()
@@ -1635,13 +1838,23 @@ private slots:
         p.undo();
         QCOMPARE(d.motifOpacity(), 40);
 
-        // Undo and redo do nothing outside the editor.
+        // Undo and redo do nothing outside the editor: not to the draft on
+        // screen, nor to the one stored for next time.
+        QCOMPARE(d.headline(), QStringLiteral("The end"));
         p.endEditing();
+        const Profile::Page left = d.page();
+        QSignalSpy edited(&d, &ProfilePageObject::edited);
         p.undo();
         p.redo();
+        QCOMPARE(d.page(), left);
+        QCOMPARE(edited.count(), 0);
+        QVERIFY(!p.canUndo());
+        QVERIFY(!p.canRedo());
 
         // The history keeps the last 100 steps.
         QVERIFY(p.beginEditing());
+        QCOMPARE(d.page(), left);
+        QVERIFY(p.survivingDraftAtMs() > 0);
         QVERIFY(!p.canUndo());
         for (int step = 1; step <= 105; ++step)
             d.setHeadline(QString::number(step));
@@ -1758,6 +1971,10 @@ private slots:
 
     void plainStyleAppliesToOthersOnly()
     {
+        ProfileMediaStore &store = ProfileMediaStore::instance();
+        // Counts the decodes the store starts (on its own thread).
+        const auto decodes = std::make_shared<QAtomicInt>(0);
+        store.setDecodeHookForTesting([decodes] { decodes->fetchAndAddRelaxed(1); });
         ChatController chat;
         ProfileController &p = *chat.profiles();
         p.setMockPage(Reference::selfId(), Reference::ownReferencePage());
@@ -1767,12 +1984,31 @@ private slots:
         QVERIFY(jessica.background.isSet());
         jessica.theme.backgroundKind = Profile::BackgroundKind::ImageBackground;
         p.setMockPage(QStringLiteral("jessica"), jessica);
+        const QString key = ProfileMediaStore::imageKeyFor(jessica.background.sha256);
+
+        // Opened in Plain style, the picture is neither shown nor decoded
+        // (ARCH §2.5): the store is never even asked for it.
+        p.setPlainStyle(true);
         QVERIFY(p.openContact(QStringLiteral("jessica")));
         ProfilePageObject &view = *p.view();
         ProfileRenderStyle &render = *view.render();
+        QVERIFY(render.plain());
+        QVERIFY(view.hasBackgroundImage());
+        QCOMPARE(view.backgroundImageKey(), QString());
+        QCOMPARE(render.imageKey(), QString());
+        QTest::qWait(200);
+        QCOMPARE(decodes->loadRelaxed(), 0);
+        QCOMPARE(store.decodedCount(), 0);
+        QVERIFY(!store.image(key).has_value());
+        QVERIFY(!store.stats(key).has_value());
+
+        // Turned off, it is decoded and shown.
+        p.setPlainStyle(false);
         QVERIFY(!render.plain());
-        QVERIFY(!view.backgroundImageKey().isEmpty());
-        QCOMPARE(render.imageKey(), view.backgroundImageKey());
+        QCOMPARE(view.backgroundImageKey(), key);
+        QCOMPARE(render.imageKey(), key);
+        QTRY_VERIFY_WITH_TIMEOUT(store.image(key).has_value(), 5'000);
+        QCOMPARE(decodes->loadRelaxed(), 1);
         const QString headline = view.headline();
         const QVariantList friends = view.topFriends();
 
@@ -1788,7 +2024,7 @@ private slots:
         QCOMPARE(render.nameFlourish(), int(Profile::Flourish::NoFlourish));
         QCOMPARE(render.ambient(), int(Profile::Ambient::NoAmbient));
         QCOMPARE(render.tableStyle(), int(Profile::TableStyle::CellTable));
-        // The picture is neither shown nor decoded.
+        // The picture is no longer shown.
         QCOMPARE(render.imageKey(), QString());
         QCOMPARE(view.backgroundImageKey(), QString());
         // Everything else stays: the words, the friends, the page state.
@@ -1815,7 +2051,8 @@ private slots:
         // And turning it off brings the picture back on their page.
         QVERIFY(p.openContact(QStringLiteral("jessica")));
         QVERIFY(!render.plain());
-        QVERIFY(!view.backgroundImageKey().isEmpty());
+        QCOMPARE(view.backgroundImageKey(), key);
+        store.setDecodeHookForTesting({});
     }
 
     void closedPagesLetGoOfTheirMedia()
@@ -1964,6 +2201,281 @@ private slots:
         d.setAdaptive(true);
         QVERIFY(d.adaptive());
         QCOMPARE(d.linkColor(), rgb(Profile::aeroSkyTheme(false).linkColor));
+    }
+
+    // The render style is the readability engine's palette for the theme the
+    // viewer sees, plus the theme's own knobs (ARCH §7.4).
+    void renderStyleFollowsTheEngine_data()
+    {
+        QTest::addColumn<int>("preset");
+        QTest::addColumn<bool>("dark");
+        for (int preset = int(Profile::Preset::AeroSkyPreset); preset <= int(Profile::Preset::ChromeY2KPreset);
+             ++preset) {
+            const QString slug = Profile::presetSlug(Profile::Preset(preset));
+            QTest::newRow(qPrintable(slug + QStringLiteral("-light"))) << preset << false;
+            QTest::newRow(qPrintable(slug + QStringLiteral("-dark"))) << preset << true;
+        }
+    }
+
+    void renderStyleFollowsTheEngine()
+    {
+        QFETCH(int, preset);
+        QFETCH(bool, dark);
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        const Profile::Page page =
+            Profile::applyPreset(publishedPage(QStringLiteral("Styled")), Profile::Preset(preset));
+        p.setMockPage(QStringLiteral("michael"), page);
+        p.setDarkMode(dark);
+        QVERIFY(p.openContact(QStringLiteral("michael")));
+        const ProfileRenderStyle &r = *p.view()->render();
+
+        // The theme this viewer sees, and the engine's palette for it.
+        const Profile::Theme theme =
+            page.theme.adaptive ? ProfileRenderStyle::withAeroSkyColours(page.theme, dark) : page.theme;
+        const ProfileReadability::Palette pal =
+            ProfileReadability::resolve(theme, ProfileReadability::pageSamples(theme, std::nullopt));
+        const auto list = [](const auto &values) {
+            QVariantList out;
+            for (const auto &value : values)
+                out.append(QVariant::fromValue(value));
+            return out;
+        };
+
+        // Backdrop and boxes.
+        QVERIFY(!r.plain());
+        QCOMPARE(r.backgroundKind(), int(theme.backgroundKind));
+        QCOMPARE(r.color1(), rgb(theme.backgroundColor1));
+        QCOMPARE(r.color2(), rgb(theme.backgroundColor2));
+        QCOMPARE(r.motif(), int(theme.motif));
+        QCOMPARE(r.motifInk(), rgb(theme.motifInk));
+        QCOMPARE(r.motifOpacity(), theme.motifOpacity / 100.0);
+        QCOMPARE(r.motifScale(), int(theme.motifScale));
+        QCOMPARE(r.imageKey(), QString());
+        QCOMPARE(r.boxFill(), pal.boxFill);
+        QCOMPARE(r.boxDark(), pal.boxDark);
+        QCOMPARE(r.borderColor(), rgb(theme.borderColor));
+        QCOMPARE(r.altBorderColor(), rgb(theme.altHeader ? theme.altBorderColor : theme.borderColor));
+        QCOMPARE(r.borderWidth(), int(theme.borderWidth));
+        QCOMPARE(r.radiusPx(), Profile::radiusPixels(theme.boxRadius));
+        QCOMPARE(r.boxGlow(), theme.boxGlow);
+        QCOMPARE(r.tableStyle(), int(theme.tableStyle));
+        // Header strips.
+        QCOMPARE(r.headerStyle(), int(theme.headerStyle));
+        QCOMPARE(r.stripStops(), list(pal.strip.stops));
+        QCOMPARE(r.stripPositions(), list(pal.strip.positions));
+        QCOMPARE(r.stripHighlight(), pal.strip.highlight);
+        QCOMPARE(r.stripBottomLine(), pal.strip.bottomLine);
+        QCOMPARE(r.stripDark(), pal.strip.dark);
+        QCOMPARE(r.altStripStops(), list(pal.altStrip.stops));
+        QCOMPARE(r.altStripPositions(), list(pal.altStrip.positions));
+        QCOMPARE(r.altStripHighlight(), pal.altStrip.highlight);
+        QCOMPARE(r.altStripBottomLine(), pal.altStrip.bottomLine);
+        QCOMPARE(r.altStripDark(), pal.altStrip.dark);
+        QCOMPARE(r.altHeader(), theme.altHeader);
+        QCOMPARE(r.headerText(), pal.headerText);
+        QCOMPARE(r.altHeaderText(), pal.altHeaderText);
+        // Every ink is its own role's, held at its floor.
+        QCOMPARE(r.nameColor(), pal.name);
+        QCOMPARE(r.nameColor2(), pal.name2);
+        QCOMPARE(r.bodyColor(), pal.body);
+        QCOMPARE(r.labelColor(), pal.label);
+        QCOMPARE(r.linkColor(), pal.link);
+        QCOMPARE(r.mutedColor(), pal.muted);
+        QCOMPARE(r.blurbSubheadColor(), pal.blurbSubhead);
+        QCOMPARE(r.cellLabelFill(), pal.cellLabelFill);
+        QCOMPARE(r.cellValueFill(), pal.cellValueFill);
+        QCOMPARE(r.cellLabelInk(), pal.cellLabelInk);
+        QCOMPARE(r.cellValueInk(), pal.cellValueInk);
+        QCOMPARE(r.tableRuleColor(), pal.tableRule);
+        // Indexed by the Presence value; the palette lists Available, Away,
+        // Busy, Offline.
+        const QVariantList presence = r.presenceInks();
+        QCOMPARE(presence.size(), presenceCount);
+        QCOMPARE(presence.at(int(Presence::Available)).value<QColor>(), pal.presence.at(0));
+        QCOMPARE(presence.at(int(Presence::Away)).value<QColor>(), pal.presence.at(1));
+        QCOMPARE(presence.at(int(Presence::Busy)).value<QColor>(), pal.presence.at(2));
+        QCOMPARE(presence.at(int(Presence::Offline)).value<QColor>(), pal.presence.at(3));
+        QCOMPARE(r.monogramTop(), pal.monogramTop);
+        QCOMPARE(r.monogramBottom(), pal.monogramBottom);
+        QCOMPARE(r.monogramRim(), pal.monogramRim);
+        QCOMPARE(r.monogramInk(), pal.monogramInk);
+        QCOMPARE(r.altMonogramTop(), pal.altMonogramTop);
+        QCOMPARE(r.altMonogramBottom(), pal.altMonogramBottom);
+        QCOMPARE(r.altMonogramRim(), pal.altMonogramRim);
+        QCOMPARE(r.altMonogramInk(), pal.altMonogramInk);
+        QCOMPARE(r.songMaterial(), pal.songMaterial);
+        QCOMPARE(r.textHalo(), pal.halo);
+        QCOMPARE(r.haloColor(), pal.haloColor);
+        QCOMPARE(r.ambient(), int(theme.ambient));
+        QCOMPARE(r.ambientOutline(), pal.ambientOutline);
+        // What was corrected, for the editor.
+        QCOMPARE(r.adjusted(), pal.adjusted);
+        QVariantList adjustments;
+        for (const ProfileReadability::Adjustment &adjustment : pal.adjustments) {
+            adjustments.append(QVariantMap{{QStringLiteral("tab"), int(adjustment.tab)},
+                                           {QStringLiteral("role"), adjustment.role},
+                                           {QStringLiteral("sentence"), adjustment.sentence}});
+        }
+        QCOMPARE(r.adjustments(), adjustments);
+        QVariantMap inkAdjusted;
+        for (auto it = pal.inkAdjusted.cbegin(); it != pal.inkAdjusted.cend(); ++it)
+            inkAdjusted.insert(QString::number(it.key()), it.value());
+        QCOMPARE(r.inkAdjusted(), inkAdjusted);
+
+        // Type: SPEC §4.3's scale for the text size, times the faces' factors.
+        using ProfileFonts::Role;
+        const int size = int(theme.textSize);
+        const std::array<int, 3> body{12, 13, 15};
+        const std::array<int, 3> heading{13, 14, 16};
+        const std::array<int, 3> caption{11, 11, 12};
+        const std::array<int, 3> strip{28, 30, 34};
+        const qreal headingFactor = ProfileFonts::sizeFactor(theme.headingFont, Role::Heading);
+        QCOMPARE(r.stripHeight(), strip.at(size));
+        QCOMPARE(r.titlePixelSize(), int(std::lround(heading.at(size) * headingFactor)));
+        QCOMPARE(r.subheadPixelSize(), r.titlePixelSize());
+        QCOMPARE(r.headingFactor(), headingFactor);
+        QCOMPARE(r.bodyPixelSize(),
+                 int(std::lround(body.at(size) * ProfileFonts::sizeFactor(theme.bodyFont, Role::Body))));
+        QCOMPARE(r.labelPixelSize(),
+                 int(std::lround(body.at(size) * ProfileFonts::sizeFactor(theme.bodyFont, Role::Label))));
+        QCOMPARE(r.captionPixelSize(), caption.at(size));
+        QCOMPARE(r.headingFamily(), ProfileFonts::family(theme.headingFont, Role::Heading));
+        QCOMPARE(r.bodyFamily(), ProfileFonts::family(theme.bodyFont, Role::Body));
+        QCOMPARE(r.labelFamily(), ProfileFonts::family(theme.bodyFont, Role::Label));
+        QCOMPARE(r.headingLift(), theme.headingFont == Profile::Font::ScriptFont ? -1 : 0);
+        // The name.
+        QCOMPARE(r.nameFamily(), ProfileFonts::family(theme.nameFont, Role::Name));
+        QCOMPARE(r.nameBasePixelSize(), ProfileFonts::namePixelSize(theme.nameFont, theme.nameSize));
+        QVERIFY(r.nameMinPixelSize() >= 20 && r.nameMinPixelSize() <= r.nameBasePixelSize());
+        QCOMPARE(r.nameEffect(), int(theme.nameEffect));
+        QCOMPARE(r.nameFlourish(), int(theme.nameFlourish));
+    }
+
+    void renderStyleCorrectsWhatCannotShow()
+    {
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        Profile::Page page =
+            Profile::applyPreset(publishedPage(QStringLiteral("Knobs")), Profile::Preset::LinenPreset);
+        page.theme.adaptive = false;
+        p.setMockPage(QStringLiteral("michael"), page);
+        QVERIFY(p.openContact(QStringLiteral("michael")));
+        const ProfileRenderStyle &r = *p.view()->render();
+        const auto show = [&](const std::function<void(Profile::Theme &)> &change) {
+            Profile::Page next = page;
+            change(next.theme);
+            p.setMockPage(QStringLiteral("michael"), next);
+            return next.theme;
+        };
+        using Profile::BorderStyle;
+
+        // Two lines need 3 px: a thinner double border is drawn solid.
+        show([](Profile::Theme &t) {
+            t.borderStyle = BorderStyle::DoubleBorder;
+            t.borderWidth = 2;
+        });
+        QCOMPARE(r.borderStyle(), int(BorderStyle::SolidBorder));
+        QCOMPARE(r.borderWidth(), 2);
+        show([](Profile::Theme &t) {
+            t.borderStyle = BorderStyle::DoubleBorder;
+            t.borderWidth = 3;
+        });
+        QCOMPARE(r.borderStyle(), int(BorderStyle::DoubleBorder));
+        show([](Profile::Theme &t) {
+            t.borderStyle = BorderStyle::DashedBorder;
+            t.borderWidth = 1;
+        });
+        QCOMPARE(r.borderStyle(), int(BorderStyle::DashedBorder));
+
+        // The type scale follows the text size (interface faces: no factor).
+        struct Scale final {
+            Profile::TextSize size;
+            int body, title, strip, caption;
+        };
+        for (const Scale &scale : {Scale{Profile::TextSize::SmallText, 12, 13, 28, 11},
+                                   Scale{Profile::TextSize::NormalText, 13, 14, 30, 11},
+                                   Scale{Profile::TextSize::LargeText, 15, 16, 34, 12}}) {
+            show([&scale](Profile::Theme &t) {
+                t.textSize = scale.size;
+                t.headingFont = Profile::Font::InterfaceFont;
+                t.bodyFont = Profile::Font::InterfaceFont;
+            });
+            QCOMPARE(r.bodyPixelSize(), scale.body);
+            QCOMPARE(r.labelPixelSize(), scale.body);
+            QCOMPARE(r.titlePixelSize(), scale.title);
+            QCOMPARE(r.subheadPixelSize(), scale.title);
+            QCOMPARE(r.stripHeight(), scale.strip);
+            QCOMPARE(r.captionPixelSize(), scale.caption);
+        }
+        // Script headings sit a pixel higher; no other face does.
+        show([](Profile::Theme &t) { t.headingFont = Profile::Font::ScriptFont; });
+        QCOMPARE(r.headingLift(), -1);
+        show([](Profile::Theme &t) { t.headingFont = Profile::Font::SerifFont; });
+        QCOMPARE(r.headingLift(), 0);
+
+        // An ink that cannot be read is shown otherwise, and the editor learns
+        // which role it was, keyed by the role's number.
+        const QString bodyRole = QString::number(int(Profile::InkRole::BodyInk));
+        const QString linkRole = QString::number(int(Profile::InkRole::LinkInk));
+        QVERIFY(!r.inkAdjusted().value(bodyRole).toBool());
+        const Profile::Theme white = show([](Profile::Theme &t) { t.bodyColor = 0xFFFFFF; });
+        QVERIFY(r.adjusted());
+        QVERIFY(r.bodyColor() != QColor(Qt::white));
+        QVERIFY(r.inkAdjusted().value(bodyRole).toBool());
+        QVERIFY(!r.inkAdjusted().value(linkRole).toBool());
+        QVERIFY(!r.adjustments().isEmpty());
+        const ProfileReadability::Palette pal =
+            ProfileReadability::resolve(white, ProfileReadability::pageSamples(white, std::nullopt));
+        QCOMPARE(r.bodyColor(), pal.body);
+    }
+
+    void renderStyleTakesInTheDecodedPicture()
+    {
+        ProfileMediaStore &store = ProfileMediaStore::instance();
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        // Pale Linen boxes, as see-through as they go, over a black picture.
+        Profile::Page page =
+            Profile::applyPreset(publishedPage(QStringLiteral("Night")), Profile::Preset::LinenPreset);
+        page.theme.adaptive = false;
+        page.theme.boxOpacity = 60;
+        page.theme.backgroundKind = Profile::BackgroundKind::ImageBackground;
+        page.background =
+            p.addMockMedia(Profile::MediaKind::BackgroundImageMedia, realJpeg(Qt::black, QSize(96, 64)));
+        QVERIFY(page.background.isSet());
+        const QString key = ProfileMediaStore::imageKeyFor(page.background.sha256);
+        p.setMockPage(QStringLiteral("michael"), page);
+        QSignalSpy changed(p.view()->render(), &ProfileRenderStyle::changed);
+
+        // What the engine makes of the page without the picture, and with it.
+        const Profile::Theme &theme = page.theme;
+        const auto inks = [](const ProfileReadability::Palette &pal) {
+            return QVariantList{pal.boxFill, pal.body,       pal.label,        pal.link, pal.muted,
+                                pal.name,    pal.headerText, pal.cellValueInk, pal.halo, pal.haloColor};
+        };
+        const ProfileReadability::Palette without =
+            ProfileReadability::resolve(theme, ProfileReadability::pageSamples(theme, std::nullopt));
+
+        QVERIFY(p.openContact(QStringLiteral("michael")));
+        const ProfileRenderStyle &r = *p.view()->render();
+        const auto shown = [&r] {
+            return QVariantList{r.boxFill(),   r.bodyColor(),  r.labelColor(),   r.linkColor(), r.mutedColor(),
+                                r.nameColor(), r.headerText(), r.cellValueInk(), r.textHalo(),  r.haloColor()};
+        };
+        QCOMPARE(r.imageKey(), key);
+        // Decoding runs on the pool and reports through the event loop: until
+        // then only the page's base colour counts.
+        QVERIFY(!store.stats(key).has_value());
+        QCOMPARE(shown(), inks(without));
+        const int before = int(changed.count());
+
+        QTRY_VERIFY_WITH_TIMEOUT(store.stats(key).has_value(), 5'000);
+        const ProfileReadability::Palette with =
+            ProfileReadability::resolve(theme, ProfileReadability::pageSamples(theme, store.stats(key)));
+        QVERIFY(inks(with) != inks(without)); // the picture matters to this page
+        QTRY_COMPARE_WITH_TIMEOUT(shown(), inks(with), 5'000);
+        QVERIFY(changed.count() > before);
     }
 
     // --- Media -------------------------------------------------------------------
@@ -2172,6 +2684,213 @@ private slots:
         p.undo();
         QCOMPARE(d.songKey(), cutAt4);
         QCOMPARE(p.songWindowStartMs(), 4'000);
+    }
+
+    void songWindowMovedDuringItsEncodeDropsTheStaleCut()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = writeSong(dir, QStringLiteral("drag.wav"), 52.0, 1.0);
+        QVERIFY(!path.isEmpty());
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        ProfilePageObject &d = *p.draft();
+        p.importSong(QUrl::fromLocalFile(path));
+        QTRY_VERIFY_WITH_TIMEOUT(!p.songImporting(), 90'000);
+        const QString firstKey = d.songKey();
+
+        // Every window encode waits on the worker until the test lets it go.
+        SongImporter &importer = p.songImporterForTesting();
+        QSemaphore started;
+        QSemaphore go;
+        importer.setEncodeHookForTesting([&started, &go] {
+            started.release();
+            (void)go.tryAcquire(1, 30'000);
+        });
+        QStringList keys; // every cut the draft takes
+        const QMetaObject::Connection cuts =
+            connect(&d, &ProfilePageObject::mediaChanged, this, [&keys, &d] { keys.append(d.songKey()); });
+        QList<qint64> starts; // every window the song tab shows from the second move on
+        const QMetaObject::Connection windows = connect(&p, &ProfileController::importChanged, this,
+                                                        [&starts, &p] { starts.append(p.songWindowStartMs()); });
+
+        p.setSongWindow(1'000);
+        QTRY_VERIFY_WITH_TIMEOUT(started.available() == 1, 10'000); // the 1 s cut is under way
+        // The handle moves on while it runs.
+        p.setSongWindow(2'000);
+        starts.clear();
+        QCOMPARE(p.songWindowStartMs(), 2'000);
+        QVERIFY(p.songImporting());
+        // The 1 s cut runs to its end; whatever it posted is delivered before
+        // the debounce can fire. It is stale, so nothing of it lands.
+        go.release();
+        importer.waitForIdleForTesting();
+        QCoreApplication::sendPostedEvents(&importer, QEvent::MetaCall);
+        QCOMPARE(p.songWindowStartMs(), 2'000);
+        QCOMPARE(d.songKey(), firstKey);
+        QVERIFY(keys.isEmpty());
+        QVERIFY(p.songImporting()); // the 2 s cut waits for the handle to rest
+
+        go.release();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.songImporting(), 90'000);
+        importer.setEncodeHookForTesting({});
+        disconnect(cuts);
+        disconnect(windows);
+        QCOMPARE(started.available(), 2); // two cuts were started, one landed
+        QCOMPARE(p.songWindowStartMs(), 2'000);
+        QVERIFY(d.songKey() != firstKey);
+        QCOMPARE(keys, QStringList{d.songKey()});
+        QVERIFY(!starts.isEmpty());
+        QVERIFY(!starts.contains(1'000)); // the owner's move was never undone
+    }
+
+    void songWindowWaitsForANewFileAnalysis()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString first = writeSong(dir, QStringLiteral("first.wav"), 52.0, 3.0);
+        const QString second = writeSong(dir, QStringLiteral("second.wav"), 50.0, 2.0, QByteArrayLiteral("New Tune"),
+                                         QByteArrayLiteral("Someone"));
+        QVERIFY(!first.isEmpty() && !second.isEmpty());
+        const std::optional<SongSourceInfo> reference = analyse(second);
+        QVERIFY(reference.has_value());
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        ProfilePageObject &d = *p.draft();
+        p.importSong(QUrl::fromLocalFile(first));
+        QTRY_VERIFY_WITH_TIMEOUT(!p.songImporting(), 90'000);
+        const QString firstKey = d.songKey();
+        d.setSongTitle(QStringLiteral("My cut"));
+        d.setSongArtist(QStringLiteral("Me"));
+        const qint64 firstStart = p.songWindowStartMs();
+
+        // A new file: until it is analysed its window is not known, and the
+        // song on screen is the one it replaces. Moving the handle now
+        // changes nothing (and never cancels the analysis).
+        p.importSong(QUrl::fromLocalFile(second));
+        QVERIFY(p.songImporting());
+        QVERIFY(firstStart != 5'000);
+        p.setSongWindow(5'000);
+        QCOMPARE(p.songWindowStartMs(), firstStart);
+        QVERIFY(p.publish());
+        QVERIFY(p.publishPending());
+
+        // The analysis completes, the new file's cut lands with its own
+        // title and artist, and the Save goes out with it.
+        QTRY_VERIFY_WITH_TIMEOUT(!p.publishPending(), 90'000);
+        QVERIFY(!p.songImporting());
+        QVERIFY(!p.editing());
+        QVERIFY(p.view()->songKey() != firstKey);
+        QCOMPARE(p.view()->songTitle(), QStringLiteral("New Tune"));
+        QCOMPARE(p.view()->songArtist(), QStringLiteral("Someone"));
+        QVERIFY(p.beginEditing());
+        QCOMPARE(p.songSource().value(QStringLiteral("fileName")).toString(), QStringLiteral("second.wav"));
+        QCOMPARE(p.songWindowStartMs(), reference->defaultWindowStartMs);
+
+        // Once analysed, its window moves like any other.
+        p.importSong(QUrl::fromLocalFile(first));
+        QTRY_VERIFY_WITH_TIMEOUT(!p.songImporting(), 90'000);
+        p.setSongWindow(1'500);
+        QCOMPARE(p.songWindowStartMs(), 1'500);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.songImporting(), 90'000);
+        QCOMPARE(p.songWindowStartMs(), 1'500);
+        QCOMPARE(d.songTitle(), QStringLiteral("Paper Planes"));
+    }
+
+    void removingOrUndoingTheSongDropsItsNewWindow()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = writeSong(dir, QStringLiteral("gone.wav"), 52.0, 1.0);
+        QVERIFY(!path.isEmpty());
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        ProfilePageObject &d = *p.draft();
+        p.importSong(QUrl::fromLocalFile(path));
+        QTRY_VERIFY_WITH_TIMEOUT(!p.songImporting(), 90'000);
+        const QString songKey = d.songKey();
+        QVERIFY(!songKey.isEmpty());
+
+        SongImporter &importer = p.songImporterForTesting();
+        QSemaphore started;
+        QSemaphore go;
+        importer.setEncodeHookForTesting([&started, &go] {
+            started.release();
+            (void)go.tryAcquire(1, 30'000);
+        });
+        const auto drain = [&importer] {
+            importer.waitForIdleForTesting();
+            QCoreApplication::sendPostedEvents(&importer, QEvent::MetaCall);
+            QTest::qWait(20);
+        };
+
+        // Removed while a new window of it is being cut: it stays removed.
+        p.setSongWindow(3'000);
+        QTRY_VERIFY_WITH_TIMEOUT(started.available() == 1, 10'000);
+        QSignalSpy imports(&p, &ProfileController::importChanged);
+        p.removeSong();
+        QVERIFY(!d.hasSong());
+        QVERIFY(!p.songImporting());
+        QVERIFY(imports.count() >= 1);
+        go.release();
+        drain();
+        QVERIFY(!d.hasSong());
+        QCOMPARE(d.songTitle(), QString());
+        QVERIFY(p.songSource().isEmpty());
+        QVERIFY(!p.songImporting());
+
+        // Undone away while a new window of it is being cut: the undo stands,
+        // and so does its redo step.
+        p.undo();
+        QCOMPARE(d.songKey(), songKey);
+        p.setSongWindow(5'000);
+        QTRY_VERIFY_WITH_TIMEOUT(started.available() == 2, 10'000);
+        p.undo(); // back to before the song
+        QVERIFY(!d.hasSong());
+        QVERIFY(p.canRedo());
+        QVERIFY(!p.songImporting());
+        go.release();
+        drain();
+        QVERIFY(!d.hasSong());
+        QVERIFY(p.canRedo());
+        importer.setEncodeHookForTesting({});
+
+        // Removed while the moved window waits for the handle to rest, with
+        // a Save waiting on it: nothing is left to prepare, and the page
+        // goes out as it now is.
+        p.redo();
+        QCOMPARE(d.songKey(), songKey);
+        QSignalSpy published(&p, &ProfileController::published);
+        p.setSongWindow(4'000);
+        QVERIFY(p.songImporting());
+        QVERIFY(p.publish());
+        QVERIFY(p.publishPending());
+        imports.clear();
+        p.removeSong();
+        QVERIFY(!p.songImporting());
+        QVERIFY(imports.count() >= 1);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.publishPending(), 5'000);
+        QCOMPARE(published.count(), 1);
+        QVERIFY(!p.view()->hasSong());
+        QTest::qWait(ProfileController::songWindowDelayMs + 100);
+        QVERIFY(!p.view()->hasSong());
+
+        // "Remove song" also ends a new file's import: nothing comes back.
+        QVERIFY(p.beginEditing());
+        p.importSong(QUrl::fromLocalFile(path));
+        QVERIFY(p.songImporting());
+        p.removeSong();
+        QVERIFY(!p.songImporting());
+        QVERIFY(p.songSource().isEmpty());
+        QTest::qWait(500);
+        QVERIFY(!d.hasSong());
+        QVERIFY(!p.songImporting());
     }
 
     // --- Top Friends and layout -------------------------------------------------
@@ -2612,6 +3331,129 @@ private slots:
         QCOMPARE(p.view()->backgroundImageKey(), ProfileMediaStore::imageKeyFor(pageMediaHash(jpeg)));
         QCOMPARE(p.view()->render()->imageKey(), p.view()->backgroundImageKey());
         QCOMPARE(p.view()->render()->backgroundKind(), int(Profile::BackgroundKind::ImageBackground));
+    }
+
+    void viewingAContactPageMarksItOncePerVisit()
+    {
+        PageSyncTest::TwoPeerFixture fixture;
+        // Any received blob is over the storage cap: evicted on arrival.
+        fixture.limits.receivedMediaSoftCapBytes = 1;
+        fixture.limits.receivedMediaTargetBytes = 0;
+        QVERIFY(fixture.setUp());
+        useFixtureTime(fixture);
+        PageSyncTest::Peer &alice = fixture.a();
+        PageSyncTest::Peer &bob = fixture.b();
+        LiveChat live(alice);
+        ProfileController &p = live.profiles();
+        ProfilePageSync &bobSync = fixture.startSync(bob);
+        using PageSyncTest::TwoPeerFixture;
+        const auto requests = [&alice, &bob] {
+            QVector<PageRequestMessage> decoded;
+            for (const QByteArray &payload :
+                 TwoPeerFixture::payloadsFrom(bob, alice, ProfilePayloadKind::PageRequest)) {
+                if (const auto request = decodePageRequest(payload))
+                    decoded.push_back(*request);
+            }
+            return decoded;
+        };
+        const auto viewedAt = [&alice, &bob] { return alice.pages().contactPage(bob.account).value()->viewedAtMs; };
+
+        // Alice's own page tells Bob her client takes media; his picture
+        // reaches her and is evicted at once, its core kept.
+        QVERIFY(PageSyncTest::publishPage(*p.sync(), QStringLiteral("Alice's page")) > 0);
+        fixture.settle();
+        const QByteArray picture = realJpeg(QColor(QStringLiteral("#446688")));
+        QVERIFY(PageSyncTest::publishPage(bobSync, QStringLiteral("Bob's page"), picture) > 0);
+        fixture.settle();
+        QCOMPARE(TwoPeerFixture::payloadsFrom(alice, bob, ProfilePayloadKind::PageMedia).size(), 1);
+        QVERIFY(!p.sync()->contactPage(bob.account)->backgroundPresent);
+        QCOMPARE(requests().size(), 0); // nothing asked in the background
+
+        // Opening his page is a look: it is recorded, and the evicted picture
+        // is asked for again (ARCH §4.7 D).
+        fixture.clock.advance(1'000);
+        QVERIFY(p.openContact(bob.account.toHex()));
+        QCOMPARE(viewedAt(), fixture.clock.nowMs);
+        fixture.settle();
+        QCOMPARE(requests().size(), 1);
+        QCOMPARE(requests().first().wantMedia, QVector<QByteArray>{pageMediaHash(picture)});
+
+        // Refreshes of the same visit are not looks.
+        const qint64 firstLook = viewedAt();
+        fixture.clock.advance(ProfileController::refreshIntervalMs);
+        p.refresh();
+        p.refresh();
+        fixture.settle();
+        QCOMPARE(viewedAt(), firstLook);
+        QCOMPARE(requests().size(), 1);
+
+        // Coming back is: a new visit is a new look.
+        fixture.clock.advance(1'000);
+        p.closeAll();
+        QVERIFY(p.openContact(bob.account.toHex()));
+        QCOMPARE(viewedAt(), fixture.clock.nowMs);
+    }
+
+    void discardThatCannotClearTheStoredDraftTriesAgain()
+    {
+        PageSyncTest::TwoPeerFixture fixture;
+        QVERIFY(fixture.setUp());
+        useFixtureTime(fixture);
+        LiveChat live(fixture.a());
+        ProfileController &p = live.profiles();
+        ProfilePageSync &sync = *p.sync();
+        const auto stored = [&sync] {
+            const std::optional<Profile::Page> draft = sync.draft();
+            return draft ? draft->content.headline : QStringLiteral("<none>");
+        };
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        p.draft()->setHeadline(QStringLiteral("Published"));
+        QVERIFY(p.publish());
+
+        // Changes thrown away while the database refuses to clear them: the
+        // editor shows the published page, and the stored draft is cleared
+        // by the next autosave once it can be.
+        QVERIFY(p.beginEditing());
+        p.draft()->setHeadline(QStringLiteral("Thrown away"));
+        p.endEditing();
+        QCOMPARE(stored(), QStringLiteral("Thrown away"));
+        QVERIFY(p.beginEditing());
+        QVERIFY(p.survivingDraftAtMs() > 0);
+        sync.failDraftWritesForTesting(true);
+        p.discardChanges();
+        QCOMPARE(p.draft()->headline(), QStringLiteral("Published"));
+        QVERIFY(!p.draftDirty());
+        QCOMPARE(stored(), QStringLiteral("Thrown away"));
+        sync.failDraftWritesForTesting(false);
+        QTRY_COMPARE_WITH_TIMEOUT(stored(), QStringLiteral("<none>"), 5'000);
+        QCOMPARE(p.notice(), QString());
+        p.endEditing();
+        QVERIFY(p.beginEditing());
+        QCOMPARE(p.survivingDraftAtMs(), 0); // nothing thrown away comes back
+        QCOMPARE(p.draft()->headline(), QStringLiteral("Published"));
+
+        // Leaving the editor at once flushes that retry.
+        p.draft()->setHeadline(QStringLiteral("Thrown away again"));
+        p.endEditing();
+        QVERIFY(p.beginEditing());
+        sync.failDraftWritesForTesting(true);
+        p.startOver();
+        sync.failDraftWritesForTesting(false);
+        p.endEditing();
+        QCOMPARE(stored(), QStringLiteral("<none>"));
+        QVERIFY(p.beginEditing());
+        QCOMPARE(p.survivingDraftAtMs(), 0);
+
+        // A refusal that persists is told, not kept quiet.
+        p.draft()->setHeadline(QStringLiteral("Stuck"));
+        p.endEditing();
+        QVERIFY(p.beginEditing());
+        sync.failDraftWritesForTesting(true);
+        p.discardChanges();
+        p.endEditing();
+        QCOMPARE(p.notice(), QStringLiteral("Your changes could not be saved."));
+        sync.failDraftWritesForTesting(false);
     }
 
     void draftSurvivesRestart()

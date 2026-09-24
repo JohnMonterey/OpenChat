@@ -168,8 +168,9 @@ bool ProfilePageSync::saveDraft(const Profile::Page &draft, const QString &songS
         qCWarning(contactsLog) << "Not saving a profile page draft of" << core.size() << "bytes";
         return false;
     }
-    if (!repository->saveDraft(core, hashOf(page.background), hashOf(page.song), songSource, now())
-             .hasValue()) {
+    if (m_failDraftWritesForTesting
+        || !repository->saveDraft(core, hashOf(page.background), hashOf(page.song), songSource, now())
+                .hasValue()) {
         qCWarning(contactsLog) << "Could not save the profile page draft";
         return false;
     }
@@ -182,7 +183,7 @@ bool ProfilePageSync::discardDraft()
     ProfilePageRepository *repository = pages();
     if (repository == nullptr)
         return false;
-    if (!repository->clearDraft(now()).hasValue()) {
+    if (m_failDraftWritesForTesting || !repository->clearDraft(now()).hasValue()) {
         qCWarning(contactsLog) << "Could not discard the profile page draft";
         return false;
     }

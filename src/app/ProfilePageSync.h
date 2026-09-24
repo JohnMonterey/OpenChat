@@ -119,6 +119,9 @@ public:
     // store refused it.
     bool saveDraft(const Profile::Page &draft, const QString &songSource);
     bool discardDraft();
+    // Tests: saveDraft and discardDraft fail as a refused database write
+    // would (nothing stored, false returned) until turned off again.
+    void failDraftWritesForTesting(bool fail) { m_failDraftWritesForTesting = fail; }
     // Stores a processed blob and points the draft's slot for `kind` at it,
     // in one transaction. The bytes must pass the checks every contact will
     // make on arrival (a JPEG with 1 to 32 scans, or a well-formed song
@@ -259,6 +262,7 @@ private:
     bool m_pumpWakeQueued = false;
     bool m_callActive = false;
     bool m_failedClosedLogged = false;
+    bool m_failDraftWritesForTesting = false;
     QList<Answer> m_answers;   // FIFO, at most one per contact
     QList<Request> m_requests; // FIFO, at most one per contact
     std::optional<AccountId> m_lastServed; // round-robin cursor over deliveries

@@ -143,9 +143,17 @@ public:
     static constexpr int idleMediaReleaseMs = 1'000;
     static constexpr int maxRecentColors = 8;
 
+    // A relay handle lookup that got no answer at all (a session refused
+    // mid-refresh, a lost reply) counts as failed after this long.
+    static constexpr qint64 handleLookupTimeoutMs = 30'000;
+    // A failed lookup is asked again, but not more often than this (the 5 s
+    // refresh would otherwise hammer the relay).
+    static constexpr qint64 handleRetryMs = 60'000;
+
     // How the ProfilePageSync this controller builds keeps time and picks
     // delays. Tests replace production's wall clock and random source (and
     // its limits) so background requests stay out of exact envelope counts.
+    // The clock also times the controller's own relay handle lookups.
     struct SyncTuning final {
         ProfilePageSync::Clock clock;   // empty: the wall clock
         ProfilePageSync::Random random; // empty: QRandomGenerator
@@ -222,6 +230,9 @@ public:
     Profile::MediaRef addMockMedia(Profile::MediaKind kind, const QByteArray &bytes);
     void setMockLinkOnline(bool online);
     [[nodiscard]] ProfilePageSync *sync() const noexcept { return m_sync.get(); }
+    // Tests: the importer the Song tab's work runs on (its encode hook holds
+    // a window encode in flight).
+    [[nodiscard]] SongImporter &songImporterForTesting() { return songImporter(); }
 
     [[nodiscard]] bool isOpen() const noexcept { return !m_stack.isEmpty(); }
     [[nodiscard]] int depth() const noexcept { return int(m_stack.size()); }
@@ -367,6 +378,12 @@ private:
         QByteArray songHash;
         bool songPresent = false;
     };
+    // Who a stack entry is, as far as this viewer can tell: the account and
+    // the relay-confirmed handle it resolves to, else how it was opened.
+    struct PersonKey final {
+        QString accountHex, handle, requestId;
+        PersonRef::Kind kind = PersonRef::Kind::Own;
+    };
     // The file a song was cut from, kept for re-trimming (editor-only).
     struct SongSource final {
         QString path, fileName, formatLabel;
@@ -375,6 +392,13 @@ private:
         qint64 windowStartMs = 0;
         QByteArray songHash; // the encoded window it produced
     };
+    // What a running window encode was asked for, so its result lands only
+    // there: a new file's first cut, or a new window of the draft's song.
+    struct SongEncode final {
+        bool firstCut = false;
+        QString path;       // the file it cuts
+        QByteArray recutOf; // a new window: the draft song it replaces
+    };
 
     // Navigation
     void startStack(const PersonRef &person, Profile::Origin origin);
@@ -382,7 +406,8 @@ private:
     void truncateTo(int index);
     void navigated();
     [[nodiscard]] Profile::Origin originFromSection(int origin) const;
-    [[nodiscard]] static bool samePerson(const PersonRef &a, const PersonRef &b);
+    [[nodiscard]] PersonKey personKey(const PersonRef &ref) const;
+    [[nodiscard]] static bool samePerson(const PersonKey &a, const PersonKey &b);
     [[nodiscard]] PersonRef personForAccount(const AccountId &account, const QString &label,
                                              const QString &avatarKey, Profile::Origin reason) const;
 
@@ -399,6 +424,9 @@ private:
     [[nodiscard]] QString localName() const;
     [[nodiscard]] QVariantList tilesFor(const QVector<Profile::TopFriend> &friends) const;
     void requestHandle(const AccountId &account);
+    // Pending lookups past handleLookupTimeoutMs (or all of them) count as
+    // failed, so they are retried at the failed pace instead of never.
+    void expireLookups(bool all);
     void requestOwnHandle();
     void onAccountResolved(const AccountId &account, const QString &handle);
     void onAccountResolutionFailed(const AccountId &account);
@@ -440,6 +468,7 @@ private:
     void flushAutosave();
     void saveDraftNow();
     [[nodiscard]] bool publishNow();
+    void setPublishPending(bool pending);
     void finishPendingPublish(bool importSucceeded);
     [[nodiscard]] bool importsBusy() const;
     // Refs of the draft whose blob no longer resolves (collected while only
@@ -460,6 +489,12 @@ private:
     void onSongEncoded(const QByteArray &container, qint64 durationMs, qint64 windowStartMs);
     void onSongFailed(const QString &message);
     void startSongWindowEncode();
+    // Cuts the window of the file being imported (first cut) or of the
+    // draft's song, remembering which (m_songEncode).
+    void encodeSongWindow(bool firstCut);
+    // Stops a new window of the draft's song, waiting or being cut; true when
+    // there was one. A new file's cut is left alone.
+    bool dropSongRecut();
     // The file the song tab shows: one being imported once it is analysed,
     // else the draft song's own.
     [[nodiscard]] const SongSource &shownSongSource() const;
@@ -527,8 +562,8 @@ private:
     qreal m_backgroundProgress = 0;
     std::unique_ptr<SongImporter> m_songImporter;
     bool m_songAnalysing = false;
-    bool m_songEncoding = false;
-    bool m_songIsNewImport = false; // the next encode also takes the file's title and artist
+    std::optional<SongEncode> m_songEncode; // the window encode running, if any
+    bool m_songIsNewImport = false; // a new file is being imported: its first cut takes its title and artist
     SongSource m_songSource;        // the draft's song's file
     SongSource m_songImport;        // a file being imported, until its first encode lands
     QString m_songTitleTag, m_songArtistTag;
@@ -537,8 +572,8 @@ private:
 
     // Relay handle lookups, by account hex.
     QHash<QString, QString> m_resolvedHandles;
-    QSet<QString> m_pendingLookups;
-    QHash<QString, qint64> m_failedLookups;
+    QHash<QString, qint64> m_pendingLookups; // when it was asked
+    QHash<QString, qint64> m_failedLookups;  // when it failed
     bool m_ownHandleRequested = false;
 
     QVariantList m_candidates;

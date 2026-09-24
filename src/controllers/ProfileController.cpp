@@ -43,10 +43,6 @@ using Profile::Relationship;
 const QString lastTabKey = QStringLiteral("Profiles/lastEditorTab");
 const QString recentColorsKey = QStringLiteral("Profiles/recentColors");
 
-// A stranger's handle is asked of the relay again after a failed lookup, but
-// not more often than this (the 5 s refresh would otherwise hammer it).
-constexpr qint64 handleRetryMs = 60'000;
-
 std::optional<ProfileController::SyncTuning> &syncTuning()
 {
     static std::optional<ProfileController::SyncTuning> tuning;
@@ -56,6 +52,13 @@ std::optional<ProfileController::SyncTuning> &syncTuning()
 [[nodiscard]] qint64 nowMs()
 {
     return QDateTime::currentMSecsSinceEpoch();
+}
+
+// What times the relay handle lookups: the tuned clock in tests.
+[[nodiscard]] qint64 lookupNowMs()
+{
+    const std::optional<ProfileController::SyncTuning> &tuning = syncTuning();
+    return tuning && tuning->clock ? tuning->clock() : nowMs();
 }
 
 [[nodiscard]] std::optional<AccountId> accountFromHex(const QString &hex)
@@ -305,8 +308,19 @@ void ProfileController::setRelay(RelayClient *relay)
         connect(relay, &RelayClient::accountResolutionFailed, this,
                 [this](const AccountId &account, RelayDirectoryError) { onAccountResolutionFailed(account); });
         connect(relay, &RelayClient::connected, this, [this] {
+            // A new relay session: lookups the last one never answered are
+            // asked again.
             m_ownHandleRequested = false;
+            m_pendingLookups.clear();
             requestOwnHandle();
+            refreshPerson();
+        });
+        // A lookup turned away for an expired session gets no answer of its
+        // own (RelayClient says only authExpired): it waits out the failed
+        // pace while the session is renewed, then is asked again.
+        connect(relay, &RelayClient::authExpired, this, [this] {
+            expireLookups(true);
+            refreshPerson();
         });
     }
     requestOwnHandle();
@@ -328,11 +342,28 @@ void ProfileController::requestHandle(const AccountId &account)
     const QString hex = account.toHex();
     if (!m_relay || m_pendingLookups.contains(hex) || m_resolvedHandles.contains(hex))
         return;
+    const qint64 now = lookupNowMs();
     if (const auto failed = m_failedLookups.constFind(hex);
-        failed != m_failedLookups.cend() && nowMs() - *failed < handleRetryMs)
+        failed != m_failedLookups.cend() && now - *failed < handleRetryMs)
         return;
-    m_pendingLookups.insert(hex);
+    m_pendingLookups.insert(hex, now);
     m_relay->resolveAccount(account);
+}
+
+void ProfileController::expireLookups(bool all)
+{
+    // Some refusals reach no lookup signal (a 401 while the session is being
+    // renewed, a non-HTTPS endpoint): without this such a stub would show
+    // the owner's label as "pending" for the controller's whole life.
+    const qint64 now = lookupNowMs();
+    for (auto it = m_pendingLookups.begin(); it != m_pendingLookups.end();) {
+        if (all || now - it.value() >= handleLookupTimeoutMs) {
+            m_failedLookups.insert(it.key(), now);
+            it = m_pendingLookups.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void ProfileController::onAccountResolved(const AccountId &account, const QString &handle)
@@ -361,7 +392,7 @@ void ProfileController::onAccountResolutionFailed(const AccountId &account)
         m_ownHandleRequested = false; // try again on the next connect
     if (!m_pendingLookups.remove(hex))
         return;
-    m_failedLookups.insert(hex, nowMs());
+    m_failedLookups.insert(hex, lookupNowMs());
     refreshPerson();
 }
 
@@ -489,10 +520,13 @@ bool ProfileController::openTopFriend(int index)
     // the viewer's contact resolves to the roster instead.
     PersonRef ref = personForAccount(*account, friends.at(index).name, QString(), Origin::FromFriendSpace);
     ref.referrerName = m_person.firstName;
-    if (samePerson(ref, m_stack.last().person))
+    // Entries are compared by who they are, not by how each was opened: a
+    // contact found in Search by handle is the same person as their tile.
+    const PersonKey target = personKey(ref);
+    if (samePerson(target, personKey(m_stack.last().person)))
         return false;
-    for (int entry = 0; entry < m_stack.size(); ++entry) {
-        if (samePerson(ref, m_stack.at(entry).person)) {
+    for (int entry = 0; entry < int(m_stack.size()) - 1; ++entry) {
+        if (samePerson(target, personKey(m_stack.at(entry).person))) {
             truncateTo(entry); // history never loops
             return true;
         }
@@ -608,16 +642,29 @@ Origin ProfileController::originFromSection(int origin) const
     return Origin::FromChat;
 }
 
-bool ProfileController::samePerson(const PersonRef &a, const PersonRef &b)
+ProfileController::PersonKey ProfileController::personKey(const PersonRef &ref) const
 {
-    using Kind = PersonRef::Kind;
-    if (a.kind == Kind::Own || b.kind == Kind::Own)
-        return a.kind == b.kind;
-    if (!a.accountHex.isEmpty() || !b.accountHex.isEmpty())
+    // A handle resolves to the roster or request row that has it, and your
+    // own handle or account to you.
+    const PersonState state = resolveIdentity(ref);
+    return {state.accountHex, state.handle, ref.requestId, ref.kind};
+}
+
+bool ProfileController::samePerson(const PersonKey &a, const PersonKey &b)
+{
+    // Accounts decide when both are known. A handle names one account, so
+    // it decides when an account is missing on either side (a search result
+    // no row here has, a request whose account did not parse).
+    if (!a.accountHex.isEmpty() && !b.accountHex.isEmpty())
         return a.accountHex == b.accountHex;
+    if (!a.handle.isEmpty() && !b.handle.isEmpty())
+        return a.handle == b.handle;
+    if (!a.accountHex.isEmpty() || !b.accountHex.isEmpty())
+        return false;
+    using Kind = PersonRef::Kind;
     if (a.kind == Kind::Request && b.kind == Kind::Request)
         return a.requestId == b.requestId;
-    return a.kind == b.kind && a.handle == b.handle;
+    return a.kind == Kind::Own && b.kind == Kind::Own; // yourself, before your account is known
 }
 
 ProfileController::PersonRef ProfileController::personForAccount(const AccountId &account, const QString &label,
@@ -901,6 +948,7 @@ void ProfileController::refreshPerson()
 {
     if (m_stack.isEmpty())
         return;
+    expireLookups(false);
     PersonState state = resolveIdentity(m_stack.last().person);
     // Only the relay may name someone the roster does not.
     if (state.relationship != Relationship::SelfPerson && state.handle.isEmpty() && !state.handlePending) {
@@ -1393,9 +1441,10 @@ void ProfileController::resetDraftToPublished()
 {
     cancelImports();
     m_autosaveTimer.stop();
+    bool discardFailed = false;
     if (m_live) {
         if (m_sync)
-            (void)m_sync->discardDraft();
+            discardFailed = !m_sync->discardDraft();
     } else {
         m_mockDraft.reset();
         m_mockDraftSource.clear();
@@ -1405,6 +1454,12 @@ void ProfileController::resetDraftToPublished()
     m_history.clear();
     m_survivingDraftAtMs = 0;
     loadDraft(m_published);
+    // A stored draft that could not be cleared would be offered again next
+    // time ("You have unsaved changes…"). The draft now equals the published
+    // page, so the next autosave clears it (and reports a second failure);
+    // leaving the editor or closing flushes that save at once.
+    if (discardFailed)
+        scheduleAutosave();
     updateDirty();
     updateCandidates();
     emit editingChanged();
@@ -1453,10 +1508,7 @@ bool ProfileController::publish()
         return false;
     if (importsBusy()) {
         // "Saving…": the page goes out as soon as the picture or song is in.
-        if (!m_publishPending) {
-            m_publishPending = true;
-            emit publishedChanged();
-        }
+        setPublishPending(true);
         return true;
     }
     return publishNow();
@@ -1464,6 +1516,9 @@ bool ProfileController::publish()
 
 bool ProfileController::publishNow()
 {
+    // Whatever a Save was waiting for, this is it: a flag left standing
+    // would publish again on its own when a later import finished.
+    setPublishPending(false);
     closeGesture();
     // The draft's stored media columns are what a publish checks its refs
     // against, so they must name the draft's blobs first.
@@ -1502,6 +1557,14 @@ bool ProfileController::publishNow()
     emit publishedChanged();
     emit published(!m_linkOnline);
     return true;
+}
+
+void ProfileController::setPublishPending(bool pending)
+{
+    if (pending == m_publishPending)
+        return;
+    m_publishPending = pending;
+    emit publishedChanged();
 }
 
 void ProfileController::finishPendingPublish(bool importSucceeded)
@@ -1993,13 +2056,15 @@ void ProfileController::importSong(const QUrl &file)
     m_songImport.path = localPath(file);
     m_songIsNewImport = true;
     m_songAnalysing = true;
-    m_songEncoding = false;
+    m_songEncode.reset(); // analyse() cancels whatever the importer was doing
     emit importChanged();
     songImporter().analyse(m_songImport.path);
 }
 
 void ProfileController::onSongAnalysed(const SongSourceInfo &info)
 {
+    if (!m_songAnalysing || !m_songIsNewImport)
+        return; // no analysis is awaited here
     m_songAnalysing = false;
     m_songImport.fileName = info.fileName;
     m_songImport.formatLabel = info.formatLabel;
@@ -2008,14 +2073,26 @@ void ProfileController::onSongAnalysed(const SongSourceInfo &info)
     m_songImport.windowStartMs = info.defaultWindowStartMs;
     m_songTitleTag = info.title;
     m_songArtistTag = info.artist;
-    m_songEncoding = true;
-    emit importChanged();
-    songImporter().encodeWindow(m_songImport.path, info.defaultWindowStartMs);
+    encodeSongWindow(true);
 }
 
 void ProfileController::onSongEncoded(const QByteArray &container, qint64 durationMs, qint64 windowStartMs)
 {
-    m_songEncoding = false;
+    if (!m_songEncode)
+        return; // no encode is awaited here
+    const SongEncode request = *std::exchange(m_songEncode, std::nullopt);
+    // A cut lands only where it was asked for: a new file's while that file
+    // is still the one being imported, a new window of the draft's song while
+    // the draft still holds that song (never one removed or undone away).
+    const bool current = request.firstCut
+                             ? m_songIsNewImport && request.path == m_songImport.path
+                             : !m_songIsNewImport && !request.recutOf.isEmpty()
+                                   && request.recutOf == m_songSource.songHash;
+    if (!current) {
+        emit importChanged();
+        finishPendingPublish(true);
+        return;
+    }
     const std::optional<QByteArray> sha256 = storeLocalMedia(Profile::MediaKind::SongMedia, container);
     if (!sha256) {
         m_songIsNewImport = false;
@@ -2025,7 +2102,7 @@ void ProfileController::onSongEncoded(const QByteArray &container, qint64 durati
         finishPendingPublish(false);
         return;
     }
-    SongSource source = m_songIsNewImport ? m_songImport : m_songSource;
+    SongSource source = request.firstCut ? m_songImport : m_songSource;
     // Where the window really starts: the importer clamps it to the file.
     source.windowStartMs = windowStartMs;
     source.songHash = *sha256;
@@ -2037,7 +2114,7 @@ void ProfileController::onSongEncoded(const QByteArray &container, qint64 durati
     page.song.sha256 = *sha256;
     page.song.bytes = quint32(container.size());
     page.song.durationMs = quint32(std::clamp<qint64>(durationMs, 0, Profile::maxSongRefDurationMs));
-    if (m_songIsNewImport) {
+    if (request.firstCut) {
         // A new file brings its own title and artist (the base name when it
         // has no tags); a new window of the same file keeps what was typed.
         page.content.songTitle = Profile::sanitizeLine(m_songTitleTag, Profile::TextBounds::songTitle);
@@ -2056,7 +2133,7 @@ void ProfileController::onSongEncoded(const QByteArray &container, qint64 durati
 void ProfileController::onSongFailed(const QString &message)
 {
     m_songAnalysing = false;
-    m_songEncoding = false;
+    m_songEncode.reset();
     m_songIsNewImport = false;
     m_songImport = {};
     setNotice(message);
@@ -2066,7 +2143,10 @@ void ProfileController::onSongFailed(const QString &message)
 
 void ProfileController::setSongWindow(qint64 startMs)
 {
-    if (!m_editing)
+    // A new file's window moves only once it is analysed: until then the
+    // importer is busy with it (a window cut would cancel the analysis for
+    // good), and the song on screen is the one it replaces.
+    if (!m_editing || m_songAnalysing)
         return;
     SongSource &source = m_songIsNewImport && !m_songImport.fileName.isEmpty() ? m_songImport : m_songSource;
     if (source.path.isEmpty())
@@ -2074,9 +2154,9 @@ void ProfileController::setSongWindow(qint64 startMs)
     source.windowStartMs = std::max<qint64>(0, startMs);
     // A window encode still running is for where the handle was: its result
     // would only flash in before the one for where it rests.
-    if (m_songEncoding && !m_songAnalysing && m_songImporter) {
-        m_songImporter->cancel();
-        m_songEncoding = false;
+    if (m_songEncode) {
+        songImporter().cancel();
+        m_songEncode.reset();
     }
     // Re-encoded once the handle rests: a drag is one encode, not fifty.
     m_songWindowTimer.start();
@@ -2085,12 +2165,39 @@ void ProfileController::setSongWindow(qint64 startMs)
 
 void ProfileController::startSongWindowEncode()
 {
-    const SongSource &source = shownSongSource();
-    if (source.path.isEmpty())
+    if (m_songAnalysing)
+        return; // a new file is cut once it is analysed
+    const bool firstCut = m_songIsNewImport && !m_songImport.fileName.isEmpty();
+    if ((firstCut ? m_songImport : m_songSource).path.isEmpty()) {
+        // The song the window was for went while the handle rested: nothing
+        // is left to prepare, and a Save that waited goes ahead as it is.
+        emit importChanged();
+        finishPendingPublish(true);
         return;
-    m_songEncoding = true;
+    }
+    encodeSongWindow(firstCut);
+}
+
+void ProfileController::encodeSongWindow(bool firstCut)
+{
+    const SongSource &source = firstCut ? m_songImport : m_songSource;
+    m_songEncode = SongEncode{firstCut, source.path, firstCut ? QByteArray() : source.songHash};
     emit importChanged();
     songImporter().encodeWindow(source.path, source.windowStartMs);
+}
+
+bool ProfileController::dropSongRecut()
+{
+    if (m_songIsNewImport)
+        return false; // a new file's cut is not the draft song's: it still lands
+    bool dropped = m_songWindowTimer.isActive();
+    m_songWindowTimer.stop();
+    if (m_songEncode) {
+        songImporter().cancel();
+        m_songEncode.reset();
+        dropped = true;
+    }
+    return dropped;
 }
 
 const ProfileController::SongSource &ProfileController::shownSongSource() const
@@ -2102,40 +2209,54 @@ void ProfileController::removeSong()
 {
     if (!m_editing)
         return;
+    // "Remove song" leaves the page without one: a file still being imported
+    // goes too, and a new window being cut from the removed song is dropped
+    // (followDraftSong), so nothing in flight brings a song back.
+    const bool importing = m_songIsNewImport;
+    if (importing) {
+        songImporter().cancel();
+        m_songWindowTimer.stop();
+        m_songAnalysing = false;
+        m_songEncode.reset();
+        m_songIsNewImport = false;
+        m_songImport = {};
+    }
     Profile::Page page = m_draft.page();
-    if (!page.song.isSet())
+    if (page.song.isSet()) {
+        page.song = {};
+        page.content.songTitle.clear();
+        page.content.songArtist.clear();
+        editDraft(page);
+    } else if (!importing) {
         return;
-    page.song = {};
-    page.content.songTitle.clear();
-    page.content.songArtist.clear();
-    editDraft(page);
+    }
     emit importChanged();
+    // A Save waiting on what went goes ahead with the page as it now is.
+    finishPendingPublish(true);
 }
 
 void ProfileController::cancelImports()
 {
+    // Measured before the timer stops: a window waiting to be cut is busy too.
+    const bool wasBusy = importsBusy() || m_songIsNewImport;
     if (m_backgroundImporter)
         m_backgroundImporter->cancel();
     if (m_songImporter)
         m_songImporter->cancel();
     m_songWindowTimer.stop();
-    const bool wasBusy = importsBusy() || m_songIsNewImport;
     m_backgroundImporting = false;
     m_songAnalysing = false;
-    m_songEncoding = false;
+    m_songEncode.reset();
     m_songIsNewImport = false;
     m_songImport = {};
-    if (m_publishPending) {
-        m_publishPending = false;
-        emit publishedChanged();
-    }
+    setPublishPending(false);
     if (wasBusy)
         emit importChanged();
 }
 
 bool ProfileController::songImporting() const
 {
-    return m_songAnalysing || m_songEncoding || m_songWindowTimer.isActive();
+    return m_songAnalysing || m_songEncode.has_value() || m_songWindowTimer.isActive();
 }
 
 QVariantMap ProfileController::songSource() const
@@ -2171,11 +2292,18 @@ qint64 ProfileController::songClipBytes() const
 void ProfileController::followDraftSong()
 {
     const Profile::MediaRef &song = m_draft.page().song;
-    const SongSource next = song.isSet() ? m_songSources.value(song.sha256) : SongSource{};
-    if (next.songHash == m_songSource.songHash && next.path == m_songSource.path
-        && next.windowStartMs == m_songSource.windowStartMs)
+    SongSource next = song.isSet() ? m_songSources.value(song.sha256) : SongSource{};
+    // The same song keeps its source as it is: a window the owner is moving
+    // stays where the handle is while other fields are edited.
+    if (next.songHash == m_songSource.songHash)
         return;
-    m_songSource = next;
+    m_songSource = std::move(next);
+    // A new window being cut from the song the draft held is for that song
+    // only: once the draft holds another (removed, undone or redone away) it
+    // is dropped, and a Save waiting on it goes ahead with the draft as it
+    // now is (after the edit in progress has settled).
+    if (dropSongRecut())
+        QTimer::singleShot(0, this, [this] { finishPendingPublish(true); });
     emit importChanged();
 }
 

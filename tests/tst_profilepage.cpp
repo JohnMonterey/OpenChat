@@ -485,6 +485,90 @@ QVector<Module> columnOf(const QVector<ModulePlacement> &modules, Column column)
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Text helpers
+// ---------------------------------------------------------------------------
+
+// Whether `text` is valid UTF-16: every surrogate is half of a pair.
+bool isWellFormed(const QString &text)
+{
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        if (text.at(i).isHighSurrogate()) {
+            if (i + 1 == text.size() || !text.at(i + 1).isLowSurrogate())
+                return false;
+            ++i;
+        } else if (text.at(i).isLowSurrogate()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether the unit at `index` belongs to the character before it: the second
+// half of a surrogate pair, or a combining mark.
+bool continuesACharacter(const QString &text, qsizetype index)
+{
+    const QChar unit = text.at(index);
+    if (unit.isLowSurrogate())
+        return true;
+    char32_t codePoint = unit.unicode();
+    if (unit.isHighSurrogate() && index + 1 < text.size())
+        codePoint = QChar::surrogateToUcs4(unit, text.at(index + 1));
+    const QChar::Category category = QChar::category(codePoint);
+    return category == QChar::Mark_NonSpacing || category == QChar::Mark_SpacingCombining
+        || category == QChar::Mark_Enclosing;
+}
+
+// Every text field of a page, with the sanitiser ARCH §1.7 gives it:
+// paragraphs keep line breaks, single-line fields turn them into spaces. The
+// accessor adds the list entry it needs (an info line, a Top Friend) so one
+// text can be put into any field of an empty page.
+struct TextField {
+    const char *name;
+    bool paragraphs;
+    std::function<QString &(Page &)> text;
+};
+
+QVector<TextField> textFields()
+{
+    using P = Page;
+    // The lines before `index` hold a filler, so the text keeps its position.
+    const auto infoLine = [](int index) {
+        return [index](P &p) -> QString & {
+            while (p.content.infoLines.size() <= index)
+                p.content.infoLines.push_back(u"x"_s);
+            return p.content.infoLines[index];
+        };
+    };
+    return {
+        {"displayName", false, [](P &p) -> QString & { return p.content.displayName; }},
+        {"headline", false, [](P &p) -> QString & { return p.content.headline; }},
+        {"infoLines[0]", false, infoLine(0)},
+        {"infoLines[1]", false, infoLine(1)},
+        {"infoLines[2]", false, infoLine(2)},
+        {"interests.general", true, [](P &p) -> QString & { return p.content.interests.general; }},
+        {"interests.music", true, [](P &p) -> QString & { return p.content.interests.music; }},
+        {"interests.movies", true, [](P &p) -> QString & { return p.content.interests.movies; }},
+        {"interests.television", true, [](P &p) -> QString & { return p.content.interests.television; }},
+        {"interests.books", true, [](P &p) -> QString & { return p.content.interests.books; }},
+        {"interests.heroes", true, [](P &p) -> QString & { return p.content.interests.heroes; }},
+        {"details.hometown", false, [](P &p) -> QString & { return p.content.details.hometown; }},
+        {"details.occupation", false, [](P &p) -> QString & { return p.content.details.occupation; }},
+        {"details.education", false, [](P &p) -> QString & { return p.content.details.education; }},
+        {"details.languages", false, [](P &p) -> QString & { return p.content.details.languages; }},
+        {"aboutMe", true, [](P &p) -> QString & { return p.content.aboutMe; }},
+        {"meet", true, [](P &p) -> QString & { return p.content.meet; }},
+        {"songTitle", false, [](P &p) -> QString & { return p.content.songTitle; }},
+        {"songArtist", false, [](P &p) -> QString & { return p.content.songArtist; }},
+        {"topFriends.name", false,
+         [](P &p) -> QString & {
+             if (p.topFriends.isEmpty())
+                 p.topFriends.push_back({accountOf(1), QString()});
+             return p.topFriends.first().name;
+         }},
+    };
+}
+
 } // namespace
 
 class ProfilePageTest final : public QObject
@@ -993,6 +1077,14 @@ private slots:
         line("cluster at the bound", u"abe\u0301"_s, u"ab"_s, 3);
         line("emoji sequence at the bound", u"a\U0001F469\u200D\U0001F4BB"_s, u"a"_s, 4);
         line("flag at the bound", u"ab\U0001F1FA\U0001F1F8"_s, u"ab"_s, 5);
+        // After an Indic or Thai run Qt's boundary finder reports a boundary
+        // inside the emoji's surrogate pair; the cut must not trust it.
+        line("Hindi then emoji at the bound", u"नमस्ते \U0001F600"_s,
+             u"नमस्ते"_s, 8);
+        line("Thai then emoji at the bound", u"สวัสดี\U0001F600"_s,
+             u"สวัสดี"_s, 7);
+        para("Tamil then emoji at the bound", u"வணக்கம்\U0001F600"_s,
+             u"வணக்கம்"_s, 8);
         line("cut then trim", u"ab cd"_s, u"ab"_s, 3);
         para("cut then trim newlines", u"ab\n\ncd"_s, u"ab"_s, 4);
         line("exactly at the bound", u"abcd"_s, u"abcd"_s, 4);
@@ -1079,6 +1171,12 @@ private slots:
         // The bound holds, without splitting a character.
         QCOMPARE(Profile::sanitizeLive(QString(50, u'a'), 48, false).size(), 48);
         QCOMPARE(Profile::sanitizeLive(QString(47, u'a') + u"\U0001F600"_s, 48, false), QString(47, u'a'));
+        // Typing gets no second filtering pass, so the cut alone must keep
+        // the emoji whole after a script Qt's boundary finder misjudges.
+        const QString namaste = u"नमस्ते"_s;
+        QCOMPARE(Profile::sanitizeLive(namaste + u" \U0001F600"_s, 8, false), namaste + u" "_s);
+        QCOMPARE(Profile::sanitizeLive(namaste + u" \U0001F600"_s, 8, true), namaste + u" "_s);
+        QCOMPARE(Profile::sanitizeLive(namaste + u"\U0001F600"_s, 7, false), namaste);
 
         // Saving what was typed gives what pasting it would have given.
         for (const QString &typed : {u"  Dana  W. "_s, u"a\n\n\n\nb  "_s, u"x\u202E y\u200B"_s}) {
@@ -1087,6 +1185,78 @@ private slots:
             QCOMPARE(Profile::sanitizeLine(Profile::sanitizeLive(typed, 48, false), 48),
                      Profile::sanitizeLine(typed, 48));
         }
+    }
+
+    void truncationNeverSplitsACharacter_data()
+    {
+        QTest::addColumn<QString>("text");
+        // Each script with marks, then an emoji (a surrogate pair) and a
+        // flag, so every bound lands once inside a cluster or a pair.
+        const QString emoji = u" \U0001F600\U0001F1FA\U0001F1F8 end"_s;
+        QTest::newRow("Hindi") << u"नमस्ते"_s + emoji;
+        QTest::newRow("Hindi, no space") << u"नमस्ते\U0001F600\U0001F600"_s;
+        QTest::newRow("Bengali") << u"নমস্কার"_s + emoji;
+        QTest::newRow("Tamil") << u"வணக்கம்"_s + emoji;
+        QTest::newRow("Thai") << u"สวัสดี"_s + emoji;
+        QTest::newRow("Arabic") << u"مرحبا"_s + emoji;
+        QTest::newRow("Korean") << u"안녕"_s + emoji;
+        QTest::newRow("Latin with marks") << u"Zé̂ö"_s + emoji;
+        QTest::newRow("supplementary mark") << u"a\U00011013\U00011038b\U0001F600"_s; // Brahmi ka + aa sign
+    }
+
+    void truncationNeverSplitsACharacter()
+    {
+        QFETCH(QString, text);
+        for (const bool multiLine : {false, true}) {
+            const QString whole = Profile::sanitizeLive(text, 1000, multiLine);
+            for (int bound = 1; bound <= whole.size(); ++bound) {
+                const QString live = Profile::sanitizeLive(text, bound, multiLine);
+                const QString context = u"bound %1, multiLine %2"_s.arg(bound).arg(multiLine);
+                QVERIFY2(live.size() <= bound, qPrintable(context));
+                QVERIFY2(isWellFormed(live), qPrintable(context));
+                // A prefix of the text, cut between two characters.
+                QVERIFY2(whole.startsWith(live), qPrintable(context));
+                QVERIFY2(live.size() == whole.size() || !continuesACharacter(whole, live.size()),
+                         qPrintable(context));
+                // Typing it again changes nothing.
+                QCOMPARE(Profile::sanitizeLive(live, bound, multiLine), live);
+
+                const QString full =
+                    multiLine ? Profile::sanitizeParagraphs(text, bound) : Profile::sanitizeLine(text, bound);
+                QVERIFY2(full.size() <= bound && isWellFormed(full), qPrintable(context));
+                QCOMPARE(multiLine ? Profile::sanitizeParagraphs(full, bound) : Profile::sanitizeLine(full, bound),
+                         full);
+            }
+        }
+    }
+
+    void everyTextFieldUsesItsSanitizer_data()
+    {
+        QTest::addColumn<int>("field");
+        const QVector<TextField> fields = textFields();
+        for (int i = 0; i < fields.size(); ++i)
+            QTest::newRow(fields.at(i).name) << i;
+    }
+
+    void everyTextFieldUsesItsSanitizer()
+    {
+        QFETCH(int, field);
+        const TextField text = textFields().at(field);
+        // Paragraph fields keep line breaks (at most one blank line in a
+        // row). Single-line fields turn them into spaces: a contact's name
+        // or friend label must never draw a second line of its own.
+        const QString input = u"a\nb\n\n\nc"_s;
+        const QString expected = text.paragraphs ? u"a\nb\n\nc"_s : u"a b c"_s;
+        Page page;
+        text.text(page) = input;
+
+        Page normalized = Profile::normalized(page);
+        QCOMPARE(text.text(normalized), expected);
+        // What a contact receives reads the same.
+        const auto decoded = decodePageCore(encodePageCore(page));
+        QVERIFY(decoded);
+        Page received = *decoded;
+        QCOMPARE(text.text(received), expected);
     }
 
     void samePublishedContentComparesNormalizedForms()
@@ -1394,6 +1564,37 @@ private slots:
         QCOMPARE(decoded->wantMedia, (QVector<QByteArray>{hashOf('\x01'), hashOf('\x03')}));
     }
 
+    void requestDecoderKeepsTwoDistinctHashes()
+    {
+        // Written by hand, not by the encoder (which already trims): a
+        // hostile request naming one blob over and over must not make the
+        // owner answer with it more than once, nor ask for more than two.
+        const QByteArray h1 = hashOf('\x01'), h2 = hashOf('\x02'), h3 = hashOf('\x03');
+        const QCborMap base = bodyOf(encodePageRequest({qint64(5), {}}));
+        const auto requestWanting = [&](const QCborArray &wanted) { return tagged(setIn(base, {3}, wanted)); };
+
+        const QByteArray repeated = requestWanting({h1, h1, h2, h3, h1});
+        QVERIFY(repeated.size() <= maxPageRequestBytes);
+        auto decoded = decodePageRequest(repeated);
+        QVERIFY(decoded);
+        QCOMPARE(decoded->haveRevision, std::optional<qint64>(5));
+        QCOMPARE(decoded->wantMedia, (QVector<QByteArray>{h1, h2}));
+
+        // As many copies of one hash as fit under the size cap still ask for it once.
+        QCborArray copies;
+        while (requestWanting(copies + h1).size() <= maxPageRequestBytes)
+            copies.append(h1);
+        QVERIFY(copies.size() >= 6);
+        decoded = decodePageRequest(requestWanting(copies));
+        QVERIFY(decoded);
+        QCOMPARE(decoded->wantMedia, QVector<QByteArray>{h1});
+
+        // Every entry is checked, even past the two kept: a malformed third
+        // one still rejects the message.
+        QVERIFY(!decodePageRequest(requestWanting({h1, h2, h3.left(31)})));
+        QVERIFY(!decodePageRequest(requestWanting({h1, h1, h1, u"hash"_s})));
+    }
+
     void decodeRejectsMalformed_data()
     {
         QTest::addColumn<QByteArray>("payload");
@@ -1479,7 +1680,7 @@ private slots:
         QTest::newRow("missing JPEG magic")
             << withMediaData(Profile::MediaKind::BackgroundImageMedia, jpegLike(1).mid(2)) << media;
         QTest::newRow("JPEG with 33 scans")
-            << withMediaData(Profile::MediaKind::BackgroundImageMedia, jpegLike(maxJpegScans + 1)) << media;
+            << withMediaData(Profile::MediaKind::BackgroundImageMedia, jpegLike(33)) << media;
         QTest::newRow("JPEG with no scan") << withMediaData(Profile::MediaKind::BackgroundImageMedia, jpegLike(0))
                                            << media;
         QTest::newRow("JPEG cut short")
@@ -1750,6 +1951,18 @@ private slots:
         QCOMPARE(maxPageMediaMessageBytes, 229'888);
         QCOMPARE(maxPageCoreBytes, 24'576);
         QCOMPARE(maxPageRequestBytes, 256);
+        // The other wire bounds clients must agree on, and the scan limit
+        // that keeps a progressive "scan bomb" out. Tests elsewhere build
+        // their edge cases from these constants, so they are pinned here.
+        QCOMPARE(maxJpegScans, 32);
+        QCOMPARE(SongContainer::maxPreSkip, 3840);
+        QCOMPARE(SongContainer::maxTotalSamples, qint64(2'184'000));
+        QCOMPARE(Profile::maxRevision, (qint64(1) << 53) - 1);
+        QCOMPARE(Profile::maxRevision, qint64(9'007'199'254'740'991));
+
+        // A JPEG at the scan limit is accepted (33 is refused in decodeRejectsMalformed).
+        const PageMediaMessage mostScans = mediaOf(Profile::MediaKind::BackgroundImageMedia, jpegLike(32));
+        QVERIFY(decodePageMedia(encodePageMedia(mostScans)) == mostScans);
 
         const QByteArray jpeg = jpegLike(12, maxBackgroundImageBytes);
         const QByteArray song = rawSongBytes(largestSong());
@@ -1843,8 +2056,8 @@ private slots:
         // The longest song, with the one spare packet the count allows.
         SongContainer longest;
         longest.frameSamples = 2880;
-        longest.preSkip = SongContainer::maxPreSkip;
-        longest.totalSamples = SongContainer::maxTotalSamples;
+        longest.preSkip = 3840;           // the spec's bounds written out, so a
+        longest.totalSamples = 2'184'000; // constant that drifted still fails
         const int needed = int((longest.totalSamples + longest.preSkip + 2879) / 2880);
         longest.packets = QVector<QByteArray>(needed + 1, filled(40, '\x33'));
         QVERIFY(decodeSongContainer(encodeSongContainer(longest)) == longest);
@@ -1889,14 +2102,36 @@ private slots:
         row("channels 3", [](RawSong &s) { s.channels = 3; });
         row("reserved", [](RawSong &s) { s.reserved = 1; });
         row("44.1 kHz", [](RawSong &s) { s.sampleRate = 44'100; });
-        row("frameSamples 1000", [](RawSong &s) { s.frameSamples = 1000; });
-        row("preSkip 5000", [](RawSong &s) { s.preSkip = 5000; });
+        // Each of these keeps the ten packets consistent with its own frame
+        // size and pre-skip, so only the rule it names is broken.
+        const auto frameRow = [&](const char *tag, quint16 frameSamples) {
+            row(tag, [frameSamples](RawSong &s) {
+                s.frameSamples = frameSamples;
+                s.totalSamples = 10u * frameSamples - s.preSkip;
+            });
+        };
+        frameRow("frameSamples 480", 480);
+        frameRow("frameSamples 1000", 1000);
+        frameRow("frameSamples 2881", 2881);
+        frameRow("frameSamples 65535", 65535);
+        // Zero would divide the packet count's arithmetic: it must be
+        // refused before anything computes with it.
+        row("frameSamples 0", [](RawSong &s) { s.frameSamples = 0; });
+        row("preSkip 3841", [](RawSong &s) {
+            s.preSkip = 3841;
+            s.totalSamples = 10 * 2880 - 3841;
+        });
+        row("preSkip 65535", [](RawSong &s) {
+            s.preSkip = 65535;
+            s.totalSamples = 30 * 2880 - 65535;
+            s.packets = QVector<QByteArray>(30, filled(1, '\x42'));
+        });
         row("totalSamples 0", [](RawSong &s) {
             s.totalSamples = 0;
             s.packets.resize(1);
         });
         row("totalSamples over cap", [](RawSong &s) {
-            s.totalSamples = quint32(SongContainer::maxTotalSamples + 1);
+            s.totalSamples = 2'184'001;
             s.packets = QVector<QByteArray>(int((s.totalSamples + s.preSkip + 2879) / 2880), filled(1, '\x42'));
         });
         row("packetCount inconsistent: short", [](RawSong &s) { s.packets.removeLast(); });
@@ -1924,6 +2159,56 @@ private slots:
         QVERIFY(decodeSongContainer(rawSongBytes(RawSong{}))); // each row breaks one rule of this
         QVERIFY(decodeSongContainer(rawSongBytes(largestSong())));
         QVERIFY(!decodeSongContainer(bytes));
+    }
+
+    // The accepting side of each bound the rejections above test, so a rule
+    // drawn one step too tight fails as surely as one drawn too loose.
+    void containerAcceptsEveryBound_data()
+    {
+        QTest::addColumn<QByteArray>("bytes");
+        const auto row = [](const QByteArray &tag, const std::function<void(RawSong &)> &change) {
+            RawSong song;
+            change(song);
+            QTest::newRow(tag.constData()) << rawSongBytes(song);
+        };
+        for (const quint16 frameSamples : {quint16(960), quint16(1920), quint16(2880)}) {
+            row("frameSamples " + QByteArray::number(frameSamples), [frameSamples](RawSong &s) {
+                s.frameSamples = frameSamples;
+                s.totalSamples = 10u * frameSamples - s.preSkip;
+            });
+        }
+        row("preSkip 0", [](RawSong &s) {
+            s.preSkip = 0;
+            s.totalSamples = 10 * 2880;
+        });
+        row("preSkip 3840", [](RawSong &s) {
+            s.preSkip = 3840;
+            s.totalSamples = 10 * 2880 - 3840;
+        });
+        row("totalSamples 1", [](RawSong &s) {
+            s.totalSamples = 1;
+            s.packets.resize(1);
+        });
+        row("totalSamples at cap", [](RawSong &s) {
+            s.totalSamples = 2'184'000;
+            s.packets = QVector<QByteArray>(int((s.totalSamples + s.preSkip + 2879) / 2880), filled(1, '\x42'));
+        });
+        row("one spare packet", [](RawSong &s) { s.packets.push_back(filled(10, '\x42')); });
+        row("stereo", [](RawSong &s) { s.channels = 2; });
+        row("packet of 1275 bytes", [](RawSong &s) { s.packets[4] = filled(1275, '\x42'); });
+        QTest::newRow("exactly 224 KiB") << rawSongBytes(largestSong());
+    }
+
+    void containerAcceptsEveryBound()
+    {
+        QFETCH(QByteArray, bytes);
+        const auto decoded = decodeSongContainer(bytes);
+        QVERIFY(decoded);
+        // It reads what the bytes say, and writes the same bytes back.
+        QCOMPARE(qFromLittleEndian<quint16>(bytes.constData() + 12), quint16(decoded->frameSamples));
+        QCOMPARE(qFromLittleEndian<quint16>(bytes.constData() + 14), quint16(decoded->preSkip));
+        QCOMPARE(qFromLittleEndian<quint32>(bytes.constData() + 16), quint32(decoded->totalSamples));
+        QCOMPARE(encodeSongContainer(*decoded), bytes);
     }
 
     void containerClampsGainToAttenuation()

@@ -412,6 +412,8 @@ private slots:
     void garbageCollectionKeepsEveryReferencedBlob();
     void collectionDropsRowsOfNonContacts();
     void pendingMediaExpires();
+    void localBlobGraceRunsFromWhenItIsLetGo();
+    void replacedCoreForgetsItsMedia();
     void deliveryDeviceAndCapabilityRoundTrip();
     void forgetSentMediaForOneAccountAndExcept();
     void requestStateRoundTrip();
@@ -713,7 +715,7 @@ void ProfilePageStoreTest::draftAndPublishedRoundTrip()
     QCOMPARE(fresh.value().publishedRevision, qint64(0));
     QVERIFY(!fresh.value().publishedBackground && !fresh.value().publishedSong);
     QCOMPARE(fresh.value().publishedAtMs, qint64(0));
-    QVERIFY(store.pages->clearDraft().hasValue()); // harmless without a row
+    QVERIFY(store.pages->clearDraft(1'000).hasValue()); // harmless without a row
 
     QVERIFY(store.pages->savePublished(publishedCore, revision, backgroundHash, songHash, 6'000)
                 .hasValue());
@@ -746,7 +748,7 @@ void ProfilePageStoreTest::draftAndPublishedRoundTrip()
     QCOMPARE(page.value().draftUpdatedAtMs, qint64(8'000));
     QCOMPARE(page.value().publishedCore, publishedCore);
 
-    QVERIFY(store.pages->clearDraft().hasValue());
+    QVERIFY(store.pages->clearDraft(9'000).hasValue());
     page = store.pages->localPage();
     QVERIFY(page.value().draftCore.isEmpty());
     QVERIFY(!page.value().draftSong);
@@ -976,12 +978,17 @@ void ProfilePageStoreTest::pendingContactMediaCountsOnlyUnnamedRows()
     QCOMPARE(store.pages->pendingContactMediaCount(bob).value(), 1);
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
 
-    // A core that names a different picture turns the old one pending.
+    // A core that names a different picture adopts the stray one and forgets
+    // the picture it replaced rather than turning it pending; Bob's record of
+    // the same blob is his own and stays.
     QVERIFY(store.pages->storeContactPage(contactPage(alice, 2, "core 2", stray.hash, song.hash))
                 .value());
-    QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
+    QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 0);
+    QVERIFY(!store.pages->hasContactMedia(alice, background.hash, backgroundKind).value());
+    QVERIFY(store.pages->hasContactMedia(bob, background.hash, backgroundKind).value());
+    QCOMPARE(store.pages->pendingContactMediaCount(bob).value(), 1);
     QVERIFY(store.pages->storeContactPage(contactPage(alice, 3, "core 3")).value());
-    QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 3);
+    QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 0);
 }
 
 void ProfilePageStoreTest::contactPageStoresOnlyNewerRevisions()
@@ -1221,14 +1228,190 @@ void ProfilePageStoreTest::pendingMediaExpires()
     QCOMPARE(store.pages->collectGarbage(60'000, never).value(), 0);
     QVERIFY(store.pages->hasContactMedia(alice, recent.hash, backgroundKind).value());
 
-    // A newer core adopts the recent blob; the one it no longer names is
-    // pending again and, being old, expires.
+    // A newer core adopts the recent blob and forgets the one it no longer
+    // names at once, row and blob: nothing is left for the collection.
     QVERIFY(store.pages->storeContactPage(contactPage(alice, 2, "core 2", recent.hash)).value());
-    QCOMPARE(store.pages->collectGarbage(60'000, never).value(), 1);
+    QCOMPARE(store.blobCount(), qint64(1));
+    QCOMPARE(store.pages->collectGarbage(60'000, never).value(), 0);
     QVERIFY(!store.pages->hasContactMedia(alice, named.hash, backgroundKind).value());
     QVERIFY(store.pages->hasContactMedia(alice, recent.hash, backgroundKind).value());
     QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 0);
     QCOMPARE(store.blobCount(), qint64(1));
+}
+
+void ProfilePageStoreTest::localBlobGraceRunsFromWhenItIsLetGo()
+{
+    PageStore store;
+    QVERIFY(store.open());
+    constexpr qint64 minute = 60'000;
+    constexpr qint64 grace = 10 * minute;
+    // A collection at `nowMs` with a day's pending time-to-live and a
+    // ten-minute grace, as ProfilePageSync runs it.
+    const auto collectAt = [&](qint64 nowMs) {
+        return store.pages->collectGarbage(nowMs - 86'400'000, nowMs - grace).value();
+    };
+    const auto createdAt = [&](const Blob &media) {
+        RawDatabase raw(store.path());
+        return raw.integer("SELECT created_at_ms FROM profile_media WHERE hex(sha256) = '"
+                           + media.hash.toHex().toUpper() + "'");
+    };
+    const Blob first = blob('1');
+    const Blob second = blob('2');
+    const Blob song = blob('s');
+    const Blob third = blob('3');
+
+    // A picture imported long before it is replaced: the editor can undo the
+    // replacement for the whole grace, counted from the replacement.
+    QVERIFY(store.importIntoDraft(backgroundKind, first, 0));
+    QVERIFY(store.importIntoDraft(backgroundKind, second, 15 * minute));
+    QCOMPARE(createdAt(first), 15 * minute);
+    QCOMPARE(collectAt(15 * minute + 1'000), 0);
+    QCOMPARE(collectAt(25 * minute), 0);
+    // Undo names it again (the autosave), and the page can use it.
+    QVERIFY(store.pages->saveDraft("undo", first.hash, std::nullopt, QString(), 20 * minute)
+                .hasValue());
+    QCOMPARE(store.pages->localMedia(first.hash).value(),
+             std::optional<QByteArray>(first.data));
+
+    // Redo lets go of it again, and its grace starts over from then.
+    QVERIFY(store.pages->saveDraft("redo", second.hash, std::nullopt, QString(), 40 * minute)
+                .hasValue());
+    QCOMPARE(createdAt(first), 40 * minute);
+    QCOMPARE(createdAt(second), 20 * minute); // let go of by the undo, named again since
+    QCOMPARE(collectAt(50 * minute), 0);
+    QCOMPARE(collectAt(50 * minute + 1), 1);
+    QVERIFY(!store.pages->localMedia(first.hash).value());
+    QCOMPARE(store.blobCount(), qint64(1));
+
+    // Publishing keeps naming the draft's blobs, and an autosave that keeps
+    // naming them rewrites nothing: only a blob let go of is touched.
+    QVERIFY(store.importIntoDraft(songKind, song, 60 * minute));
+    QVERIFY(store.pages->savePublished("page 1", 1, second.hash, song.hash, 61 * minute)
+                .hasValue());
+    QVERIFY(store.pages->saveDraft("draft", second.hash, song.hash, QString(), 62 * minute)
+                .hasValue());
+    QCOMPARE(createdAt(second), 20 * minute);
+    QCOMPARE(createdAt(song), 60 * minute);
+
+    // A picture replaced in the draft while the published page still shows
+    // it is not let go of; discarding the draft lets go of the new one.
+    QVERIFY(store.importIntoDraft(backgroundKind, third, 63 * minute));
+    QCOMPARE(createdAt(second), 20 * minute);
+    QVERIFY(store.pages->clearDraft(90 * minute).hasValue());
+    QCOMPARE(createdAt(third), 90 * minute);
+    QCOMPARE(collectAt(100 * minute), 0);
+    QCOMPARE(collectAt(100 * minute + 1), 1);
+    QVERIFY(!store.pages->localMedia(third.hash).value());
+
+    // A refused publish lets go of nothing; the next one lets go of the
+    // blobs the page it replaces used.
+    QCOMPARE(errorCode(store.pages->savePublished("stale", 1, std::nullopt, std::nullopt,
+                                                  110 * minute)),
+             conflict);
+    QCOMPARE(createdAt(second), 20 * minute);
+    QVERIFY(store.pages->savePublished("page 2", 2, std::nullopt, std::nullopt, 120 * minute)
+                .hasValue());
+    QCOMPARE(createdAt(second), 120 * minute);
+    QCOMPARE(createdAt(song), 120 * minute);
+    QCOMPARE(collectAt(130 * minute), 0);
+    QCOMPARE(collectAt(130 * minute + 1), 2);
+    QCOMPARE(store.blobCount(), qint64(0));
+
+    // A clock that went back never moves the time back.
+    const Blob later = blob('L');
+    QVERIFY(store.importIntoDraft(backgroundKind, later, 200 * minute));
+    QVERIFY(store.importIntoDraft(backgroundKind, first, 150 * minute));
+    QCOMPARE(createdAt(later), 200 * minute);
+}
+
+void ProfilePageStoreTest::replacedCoreForgetsItsMedia()
+{
+    PageStore store;
+    QVERIFY(store.open());
+    const auto alice = AccountId::generate();
+    const auto bob = AccountId::generate();
+    QVERIFY(store.addContact(alice, ContactState::Accepted));
+    QVERIFY(store.addContact(bob, ContactState::Accepted));
+    const auto rowsOf = [&](const AccountId &account) {
+        RawDatabase raw(store.path());
+        return raw.integer("SELECT count(*) FROM contact_page_media WHERE hex(account_id) = '"
+                           + account.bytes().toHex().toUpper() + "'");
+    };
+
+    // A contact publishing revision after revision, each with a fresh
+    // picture and song sent after its core (so stored, being named): only
+    // the current two are ever held, none of them pending.
+    char fill = 'A';
+    for (qint64 revision = 1; revision <= 5; ++revision) {
+        const Blob background = blob(fill++);
+        const Blob song = blob(fill++);
+        const qint64 at = revision * 1'000;
+        QVERIFY(store.pages
+                    ->storeContactPage(
+                        contactPage(alice, revision, "core", background.hash, song.hash, at))
+                    .value());
+        QVERIFY(store.receive(alice, backgroundKind, background, at + 1));
+        QVERIFY(store.receive(alice, songKind, song, at + 2));
+        QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 0);
+        QCOMPARE(rowsOf(alice), qint64(2));
+        QCOMPARE(store.blobCount(), qint64(2)); // the replaced ones went at once
+        QCOMPARE(store.pages->receivedMediaBytes().value(), qint64(2'000));
+    }
+
+    // Media that overtook a newer core was not named by the core being
+    // replaced: it stays pending through the revision in between, and the
+    // core it belongs to adopts it.
+    const Blob early = blob('e');
+    QVERIFY(store.receive(alice, backgroundKind, early, 6'000));
+    QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
+    QVERIFY(store.pages
+                ->storeContactPage(
+                    contactPage(alice, 6, "core 6", blob('6').hash, std::nullopt, 6'100))
+                .value());
+    QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 1);
+    QCOMPARE(rowsOf(alice), qint64(1));
+    QVERIFY(store.pages
+                ->storeContactPage(contactPage(alice, 7, "core 7", early.hash, std::nullopt, 7'000))
+                .value());
+    QCOMPARE(store.pages->pendingContactMediaCount(alice).value(), 0);
+    QCOMPARE(store.pages->contactMedia(alice, early.hash, backgroundKind).value(),
+             std::optional<QByteArray>(early.data));
+
+    // A replaced blob that another contact or our own page also uses keeps
+    // its bytes for them; only this contact's record of it goes.
+    const Blob shared = blob('h');
+    const Blob ours = blob('o');
+    QVERIFY(store.importIntoDraft(songKind, ours, 8'000));
+    QVERIFY(store.pages
+                ->storeContactPage(contactPage(alice, 8, "core 8", shared.hash, ours.hash, 8'000))
+                .value());
+    QVERIFY(store.receive(alice, backgroundKind, shared, 8'001));
+    QVERIFY(store.receive(alice, songKind, ours, 8'002));
+    QVERIFY(store.receive(bob, backgroundKind, shared, 8'003));
+    QVERIFY(store.pages
+                ->storeContactPage(
+                    contactPage(alice, 9, "core 9", std::nullopt, std::nullopt, 9'000))
+                .value());
+    QCOMPARE(rowsOf(alice), qint64(0));
+    QCOMPARE(store.pages->contactMedia(bob, shared.hash, backgroundKind).value(),
+             std::optional<QByteArray>(shared.data));
+    QCOMPARE(store.pages->localMedia(ours.hash).value(), std::optional<QByteArray>(ours.data));
+
+    // A repeated or older core replaces nothing, so it forgets nothing.
+    const Blob current = blob('c');
+    QVERIFY(store.pages
+                ->storeContactPage(
+                    contactPage(alice, 10, "core 10", current.hash, std::nullopt, 10'000))
+                .value());
+    QVERIFY(store.receive(alice, backgroundKind, current, 10'001));
+    for (const qint64 stale : {qint64(10), qint64(3)}) {
+        const auto stored = store.pages->storeContactPage(
+            contactPage(alice, stale, "replay", std::nullopt, std::nullopt, 11'000));
+        QVERIFY(stored.hasValue());
+        QVERIFY(!stored.value());
+    }
+    QCOMPARE(store.pages->contactMedia(alice, current.hash, backgroundKind).value(),
+             std::optional<QByteArray>(current.data));
 }
 
 void ProfilePageStoreTest::deliveryDeviceAndCapabilityRoundTrip()

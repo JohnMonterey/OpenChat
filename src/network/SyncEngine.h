@@ -206,6 +206,9 @@ class SyncEngine final : public QObject
     Q_OBJECT
 
 public:
+    // See Config::maxDrainBacklogBytes.
+    static constexpr qint64 defaultMaxDrainBacklogBytes = 256 * 1024;
+
     struct Config final {
         AccountId localAccountId;
         DeviceId localDeviceId;
@@ -213,10 +216,20 @@ public:
         int drainBatch = 32;
         qint64 leaseMs = 30'000;
         // The outbox drain hands the link another envelope only while the
-        // transport's unsent bytes are at or below this, so a chat message or a
-        // call offer never queues behind megabytes already in the TLS buffer.
-        // A transport that cannot say (-1) is never held back; <= 0 disables.
-        qint64 maxDrainBacklogBytes = 64 * 1024;
+        // transport's unsent bytes are at or below this, so large envelopes
+        // (page media, 240 KiB each) never pile up megabytes deep in the TLS
+        // buffer. A transport that cannot say (-1) is never held back; <= 0
+        // disables.
+        //
+        // Call media shares the link as disposable datagrams, which the relay
+        // client drops while more than 128 KiB is unsent; the largest is a
+        // camera frame of at most 96 KiB. So media alone never leaves much
+        // more than 224 KiB waiting, and this gate sits above that: any lower,
+        // and video on an uplink slower than the camera would hold every chat
+        // message, receipt and call signal back for the whole call, where
+        // they must instead go first and cost the video frames.
+        // SyncCallTransport.cpp asserts the relation.
+        qint64 maxDrainBacklogBytes = defaultMaxDrainBacklogBytes;
     };
 
     // signer produces the Ed25519 signature over the canonical envelope signing

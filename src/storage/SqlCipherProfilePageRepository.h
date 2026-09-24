@@ -40,7 +40,7 @@ public:
     saveDraft(QByteArrayView core, const std::optional<QByteArray> &background,
               const std::optional<QByteArray> &song, const QString &songSource,
               qint64 nowMs) override;
-    [[nodiscard]] Result<void, RepositoryError> clearDraft() override;
+    [[nodiscard]] Result<void, RepositoryError> clearDraft(qint64 nowMs) override;
     [[nodiscard]] Result<void, RepositoryError>
     savePublished(QByteArrayView core, qint64 revision, const std::optional<QByteArray> &background,
                   const std::optional<QByteArray> &song, qint64 nowMs) override;

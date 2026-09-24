@@ -288,8 +288,28 @@ enum class CharClass {
     return QString::fromUcs4(out.constData(), out.size());
 }
 
+// Whether the UTF-16 unit at `index` belongs to the character before it: the
+// second half of a surrogate pair, or a combining mark (whose base is before
+// it).
+[[nodiscard]] bool continuesACharacter(const QString &text, qsizetype index) noexcept
+{
+    const QChar unit = text.at(index);
+    if (unit.isLowSurrogate())
+        return index > 0 && text.at(index - 1).isHighSurrogate();
+    char32_t c = unit.unicode();
+    if (unit.isHighSurrogate() && index + 1 < text.size() && text.at(index + 1).isLowSurrogate())
+        c = QChar::surrogateToUcs4(unit, text.at(index + 1));
+    return isMarkCategory(c);
+}
+
 // Cuts at the last grapheme-cluster boundary at or before maxLength, so a
 // surrogate pair, a base with its marks or an emoji sequence is never split.
+//
+// The boundary finder is not trusted alone: after a run of an Indic or Thai
+// script, Qt 6.11 reports a boundary inside the surrogate pair of an emoji
+// that follows. Full sanitising would drop the half character in its second
+// pass, but typing gets no second pass, so the cut itself steps back until it
+// no longer splits a pair or separates a mark from its base.
 [[nodiscard]] QString truncateAtCluster(const QString &text, qsizetype maxLength)
 {
     if (text.size() <= maxLength)
@@ -301,6 +321,8 @@ enum class CharClass {
     qsizetype cut = maxLength;
     if (!finder.isAtBoundary())
         cut = std::max<qsizetype>(finder.toPreviousBoundary(), 0);
+    while (cut > 0 && continuesACharacter(text, cut)) // cut < text.size(): the text is longer than the bound
+        --cut;
     return text.left(cut);
 }
 

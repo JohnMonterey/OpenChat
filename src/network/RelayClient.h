@@ -257,7 +257,11 @@ public:
     // is stored, sequenced or acknowledged, so unlike sendEnvelope there is no
     // asynchronous acceptance to wait for and no retry if the peer is offline.
     // Intended for real-time media, where a redelivered frame is already stale.
+    // While more than maxDatagramBacklogBytes is unsent the datagram is
+    // dropped (reported as success): media on a slow uplink loses frames
+    // rather than building up seconds of lag behind a congested socket.
     [[nodiscard]] Result<void, RelayCallError> sendDatagram(const CiphertextEnvelopeV1 &envelope);
+    static constexpr qint64 maxDatagramBacklogBytes = 128 * 1024;
     // Bytes queued on the socket and not yet written, or -1 without a socket.
     [[nodiscard]] qint64 pendingSendBytes() const;
 

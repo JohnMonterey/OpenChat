@@ -1,6 +1,7 @@
 #include "network/SyncEngine.h"
 
 #include "domain/MessageContent.h"
+#include "network/RelayClient.h"
 #include "protocol/CanonicalCborCodec.h"
 #include "protocol/CiphertextEnvelope.h"
 
@@ -462,12 +463,21 @@ public:
     void sendEnvelope(const CiphertextEnvelopeV1 &envelope) override
     {
         sent.append(envelope);
-        // A socket that has written nothing yet: what it is handed stays
-        // unsent until the test empties the backlog.
         if (backlogGrowsOnSend && backlog >= 0)
             backlog += encodeCanonical(envelope).size();
     }
-    void sendDatagram(const CiphertextEnvelopeV1 &envelope) override { datagrams.append(envelope); }
+    void sendDatagram(const CiphertextEnvelopeV1 &envelope) override
+    {
+        // RelayClient's rule: a datagram is dropped while more than its
+        // limit is unsent, and one admitted adds to the backlog like any
+        // other write.
+        if (backlogGrowsOnSend && backlog >= 0) {
+            if (backlog > RelayClient::maxDatagramBacklogBytes)
+                return;
+            backlog += encodeCanonical(envelope).size();
+        }
+        datagrams.append(envelope);
+    }
     void acknowledge(const EnvelopeId &envelopeId, quint64 watermark) override
     {
         acks.append({envelopeId, watermark});
@@ -477,6 +487,8 @@ public:
     bool connected = true;
     // -1 is "cannot say", what a transport without a backlog figure answers.
     qint64 backlog = -1;
+    // A socket that writes nothing: what it is handed stays unsent until the
+    // test empties the backlog.
     bool backlogGrowsOnSend = false;
     QVector<CiphertextEnvelopeV1> sent;
     QVector<CiphertextEnvelopeV1> datagrams;
@@ -642,6 +654,7 @@ private slots:
     void unreadableTaggedMessageIsConsumedWithoutARow();
     void drainPausesWhileTheLinkIsBacklogged();
     void drainResumesInOrder();
+    void callMediaAloneNeverHoldsTheDrainBack();
     void unknownBacklogNeverGates();
     void retryOfALargeEnvelopeWaitsForItsUpload();
     void linkUpIsSignalled();
@@ -2220,9 +2233,12 @@ void SyncEngineTest::unreadableTaggedMessageIsConsumedWithoutARow()
 
 void SyncEngineTest::drainPausesWhileTheLinkIsBacklogged()
 {
-    // A few page envelopes of headroom, little enough that a chat message
-    // behind them is not held up for long. makeConfig leaves it at its default.
-    QCOMPARE(makeConfig().maxDrainBacklogBytes, qint64(64 * 1024));
+    // About one page envelope of headroom, and more than call media alone
+    // can leave unsent (callMediaAloneNeverHoldsTheDrainBack). makeConfig
+    // leaves it at its default.
+    const qint64 gate = SyncEngine::defaultMaxDrainBacklogBytes;
+    QCOMPARE(gate, qint64(256 * 1024));
+    QCOMPARE(makeConfig().maxDrainBacklogBytes, gate);
 
     FakeStore store;
     FakeMls mls;
@@ -2236,10 +2252,10 @@ void SyncEngineTest::drainPausesWhileTheLinkIsBacklogged()
     engine.enqueueText(conversation, peer, QStringLiteral("two"));
     QCOMPARE(store.outboxes.size(), 2);
 
-    // The link is back but more than 64 KiB is still unsent: nothing is
+    // The link is back but more than the gate is still unsent: nothing is
     // claimed or sent, and no attempt is spent.
     transport.connected = true;
-    transport.backlog = 64 * 1024 + 1;
+    transport.backlog = gate + 1;
     transport.onConnected();
     // A send made meanwhile is stored and waits with the rest.
     engine.enqueueText(conversation, peer, QStringLiteral("three"));
@@ -2253,7 +2269,7 @@ void SyncEngineTest::drainPausesWhileTheLinkIsBacklogged()
     // Exactly at the limit the link takes one more envelope. That envelope
     // pushes the backlog over, and the check before the next claim holds the
     // other two back: the backlog is looked at per envelope, not per drain.
-    transport.backlog = 64 * 1024;
+    transport.backlog = gate;
     transport.backlogGrowsOnSend = true;
     transport.onConnected();
     QCOMPARE(transport.sent.size(), 1);
@@ -2282,7 +2298,7 @@ void SyncEngineTest::drainResumesInOrder()
 
     // A large upload is still leaving: the first envelope goes, the rest wait.
     transport.connected = true;
-    transport.backlog = 64 * 1024 - 1;
+    transport.backlog = SyncEngine::defaultMaxDrainBacklogBytes - 1;
     transport.backlogGrowsOnSend = true;
     transport.onConnected();
     QCOMPARE(transport.sent.size(), 1);
@@ -2299,6 +2315,40 @@ void SyncEngineTest::drainResumesInOrder()
     for (const StoredOutbox &outbox : std::as_const(store.outboxes))
         QCOMPARE(outbox.record.attemptCount, 1);
     QCOMPARE(mls.encryptCount, 3);
+}
+
+void SyncEngineTest::callMediaAloneNeverHoldsTheDrainBack()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.backlog = 0;
+    transport.backlogGrowsOnSend = true;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+
+    // Camera video on an uplink slower than the camera: unpaced frames of up
+    // to 96 KiB (plus the call packet's header and tag) are admitted while
+    // at most 128 KiB is unsent, and the rest are dropped. The backlog
+    // settles above 128 KiB, far over 64 KiB, and stays there for the call.
+    const QByteArray frame(96 * 1024 + 38, 'v');
+    for (int i = 0; i < 20; ++i)
+        engine.sendCallMedia(conversation, peer, frame);
+    QVERIFY(transport.datagrams.size() < 20);
+    QVERIFY2(transport.backlog > RelayClient::maxDatagramBacklogBytes,
+             qPrintable(QString::number(transport.backlog)));
+
+    // A text and a call signal still leave at once, ahead of the video:
+    // durable traffic is never held back by media that can be dropped.
+    engine.enqueueText(conversation, peer, QStringLiteral("can you hear me?"));
+    engine.sendCallSignal(conversation, peer, QByteArray("ANSWER"));
+    QCOMPARE(transport.sent.size(), 2);
+    QCOMPARE(transport.sent.at(0).ciphertext, QByteArray("ENC:can you hear me?"));
+    QCOMPARE(transport.sent.at(1).ciphertext, QByteArray("ENC:ANSWER"));
+    for (const StoredOutbox &outbox : std::as_const(store.outboxes))
+        QCOMPARE(outbox.record.attemptCount, 1);
 }
 
 void SyncEngineTest::unknownBacklogNeverGates()

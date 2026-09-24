@@ -90,7 +90,8 @@ public:
     // Stores the blob AND points the draft's slot for `kind` at it in one
     // transaction (creating the local row if needed), so no collection can
     // delete a just-imported blob before the draft names it. The slot's
-    // previous blob is left to the collection's grace period.
+    // previous blob is left to the collection's grace period, which starts
+    // now (see collectGarbage).
     [[nodiscard]] virtual Result<void, RepositoryError>
     putLocalDraftMedia(int kind, QByteArrayView sha256, QByteArrayView data, qint64 nowMs) = 0;
 
@@ -125,6 +126,12 @@ public:
     // `localBlobOlderThanMs` that neither the local page nor any contact's
     // media record references. Both arguments are cut-off times (now minus the
     // time-to-live and now minus the grace). Returns the blobs deleted.
+    //
+    // A blob the local page stops naming (replaced, removed, discarded or
+    // superseded by a publish) counts as stored at that moment, so the grace
+    // runs from when it was let go of: the editor's undo can bring it back
+    // for that long however long ago it was imported. Undo reaching back
+    // further may find it gone (localMedia() empty).
     [[nodiscard]] virtual Result<int, RepositoryError>
     collectGarbage(qint64 pendingOlderThanMs, qint64 localBlobOlderThanMs) = 0;
 
@@ -156,12 +163,13 @@ public:
 
     // Replaces every draft field. An empty core is InvalidInput (a draft is
     // always an encoded core; clearDraft() drops one); an empty songSource is
-    // stored as none.
+    // stored as none. Every write to the local page takes `nowMs` because a
+    // blob it stops naming starts its grace then (see collectGarbage).
     [[nodiscard]] virtual Result<void, RepositoryError>
     saveDraft(QByteArrayView core, const std::optional<QByteArray> &background,
               const std::optional<QByteArray> &song, const QString &songSource,
               qint64 nowMs) = 0;
-    [[nodiscard]] virtual Result<void, RepositoryError> clearDraft() = 0;
+    [[nodiscard]] virtual Result<void, RepositoryError> clearDraft(qint64 nowMs) = 0;
 
     // Stores the published page and clears the draft, in the same
     // transaction. The revision must be above the one published before
@@ -178,7 +186,14 @@ public:
 
     // Returns false (and stores nothing) when revision <= the stored one. A
     // newer revision keeps the stored viewedAtMs: the viewer's last look is
-    // about the contact, not about one revision of their page.
+    // about the contact, not about one revision of their page. In the same
+    // transaction it forgets the media only the replaced core named (their
+    // records, and each such blob nothing else references, at once): that
+    // media can never be shown again, and left behind it would count as
+    // pending, so every revision a contact publishes would add blobs past
+    // the per-contact bound. The owner forgets having sent it the same way
+    // (forgetSentMediaExcept), so a later revision that names it again
+    // sends it again.
     [[nodiscard]] virtual Result<bool, RepositoryError>
     storeContactPage(const StoredContactPage &page) = 0;
 

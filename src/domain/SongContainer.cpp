@@ -27,9 +27,13 @@ constexpr qsizetype lengthBytes = 2;
 }
 
 // At most one packet more than needed: an encoder may flush a final packet
-// that holds only its look-ahead.
+// that holds only its look-ahead. The frame size is checked here too, not
+// only by the callers' earlier checks, so no reordering of those can divide
+// by a hostile zero.
 [[nodiscard]] bool packetCountFits(qint64 count, qint64 totalSamples, qint64 preSkip, qint64 frameSamples) noexcept
 {
+    if (!isFrameSize(frameSamples))
+        return false;
     const qint64 minimum = minimumPackets(totalSamples, preSkip, frameSamples);
     return count >= minimum && count <= minimum + 1;
 }

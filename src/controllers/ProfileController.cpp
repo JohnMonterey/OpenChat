@@ -198,7 +198,7 @@ ProfileController::ProfileController(ChatController &chats, QObject *parent)
     connect(&ProfileMediaStore::instance(), &ProfileMediaStore::imageReady, this, &ProfileController::onImageReady);
 
     const QSettings settings;
-    m_lastTab = std::clamp(settings.value(lastTabKey, 0).toInt(), 0, int(Profile::EditorTab::LayoutTab));
+    m_lastTab = std::clamp(settings.value(lastTabKey, 0).toInt(), 0, int(Profile::EditorTab::PanelsTab));
     for (const QString &name : settings.value(recentColorsKey).toStringList()) {
         if (QColor::isValidColorName(name) && !m_recentColors.contains(name) && m_recentColors.size() < maxRecentColors)
             m_recentColors.append(name);
@@ -433,13 +433,19 @@ Profile::MediaRef ProfileController::addMockMedia(Profile::MediaKind kind, const
         return ref; // live pages carry only media that really arrived
     ref.sha256 = pageMediaHash(bytes);
     ref.bytes = quint32(bytes.size());
-    if (kind == Profile::MediaKind::BackgroundImageMedia) {
+    if (kind == Profile::MediaKind::BackgroundImageMedia || kind == Profile::MediaKind::PanelImageMedia) {
         QBuffer buffer;
         buffer.setData(bytes);
         QImageReader reader(&buffer);
         const QSize size = reader.size();
-        ref.width = quint16(std::clamp(size.width(), 0, Profile::maxBackgroundDimension));
-        ref.height = quint16(std::clamp(size.height(), 0, Profile::maxBackgroundDimension));
+        const int limit = kind == Profile::MediaKind::PanelImageMedia ? Profile::PanelBounds::maxImageDimension
+                                                                       : Profile::maxBackgroundDimension;
+        ref.width = quint16(std::clamp(size.width(), 0, limit));
+        ref.height = quint16(std::clamp(size.height(), 0, limit));
+    } else if (const auto clip = decodeClipContainer(bytes)) {
+        ref.width = quint16(clip->width);
+        ref.height = quint16(clip->height);
+        ref.durationMs = quint32(clip->durationMs);
     } else if (const auto song = decodeSongContainer(bytes)) {
         ref.durationMs = quint32(song->durationMs());
     }
@@ -1949,15 +1955,27 @@ void ProfileController::moveTopFriend(int from, int to)
     editDraft(page);
 }
 
+// Whether `entry` is the module the Layout tab names `module`: a built-in
+// module by its id, a panel as panelModuleBase + its panel id.
+[[nodiscard]] static bool isLayoutEntry(const Profile::ModulePlacement &entry, int module)
+{
+    if (module > ProfilePageObject::panelModuleBase)
+        return entry.module == Profile::Module::CustomPanelModule
+               && int(entry.panel) == module - ProfilePageObject::panelModuleBase;
+    return int(entry.module) == module;
+}
+
 void ProfileController::moveModule(int module, int column, int index)
 {
-    if (!m_editing || module < int(Profile::Module::HandleModule) || module > int(Profile::Module::TopFriendsModule)
+    const bool builtIn = module >= int(Profile::Module::HandleModule) && module <= int(Profile::Module::TopFriendsModule);
+    const bool panel = module > ProfilePageObject::panelModuleBase && module <= ProfilePageObject::panelModuleBase + 255;
+    if (!m_editing || (!builtIn && !panel)
         || (column != int(Profile::Column::NarrowColumn) && column != int(Profile::Column::WideColumn)))
         return;
     Profile::Page page = m_draft.page();
     QVector<Profile::ModulePlacement> modules = page.modules.isEmpty() ? Profile::defaultModules() : page.modules;
     const auto found = std::find_if(modules.begin(), modules.end(), [module](const Profile::ModulePlacement &entry) {
-        return int(entry.module) == module;
+        return isLayoutEntry(entry, module);
     });
     if (found == modules.end())
         return;
@@ -1986,7 +2004,7 @@ void ProfileController::setModuleVisible(int module, bool visible)
     if (page.modules.isEmpty())
         page.modules = Profile::defaultModules();
     for (Profile::ModulePlacement &entry : page.modules) {
-        if (int(entry.module) == module)
+        if (isLayoutEntry(entry, module))
             entry.visible = visible;
     }
     if (page == m_draft.page())
@@ -2042,7 +2060,7 @@ QVariantMap ProfileController::contrastFor(int inkRole, const QColor &color) con
 
 void ProfileController::setLastTab(int tab)
 {
-    if (tab < int(Profile::EditorTab::ThemesTab) || tab > int(Profile::EditorTab::LayoutTab) || tab == m_lastTab)
+    if (tab < int(Profile::EditorTab::ThemesTab) || tab > int(Profile::EditorTab::PanelsTab) || tab == m_lastTab)
         return;
     // Every gesture belongs to a control of the tab being left (a slider
     // resting, a field's focus period), which goes with it: what follows in

@@ -50,6 +50,9 @@ public:
 
     void paint(QPainter *painter) override;
 
+protected:
+    void componentComplete() override;
+
 signals:
     void segmentKeysChanged();
     void loopChanged();
@@ -67,6 +70,7 @@ private:
     QStringList m_keys;
     bool m_loop = false;
     bool m_playing = false;
+    bool m_wantPlaying = false; // asked for before the item was complete
     QVector<ClipContainer> m_segments;
     QVector<qint64> m_segmentStartMs;
     qint64 m_durationMs = 0;

@@ -554,8 +554,14 @@ ProfilePageObject::Lists ProfilePageObject::computeLists() const
         const QString name = !isPanel ? Profile::moduleName(placement.module)
                              : filled(m_page.panels.at(panelAt).title) ? m_page.panels.at(panelAt).title
                                                                        : QStringLiteral("Untitled panel");
-        lists.moduleArrangement.append(QVariantMap{{QStringLiteral("module"), int(placement.module)},
+        // A panel is listed as panelModuleBase + its id, like the columns
+        // list it, so every entry has an id of its own.
+        const int id = isPanel ? panelModuleBase + int(placement.panel) : int(placement.module);
+        lists.moduleArrangement.append(QVariantMap{{QStringLiteral("module"), id},
                                                    {QStringLiteral("panel"), int(placement.panel)},
+                                                   {QStringLiteral("glyph"), isPanel ? Profile::panelIconGlyph(
+                                                                                           m_page.panels.at(panelAt).icon)
+                                                                                     : QString()},
                                                    {QStringLiteral("name"), name},
                                                    {QStringLiteral("column"), int(placement.column)},
                                                    {QStringLiteral("visible"), placement.visible},

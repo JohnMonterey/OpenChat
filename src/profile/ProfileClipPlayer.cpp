@@ -8,6 +8,7 @@
 #include <QPointer>
 
 #include <algorithm>
+#include <utility>
 
 namespace OpenChat {
 
@@ -30,11 +31,24 @@ ProfileClipPlayer::~ProfileClipPlayer()
     stopSound();
 }
 
+void ProfileClipPlayer::componentComplete()
+{
+    QQuickPaintedItem::componentComplete();
+    // `playing: true` may have been set before the keys were.
+    if (std::exchange(m_wantPlaying, false))
+        setPlaying(true);
+}
+
 void ProfileClipPlayer::setSegmentKeys(const QStringList &keys)
 {
     if (keys == m_keys)
         return;
-    setPlaying(false);
+    if (m_playing) {
+        m_playing = false;
+        m_timer.stop();
+        stopSound();
+        emit playingChanged();
+    }
     m_keys = keys;
     m_segments.clear();
     m_segmentStartMs.clear();
@@ -55,6 +69,10 @@ void ProfileClipPlayer::setLoop(bool loop)
 
 void ProfileClipPlayer::setPlaying(bool playing)
 {
+    if (!isComponentComplete()) {
+        m_wantPlaying = playing;
+        return;
+    }
     if (playing == m_playing)
         return;
     if (playing) {

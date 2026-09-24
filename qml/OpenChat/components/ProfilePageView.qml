@@ -48,7 +48,7 @@ Item {
     readonly property bool preview: mode === "preview"
     readonly property var render: page ? page.render : null
     readonly property string ownerFirstName: profiles ? profiles.personFirstName : ""
-    readonly property bool popupOpen: false
+    readonly property bool popupOpen: lightbox.opened
 
     // --- Geometry (SPEC §3.1)
     readonly property int margin: Math.max(16, Math.min(32, 16 + Math.round((width - 720) / 4)))
@@ -104,6 +104,9 @@ Item {
             narrow.push("m" + narrowModules[i]);
         for (let j = 0; j < wideModules.length; ++j)
             wide.push("m" + wideModules[j]);
+        // The editor's preview ends the wide column with "Add new panel".
+        if (pageView.preview && pageView.page.canAddPanel)
+            wide.push("addpanel");
         if (pageView.twoColumns)
             return { narrow: narrow, wide: wide };
         // One column: Identity, Contacting, the banner, then the wide
@@ -335,6 +338,12 @@ Item {
         Accessible.ignored: true
     }
 
+    ProfilePanelLightbox {
+        id: lightbox
+        z: 10
+        anchors.fill: parent
+    }
+
     // The backdrop is the Background tab's target in the preview.
     MouseArea {
         anchors.fill: parent
@@ -450,6 +459,10 @@ Item {
                 id: loader
                 width: parent.width
                 sourceComponent: pageView.componentFor(slot.moduleKey)
+                onLoaded: {
+                    if (item.panelId !== undefined)
+                        item.panelId = pageView.panelIdOf(slot.moduleKey);
+                }
             }
             Loader {
                 anchors.fill: parent
@@ -472,8 +485,24 @@ Item {
         }
     }
 
+    // The owner's panels are keyed "m" + (panelModuleBase + their id).
+    readonly property int panelModuleBase: 100
+    function panelIdOf(key) {
+        if (key.length < 2 || key.charAt(0) !== "m")
+            return 0;
+        const value = parseInt(key.slice(1));
+        return value >= pageView.panelModuleBase ? value - pageView.panelModuleBase : 0;
+    }
+    // A picture of a panel, opened large over the page.
+    function openLightbox(images, index) {
+        lightbox.show(images, index);
+    }
+
     function componentFor(key) {
+        if (pageView.panelIdOf(key) > 0)
+            return panelModule;
         switch (key) {
+        case "addpanel": return addPanelTile;
         case "identity": return identityModule;
         case "contacting": return contactingModule;
         case "banner": return bannerModule;
@@ -490,7 +519,11 @@ Item {
     // The editor tab a module opens (ARCH §8.1's frozen strings); "" for
     // the app's own boxes, which are inert.
     function targetOf(key) {
+        const panel = pageView.panelIdOf(key);
+        if (panel > 0)
+            return "panel:" + panel;
         switch (key) {
+        case "addpanel": return "addPanel";
         case "identity": return "name";
         case "m" + Profile.SongModule: return "song";
         case "m" + Profile.InterestsModule: return "interests";
@@ -538,9 +571,10 @@ Item {
         const blurbs = "m" + Profile.BlurbsModule;
         const interests = "m" + Profile.InterestsModule;
         const details = "m" + Profile.DetailsModule;
+        const panel = pageView.panelIdOf(key) > 0;
         switch (kind) {
         case "body":
-            return { on: key === blurbs || key === interests || key === details, item: null };
+            return { on: key === blurbs || key === interests || key === details || panel, item: null };
         case "label":
             return { on: key === interests || key === details, item: null };
         case "link":
@@ -569,6 +603,8 @@ Item {
         return "";
     }
     function placeholderOf(key) {
+        if (pageView.panelIdOf(key) > 0)
+            return "Add something to this panel. Empty panels are hidden from contacts.";
         switch (key) {
         case "m" + Profile.SongModule: return "Add a song. Empty boxes are hidden from contacts.";
         case "m" + Profile.InterestsModule: return "Add your interests. Empty boxes are hidden from contacts.";
@@ -579,6 +615,17 @@ Item {
         return "";
     }
 
+    Component {
+        id: panelModule
+        ProfilePanelModule { view: pageView }
+    }
+    Component {
+        id: addPanelTile
+        ProfileAddPanelTile {
+            view: pageView
+            readonly property bool hasPreviewContent: true
+        }
+    }
     Component {
         id: identityModule
         ProfileIdentityModule { view: pageView }

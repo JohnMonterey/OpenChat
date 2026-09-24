@@ -18,9 +18,9 @@ Item {
     readonly property var page: view ? view.page : null
     readonly property bool preview: view ? view.preview : false
     readonly property var render: panel ? panel.render : null
-    property var data: ({})
+    property var info: ({})
     function refresh() {
-        block.data = block.page && block.blockId > 0 ? block.page.block(block.blockId) : {};
+        block.info = block.page && block.blockId > 0 ? block.page.block(block.blockId) : {};
     }
     onBlockIdChanged: refresh()
     Component.onCompleted: refresh()
@@ -32,8 +32,8 @@ Item {
         }
     }
 
-    readonly property int kind: block.data.kind || 0
-    readonly property bool filled: block.data.hasContent === true
+    readonly property int kind: block.info.kind || 0
+    readonly property bool filled: block.info.hasContent === true
     // A divider shows between content; an empty block only in the preview.
     visible: block.kind === Profile.DividerBlock || block.filled || block.preview
     implicitHeight: visible && loader.item ? loader.item.implicitHeight : 0
@@ -54,11 +54,11 @@ Item {
 
     function openPicture(index) {
         if (block.preview) {
-            block.view.editRequested("panel:" + block.data.panelId);
+            block.view.editRequested("panel:" + block.info.panelId);
             return;
         }
         if (block.view && typeof block.view.openLightbox === "function")
-            block.view.openLightbox(block.data.images || [], index);
+            block.view.openLightbox(block.info.images || [], index);
     }
 
     component BodyText: Text {
@@ -127,10 +127,10 @@ Item {
     Component {
         id: textBlock
         Item {
-            readonly property int style: block.data.textStyle || 0
-            readonly property int align: block.data.align === Profile.CenterAlign ? Text.AlignHCenter
-                                       : block.data.align === Profile.EndAlign ? Text.AlignRight : Text.AlignLeft
-            readonly property string words: block.data.text || ""
+            readonly property int style: block.info.textStyle || 0
+            readonly property int align: block.info.align === Profile.CenterAlign ? Text.AlignHCenter
+                                       : block.info.align === Profile.EndAlign ? Text.AlignRight : Text.AlignLeft
+            readonly property string words: block.info.text || ""
             implicitHeight: words.length === 0 ? hint.implicitHeight
                             : style === Profile.CalloutText ? callout.height
                             : style === Profile.QuoteText ? quote.height : plain.implicitHeight
@@ -167,6 +167,7 @@ Item {
                 }
                 BodyText {
                     id: quoteText
+                    objectName: "profilePanelText_" + block.blockId
                     x: 14
                     y: 4
                     width: parent.width - 14
@@ -187,6 +188,7 @@ Item {
                 border.color: block.ruleColor
                 BodyText {
                     id: calloutText
+                    objectName: "profilePanelText_" + block.blockId
                     x: 12
                     y: 10
                     width: parent.width - 24
@@ -205,9 +207,9 @@ Item {
         id: pictureBlock
         Column {
             id: pictures
-            readonly property var images: block.data.images || []
-            readonly property int gallery: block.data.gallery || 0
-            readonly property int frame: block.data.frame === undefined ? Profile.RoundedFrame : block.data.frame
+            readonly property var images: block.info.images || []
+            readonly property int gallery: block.info.gallery || 0
+            readonly property int frame: block.info.frame === undefined ? Profile.RoundedFrame : block.info.frame
             readonly property int columns: images.length <= 1 ? 1 : images.length === 2 || images.length === 4 ? 2 : 3
             readonly property real gap: 8
             spacing: 6
@@ -278,19 +280,19 @@ Item {
         Column {
             spacing: 6
             Hint {
-                visible: block.data.hasVideo !== true
+                visible: block.info.hasVideo !== true
                 text: "Add a video in the editor."
             }
             ProfilePanelVideo {
-                visible: block.data.hasVideo === true
+                visible: block.info.hasVideo === true
                 width: parent.width
-                entry: block.data
+                entry: block.info
                 panelBlock: block
             }
             Caption {
-                visible: (block.data.caption || "").length > 0
+                visible: (block.info.caption || "").length > 0
                 width: parent.width
-                text: block.data.caption || ""
+                text: block.info.caption || ""
             }
         }
     }
@@ -300,8 +302,8 @@ Item {
         id: listBlock
         Column {
             id: list
-            readonly property var items: block.data.items || []
-            readonly property int listStyle: block.data.listStyle || 0
+            readonly property var items: block.info.items || []
+            readonly property int listStyle: block.info.listStyle || 0
             readonly property bool games: listStyle === Profile.GameList
             spacing: games ? 8 : 5
 
@@ -462,7 +464,7 @@ Item {
     Component {
         id: dividerBlock
         Item {
-            readonly property int style: block.data.divider || 0
+            readonly property int style: block.info.divider || 0
             implicitHeight: style === Profile.SpaceDivider ? 14 : 16
             Rectangle {
                 visible: parent.style === Profile.LineDivider
@@ -496,7 +498,7 @@ Item {
                             ink: block.linkInk
                             opacity: 0.8
                         }
-                        function dividerKind() { return block.data.divider || 0; }
+                        function dividerKind() { return block.info.divider || 0; }
                     }
                 }
             }

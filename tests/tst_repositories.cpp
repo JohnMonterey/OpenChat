@@ -98,7 +98,11 @@ void RepositoryTest::existingHistoryRemainsReadWhenUpgrading()
         QCOMPARE(sqlite3_open(directory.filePath("profile.sqlite3").toUtf8().constData(), &handle), SQLITE_OK);
         const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> connection(handle, &sqlite3_close);
         QVERIFY(RepositorySql::execute(handle, "PRAGMA key = '0123456789abcdef0123456789abcdef';"));
-        // Undo 016 (profile pages) as well: a version-13 file has none of it.
+        // Undo 017 (profile panels) and 016 (profile pages) as well: a
+        // version-13 file has none of either.
+        QVERIFY(RepositorySql::execute(
+            handle, "DROP VIEW local_page_named_media; DROP VIEW contact_page_named_media; "
+                    "DROP TABLE local_page_panel_media; DROP TABLE contact_page_panel_media;"));
         QVERIFY(RepositorySql::execute(
             handle, "DROP TABLE profile_media; DROP TABLE local_profile_page; "
                     "DROP TABLE contact_pages; DROP TABLE contact_page_media; "

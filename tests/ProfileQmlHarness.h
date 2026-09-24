@@ -29,6 +29,7 @@
 #include "cosmetics/CosmeticTypes.h"
 #include "profile/ProfileFonts.h"
 #include "profile/ProfileMediaStore.h"
+#include "profile/ProfilePanelMedia.h"
 #include "profile/ProfileQmlTypes.h"
 #include "profile/ProfileRenderPolicy.h"
 #include "profile/SongPlayer.h"
@@ -100,6 +101,7 @@ inline void resetProfileSingletons()
     ProfileRenderPolicy::instance().resetForTesting();
     ProfileMediaStore::instance().resetForTesting();
     SongLibrary::instance().clear();
+    PanelMediaLibrary::instance().clear();
 }
 
 template<typename Test>

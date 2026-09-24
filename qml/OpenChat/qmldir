@@ -96,6 +96,15 @@ ProfileAboutTab 1.0 components/ProfileAboutTab.qml
 ProfileFriendsTab 1.0 components/ProfileFriendsTab.qml
 ProfileSongTab 1.0 components/ProfileSongTab.qml
 ProfileLayoutTab 1.0 components/ProfileLayoutTab.qml
+ProfileAddPanelTile 1.0 components/ProfileAddPanelTile.qml
+ProfileBlockEditor 1.0 components/ProfileBlockEditor.qml
+ProfilePanelBlock 1.0 components/ProfilePanelBlock.qml
+ProfilePanelEditor 1.0 components/ProfilePanelEditor.qml
+ProfilePanelLightbox 1.0 components/ProfilePanelLightbox.qml
+ProfilePanelModule 1.0 components/ProfilePanelModule.qml
+ProfilePanelPicture 1.0 components/ProfilePanelPicture.qml
+ProfilePanelsTab 1.0 components/ProfilePanelsTab.qml
+ProfilePanelVideo 1.0 components/ProfilePanelVideo.qml
 ProfileColorWell 1.0 components/ProfileColorWell.qml
 ProfileColorPicker 1.0 components/ProfileColorPicker.qml
 ProfileSegmented 1.0 components/ProfileSegmented.qml

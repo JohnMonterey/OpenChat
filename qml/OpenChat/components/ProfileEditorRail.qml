@@ -30,11 +30,13 @@ FocusScope {
         { index: 5, name: "about", label: "About me", glyph: "pencil", group: 1 },
         { index: 6, name: "friends", label: "Top Friends", glyph: "people", group: 1 },
         { index: 7, name: "song", label: "Song", glyph: "note", group: 1 },
-        { index: 8, name: "layout", label: "Layout", glyph: "columns", group: 1 }
+        { index: 8, name: "layout", label: "Layout", glyph: "columns", group: 1 },
+        { index: 9, name: "panels", label: "Panels", glyph: "plus", group: 1 }
     ]
     readonly property int currentIndex: profiles ? profiles.lastTab : 0
-    // Tabs shrink from 52 to 44 px so all nine fit the 720×560 window.
-    readonly property int tabHeight: Math.max(44, Math.min(52, Math.floor((height - 12 - 2 * 22) / 9)))
+    // Tabs shrink from 52 to 40 px so all ten fit the 720×560 window, a call
+    // strip included.
+    readonly property int tabHeight: Math.max(40, Math.min(52, Math.floor((height - 12 - 2 * 22) / tabs.length)))
 
     function choose(index) {
         if (profiles && index >= 0 && index < tabs.length)
@@ -134,13 +136,24 @@ FocusScope {
             anchors.centerIn: parent
             spacing: 6
             Glyph {
-                visible: button.glyph.length > 0
+                visible: button.glyph.length > 0 && !shapeGlyph.visible
                 anchors.verticalCenter: parent.verticalCenter
                 width: button.glyphSize
                 height: button.glyphSize
                 kind: button.glyph
                 ink: Theme.iconInk
                 stroke: 1.5
+            }
+            // The panels' icons this canvas does not draw come from the
+            // page's own glyph set.
+            ProfileGlyph {
+                id: shapeGlyph
+                visible: ["copy", "film", "gamepad", "heart", "book", "chat", "trophy", "star"].indexOf(button.glyph) >= 0
+                anchors.verticalCenter: parent.verticalCenter
+                width: button.glyphSize
+                height: button.glyphSize
+                kind: button.glyph
+                ink: Theme.iconInk
             }
             Text {
                 visible: button.label.length > 0

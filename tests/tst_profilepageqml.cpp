@@ -19,6 +19,7 @@
 #include "models/ContactListModel.h"
 #include "models/RequestListModel.h"
 #include "network/RelayClient.h"
+#include "profile/ClipCodec.h"
 #include "profile/ProfileAmbientItem.h"
 #include "profile/ProfileMediaStore.h"
 #include "profile/ProfileNameTextItem.h"
@@ -35,6 +36,7 @@
 #include <QFile>
 #include <QFont>
 #include <QImage>
+#include <QPainter>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -259,6 +261,30 @@ QByteArray jpegOf(const QColor &left, const QColor &right, const QSize &size = Q
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
     image.save(&buffer, "JPG", 90);
+    return bytes;
+}
+
+// A photo-like JPEG: a sky gradient in `hue` with a sun and a horizon, so a
+// capture of a panel shows real-looking pictures.
+QByteArray photoOf(int hue, const QSize &size)
+{
+    QImage image(size, QImage::Format_RGB32);
+    QPainter painter(&image);
+    QLinearGradient sky(0, 0, 0, size.height());
+    sky.setColorAt(0, QColor::fromHsv(hue, 120, 250));
+    sky.setColorAt(1, QColor::fromHsv((hue + 40) % 360, 200, 150));
+    painter.fillRect(image.rect(), sky);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setBrush(QColor::fromHsv((hue + 180) % 360, 90, 255));
+    painter.setPen(Qt::NoPen);
+    painter.drawEllipse(QPointF(size.width() * 0.7, size.height() * 0.35), size.height() * 0.14, size.height() * 0.14);
+    painter.setBrush(QColor::fromHsv((hue + 20) % 360, 160, 70));
+    painter.drawRect(QRectF(0, size.height() * 0.72, size.width(), size.height() * 0.28));
+    painter.end();
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "JPG", 85);
     return bytes;
 }
 
@@ -1740,6 +1766,175 @@ private slots:
                      int(Profile::BackgroundKind::PatternBackground));
         shot = stage.grab();
         QVERIFY(!near(at(shot, QPointF(10, 400)), QColor(200, 30, 30), 60));
+    }
+
+    // --- Custom panels (docs/profile-panels.md) ---------------------------------
+
+    // Jessica's page with panels of every kind: what a viewer sees of each,
+    // with its pictures decoded, and nothing of an empty panel.
+    void panelsRenderEveryBlockKind()
+    {
+        Stage stage;
+        ProfileController &profiles = stage.profiles();
+        Profile::Page page = Reference::seededPage(QStringLiteral("jessica")).value();
+        const auto picture = [&](int hue) {
+            return profiles.addMockMedia(Profile::MediaKind::PanelImageMedia, photoOf(hue, QSize(480, 360)));
+        };
+
+        Profile::Panel games = Profile::panelFromTemplate(page, Profile::PanelTemplate::GamesPanel);
+        games.blocks[0].items = {
+            {QStringLiteral("Halo 3"), QStringLiteral("Xbox 360 · 400 hours"), 5, Profile::GameStatus::AllTimeFavorite,
+             picture(210)},
+            {QStringLiteral("Guitar Hero II"), QStringLiteral("PS2"), 4, Profile::GameStatus::PlayingWithFriends,
+             picture(20)},
+            {QStringLiteral("Katamari Damacy"), QString(), 0, Profile::GameStatus::WantToPlay, {}}};
+        page.panels.push_back(games);
+
+        Profile::Panel photos = Profile::panelFromTemplate(page, Profile::PanelTemplate::PhotoPanel);
+        photos.title = QStringLiteral("Warped Tour '07");
+        photos.blocks[0].images = {{picture(330), QStringLiteral("Front row!!")}, {picture(270), QString()},
+                                   {picture(120), QStringLiteral("merch haul")}};
+        Profile::Block quote = Profile::newBlock(page, Profile::BlockKind::TextBlock);
+        quote.id = 900;
+        quote.textStyle = Profile::TextStyle::QuoteText;
+        quote.text = QStringLiteral("Best. Summer. Ever.");
+        Profile::Block hearts = Profile::newBlock(page, Profile::BlockKind::DividerBlock);
+        hearts.id = 901;
+        hearts.divider = Profile::DividerStyle::HeartsDivider;
+        photos.blocks = {photos.blocks.first(), hearts, quote};
+        page.panels.push_back(photos);
+
+        Profile::Panel empty;
+        empty.id = 40;
+        empty.title = QStringLiteral("Nothing here yet");
+        page.panels.push_back(empty);
+        page.revision += 1;
+        page = Profile::normalized(page);
+        profiles.setMockPage(QStringLiteral("jessica"), page);
+
+        QVERIFY(stage.load(QSize(1000, 1500)));
+        QVERIFY(openPerson(stage, QStringLiteral("jessica")));
+        QQuickItem *gamesBox = stage.item(QStringLiteral("profilePanelBox_") + QString::number(page.panels.at(0).id));
+        QQuickItem *photoBox = stage.item(QStringLiteral("profilePanelBox_") + QString::number(page.panels.at(1).id));
+        QVERIFY(gamesBox);
+        QVERIFY(photoBox);
+        QCOMPARE(stage.item(QStringLiteral("profilePanelBox_40")), nullptr); // empty: never shown to viewers
+        QCOMPARE(gamesBox->property("title").toString(), QStringLiteral("Favorite games"));
+        QCOMPARE(gamesBox->property("glyph").toString(), QStringLiteral("gamepad"));
+        QCOMPARE(stage.text(QStringLiteral("profilePanelText_900")), QStringLiteral("Best. Summer. Ever."));
+
+        // Every picture decodes (the covers too), off the GUI thread.
+        QList<QQuickItem *> pictures;
+        for (QQuickItem *item : allItems(stage.view())) {
+            if (item->objectName() == u"profilePanelPicture")
+                pictures.append(item);
+        }
+        QCOMPARE(pictures.size(), 3);
+        for (QQuickItem *item : std::as_const(pictures))
+            QTRY_VERIFY(item->property("ready").toBool());
+
+        if (const QByteArray directory = qgetenv("OPENCHAT_CAPTURE_DIR"); !directory.isEmpty())
+            stage.grab().save(QString::fromLocal8Bit(directory) + QStringLiteral("/panels-view.png"));
+
+        // A picture opens large, and Esc puts it away.
+        stage.click(pictures.first());
+        QQuickItem *lightbox = stage.item(QStringLiteral("profilePanelLightbox"));
+        QVERIFY(lightbox);
+        QTRY_VERIFY(stage.item(QStringLiteral("profilePanelLightboxImage"))->property("ready").toBool());
+        QVERIFY(stage.page()->property("popupOpen").toBool());
+        stage.key(Qt::Key_Escape);
+        QTRY_COMPARE(stage.item(QStringLiteral("profilePanelLightbox")), nullptr);
+        QVERIFY(profiles.isOpen()); // Esc closed the picture, not the page
+    }
+
+    // A panel video shows its poster and length, plays on a click (never by
+    // itself) and stops on the next.
+    void panelVideoPlaysOnlyWhenClicked()
+    {
+        if (!clipCodecAvailable())
+            QSKIP("This build has no libvpx");
+        Stage stage;
+        ProfileController &profiles = stage.profiles();
+        const QSize size(320, 180);
+        QVector<QImage> frames;
+        for (int i = 0; i < 15; ++i) {
+            QImage frame(size, QImage::Format_RGB32);
+            frame.fill(QColor::fromHsv((i * 20) % 360, 200, 220));
+            frames.push_back(frame);
+        }
+        const auto encoded = encodeClipVideo(frames, 15, {200}, 150 * 1024);
+        QVERIFY(encoded);
+        const QVector<QByteArray> segments = packClip({*encoded}, {1'000}, size, 15, ClipAudio{}, maxClipSegmentBytes);
+        QCOMPARE(segments.size(), 1);
+
+        Profile::Page page = Reference::seededPage(QStringLiteral("michael")).value();
+        Profile::Panel panel = Profile::panelFromTemplate(page, Profile::PanelTemplate::VideoPanel);
+        panel.blocks[0].video.segments = {profiles.addMockMedia(Profile::MediaKind::VideoSegmentMedia, segments.first())};
+        panel.blocks[0].video.poster = profiles.addMockMedia(Profile::MediaKind::PanelImageMedia,
+                                                             photoOf(200, QSize(320, 180)));
+        panel.blocks[0].caption = QStringLiteral("Skate park");
+        QVERIFY(panel.blocks[0].video.segments.first().isSet());
+        page.panels = {panel};
+        page.revision += 1;
+        page = Profile::normalized(page);
+        profiles.setMockPage(QStringLiteral("michael"), page);
+        QVERIFY(stage.load(QSize(1000, 1100)));
+        QVERIFY(openPerson(stage, QStringLiteral("michael")));
+
+        QQuickItem *box = stage.item(QStringLiteral("profilePanelBox_") + QString::number(panel.id));
+        QVERIFY(box);
+        QQuickItem *video = nullptr;
+        for (QQuickItem *item : allItems(box)) {
+            if (QString::fromLatin1(item->metaObject()->className()).startsWith(u"ProfilePanelVideo"))
+                video = item;
+        }
+        QVERIFY(video);
+        QCOMPARE(video->property("playing").toBool(), false);
+        QTRY_VERIFY(video->property("present").toBool());
+
+        stage.click(video);
+        QTRY_VERIFY(video->property("playing").toBool());
+        QQuickItem *player = nullptr;
+        QTRY_VERIFY([&] {
+            for (QQuickItem *item : allItems(video)) {
+                if (qstrcmp(item->metaObject()->className(), "OpenChat::ProfileClipPlayer") == 0)
+                    player = item;
+            }
+            return player != nullptr;
+        }());
+        QVERIFY(player->property("playing").toBool());
+        QCOMPARE(player->property("durationMs").toLongLong(), 1'000);
+        QCOMPARE(player->property("hasSound").toBool(), false);
+
+        stage.click(video);
+        QTRY_VERIFY(!video->property("playing").toBool());
+    }
+
+    // A panel with its own colours wears them (through readability), and
+    // Plain style puts it back in OpenChat's own look with every other box.
+    void panelColoursFollowPlainStyle()
+    {
+        Stage stage;
+        ProfileController &profiles = stage.profiles();
+        Profile::Page page = Reference::seededPage(QStringLiteral("ryan")).value();
+        Profile::Panel panel = Profile::panelFromTemplate(page, Profile::PanelTemplate::TextPanel);
+        panel.blocks[0].text = QStringLiteral("Hello from my own panel.");
+        panel.look = {true, 0x7A1FA2, 0xFFFFFF, 0xF3E5F5, 0x2A0A30, true};
+        page.panels = {panel};
+        page.revision += 1;
+        page = Profile::normalized(page);
+        profiles.setMockPage(QStringLiteral("ryan"), page);
+        QVERIFY(stage.load());
+        QVERIFY(openPerson(stage, QStringLiteral("ryan")));
+        QQuickItem *box = stage.item(QStringLiteral("profilePanelBox_") + QString::number(panel.id));
+        QVERIFY(box);
+        auto *own = qvariant_cast<ProfileRenderStyle *>(box->property("render"));
+        QVERIFY(own);
+        QVERIFY(own != profiles.view()->render());
+        QCOMPARE(QColor(own->boxFill().rgb()).name(), QStringLiteral("#f3e5f5"));
+
+        profiles.setPlainStyle(true);
+        QTRY_VERIFY(qvariant_cast<ProfileRenderStyle *>(box->property("render")) == profiles.view()->render());
     }
 
     // --- Motion ------------------------------------------------------------------

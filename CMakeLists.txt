@@ -295,6 +295,15 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/ProfileFriendsTab.qml
         qml/OpenChat/components/ProfileSongTab.qml
         qml/OpenChat/components/ProfileLayoutTab.qml
+        qml/OpenChat/components/ProfileAddPanelTile.qml
+        qml/OpenChat/components/ProfileBlockEditor.qml
+        qml/OpenChat/components/ProfilePanelBlock.qml
+        qml/OpenChat/components/ProfilePanelEditor.qml
+        qml/OpenChat/components/ProfilePanelLightbox.qml
+        qml/OpenChat/components/ProfilePanelModule.qml
+        qml/OpenChat/components/ProfilePanelPicture.qml
+        qml/OpenChat/components/ProfilePanelsTab.qml
+        qml/OpenChat/components/ProfilePanelVideo.qml
         qml/OpenChat/components/ProfileColorWell.qml
         qml/OpenChat/components/ProfileColorPicker.qml
         qml/OpenChat/components/ProfileSegmented.qml

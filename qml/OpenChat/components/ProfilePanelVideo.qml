@@ -23,6 +23,16 @@ Item {
     Keys.onSpacePressed: toggle()
     Keys.onReturnPressed: toggle()
 
+    // A call ringing or starting silences the page, as it does its song.
+    Connections {
+        target: video.panelBlock && video.panelBlock.view ? video.panelBlock.view.profiles : null
+        ignoreUnknownSignals: true
+        function onViewerChanged() {
+            if (target.callActive)
+                video.playing = false;
+        }
+    }
+
     function toggle() {
         if (video.preview) {
             if (video.panelBlock && video.panelBlock.view)

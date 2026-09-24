@@ -126,6 +126,8 @@ private:
 // itemChange() here.
 class ProfileItemAnimation final : public QObject
 {
+    Q_OBJECT
+
 public:
     using TickFn = std::function<void(int frame)>;
     using StateFn = std::function<void(bool running)>;

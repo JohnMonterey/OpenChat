@@ -435,16 +435,16 @@ private slots:
         QFETCH(int, preset);
         QFETCH(bool, dark);
         QSettings().setValue(QStringLiteral("Appearance/darkMode"), dark);
-        const PresetPage shown = presetPage(Preset(preset));
+        const PresetPage target = presetPage(Preset(preset));
 
         const QList<QSize> sizes = capturing() ? QList<QSize>{QSize(860, 680), QSize(1280, 900)}
                                                : QList<QSize>{QSize(860, 680)};
         for (const QSize &size : sizes) {
             Stage stage;
             stage.chat.setLocalUserName(QStringLiteral("Daniel"));
-            stage.profiles().setMockPage(shown.contact, shown.page);
+            stage.profiles().setMockPage(target.contact, target.page);
             QVERIFY(stage.load(size));
-            QVERIFY(openPerson(stage, shown.contact));
+            QVERIFY(openPerson(stage, target.contact));
             QCOMPARE(stage.profiles().pageState(), int(PageState::CustomPage));
             QQuickItem *view = stage.view();
             QVERIFY(view);
@@ -469,11 +469,35 @@ private slots:
             QCOMPARE(shot.size() / shot.devicePixelRatio(), size);
             // The identity card is filled with the box colour, not the backdrop.
             QQuickItem *card = stage.item(QStringLiteral("profileIdentityBox"));
+            const ProfileRenderStyle &render = *page->render();
             const QRectF cardRect = sceneRect(card);
-            const QColor fill = page->render()->boxFill();
-            const QColor inside = at(shot, cardRect.topLeft() + QPointF(cardRect.width() - 6, cardRect.height() - 6));
-            QVERIFY2(near(inside, fill, 40) || fill.alphaF() < 0.99,
-                     qPrintable(inside.name() + QStringLiteral(" vs ") + fill.name()));
+            if (render.boxFill().alphaF() > 0.99) {
+                const QColor inside = at(shot, cardRect.bottomRight() - QPointF(6, 6));
+                QVERIFY2(near(inside, render.boxFill(), 12),
+                         qPrintable(inside.name() + QStringLiteral(" vs ") + render.boxFill().name()));
+            }
+            // The Contacting box's strip is the renderer's recipe: its free
+            // right end shows the stops, and the title wears the header ink.
+            QQuickItem *contacting = stage.item(QStringLiteral("profileContactingBox"));
+            QQuickItem *title = shown(contacting, QStringLiteral("profileBoxTitle"));
+            QVERIFY(title);
+            QCOMPARE(title->property("color").value<QColor>(), render.headerText());
+            if (render.headerStyle() != int(Profile::HeaderStyle::NoHeader)) {
+                const QRectF box = sceneRect(contacting);
+                const qreal bw = render.borderWidth();
+                const QVariantList stops = render.stripStops();
+                const QVariantList positions = render.stripPositions();
+                // A quarter of the way down: between the first two stops.
+                const qreal y = 0.25 * render.stripHeight();
+                const qreal p0 = positions.value(0).toReal(), p1 = positions.value(1).toReal();
+                const qreal t = std::clamp((0.25 - p0) / std::max(0.01, p1 - p0), 0.0, 1.0);
+                const QColor a = stops.value(0).value<QColor>(), b = stops.value(1).value<QColor>();
+                const QColor expected = QColor::fromRgbF(a.redF() + (b.redF() - a.redF()) * t,
+                                                         a.greenF() + (b.greenF() - a.greenF()) * t,
+                                                         a.blueF() + (b.blueF() - a.blueF()) * t);
+                const QColor strip = at(shot, QPointF(box.right() - bw - 12, box.top() + bw + y));
+                QVERIFY2(near(strip, expected, 14), qPrintable(strip.name() + QStringLiteral(" vs ") + expected.name()));
+            }
             capture(QStringLiteral("preset-%1-%2x%3-%4")
                         .arg(slugOf(Preset(preset)))
                         .arg(size.width())
@@ -1362,8 +1386,14 @@ private slots:
 
         QQuickItem *toggle = stage.item(QStringLiteral("profilePlainStyleSwitch"));
         QVERIFY(!toggle->property("checked").toBool());
+        // Its tip explains that the setting is the viewer's, everywhere.
+        auto *tip = stage.page()->findChild<QObject *>(QStringLiteral("profilePlainStyleTip"));
+        QVERIFY(tip);
+        QVERIFY(!tip->property("visible").toBool());
         stage.hover(toggle);
-        QTRY_VERIFY(stage.item(QStringLiteral("profilePlainStyleTip")) || true);
+        QTRY_VERIFY(tip->property("visible").toBool());
+        QCOMPARE(tip->property("title").toString(), QStringLiteral("Show profiles in plain style"));
+        QVERIFY(tip->property("text").toString().contains(QStringLiteral("Also in Settings")));
         stage.click(toggle);
         QTRY_COMPARE(stage.window->property("plainRequests").toList(), (QVariantList{true}));
         QTRY_VERIFY(render()->plain());

@@ -467,6 +467,34 @@ private slots:
         QVERIFY(a.sync->hasOwedDeliveries());
     }
 
+    void failedClosedEngineRecordsNothingForTheSendThatStoppedIt()
+    {
+        TwoPeerFixture net;
+        QVERIFY(net.setUp());
+        Peer &a = net.a();
+        Peer *c = net.addPeer(QStringLiteral("carol"));
+        QVERIFY(c);
+        // Carol's contact row names a conversation Alice's MLS never joined
+        // (a damaged store), so encrypting to her stops the engine mid-pump.
+        const ConversationId broken = ConversationId::generate();
+        ContactRecord record{c->account, c->name, QString(), ContactState::PendingOutgoing,
+                             broken,     net.clock.nowMs, net.clock.nowMs};
+        record.peerDeviceId = c->device;
+        QVERIFY(a.contacts().recordOutgoingRequest(record).hasValue());
+        QVERIFY(a.contacts().markAccepted(c->account, broken, net.clock.nowMs).hasValue());
+        net.startSync(a);
+        net.settle();
+
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("MLS operation failed")));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("sync engine has stopped")));
+        QVERIFY(publishPage(*a.sync, QStringLiteral("Stops the engine")) > 0);
+        net.settle();
+        QVERIFY(a.engine().isFailedClosed());
+        // "Sent" means the engine took it: the send that stopped it does not count.
+        QCOMPARE(deliveryOf(a, *c).sentRevision, qint64(-1));
+        QVERIFY(a.sync->hasOwedDeliveries());
+    }
+
     void peerDeviceChangeRestartsDelivery()
     {
         TwoPeerFixture net;
@@ -693,6 +721,7 @@ private slots:
         // Any received blob is over the cap.
         net.limits.receivedMediaSoftCapBytes = 1;
         net.limits.receivedMediaTargetBytes = 0;
+        net.limits.missingMediaGraceMs = 30;
         QVERIFY(net.setUp());
         Peer &a = net.a();
         Peer &b = net.b();
@@ -732,6 +761,29 @@ private slots:
         net.settle();
         QCOMPARE(requestsFrom(b, a).size(), 2);
         QCOMPARE(countFrom(a, b, Kind::PageMedia), 2);
+
+        // Media asked for once already (by the grace request), then evicted,
+        // is asked for again on a look as well.
+        Peer *c = net.addPeer(QStringLiteral("carol")); // sends by hand
+        QVERIFY(c && net.link(a, *c));
+        const QByteArray carolsPicture = testJpeg('\x0C');
+        QVERIFY(net.sendRaw(*c, a, rawCore(7'000, QStringLiteral("Carol"), backgroundRef(carolsPicture))));
+        net.settle();
+        net.clock.advance(30);
+        QVERIFY(TwoPeerFixture::waitFor([&] {
+            net.routeAll();
+            return countFrom(*c, a, Kind::PageRequest) == 1;
+        }));
+        QCOMPARE(requestStateOf(a, *c).mediaRequestedRevision, qint64(7'000));
+        QVERIFY(net.sendRaw(*c, a, rawMedia(Background, carolsPicture))); // her answer
+        net.settle();
+        QVERIFY(!a.sync->contactPage(c->account)->backgroundPresent); // evicted at once
+        net.clock.advance(30 * minute); // she answered: the base interval applies
+        a.sync->markViewed(c->account);
+        net.settle();
+        const auto carolsRequests = requestsFrom(*c, a);
+        QCOMPARE(carolsRequests.size(), 2);
+        QCOMPARE(carolsRequests.last().wantMedia, QVector<QByteArray>{pageMediaHash(carolsPicture)});
     }
 
     // --- Viewer side: receiving ---------------------------------------------

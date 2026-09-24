@@ -105,14 +105,69 @@ is queued.
 
 ## UI
 
-* The editor has a **Panels** tab: the panel list with **Add new panel**
-  and templates (Blank, Text, Photo album, Favourite games, Video). Each
-  panel expands into its block editor, where blocks can be added,
-  reordered, duplicated and removed, and panels can be renamed, recoloured
-  and have their icon changed.
-* The page preview in the editor ends the wide column with a dashed
-  "+ Add new panel" tile.
-* The Layout tab lists panels as rows beside the built-in modules (move
-  column, reorder, hide).
-* Viewing: `ProfilePanelModule` renders the blocks. Pictures open in the
-  zoom overlay, and videos show their poster until played.
+* **Panels tab** (`ProfilePanelsTab.qml`, the tenth editor tab). The
+  **Add new panel** button offers templates: Blank, Text, Photo album,
+  Favorite games, Videos (only when the build has libvpx) and Top 5 list.
+  Each panel is a card (`ProfilePanelEditor.qml`) holding:
+  * its title and the title strip switch;
+  * one of 12 icons;
+  * optional own colours: strip, strip text, box and text. With these
+    set, the box gets its own `ProfileRenderStyle` (the page's knobs plus
+    the panel's colours, through the same readability pass). Plain style
+    turns it off.
+  * its blocks (`ProfileBlockEditor.qml`: move, duplicate, remove, and the
+    controls for each kind);
+  * Duplicate panel and Delete panel (Ctrl+Z brings a deleted panel back).
+
+  Two meters show how much of the page-wide word and media budgets the
+  panels use.
+* In the preview, a dashed **Add new panel** tile ends the wide column.
+  Clicking a panel in the preview opens its card.
+* The **Layout** tab lists panels as ordinary rows. In `moduleArrangement`
+  a panel's id is `panelModuleBase + panel id`, which is how
+  `moveModule`/`setModuleVisible` tell it apart.
+* **Viewing**. `ProfilePanelModule` → `ProfilePanelBlock`:
+  * Pictures (`ProfilePanelPicture`) come in a grid, a stack or a sideways
+    strip, and a plain, rounded, tilted Polaroid or circle frame. They are
+    drawn by the `ProfilePanelImage` item from `PanelMediaLibrary`, which
+    decodes off the GUI thread at the drawn size into a 64 MiB LRU (16 MiB
+    in Low memory mode). A click opens `ProfilePanelLightbox`, where Esc and
+    the arrow keys work.
+  * Games lists show box art, stars and a status chip.
+  * A video (`ProfilePanelVideo`) shows its poster and length and plays
+    only on a click, through `ProfileClipPlayer`. Its sound goes through
+    `SongStream`, with the same loudness guard as songs. Songs and clips
+    take over from each other (`SongPlayer::takeOverSound`), and a call
+    stops a clip.
+  * Viewers never see an empty block or an empty panel.
+
+## Imports
+
+* **Pictures** go through the background pipeline with a 1280 px long side
+  and 160 KiB per picture (64 KiB for list covers). Several files queue and
+  are imported in order. A file that fails is reported and skipped. Budgets
+  are checked before a blob is stored.
+* **Videos** (`ClipImporter`) read the first 30 s. Pictures come from a
+  silent `QMediaPlayer` into a `QVideoSink` at 3× speed, sampled at 15 fps,
+  with the long side at most 480 px. Sound comes from a `QAudioDecoder`.
+  Each 5 s segment is VP9-encoded on the thread pool as soon as its
+  pictures are in, trying bitrates from 380 down to 60 kbit/s until it fits
+  its share of 224 KiB. Then one Opus stream (40 kbit/s stereo, 32 mono) is
+  cut across the segments. If a file has no sound, or its sound never
+  finishes decoding, the clip is silent. A file that ends before its
+  announced length is cut there. Formats are whatever the platform's Qt
+  Multimedia backend reads: FFmpeg on Linux, Media Foundation on Windows
+  (MP4/H.264, MOV, WMV …).
+
+## Tests
+
+`tst_profilepanels` (model, budgets, ids, wire compatibility with 0.2.9,
+the clip container), `tst_profilepagestore` (migration 16→17 keeps every
+row; panel media lifecycle), `tst_profilepagesync` (delivery; the one-time
+refresh after the upgrade), `tst_profileclip` (codec round trip; real MP4
+imports of 7 s and 35 s when ffmpeg is installed), `tst_profilecontroller`
+(picture import, dropping gone media), `tst_profileeditor` (Add new panel
+through the UI; the preview tile) and `tst_profilepageqml` (every block
+kind, the lightbox, own colours vs Plain style, video playback).
+`OPENCHAT_CAPTURE_DIR=<dir>` makes the view and editor tests save
+screenshots.

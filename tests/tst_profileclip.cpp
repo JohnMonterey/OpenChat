@@ -170,35 +170,13 @@ private slots:
     // to write one and a Qt Multimedia backend to read it.
     void importsARealVideoFile()
     {
-        if (!clipCodecAvailable())
-            QSKIP("This build has no libvpx");
-        const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
-        if (ffmpeg.isEmpty())
-            QSKIP("No ffmpeg to write a test video");
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
-        const QString path = directory.filePath(QStringLiteral("clip.mp4"));
-        QProcess process;
-        process.start(ffmpeg, {QStringLiteral("-loglevel"), QStringLiteral("error"), QStringLiteral("-f"),
-                               QStringLiteral("lavfi"), QStringLiteral("-i"),
-                               QStringLiteral("testsrc2=size=640x360:rate=30:duration=7"), QStringLiteral("-f"),
-                               QStringLiteral("lavfi"), QStringLiteral("-i"),
-                               QStringLiteral("sine=frequency=440:duration=7"), QStringLiteral("-c:v"),
-                               QStringLiteral("libx264"), QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
-                               QStringLiteral("-c:a"), QStringLiteral("aac"), QStringLiteral("-shortest"), path});
-        QVERIFY(process.waitForFinished(60'000));
-        if (process.exitCode() != 0)
-            QSKIP("ffmpeg could not write the test video");
-
-        ClipImporter importer;
-        QSignalSpy finished(&importer, &ClipImporter::finished);
-        QSignalSpy failed(&importer, &ClipImporter::failed);
-        importer.start(path);
-        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty() || !failed.isEmpty(), 90'000);
-        if (!failed.isEmpty() && failed.first().first().toString().contains(QStringLiteral("can't be opened")))
-            QSKIP("No Qt Multimedia backend reads MP4 here");
-        QVERIFY2(failed.isEmpty(), failed.isEmpty() ? "" : qPrintable(failed.first().first().toString()));
-        const auto clip = finished.first().first().value<ImportedClip>();
+        const std::optional<ImportedClip> imported = importTestVideo(directory, 7);
+        if (QTest::currentTestResolved()) // failed or skipped inside
+            return;
+        QVERIFY(imported);
+        const ImportedClip &clip = *imported;
         QCOMPARE(clip.segments.size(), 2);
         QCOMPARE(clip.durationsMs, (QVector<quint32>{5'000, 2'000}));
         QCOMPARE(clip.size, QSize(480, 270));
@@ -210,6 +188,74 @@ private slots:
             segments.push_back(*segment);
         }
         QVERIFY(clipSoundtrack(segments)); // the sine came along
+    }
+
+    // A long video keeps its first 30 seconds: six segments of five.
+    void cutsLongVideosAtThirtySeconds()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const std::optional<ImportedClip> imported = importTestVideo(directory, 35);
+        if (QTest::currentTestResolved()) // failed or skipped inside
+            return;
+        QVERIFY(imported);
+        QCOMPARE(imported->segments.size(), 6);
+        QCOMPARE(imported->durationsMs, QVector<quint32>(6, 5'000));
+        qint64 total = 0;
+        for (const QByteArray &bytes : imported->segments) {
+            QVERIFY(bytes.size() <= maxClipSegmentBytes);
+            total += bytes.size();
+        }
+        // Well within the panels' 4 MiB, beside other pictures.
+        QVERIFY2(total < 1'600'000, qPrintable(QString::number(total)));
+    }
+
+private:
+    // Writes a test video of `seconds` with ffmpeg and imports it. Skips the
+    // test when this machine cannot write or read one.
+    std::optional<ImportedClip> importTestVideo(QTemporaryDir &directory, int seconds)
+    {
+        if (!clipCodecAvailable()) {
+            QTest::qSkip("This build has no libvpx", __FILE__, __LINE__);
+            return std::nullopt;
+        }
+        const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+        if (ffmpeg.isEmpty()) {
+            QTest::qSkip("No ffmpeg to write a test video", __FILE__, __LINE__);
+            return std::nullopt;
+        }
+        const QString path = directory.filePath(QStringLiteral("clip.mp4"));
+        const QString length = QString::number(seconds);
+        QProcess process;
+        process.start(ffmpeg, {QStringLiteral("-loglevel"), QStringLiteral("error"), QStringLiteral("-f"),
+                               QStringLiteral("lavfi"), QStringLiteral("-i"),
+                               QStringLiteral("testsrc2=size=640x360:rate=30:duration=") + length,
+                               QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+                               QStringLiteral("sine=frequency=440:duration=") + length, QStringLiteral("-c:v"),
+                               QStringLiteral("libx264"), QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                               QStringLiteral("-c:a"), QStringLiteral("aac"), QStringLiteral("-shortest"), path});
+        if (!process.waitForFinished(120'000) || process.exitCode() != 0) {
+            QTest::qSkip("ffmpeg could not write the test video", __FILE__, __LINE__);
+            return std::nullopt;
+        }
+        ClipImporter importer;
+        QSignalSpy finished(&importer, &ClipImporter::finished);
+        QSignalSpy failed(&importer, &ClipImporter::failed);
+        importer.start(path);
+        if (!QTest::qWaitFor([&] { return !finished.isEmpty() || !failed.isEmpty(); }, 120'000)) {
+            QTest::qFail("The import never finished", __FILE__, __LINE__);
+            return std::nullopt;
+        }
+        if (!failed.isEmpty()) {
+            const QString message = failed.first().first().toString();
+            if (message.contains(QStringLiteral("can't be opened"))) {
+                QTest::qSkip("No Qt Multimedia backend reads MP4 here", __FILE__, __LINE__);
+                return std::nullopt;
+            }
+            QTest::qFail(qPrintable(message), __FILE__, __LINE__);
+            return std::nullopt;
+        }
+        return finished.first().first().value<ImportedClip>();
     }
 };
 

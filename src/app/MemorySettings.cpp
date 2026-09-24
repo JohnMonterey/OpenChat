@@ -1,6 +1,7 @@
 #include "app/MemorySettings.h"
 
 #include "profile/ProfileMediaStore.h"
+#include "profile/ProfilePanelMedia.h"
 #include "profile/ProfileRenderPolicy.h"
 #include "render/AvatarStore.h"
 
@@ -100,6 +101,9 @@ void MemorySettings::apply()
     // picture is decoded only while a page shows it, one at a time.
     ProfileRenderPolicy::instance().setLowMemoryMode(m_lowMemoryMode);
     ProfileMediaStore::instance().setKeepDecoded(!m_lowMemoryMode);
+    // Panel pictures keep a smaller cache of decoded pictures.
+    PanelMediaLibrary::instance().setDecodedBudget(m_lowMemoryMode ? PanelMediaLibrary::lowMemoryDecodedBudget
+                                                                   : PanelMediaLibrary::defaultDecodedBudget);
     if (m_lowMemoryMode) {
         releaseFreedHeap();
         m_trimTimer.start();

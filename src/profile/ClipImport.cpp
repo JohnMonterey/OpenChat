@@ -123,7 +123,17 @@ public:
         }
         m_stall.setSingleShot(true);
         m_stall.setInterval(m_owner.m_limits.stallTimeoutMs);
-        connect(&m_stall, &QTimer::timeout, this, [this] { fail(QStringLiteral("Reading that video took too long.")); });
+        connect(&m_stall, &QTimer::timeout, this, [this] {
+            // Pictures in but the sound never finishing: the clip goes silent
+            // rather than not at all.
+            if (m_picturesDone && !m_audioDone) {
+                m_audio.stop();
+                m_pcm = {};
+                finishAudio();
+                return;
+            }
+            fail(QStringLiteral("Reading that video took too long."));
+        });
 
         m_player.setVideoSink(&m_sink);
         connect(&m_sink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &frame) { onFrame(frame); });
@@ -255,11 +265,41 @@ private:
             fail(QStringLiteral("This video's pictures can't be read."));
             return;
         }
-        // A file that ends a little early (its length was a guess) holds its
-        // last picture to the end.
+        // A file that ends well before the length it announced (or announced
+        // none): the clip ends where its pictures do. Segments already sent
+        // to the encoder are whole and stay as they are.
+        const qint64 coveredMs = frameTimeMs(m_nextFrame);
+        if (coveredMs + 1000 < m_clipMs) {
+            const qint64 clipMs = coveredMs - coveredMs % packetMs;
+            if (clipMs < minimumClipMs) {
+                fail(QStringLiteral("This video is too short."));
+                return;
+            }
+            qint64 start = 0;
+            for (int k = 0; k < m_fillSegment; ++k)
+                start += m_durations.at(k);
+            const int kept = clipMs > start ? m_fillSegment + 1 : m_fillSegment;
+            m_durations.resize(kept);
+            m_frameCounts.resize(kept);
+            m_encoded.resize(kept);
+            if (kept > m_fillSegment) {
+                m_durations[m_fillSegment] = clipMs - start;
+                m_frameCounts[m_fillSegment] = int(((clipMs - start) * options().fps + 999) / 1000);
+                if (m_pending.size() > m_frameCounts.at(m_fillSegment))
+                    m_pending.resize(m_frameCounts.at(m_fillSegment));
+            } else {
+                m_pending.clear();
+            }
+            m_clipMs = clipMs;
+            m_nextFrame = std::min<qint64>(m_nextFrame, totalFrames());
+            if (!m_pending.isEmpty() && m_pending.size() == m_frameCounts.at(m_fillSegment))
+                dispatchSegment();
+        }
+        // A file a few pictures short holds its last picture to the end.
         while (m_nextFrame < totalFrames())
             addPicture(m_last);
         m_picturesDone = true;
+        m_stall.start(); // now the sound's to finish
         finishIfReady();
     }
 
@@ -333,6 +373,8 @@ private:
                 return;
             }
             m_pcm.samples += *samples;
+            if (m_picturesDone)
+                m_stall.start();
             // Only the clip's length is kept; the rest of the file is not read.
             const qint64 wanted = options().maxDurationMs * m_pcm.sampleRate / 1000 * m_pcm.channels;
             if (m_pcm.samples.size() >= wanted) {

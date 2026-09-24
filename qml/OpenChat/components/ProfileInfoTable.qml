@@ -53,7 +53,11 @@ Column {
                 x: table.cells ? 7 : 0
                 y: table.cells ? 5 : 6
                 width: table.labelWidth - 12
-                wrapMode: Text.Wrap
+                // At the narrowest column a long label ("Occupation")
+                // steps down a pixel or two rather than break mid-word.
+                wrapMode: Text.WordWrap
+                fontSizeMode: Text.HorizontalFit
+                minimumPixelSize: Math.max(9, font.pixelSize - 2)
                 text: row.modelData.label
                 textFormat: Text.PlainText
                 color: table.render ? (table.cells ? table.render.cellLabelInk : table.render.labelColor) : "black"

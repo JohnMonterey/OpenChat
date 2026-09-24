@@ -25,6 +25,7 @@
 
 #include <QAudioFormat>
 #include <QBuffer>
+#include <QClipboard>
 #include <QColor>
 #include <QDir>
 #include <QFile>
@@ -554,7 +555,6 @@ private slots:
         QCOMPARE(right.left() - left.right(), 14.0);
         QVERIFY(right.right() <= 720 - 16);
         QVERIFY(right.top() < left.bottom());
-        capture(QStringLiteral("final-min"), stage.grab());
     }
 
     void paintedAreaStaysWithinBudget()
@@ -622,20 +622,40 @@ private slots:
         QTest::addColumn<QString>("calls"); // "", "real" (no call service), "scripted"
         QTest::addColumn<QString>("title");
         QTest::addColumn<QStringList>("expected");
+        // Optionally: start in this section, press this cell.
+        QTest::addColumn<int>("section");
+        QTest::addColumn<QString>("press");
+        const int chat = int(ChatController::NavSection::Chat);
+        const int settings = int(ChatController::NavSection::Settings);
+        const QStringList contactCells{"message", "voice", "video", "safety"};
         QTest::newRow("contact, no services") << "michael" << false << "" << "Contacting Michael"
-                                              << QStringList{"message"};
+                                              << QStringList{"message"} << chat << "";
         QTest::newRow("contact, contacts only") << "michael" << true << "" << "Contacting Michael"
-                                                << QStringList{"message", "safety"};
+                                                << QStringList{"message", "safety"} << chat << "";
         QTest::newRow("contact, no call service") << "michael" << true << "real" << "Contacting Michael"
-                                                  << QStringList{"message", "safety"};
+                                                  << QStringList{"message", "safety"} << chat << "";
         QTest::newRow("contact, calls and contacts") << "michael" << true << "scripted" << "Contacting Michael"
-                                                     << QStringList{"message", "voice", "video", "safety"};
-        QTest::newRow("contact without a page") << "tom" << true << "scripted" << "Contacting Tom"
-                                                << QStringList{"message", "voice", "video", "safety"};
+                                                     << contactCells << chat << "";
+        QTest::newRow("contact without a page") << "tom" << true << "scripted" << "Contacting Tom" << contactCells
+                                                << chat << "";
         QTest::newRow("own, with contacts") << "self" << true << "scripted" << "Your Profile"
-                                            << QStringList{"edit", "picture", "invite"};
+                                            << QStringList{"edit", "picture", "invite"} << chat << "";
         QTest::newRow("own, no contacts") << "self" << false << "" << "Your Profile"
-                                          << QStringList{"edit", "picture"};
+                                          << QStringList{"edit", "picture"} << chat << "";
+        // Chat-bound actions close the page and switch to Chat first, even
+        // when the profile was opened from Settings (ARCH §8.4).
+        QTest::newRow("from Settings, Send Message") << "michael" << true << "scripted" << "Contacting Michael"
+                                                     << contactCells << settings << "message";
+        QTest::newRow("from Settings, Voice Call") << "ryan" << true << "scripted" << "Contacting Ryan" << contactCells
+                                                   << settings << "voice";
+        QTest::newRow("Video Call") << "alex" << true << "scripted" << "Contacting Alex" << contactCells << chat
+                                    << "video";
+        QTest::newRow("Safety Number") << "sarah" << true << "scripted" << "Contacting Sarah" << contactCells
+                                       << settings << "safety";
+        QTest::newRow("own, Edit Profile") << "self" << true << "" << "Your Profile"
+                                           << QStringList{"edit", "picture", "invite"} << chat << "edit";
+        QTest::newRow("own, Copy Invite Link") << "self" << true << "" << "Your Profile"
+                                               << QStringList{"edit", "picture", "invite"} << chat << "invite";
     }
     void contactingActionsMatchRelationship()
     {
@@ -644,15 +664,21 @@ private slots:
         QFETCH(QString, calls);
         QFETCH(QString, title);
         QFETCH(QStringList, expected);
+        QFETCH(int, section);
+        QFETCH(QString, press);
 
         Stage stage;
-        if (withContacts)
+        if (withContacts) {
             stage.contacts = std::make_unique<ContactController>();
+            stage.contacts->setMockInvite(QStringLiteral("oc-invite-123"));
+        }
         if (calls == QStringLiteral("real"))
             stage.calls = std::make_unique<CallController>();
         QVERIFY(stage.load());
         if (calls == QStringLiteral("scripted"))
             stage.useScriptedCalls();
+        stage.chat.setNavSection(ChatController::NavSection(section));
+        QVERIFY(stage.chat.selectContact(QStringLiteral("jessica")));
         QVERIFY(openPerson(stage, person == QStringLiteral("self") ? Reference::selfId() : person));
         QTRY_COMPARE(stage.actions(), expected);
         QQuickItem *box = stage.item(QStringLiteral("profileContactingBox"));
@@ -663,47 +689,28 @@ private slots:
             QVERIFY(cell->property("available").toBool());
             QVERIFY(!cell->property("accessibleName").toString().isEmpty());
         }
-    }
+        if (press.isEmpty())
+            return;
 
-    // Chat-bound actions close the page and switch to Chat first, even from
-    // the Settings section (ARCH §8.4).
-    void chatBoundActionsSwitchToTheChatSection()
-    {
-        Stage stage;
-        stage.contacts = std::make_unique<ContactController>();
-        QVERIFY(stage.load());
-        stage.useScriptedCalls();
-        QObject *calls = stage.scriptedCalls();
-
-        stage.chat.setNavSection(ChatController::NavSection::Settings);
-        QVERIFY(openPerson(stage, QStringLiteral("michael")));
-        QCOMPARE(stage.profiles().backLabel(), QStringLiteral("Settings"));
-        stage.click(stage.action(QStringLiteral("message")));
-        QTRY_VERIFY(!stage.profiles().isOpen());
-        QCOMPARE(stage.chat.navSection(), ChatController::NavSection::Chat);
-        QCOMPARE(stage.chat.currentContactId(), QStringLiteral("michael"));
-        QCOMPARE(calls->property("log").toStringList(), QStringList());
-
-        stage.chat.setNavSection(ChatController::NavSection::Settings);
-        QVERIFY(openPerson(stage, QStringLiteral("ryan")));
-        stage.click(stage.action(QStringLiteral("voice")));
-        QTRY_VERIFY(!stage.profiles().isOpen());
-        QCOMPARE(stage.chat.navSection(), ChatController::NavSection::Chat);
-        QCOMPARE(stage.chat.currentContactId(), QStringLiteral("ryan"));
-        QCOMPARE(calls->property("log").toStringList(), QStringList{QStringLiteral("voice")});
-
-        QVERIFY(openPerson(stage, QStringLiteral("alex")));
-        stage.click(stage.action(QStringLiteral("video")));
-        QTRY_VERIFY(!stage.profiles().isOpen());
-        QCOMPARE(stage.chat.currentContactId(), QStringLiteral("alex"));
-        QCOMPARE(calls->property("log").toStringList(), (QStringList{QStringLiteral("voice"), QStringLiteral("video")}));
-
-        // Safety Number opens its dialog over the page, which stays.
-        QVERIFY(openPerson(stage, QStringLiteral("michael")));
-        QVERIFY(!stage.contacts->safetyNumberOpen());
-        stage.click(stage.action(QStringLiteral("safety")));
-        QTRY_VERIFY(stage.contacts->safetyNumberOpen());
-        QVERIFY(stage.profiles().isOpen());
+        QObject *scripted = stage.scriptedCalls();
+        stage.click(stage.action(press));
+        if (press == QStringLiteral("message") || press == QStringLiteral("voice") || press == QStringLiteral("video")) {
+            QTRY_VERIFY(!stage.profiles().isOpen());
+            QCOMPARE(stage.chat.navSection(), ChatController::NavSection::Chat);
+            QCOMPARE(stage.chat.currentContactId(), person);
+            const QStringList log = press == QStringLiteral("message") ? QStringList() : QStringList{press};
+            QCOMPARE(scripted->property("log").toStringList(), log);
+        } else if (press == QStringLiteral("safety")) {
+            // Its dialog floats over the page, which stays open.
+            QTRY_VERIFY(stage.contacts->safetyNumberOpen());
+            QVERIFY(stage.profiles().isOpen());
+            QCOMPARE(stage.chat.navSection(), ChatController::NavSection(section));
+        } else if (press == QStringLiteral("edit")) {
+            QTRY_VERIFY(stage.profiles().editing());
+        } else if (press == QStringLiteral("invite")) {
+            QTRY_COMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("oc-invite-123"));
+            QTRY_COMPARE(stage.text(QStringLiteral("profilePageNoticeText")), QStringLiteral("Copied invite link"));
+        }
     }
 
     void callActionsDisableOrMergeDuringCalls()
@@ -860,6 +867,143 @@ private slots:
         QTest::qWait(200);
         QVERIFY(!player->playing());
         QCOMPARE(m_devices->opened, 1);
+    }
+
+    void songShowsArrivingAndCantPlay()
+    {
+        Stage stage;
+        PresetPage arriving = presetPage(Preset::GlitterGirlPreset);
+        arriving.page.song.sha256 = QByteArray(32, '\x5a'); // named, not yet here
+        arriving.page.song.bytes = 180'000;
+        arriving.page.song.durationMs = 45'000;
+        stage.profiles().setMockPage(arriving.contact, arriving.page);
+        QVERIFY(stage.load());
+        QVERIFY(openPerson(stage, arriving.contact));
+        QQuickItem *module = stage.item(QStringLiteral("profileSongModule"));
+        QCOMPARE(module->property("state_").toString(), QStringLiteral("loading"));
+        QCOMPARE(stage.text(QStringLiteral("profileSongTime")), QStringLiteral("Arriving…"));
+        stage.click(stage.item(QStringLiteral("profileSongOrb")));
+        QTest::qWait(50);
+        QCOMPARE(m_devices->opened, 0);
+
+        // A song this computer cannot play says so, at full strength.
+        QVERIFY(openPerson(stage, QStringLiteral("jessica")));
+        auto *player = stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer"));
+        QTRY_VERIFY(player->valid());
+        m_devices->refuse = true;
+        stage.click(stage.item(QStringLiteral("profileSongOrb")));
+        QTRY_VERIFY(!player->error().isEmpty());
+        module = stage.item(QStringLiteral("profileSongModule"));
+        QCOMPARE(module->property("state_").toString(), QStringLiteral("unavailable"));
+        QQuickItem *line = stage.item(QStringLiteral("profileSongUnavailable"));
+        QVERIFY(line);
+        QCOMPARE(line->property("text").toString(), QStringLiteral("Can't play this song on this computer."));
+        QCOMPARE(line->opacity(), 1.0);
+        QCOMPARE(module->opacity(), 1.0);
+        QVERIFY(!stage.item(QStringLiteral("profileSongGroove")));
+    }
+
+    void handleBoxCopiesTheConfirmedHandle()
+    {
+        Stage stage;
+        QVERIFY(stage.load());
+        QVERIFY(openPerson(stage, QStringLiteral("michael")));
+        QCOMPARE(stage.text(QStringLiteral("profileHandleText")), QStringLiteral("@michael"));
+        QQuickItem *copy = stage.item(QStringLiteral("profileCopyHandleButton"));
+        QVERIFY(copy);
+        QGuiApplication::clipboard()->clear();
+        stage.click(copy);
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("@michael"));
+        QTRY_COMPARE(stage.text(QStringLiteral("profilePageNoticeText")), QStringLiteral("Copied @michael"));
+        QQuickItem *handleBox = stage.item(QStringLiteral("profileHandleBox"));
+        QVERIFY(handleBox->property("copied").toBool());
+        // "✓ Copied" for 1.5 s, then "Copy" again.
+        QTRY_VERIFY_WITH_TIMEOUT(!handleBox->property("copied").toBool(), 2500);
+
+        // No confirmed handle, no box: your own handle is unknown in the mock.
+        QVERIFY(openPerson(stage, Reference::selfId()));
+        QCOMPARE(stage.profiles().personHandle(), QString());
+        QVERIFY(!stage.item(QStringLiteral("profileHandleBox")));
+    }
+
+    // The editor's preview (ProfilePreviewFrame hosts the same view): every
+    // module wears the affordances and asks for its tab and field, the
+    // app's boxes are inert, empty boxes are placeholders, and a Top Friend
+    // never navigates.
+    void previewAffordancesAskForTheirField()
+    {
+        Stage stage;
+        stage.chat.setLocalUserName(QStringLiteral("Daniel"));
+        Profile::Page own = Profile::applyPreset(Reference::ownReferencePage(), Preset::AeroSkyPreset);
+        own.content.interests = {};
+        stage.profiles().setMockPage(Reference::selfId(), own);
+        QVERIFY(stage.load(QSize(1024, 768)));
+        QVERIFY(openPerson(stage, Reference::selfId()));
+        QVERIFY(stage.profiles().beginEditing());
+        stage.window->setProperty("previewWidth", 648);
+        QQuickItem *preview = nullptr;
+        QTRY_VERIFY((preview = qvariant_cast<QQuickItem *>(stage.window->property("preview"))));
+        QTRY_VERIFY(shown(preview, QStringLiteral("profileIdentityBox")));
+        stage.settleLayout();
+        const auto requests = [&] { return stage.window->property("editRequests").toStringList(); };
+        const auto pressAt = [&](QQuickItem *item, const QPointF &offset = QPointF(-1, -1)) {
+            QVERIFY(item);
+            stage.settleLayout();
+            const QPointF local = offset.x() < 0 ? QPointF(item->width() / 2, item->height() / 2) : offset;
+            QTest::mouseClick(stage.window.get(), Qt::LeftButton, Qt::NoModifier, item->mapToScene(local).toPoint());
+        };
+
+        // Fine targets inside the identity card and the blurbs.
+        pressAt(shown(preview, QStringLiteral("profileHeadline")));
+        pressAt(shown(preview, QStringLiteral("profilePhoto")));
+        pressAt(shown(preview, QStringLiteral("profileNameText")), QPointF(40, 30));
+        pressAt(shown(preview, QStringLiteral("profileMeet")));
+        pressAt(shown(preview, QStringLiteral("profileAboutMe")));
+        QCOMPARE(requests(), (QStringList{"headline", "photo", "name", "meet", "aboutMe"}));
+
+        // A strip opens the Boxes tab; the Top Friends open theirs, and
+        // nothing navigates.
+        QQuickItem *details = shown(preview, QStringLiteral("profileDetailsBox"));
+        pressAt(details, QPointF(details->width() / 2, 8));
+        pressAt(itemsNamed(preview, QStringLiteral("profileFriendTile")).value(0));
+        QCOMPARE(requests().mid(5), (QStringList{"strip", "friends"}));
+        QCOMPARE(stage.profiles().depth(), 1);
+        QVERIFY(stage.profiles().editing());
+
+        // The app's own boxes are inert and say who wrote them.
+        QQuickItem *contacting = shown(preview, QStringLiteral("profileContactingBox"));
+        stage.hover(contacting);
+        QQuickItem *slot = shown(preview, QStringLiteral("profileModule_contacting"));
+        QTRY_COMPARE(shown(slot, QStringLiteral("profilePreviewChipText"))->property("text").toString(),
+                     QStringLiteral("Shown by OpenChat"));
+        pressAt(contacting);
+        QCOMPARE(requests().size(), 7);
+
+        // An empty box is a placeholder that invites filling it.
+        QQuickItem *interests = shown(preview, QStringLiteral("profileModule_m3"));
+        QVERIFY(interests);
+        QQuickItem *placeholder = shown(interests, QStringLiteral("profilePreviewPlaceholder"));
+        QVERIFY(placeholder);
+        stage.hover(placeholder);
+        QTRY_COMPARE(shown(interests, QStringLiteral("profilePreviewChipText"))->property("text").toString(),
+                     QStringLiteral("Edit"));
+        pressAt(placeholder);
+        QCOMPARE(requests().last(), QStringLiteral("interests"));
+
+        // The field being edited keeps its box outlined, with "Editing".
+        QTest::mouseMove(stage.window.get(), QPoint(20, 700));
+        stage.window->setProperty("previewTarget", QStringLiteral("meet"));
+        QQuickItem *blurbs = shown(preview, QStringLiteral("profileModule_m5"));
+        QTRY_VERIFY(shown(blurbs, QStringLiteral("profilePreviewOutline")));
+        QCOMPARE(shown(blurbs, QStringLiteral("profilePreviewChipText"))->property("text").toString(),
+                 QStringLiteral("Editing"));
+        QTRY_VERIFY(!shown(shown(preview, QStringLiteral("profileModule_identity")),
+                           QStringLiteral("profilePreviewOutline")));
+
+        // Around the boxes: the backdrop.
+        QTest::mouseClick(stage.window.get(), Qt::LeftButton, Qt::NoModifier,
+                          preview->mapToScene(QPointF(6, preview->height() - 10)).toPoint());
+        QCOMPARE(requests().last(), QStringLiteral("backdrop"));
     }
 
     void callStripShowsWhileRinging()
@@ -1044,7 +1188,6 @@ private slots:
         // Hover and focus shade it with the camera and the words.
         stage.hover(photo);
         QTRY_VERIFY(stage.item(QStringLiteral("profileChangePictureShade")));
-        capture(QStringLiteral("final-preset-headliner"), stage.grab());
         QTest::mouseMove(stage.window.get(), QPoint(5, 400));
         QTRY_VERIFY(!stage.item(QStringLiteral("profileChangePictureShade")));
         photo->forceActiveFocus();
@@ -1128,7 +1271,6 @@ private slots:
         for (const char *never : {"profileTopBarPresence", "profilePlainStyleSwitch", "profileEditButton",
                                   "profileSongModule", "profileBannerBox", "profileSendRequestButton"})
             QVERIFY2(!stage.item(QString::fromLatin1(never)), never);
-        capture(QStringLiteral("final-stub"), stage.grab());
 
         // Block asks first; Cancel leaves everything as it was.
         stage.click(stage.item(QStringLiteral("profileBlockLink")));
@@ -1232,8 +1374,6 @@ private slots:
         // Words, friends and actions stay.
         QCOMPARE(stage.text(QStringLiteral("profileHeadline")).isEmpty(), false);
         QVERIFY(stage.item(QStringLiteral("profileFriendSpaceBox")));
-        QTest::qWait(500);
-        capture(QStringLiteral("final-plain"), stage.grab());
 
         stage.click(toggle);
         QTRY_COMPARE(stage.window->property("plainRequests").toList(), (QVariantList{true, false}));
@@ -1408,6 +1548,7 @@ private slots:
 
     // --- The mockups' states, for review ------------------------------------------
 
+    // Each final/*.png's state, in both app modes, named after the mockup.
     void capturesForReview_data()
     {
         QTest::addColumn<QString>("shot");
@@ -1417,9 +1558,11 @@ private slots:
             return;
         }
         for (const char *shot : {"final-default", "final-default-1920", "final-scene", "final-classic-1280",
-                                 "final-preset-glitter-girl", "final-preset-safety-pin", "final-preset-chrome-y2k",
-                                 "final-preset-linen", "final-preset-neon-zebra", "final-preset-midnight-emo",
-                                 "final-stub-stranger", "final-editor-preview"}) {
+                                 "final-min", "final-preset-glitter-girl", "final-preset-safety-pin",
+                                 "final-preset-headliner", "final-preset-linen", "final-preset-chrome-y2k",
+                                 "final-preset-neon-zebra", "final-preset-midnight-emo", "final-plain", "final-stub",
+                                 "final-stub-search", "final-stub-stranger", "final-no-page", "final-editor-preview",
+                                 "final-affordance-focus"}) {
             QTest::newRow(qPrintable(QString::fromLatin1(shot) + QStringLiteral("-light"))) << QString::fromLatin1(shot) << false;
             QTest::newRow(qPrintable(QString::fromLatin1(shot) + QStringLiteral("-dark"))) << QString::fromLatin1(shot) << true;
         }
@@ -1433,11 +1576,14 @@ private slots:
         QSettings().setValue(QStringLiteral("Appearance/darkMode"), dark);
         Stage stage;
         stage.contacts = std::make_unique<ContactController>();
+        stage.chat.setLocalUserName(QStringLiteral("Daniel"));
         QSize size(860, 680);
         if (shot == QStringLiteral("final-default-1920"))
             size = QSize(1920, 1080);
         else if (shot == QStringLiteral("final-classic-1280"))
             size = QSize(1280, 800);
+        else if (shot == QStringLiteral("final-min"))
+            size = QSize(720, 560);
         else if (shot == QStringLiteral("final-editor-preview"))
             size = QSize(1024, 768);
         const auto open = [&](Preset preset, int origin = -1) {
@@ -1445,47 +1591,50 @@ private slots:
             stage.profiles().setMockPage(page.contact, page.page);
             return openPerson(stage, page.contact, origin);
         };
+        const auto player = [&] { return stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer")); };
         QVERIFY(stage.load(size));
         stage.useScriptedCalls();
-        const auto name = [&] { return shot + (dark ? QStringLiteral("-dark") : QStringLiteral("-light")); };
 
         if (shot == QStringLiteral("final-default") || shot == QStringLiteral("final-default-1920")) {
             QVERIFY(open(Preset::AeroSkyPreset));
         } else if (shot == QStringLiteral("final-scene")) {
+            // Opened from Michael's Friend Space; the song plays; the
+            // pointer rests on a Top Friend.
             QVERIFY(open(Preset::AeroSkyPreset));
-            int index = -1;
-            const QVariantList friends = stage.profiles().view()->topFriends();
-            for (int i = 0; i < friends.size(); ++i) {
-                if (friends.at(i).toMap().value(QStringLiteral("name")).toString() == QStringLiteral("Jessica"))
-                    index = i;
-            }
-            QVERIFY(index >= 0);
-            QVERIFY(stage.profiles().openTopFriend(index));
+            QVERIFY(stage.profiles().openTopFriend(friendIndex(stage.profiles(), QStringLiteral("Jessica"))));
             QVERIFY(stage.settled());
-            auto *player = stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer"));
-            QTRY_VERIFY(player->valid());
-            player->play();
-            player->seek(17'100);
-            QList<QQuickItem *> tiles = itemsNamed(stage.root(), QStringLiteral("profileFriendTile"));
-            QVERIFY(!tiles.isEmpty());
-            stage.hover(tiles.first());
+            QTRY_VERIFY(player()->valid());
+            player()->play();
+            player()->seek(17'100);
+            stage.hover(itemsNamed(stage.root(), QStringLiteral("profileFriendTile")).value(0));
         } else if (shot == QStringLiteral("final-classic-1280")) {
             QVERIFY(open(Preset::Classic06Preset));
             stage.hover(stage.action(QStringLiteral("message")));
+        } else if (shot == QStringLiteral("final-min")) {
+            // The minimum window; her song is still arriving.
+            PresetPage page = presetPage(Preset::GlitterGirlPreset);
+            page.page.song.sha256 = QByteArray(32, '\x5a');
+            page.page.song.bytes = 180'000;
+            page.page.song.durationMs = 45'000;
+            stage.profiles().setMockPage(page.contact, page.page);
+            QVERIFY(openPerson(stage, page.contact));
+            QVERIFY(stage.profiles().view()->songPending());
         } else if (shot == QStringLiteral("final-preset-glitter-girl")) {
             QVERIFY(open(Preset::GlitterGirlPreset, int(Origin::FromRequests)));
-            auto *player = stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer"));
-            QTRY_VERIFY(player->valid());
-            player->play();
-            player->seek(19'000);
-            player->pause();
+            QTRY_VERIFY(player()->valid());
+            player()->play();
+            player()->seek(19'000);
+            player()->pause();
         } else if (shot == QStringLiteral("final-preset-safety-pin")) {
             QVERIFY(open(Preset::SafetyPinPreset));
             m_devices->refuse = true;
-            auto *player = stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer"));
-            QTRY_VERIFY(player->valid());
-            player->play();
-            QTRY_VERIFY(!player->error().isEmpty());
+            QTRY_VERIFY(player()->valid());
+            player()->play();
+            QTRY_VERIFY(!player()->error().isEmpty());
+        } else if (shot == QStringLiteral("final-preset-headliner")) {
+            // Your own page; the pointer on your photo.
+            QVERIFY(open(Preset::HeadlinerPreset));
+            stage.hover(stage.item(QStringLiteral("profilePhoto")));
         } else if (shot == QStringLiteral("final-preset-chrome-y2k")) {
             QObject *calls = stage.scriptedCalls();
             calls->setProperty("peerName", QStringLiteral("Ryan"));
@@ -1499,32 +1648,58 @@ private slots:
             QVERIFY(open(Preset::NeonZebraPreset));
         } else if (shot == QStringLiteral("final-preset-midnight-emo")) {
             QVERIFY(open(Preset::MidnightEmoPreset));
+        } else if (shot == QStringLiteral("final-plain")) {
+            // Scene Queen with the viewer's Plain style on, and its tip.
+            QVERIFY(open(Preset::AeroSkyPreset));
+            QVERIFY(stage.profiles().openTopFriend(friendIndex(stage.profiles(), QStringLiteral("Jessica"))));
+            QVERIFY(stage.settled());
+            stage.profiles().setPlainStyle(true);
+            stage.hover(stage.item(QStringLiteral("profilePlainStyleSwitch")));
+            QTest::qWait(600);
+        } else if (shot == QStringLiteral("final-stub")) {
+            stage.contacts->addMockRequest(QStringLiteral("Grace"), QStringLiteral("wants to add you"));
+            RequestListModel *requests = stage.contacts->requests();
+            stage.profiles().openRequest(requests->data(requests->index(0), RequestListModel::IdRole).toString(),
+                                         requests->data(requests->index(0), RequestListModel::AccountIdRole).toString(),
+                                         QStringLiteral("Grace"), QStringLiteral("grace"));
+            QVERIFY(stage.settled());
+            stage.hover(stage.item(QStringLiteral("profileAcceptButton")));
+        } else if (shot == QStringLiteral("final-stub-search")) {
+            stage.contacts->setMockDirectory({QStringLiteral("grace.h")});
+            stage.contacts->lookup(QStringLiteral("grace.h"));
+            QTRY_COMPARE(stage.contacts->lookupState(), ContactController::LookupState::Found);
+            stage.profiles().openHandle(QStringLiteral("grace.h"));
+            QVERIFY(stage.settled());
         } else if (shot == QStringLiteral("final-stub-stranger")) {
             QVERIFY(open(Preset::AeroSkyPreset));
-            const QVariantList friends = stage.profiles().view()->topFriends();
-            int stranger = -1;
-            for (int i = 0; i < friends.size(); ++i) {
-                if (!friends.at(i).toMap().value(QStringLiteral("isContact")).toBool()
-                    && !friends.at(i).toMap().value(QStringLiteral("isSelf")).toBool())
-                    stranger = i;
-            }
-            QVERIFY(stage.profiles().openTopFriend(stranger));
+            QVERIFY(stage.profiles().openTopFriend(friendIndex(stage.profiles(), QStringLiteral("Dana Whitfield"))));
             QVERIFY(stage.settled());
+        } else if (shot == QStringLiteral("final-no-page")) {
+            QVERIFY(openPerson(stage, QStringLiteral("tom")));
         } else if (shot == QStringLiteral("final-editor-preview")) {
-            // The kit in the editor's preview: affordances and placeholders,
-            // where the editor puts it (right of the rail and panel).
-            stage.chat.setLocalUserName(QStringLiteral("Daniel"));
+            // The kit in the editor's preview, where the editor puts it
+            // (right of the rail and panel): affordances and placeholders.
+            Profile::Page own = Profile::applyPreset(Reference::ownReferencePage(), Preset::AeroSkyPreset);
+            own.content.interests = {};
+            stage.profiles().setMockPage(Reference::selfId(), own);
             QVERIFY(openPerson(stage, Reference::selfId()));
             QVERIFY(stage.profiles().beginEditing());
-            stage.window->setProperty("previewTarget", QStringLiteral("headline"));
+            stage.window->setProperty("previewTarget", QStringLiteral("aboutMe"));
             stage.window->setProperty("previewWidth", 648);
             QQuickItem *preview = nullptr;
             QTRY_VERIFY((preview = qvariant_cast<QQuickItem *>(stage.window->property("preview"))));
             QTRY_VERIFY(shown(preview, QStringLiteral("profileContactingBox")));
             stage.hover(shown(preview, QStringLiteral("profileContactingBox")));
+        } else if (shot == QStringLiteral("final-affordance-focus")) {
+            // Keyboard focus on a Top Friend: the rings without the badge.
+            QVERIFY(open(Preset::AeroSkyPreset));
+            QQuickItem *grid = stage.item(QStringLiteral("profileFriendGrid"));
+            stage.item(QStringLiteral("profilePageFlickable"))->setProperty("contentY", 260);
+            grid->forceActiveFocus();
+            stage.key(Qt::Key_Right);
         }
-        QTest::qWait(400);
-        capture(name(), stage.grab());
+        QTest::qWait(450);
+        capture(shot + (dark ? QStringLiteral("-dark") : QStringLiteral("-light")), stage.grab());
     }
 
 private:

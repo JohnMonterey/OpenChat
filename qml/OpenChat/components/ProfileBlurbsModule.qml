@@ -45,9 +45,11 @@ ProfileBox {
         renderType: Text.NativeRendering
     }
 
+    // 16 px from one part's words to the next sub-head, as the mockups
+    // draw it (4 + 8 + 4).
     Column {
         width: parent.width
-        spacing: 12
+        spacing: 16
 
         Column {
             id: aboutPart

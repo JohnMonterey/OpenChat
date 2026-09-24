@@ -35,6 +35,9 @@ Item {
 
     // The finest target under a point (in this item's coordinates).
     function targetAt(x, y) {
+        // An empty module is one invitation: all of it opens its field.
+        if (decor.placeholder)
+            return decor.target;
         for (let i = 0; i < decor.regions.length; ++i) {
             const region = decor.regions[i];
             if (!region.item || !region.item.visible)
@@ -173,7 +176,8 @@ Item {
         parent: chip
         visible: decor.inert && decor.hovered && decor.inertTip.length > 0
         text: decor.inertTip
-        y: chip.height + 4
+        // Above the chip, so it never covers the box it explains.
+        y: -height - 4
         x: chip.width - width
     }
 }

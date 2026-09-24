@@ -65,6 +65,78 @@ if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
     qt_policy(SET QTP0004 NEW)
 endif()
 
+# Profile pages' native pieces: the backdrop and its motifs, the background
+# picture layer, the styled name, the ambient sprites, the preset miniatures
+# and mood faces, the contrast engine, the decoded-picture store, the
+# background import pipeline, the bundled fonts, the render policy, the shared
+# animation ticker, song import and the page's mini player, and the QML
+# registration. QPainter artwork like the cosmetics; Qt Multimedia is reached
+# only on demand (a WAV import never loads it, a player on its first play()).
+add_library(openchat_profile STATIC
+    src/profile/ProfileRenderPolicy.cpp
+    src/profile/ProfileTicker.cpp
+    src/profile/ProfileMotifs.cpp
+    src/profile/ProfileReadability.cpp
+    src/profile/ProfileMediaStore.cpp
+    src/profile/ProfileBackgroundImage.cpp
+    src/profile/ProfileFonts.cpp
+    src/profile/ProfileBackdropItem.cpp
+    src/profile/ProfileImageLayerItem.cpp
+    src/profile/ProfileNameTextItem.cpp
+    src/profile/ProfileAmbientItem.cpp
+    src/profile/ProfilePresetThumbItem.cpp
+    src/profile/ProfileMoodFaceItem.cpp
+    src/profile/ProfileQmlTypes.cpp
+    src/profile/SongImport.cpp
+    src/profile/SongPlayer.cpp
+)
+target_include_directories(openchat_profile PUBLIC src)
+target_link_libraries(openchat_profile
+    PUBLIC openchat_domain openchat_media openchat_avatar openchat_cosmetics
+           Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Multimedia
+    PRIVATE openchat_opus
+)
+# The eight bundled content faces (docs/profile-pages.md), with their
+# licences. Registered lazily by ProfileFonts::ensureRegistered(), never at
+# start-up.
+qt_add_resources(openchat_profile "openchat_profile_fonts"
+    PREFIX "/openchat/profile-fonts"
+    BASE "assets/fonts"
+    FILES
+        assets/fonts/README.md
+        assets/fonts/fredoka/FredokaMedium.ttf
+        assets/fonts/fredoka/FredokaSemiBold.ttf
+        assets/fonts/fredoka/OFL.txt
+        assets/fonts/pacifico/Pacifico-Regular.ttf
+        assets/fonts/pacifico/OFL.txt
+        assets/fonts/courierprime/CourierPrime-Regular.ttf
+        assets/fonts/courierprime/CourierPrime-Bold.ttf
+        assets/fonts/courierprime/OFL.txt
+        assets/fonts/pressstart2p/PressStart2P-Regular.ttf
+        assets/fonts/pressstart2p/OFL.txt
+        assets/fonts/unifrakturmaguntia/UnifrakturMaguntia-Book.ttf
+        assets/fonts/unifrakturmaguntia/OFL.txt
+        assets/fonts/orbitron/OpenChatFuture-SemiBold.ttf
+        assets/fonts/orbitron/OpenChatFuture-ExtraBold.ttf
+        assets/fonts/orbitron/OFL.txt
+        assets/fonts/playfairdisplay/OpenChatSerif-Regular.ttf
+        assets/fonts/playfairdisplay/OpenChatSerif-Bold.ttf
+        assets/fonts/playfairdisplay/OFL.txt
+        assets/fonts/permanentmarker/PermanentMarker-Regular.ttf
+        assets/fonts/permanentmarker/LICENSE.txt
+)
+
+# The QML-facing profile controller, its page objects and resolved style, the
+# editor's undo history and the reference mock's pages. ChatController owns
+# the controller, so these are compiled beside ChatController.cpp in every
+# target that compiles it, each also linking openchat_profile.
+set(profile_controller_sources
+    src/controllers/ProfileController.cpp
+    src/controllers/ProfilePageObject.cpp
+    src/controllers/ProfileReferencePages.cpp
+    src/controllers/ProfileEditHistory.cpp
+)
+
 set_source_files_properties(qml/OpenChat/Theme.qml qml/OpenChat/VocalFx.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
 )
@@ -72,6 +144,7 @@ set_source_files_properties(qml/OpenChat/Theme.qml qml/OpenChat/VocalFx.qml PROP
 qt_add_executable(OpenChat
     src/main.cpp
     src/controllers/ChatController.cpp
+    ${profile_controller_sources}
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
@@ -255,6 +328,7 @@ target_include_directories(OpenChat PRIVATE src)
 target_link_libraries(OpenChat PRIVATE
     openchat_case
     openchat_cosmetics
+    openchat_profile
     openchat_app
     openchat_avatar
     openchat_call
@@ -353,6 +427,9 @@ add_library(openchat_domain STATIC
     src/domain/Identifiers.cpp
     src/domain/Handle.cpp
     src/domain/ProfileUpdate.cpp
+    src/domain/ProfilePage.cpp
+    src/domain/ProfilePageCodec.cpp
+    src/domain/SongContainer.cpp
     src/domain/GroupUpdate.cpp
     src/domain/MessageContent.cpp
 )
@@ -525,6 +602,7 @@ add_library(openchat_media STATIC
     src/media/SpeechLevelMeter.cpp
     src/media/MicrophoneProcessor.cpp
     src/media/VoiceEffects.cpp
+    src/media/SongCodec.cpp
 )
 target_include_directories(openchat_media PUBLIC src)
 target_link_libraries(openchat_media
@@ -583,6 +661,7 @@ add_library(openchat_storage STATIC
     src/storage/SqlCipherOutboxRepository.cpp
     src/storage/SqlCipherSyncRepository.cpp
     src/storage/SqlCipherSyncStore.cpp
+    src/storage/SqlCipherProfilePageRepository.cpp
     src/storage/CapturingMlsStateStore.cpp
 )
 target_include_directories(openchat_storage PUBLIC src)
@@ -609,6 +688,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/013_group_chats.sql
         src/storage/migrations/014_chat_read_state.sql
         src/storage/migrations/015_message_edits_and_replies.sql
+        src/storage/migrations/016_profile_pages.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -728,6 +808,7 @@ add_library(openchat_app STATIC
     src/app/GroupService.cpp
     src/app/DeviceLink.cpp
     src/app/KeyPackageSupply.cpp
+    src/app/ProfilePageSync.cpp
 )
 target_include_directories(openchat_app PUBLIC src)
 target_link_libraries(openchat_app
@@ -738,6 +819,12 @@ add_executable(tst_domain tests/tst_domain.cpp)
 target_include_directories(tst_domain PRIVATE src)
 target_link_libraries(tst_domain PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_domain COMMAND tst_domain)
+
+# The profile page model, its wire codec and the song container.
+add_executable(tst_profilepage tests/tst_profilepage.cpp)
+target_include_directories(tst_profilepage PRIVATE src)
+target_link_libraries(tst_profilepage PRIVATE openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_profilepage COMMAND tst_profilepage)
 
 add_executable(tst_groupupdate tests/tst_groupupdate.cpp)
 target_include_directories(tst_groupupdate PRIVATE src)
@@ -773,6 +860,24 @@ add_executable(tst_syncstore tests/tst_syncstore.cpp)
 target_include_directories(tst_syncstore PRIVATE src)
 target_link_libraries(tst_syncstore PRIVATE openchat_storage Qt6::Core Qt6::Test)
 add_test(NAME tst_syncstore COMMAND tst_syncstore)
+
+# Settled control envelopes leave the outbox (SqlCipherSyncStore), checked on
+# disk through a second connection, and through a real SyncEngine.
+add_executable(tst_outboxretention tests/tst_outboxretention.cpp)
+target_include_directories(tst_outboxretention PRIVATE src)
+target_link_libraries(tst_outboxretention PRIVATE
+    openchat_storage openchat_network openchat_protocol openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_outboxretention COMMAND tst_outboxretention)
+
+# Migration 016 and the profile page repository. openchat_sqlcipher is named so
+# the test compiles against SQLCipher's own sqlite3.h (it opens raw connections
+# to build old schemas and to write rows that bypass the repository).
+add_executable(tst_profilepagestore tests/tst_profilepagestore.cpp)
+target_include_directories(tst_profilepagestore PRIVATE src)
+target_link_libraries(tst_profilepagestore
+    PRIVATE openchat_app openchat_storage openchat_sqlcipher Qt6::Core Qt6::Test
+)
+add_test(NAME tst_profilepagestore COMMAND tst_profilepagestore)
 
 add_executable(tst_contactrepository tests/tst_contactrepository.cpp)
 target_include_directories(tst_contactrepository PRIVATE src)
@@ -858,6 +963,29 @@ target_include_directories(tst_syncengine PRIVATE src)
 target_link_libraries(tst_syncengine PRIVATE
     openchat_network openchat_protocol openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_syncengine COMMAND tst_syncengine)
+
+# Profile pages between real peers (ProfileSession, SyncEngine, MLS group)
+# trading through scripted transports: publishing, the paced delivery pump,
+# receiving and background requests. openchat_sqlcipher is named so the outbox
+# inspector compiles against SQLCipher's own sqlite3.h, not a system one.
+add_executable(tst_profilepagesync
+    tests/tst_profilepagesync.cpp
+    tests/PageSyncTestSupport.h
+)
+target_include_directories(tst_profilepagesync PRIVATE src tests)
+target_link_libraries(tst_profilepagesync PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_domain
+    openchat_sqlcipher
+    Qt6::Core
+    Qt6::Test
+)
+add_test(NAME tst_profilepagesync COMMAND tst_profilepagesync)
+set_tests_properties(tst_profilepagesync PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(tst_syncadapters tests/tst_syncadapters.cpp)
 target_include_directories(tst_syncadapters PRIVATE src)
@@ -993,6 +1121,7 @@ add_executable(tst_e2e
     tests/tst_e2e.cpp
     tests/relay/RelayTestSupport.cpp
     src/controllers/ChatController.cpp
+    ${profile_controller_sources}
     src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
@@ -1000,6 +1129,7 @@ add_executable(tst_e2e
 )
 target_include_directories(tst_e2e PRIVATE src tests relay/src)
 target_link_libraries(tst_e2e PRIVATE
+    openchat_profile
     openchat_app
     openchat_avatar
     openchat_call
@@ -1090,16 +1220,22 @@ target_include_directories(tst_models PRIVATE src)
 target_link_libraries(tst_models PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
 add_test(NAME tst_models COMMAND tst_models)
 
+# Also the Appearance › Profiles choice (plainProfiles) beside the settings list
+# that shows it, and that Low memory mode reaches the profile renderer.
 add_executable(tst_chatcontroller
     tests/tst_chatcontroller.cpp
     src/controllers/ChatController.cpp
+    ${profile_controller_sources}
     src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/CallParticipantModel.cpp
+    src/app/AppearanceSettings.cpp
+    src/app/MemorySettings.cpp
 )
 target_include_directories(tst_chatcontroller PRIVATE src tests)
 target_link_libraries(tst_chatcontroller PRIVATE
+    openchat_profile
     openchat_call
     openchat_avatar
     openchat_app
@@ -1281,9 +1417,36 @@ target_link_libraries(tst_cosmetics PRIVATE openchat_cosmetics Qt6::Core Qt6::Gu
 add_test(NAME tst_cosmetics COMMAND tst_cosmetics)
 set_tests_properties(tst_cosmetics PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# The profile renderer: motifs, backdrop, picture layer, media store, the
+# background pipeline, the contrast engine against the measured preset table,
+# the name art, ambient, ticker, fonts, thumbnails and QML registration.
+# OPENCHAT_PROFILE_CAPTURES=<dir> also writes review PNGs.
+add_executable(tst_profilerender tests/tst_profilerender.cpp)
+target_include_directories(tst_profilerender PRIVATE src)
+target_link_libraries(tst_profilerender PRIVATE
+    openchat_profile openchat_cosmetics openchat_avatar openchat_domain
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
+target_compile_definitions(tst_profilerender PRIVATE OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME tst_profilerender COMMAND tst_profilerender)
+set_tests_properties(tst_profilerender PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+
+# The profile song: codec, import and the page's player. openchat_opus is named
+# so the test can build a packet libopus itself refuses (the premise of the
+# concealment test). Playback runs against a fake output, so the suite needs no
+# sound card and makes no sound.
+add_executable(tst_profilesong tests/tst_profilesong.cpp)
+target_include_directories(tst_profilesong PRIVATE src)
+target_link_libraries(tst_profilesong PRIVATE
+    openchat_profile openchat_media openchat_domain openchat_opus Qt6::Multimedia Qt6::Test)
+add_test(NAME tst_profilesong COMMAND tst_profilesong)
+set_tests_properties(tst_profilesong PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp
+    tests/ProfileQmlHarness.h
     src/controllers/ChatController.cpp
+    ${profile_controller_sources}
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
@@ -1314,6 +1477,7 @@ target_compile_definitions(tst_qmlload PRIVATE
 target_link_libraries(tst_qmlload PRIVATE
     openchat_case
     openchat_cosmetics
+    openchat_profile
     openchat_app
     openchat_avatar
     openchat_call
@@ -1338,12 +1502,116 @@ set_tests_properties(tst_qmlload PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software"
 )
 
+# What a suite built on tests/ProfileQmlHarness.h compiles and links: the
+# controllers and models the chat window's QML binds to, the native types the
+# harness registers (as tst_qmlload's list does) and the profile controller.
+set(profile_qml_test_sources
+    tests/ProfileQmlHarness.h
+    src/controllers/ChatController.cpp
+    src/controllers/CallController.cpp
+    src/controllers/ContactController.cpp
+    src/controllers/OnboardingController.cpp
+    src/controllers/VoiceDebugController.cpp
+    src/models/ContactListModel.cpp
+    src/models/MessageListModel.cpp
+    src/models/CallParticipantModel.cpp
+    src/models/RequestListModel.cpp
+    src/render/AvatarArtwork.cpp
+    src/render/BubbleBackground.cpp
+    src/render/CallVideoItem.cpp
+    src/app/AppearanceSettings.cpp
+    src/app/MemorySettings.cpp
+    src/app/MicrophoneSettings.cpp
+    src/app/VoiceEffectHost.cpp
+    src/app/ComposerEditing.cpp
+    src/app/TextLineSpacing.cpp
+    src/app/TransportSettings.cpp
+    ${profile_controller_sources}
+)
+set(profile_qml_test_libs
+    openchat_profile
+    openchat_case
+    openchat_cosmetics
+    openchat_app
+    openchat_avatar
+    openchat_call
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_protocol
+    openchat_domain
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    Qt6::Multimedia
+    Qt6::Network
+    Qt6::WebSockets
+    Qt6::Test
+)
+
+# The profile controller: navigation, resolution, page objects, editing, undo,
+# imports and catalogues on the reference mock, and publishing, receiving,
+# drafts and call deferral over two real peers (tests/PageSyncTestSupport.h).
+# openchat_sqlcipher is named so the peers' storage headers compile against
+# SQLCipher's own sqlite3.h.
+add_executable(tst_profilecontroller
+    tests/tst_profilecontroller.cpp
+    tests/PageSyncTestSupport.h
+    ${profile_qml_test_sources}
+)
+target_include_directories(tst_profilecontroller PRIVATE src tests)
+target_compile_definitions(tst_profilecontroller PRIVATE OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(tst_profilecontroller PRIVATE ${profile_qml_test_libs} openchat_sqlcipher)
+add_test(NAME tst_profilecontroller COMMAND tst_profilecontroller)
+set_tests_properties(tst_profilecontroller PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+
+# The profile page kit (qml/OpenChat/components/Profile*.qml), hosted as Main
+# hosts it by tests/qml/ProfilePageHarness.qml over the reference mock: the
+# page geometry, the painted-area budget, plain text, the Contacting actions
+# per relationship and call state, the page's one song player, the call strip,
+# the back stack and its history menu, stubs, the Plain style switch, the
+# animation policy, borders and focus rings, every warning failing the test.
+# Copy Invite Link runs against a real RelayClient and the fake HTTPS relay
+# (tests/relay/RelayTestSupport), so it copies what the relay really minted.
+# OPENCHAT_PROFILE_CAPTURES=<dir> also writes the review PNGs.
+add_executable(tst_profilepageqml
+    tests/tst_profilepageqml.cpp
+    tests/relay/RelayTestSupport.cpp
+    ${profile_qml_test_sources}
+)
+target_include_directories(tst_profilepageqml PRIVATE src tests)
+target_compile_definitions(tst_profilepageqml PRIVATE OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(tst_profilepageqml PRIVATE ${profile_qml_test_libs} OpenSSL::Crypto)
+add_test(NAME tst_profilepageqml COMMAND tst_profilepageqml)
+set_tests_properties(tst_profilepageqml PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+
+# The owner's editor (qml/OpenChat/components/Profile{Editor,EditorBar,...}.qml)
+# hosted by tests/qml/ProfileEditorHarness.qml in the real ProfilePage over
+# the reference mock: the rail, the nine tabs and their controls, the colour
+# picker, Save / Discard / undo and the leave dialog.
+add_executable(tst_profileeditor
+    tests/tst_profileeditor.cpp
+    ${profile_qml_test_sources}
+)
+target_include_directories(tst_profileeditor PRIVATE src tests)
+target_compile_definitions(tst_profileeditor PRIVATE OPENCHAT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(tst_profileeditor PRIVATE ${profile_qml_test_libs})
+add_test(NAME tst_profileeditor COMMAND tst_profileeditor)
+set_tests_properties(tst_profileeditor PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+
 # Renders every profile cosmetic through the real QML components into labelled
 # PNG sheets (light and dark, 2x) under cosmetics-shots/. A design tool run by
 # hand, not part of the application; it loads the QML from the source tree.
 add_executable(openchat-profile-gallery
     tools/profile_gallery/main.cpp
     src/controllers/ChatController.cpp
+    ${profile_controller_sources}
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
     src/controllers/CallController.cpp
@@ -1379,6 +1647,7 @@ target_compile_definitions(openchat-profile-gallery PRIVATE
 target_link_libraries(openchat-profile-gallery PRIVATE
     openchat_case
     openchat_cosmetics
+    openchat_profile
     openchat_app
     openchat_avatar
     openchat_call
@@ -1424,6 +1693,11 @@ add_openchat_capture_test(capture_screen_zoom 1100 780 "--call-screen;--call-zoo
 add_openchat_capture_test(capture_video_zoom 900 680 "--call-video;--call-zoom")
 add_openchat_capture_test(capture_screen_fullscreen 1100 780 "--call-screen;--call-fullscreen")
 add_openchat_capture_test(capture_video_fullscreen 720 560 "--call-video;--call-fullscreen")
+# Jessica's profile (the Scene Queen preset) over the chat window. OpenChat
+# exits non-zero unless the page really is on screen (the profile open, the
+# profilePage item visible in the window, her own custom page), so the capture
+# cannot pass on the chat window underneath.
+add_openchat_capture_test(capture_profile 860 680 "--profile;scene-queen")
 
 # The add-contact preview sub-mode: renders the dialog over a populated mock
 # Requests list. Uses the same verify runner with the extra --add-contact argument.
@@ -1467,7 +1741,3 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
 )
 set_tests_properties(capture_call PROPERTIES TIMEOUT 5)
-
-# Profile pages while they are being built: last, so every target above exists
-# for the fragments to add to. Folded into this file when the feature is done.
-include(cmake/ProfilePages.cmake)

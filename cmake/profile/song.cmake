@@ -10,5 +10,6 @@ target_sources(openchat_media PRIVATE
 # page's mini player. Both reach Qt Multimedia only on demand: a WAV import
 # never loads it and a player loads it on its first play().
 target_sources(openchat_profile PRIVATE
+    src/profile/SongImport.cpp
     src/profile/SongPlayer.cpp
 )

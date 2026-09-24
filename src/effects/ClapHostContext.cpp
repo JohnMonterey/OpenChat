@@ -69,7 +69,7 @@ ClapHostContext::ClapHostContext()
     m_host.name = "OpenChat";
     m_host.vendor = "OpenChat";
     m_host.url = "https://github.com/JohnMonterey/OpenChat";
-    m_host.version = "0.2.8";
+    m_host.version = "0.2.9";
     m_host.get_extension = &ClapHostContext::getExtension;
     m_host.request_restart = &ClapHostContext::requestRestart;
     m_host.request_process = &ClapHostContext::requestProcess;

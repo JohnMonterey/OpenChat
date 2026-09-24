@@ -810,6 +810,21 @@ private slots:
         QCOMPARE(stage.text(QStringLiteral("profilePresenceLabel")), QStringLiteral("Offline"));
         QVERIFY(openPerson(stage, QStringLiteral("sarah")));
         QCOMPARE(stage.text(QStringLiteral("profilePresenceLabel")), QStringLiteral("Away"));
+        QVERIFY(!stage.item(QStringLiteral("profileStatusRow"))); // no personal message
+
+        // Your own page: your presence, and your status line as the sidebar has it.
+        stage.chat.setLocalPresence(int(Presence::Busy));
+        stage.chat.setLocalStatusText(QStringLiteral("Recording all week"));
+        QVERIFY(openPerson(stage, Reference::selfId()));
+        QCOMPARE(stage.text(QStringLiteral("profilePresenceLabel")), QStringLiteral("Busy"));
+        QQuickItem *status = stage.item(QStringLiteral("profileStatusRow"));
+        QVERIFY(status);
+        bool shownLine = false;
+        for (QQuickItem *item : allItems(status))
+            shownLine = shownLine || item->property("text").toString() == QStringLiteral("Recording all week");
+        QVERIFY(shownLine);
+        stage.chat.setLocalStatusText(QString());
+        QTRY_VERIFY(!stage.item(QStringLiteral("profileStatusRow")));
     }
 
     // --- The song ------------------------------------------------------------

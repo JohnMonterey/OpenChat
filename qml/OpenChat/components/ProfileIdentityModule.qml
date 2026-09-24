@@ -263,13 +263,17 @@ ProfileBox {
                 visible: card.moodWord.length > 0
                 spacing: 5
                 LabelText {
+                    id: moodLabel
                     anchors.verticalCenter: parent.verticalCenter
                     text: "Mood:"
                 }
+                // On the label's baseline (the body's line height would
+                // otherwise lift it off the line).
                 BodyText {
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.baseline: moodLabel.baseline
                     width: implicitWidth
                     wrapMode: Text.NoWrap
+                    lineHeight: 1
                     text: card.moodWord
                 }
                 ProfileMoodFace {
@@ -286,13 +290,14 @@ ProfileBox {
                 objectName: "profileStatusRow"
                 visible: statusText.text.length > 0
                 width: parent.width
-                height: Math.max(statusLabel.implicitHeight, statusText.implicitHeight)
+                height: Math.max(statusLabel.implicitHeight, statusText.y + statusText.implicitHeight)
                 LabelText {
                     id: statusLabel
                     text: "Status:"
                 }
                 BodyText {
                     id: statusText
+                    anchors.baseline: statusLabel.baseline
                     x: statusLabel.implicitWidth + 5
                     width: parent.width - x
                     text: card.profiles ? card.profiles.personStatusLine : ""

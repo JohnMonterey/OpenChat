@@ -54,11 +54,19 @@ struct PageDelivery final {
 };
 
 // Viewer side: the back-off state of our requests to one contact.
+//
+// mediaRequestedRevision is the core revision whose missing media we already
+// asked for, or one of two markers: `neverAsked`, or `mediaEvicted`: the
+// stored revision's media was evicted under the storage cap, so opening the
+// page asks for it again (the only request a view may cause).
 struct PageRequestState final {
+    static constexpr qint64 neverAsked = -1;
+    static constexpr qint64 mediaEvicted = -2;
+
     AccountId account;
     qint64 lastRequestAtMs = 0;
     int unanswered = 0;
-    qint64 mediaRequestedRevision = -1;
+    qint64 mediaRequestedRevision = neverAsked;
 };
 
 // Durable storage for profile pages (migration 016), for one local profile.

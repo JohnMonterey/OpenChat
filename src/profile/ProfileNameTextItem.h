@@ -37,7 +37,10 @@ class ProfileNameText : public QQuickPaintedItem
     Q_PROPERTY(QString fontFamily READ fontFamily WRITE setFontFamily NOTIFY fontFamilyChanged)
     Q_PROPERTY(int basePixelSize READ basePixelSize WRITE setBasePixelSize NOTIFY basePixelSizeChanged)
     // −1 (the default): 30 for fancy names (Glitter, Script, Gothic), else
-    // max(20, 0.7 × base); Pixel names step down its 8 px grid.
+    // max(20, 0.7 × base). Pixel names step down its 8 px grid, and their
+    // floor rounds up to it, so an M Pixel name (16) elides rather than
+    // shrink and an XL one (32) stops at 24.
+    // Fancy names also always get the glitter keyline, whatever the effect.
     Q_PROPERTY(int minPixelSize READ minPixelSize WRITE setMinPixelSize NOTIFY minPixelSizeChanged)
     Q_PROPERTY(QColor color READ color WRITE setColor NOTIFY colorChanged)
     Q_PROPERTY(QColor color2 READ color2 WRITE setColor2 NOTIFY color2Changed)
@@ -155,6 +158,7 @@ private:
     qreal m_padY = 0;
     qreal m_boxHeight = 0;
     qreal m_baselineShift = 0; // fraction of the size
+    bool m_fancy = false;      // Glitter, Script or Gothic: the 30 px floor and the keyline
 
     std::unique_ptr<ProfileItemAnimation> m_animation;
 };

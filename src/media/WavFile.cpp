@@ -194,6 +194,10 @@ Result<WavAudio, WavError> WavFile::decode(const QByteArray &bytes)
     // make the per-frame arithmetic below overflow or allocate absurdly.
     if (format->channels > 64)
         return Failure::failure(WavError::Unsupported);
+    // Likewise a sample rate past any real one, which as an int would even
+    // turn negative.
+    if (format->sampleRate > quint32(maxSampleRate))
+        return Failure::failure(WavError::Unsupported);
 
     auto samples = decodeSamples(*format, data);
     if (!samples.hasValue())

@@ -784,6 +784,41 @@ private slots:
         const auto carolsRequests = requestsFrom(*c, a);
         QCOMPARE(carolsRequests.size(), 2);
         QCOMPARE(carolsRequests.last().wantMedia, QVector<QByteArray>{pageMediaHash(carolsPicture)});
+
+        // A newer revision clears the mark: its media is merely on its way,
+        // which is the grace request's to fetch, in the background.
+        QVERIFY(net.sendRaw(*c, a, rawCore(8'000, QStringLiteral("Carol"), backgroundRef(carolsPicture))));
+        net.settle();
+        QCOMPARE(requestStateOf(a, *c).mediaRequestedRevision, PageRequestState::neverAsked);
+        net.clock.advance(30);
+        QVERIFY(TwoPeerFixture::waitFor([&] {
+            net.routeAll();
+            return requestsFrom(*c, a).size() == 3;
+        }));
+        QVERIFY(requestsFrom(*c, a).last().haveRevision == std::optional<qint64>(8'000));
+        QCOMPARE(requestStateOf(a, *c).mediaRequestedRevision, qint64(8'000));
+    }
+
+    // Eviction marks a page for a look only when it took media the page
+    // names: a pending blob going does not make still-missing media evicted.
+    void evictingPendingMediaMarksNothing()
+    {
+        TwoPeerFixture net;
+        net.limits.receivedMediaSoftCapBytes = 1;
+        net.limits.receivedMediaTargetBytes = 0;
+        QVERIFY(net.setUp());
+        Peer &a = net.a();
+        Peer &b = net.b(); // sends by hand
+        net.startSync(a);
+        QVERIFY(net.sendRaw(b, a, rawCore(5'000, QStringLiteral("Bob"), backgroundRef(testJpeg('\x0B')))));
+        QVERIFY(net.sendRaw(b, a, rawMedia(Background, testJpeg('\x0D')))); // named by no core of his
+        net.settle();
+        QCOMPARE(a.pages().receivedMediaBytes().value(), qint64(0)); // evicted at once
+        QCOMPARE(requestStateOf(a, b).mediaRequestedRevision, PageRequestState::neverAsked);
+
+        a.sync->markViewed(b.account);
+        net.settle(100);
+        QCOMPARE(countFrom(b, a, Kind::PageRequest), 0);
     }
 
     // --- Viewer side: receiving ---------------------------------------------
@@ -1189,6 +1224,81 @@ private slots:
         QCOMPARE(countFrom(b, a, Kind::PageRequest), 2);
     }
 
+    // The grace request lives only in memory. A quit before it went out must
+    // neither lose the media for good nor let a later look ask for it: only
+    // evicted media may tell the owner a page was opened.
+    void missingMediaRequestSurvivesARestart()
+    {
+        TwoPeerFixture net;
+        net.limits.missingMediaGraceMs = 50;
+        net.limits.startupRequestJitterMs = 20;
+        net.random = [](qint64) { return qint64(10); };
+        QVERIFY(net.setUp());
+        Peer &a = net.a();
+        Peer &b = net.b(); // sends by hand, never pushes its picture
+        net.startSync(a);
+        const QByteArray picture = testJpeg('\x0C');
+        QVERIFY(net.sendRaw(b, a, rawCore(5'000, QStringLiteral("Bob"), backgroundRef(picture))));
+        net.settle();
+        QVERIFY(!a.sync->contactPage(b.account)->backgroundPresent);
+
+        // Alice quits within the grace. Opening the page then asks nothing:
+        // none of it was evicted.
+        QVERIFY(net.reopen(a));
+        net.startSync(a);
+        a.sync->markViewed(b.account);
+        net.settle(100);
+        QCOMPARE(countFrom(b, a, Kind::PageRequest), 0);
+        QCOMPARE(requestStateOf(a, b).mediaRequestedRevision, PageRequestState::neverAsked);
+
+        // The grace request is armed again, in the background, and not
+        // before the core's own grace is over.
+        net.clock.advance(49);
+        net.settle(100);
+        QCOMPARE(countFrom(b, a, Kind::PageRequest), 0);
+        net.clock.advance(1);
+        QVERIFY(TwoPeerFixture::waitFor([&] {
+            net.routeAll();
+            return countFrom(b, a, Kind::PageRequest) == 1;
+        }));
+        const auto first = requestsFrom(b, a).first();
+        QVERIFY(first.haveRevision == std::optional<qint64>(5'000));
+        QCOMPARE(first.wantMedia, QVector<QByteArray>{pageMediaHash(picture)});
+        QCOMPARE(requestStateOf(a, b).mediaRequestedRevision, qint64(5'000));
+
+        // A newer revision whose grace request is still waiting for the link
+        // when Alice quits: after the restart a look queues nothing, and the
+        // re-armed request goes once the link is back.
+        QVERIFY(net.sendRaw(b, a, rawCore(6'000, QStringLiteral("Bob again"), backgroundRef(picture))));
+        net.settle();
+        a.transport.connected = false;
+        net.clock.advance(50);
+        net.settle(100);
+        QCOMPARE(countFrom(b, a, Kind::PageRequest), 1);
+        QVERIFY(net.reopen(a));
+        net.startSync(a);
+        a.sync->markViewed(b.account);
+        net.clock.advance(hour);
+        net.settle(100);
+        QCOMPARE(countFrom(b, a, Kind::PageRequest), 1);
+        a.transport.connectLink();
+        QVERIFY(TwoPeerFixture::waitFor([&] {
+            net.routeAll();
+            return countFrom(b, a, Kind::PageRequest) == 2;
+        }));
+        QVERIFY(requestsFrom(b, a).last().haveRevision == std::optional<qint64>(6'000));
+        QCOMPARE(requestStateOf(a, b).mediaRequestedRevision, qint64(6'000));
+
+        // Once per revision: not a restart, a reconnect nor a look asks again.
+        QVERIFY(net.reopen(a));
+        net.startSync(a);
+        a.transport.connectLink();
+        a.sync->markViewed(b.account);
+        net.clock.advance(hour);
+        net.settle(100);
+        QCOMPARE(countFrom(b, a, Kind::PageRequest), 2);
+    }
+
     void viewerRequestsBackOffWhileUnanswered()
     {
         TwoPeerFixture net;
@@ -1299,6 +1409,46 @@ private slots:
             QVERIFY(!deliveryOf(a, *peer).pageCapable);
         }
         QCOMPARE(countFrom(b, a, Kind::PageCore), 1); // Bob is a contact
+    }
+
+    // The sender cache remembers whose conversation it is; a contact blocked
+    // after their page messages filled it (from a request row: the sync hears
+    // of no new binding) must still be refused from then on.
+    void contactBlockedAfterEarlierPagesIsIgnored()
+    {
+        TwoPeerFixture net;
+        QVERIFY(net.setUp());
+        Peer &a = net.a();
+        Peer *kim = net.addPeer(QStringLiteral("kim")); // sends by hand
+        QVERIFY(kim && net.link(a, *kim));
+        net.startSync(a);
+        QVERIFY(publishPage(*a.sync, QStringLiteral("For contacts"), testJpeg('\x61')) > 0);
+        QVERIFY(net.sendRaw(*kim, a, rawCore(4'000, QStringLiteral("Kim"))));
+        net.settle();
+        QCOMPARE(a.pages().contactPage(kim->account).value()->revision, qint64(4'000));
+        QVERIFY(deliveryOf(a, *kim).pageCapable);
+        const int sentToKim = TwoPeerFixture::envelopesTo(a, kim->device);
+        const auto changes = countSignals(*a.sync, &ProfilePageSync::contactPageChanged, kim->account);
+
+        QVERIFY(a.contacts().block(kim->account, net.clock.nowMs).hasValue());
+        // Any page message of a contact's would reset this back-off.
+        PageRequestState backedOff{kim->account};
+        backedOff.unanswered = 3;
+        QVERIFY(a.pages().saveRequestState(backedOff).hasValue());
+        net.clock.advance(hour); // past the answer interval
+        QVERIFY(net.sendRaw(*kim, a, rawCore(5'000, QStringLiteral("Kim, blocked"))));
+        QVERIFY(net.sendRaw(*kim, a, rawMedia(Background, testJpeg('\x62'))));
+        QVERIFY(net.sendRaw(*kim, a, rawRequest()));
+        net.settle();
+
+        QCOMPARE(countFrom(a, *kim, Kind::PageCore), 2); // it did arrive
+        const auto stored = a.pages().contactPage(kim->account);
+        QVERIFY(stored.hasValue());
+        QVERIFY(!stored.value() || stored.value()->revision == 4'000);
+        QCOMPARE(*changes, 0);
+        QCOMPARE(pendingMedia(a, *kim), 0);
+        QCOMPARE(requestStateOf(a, *kim).unanswered, 3);
+        QCOMPARE(TwoPeerFixture::envelopesTo(a, kim->device), sentToKim);
     }
 
     void groupConversationTrafficIsIgnored()

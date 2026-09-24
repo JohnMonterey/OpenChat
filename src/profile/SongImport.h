@@ -11,6 +11,7 @@
 #include <QVector>
 
 #include <atomic>
+#include <functional>
 #include <optional>
 
 namespace OpenChat {
@@ -85,6 +86,12 @@ public:
     // Sends WAV files through QAudioDecoder too, so its path can be tested
     // with a file the test writes itself.
     void setForceDecoderForTesting(bool force);
+    // Runs on the worker just before each encode that starts after this call
+    // (a test holds an encode "under way" with it, or makes it throw).
+    void setEncodeHookForTesting(std::function<void()> hook);
+    // Returns once the worker has finished everything it was given; whatever
+    // that produced is posted to this object, not yet emitted.
+    void waitForIdleForTesting();
 
 signals:
     void analysed(const OpenChat::SongSourceInfo &info);
@@ -102,12 +109,19 @@ private:
     void deliverAnalysis(quint64 generation, const QString &path, const SongSourceInfo &info);
     void deliverEncoded(quint64 generation, const QByteArray &container, qint64 durationMs, qint64 windowStartMs);
     void startEncode(quint64 generation, SongClip clip, qint64 windowStartMs);
+    // Runs `job` on the worker unless a newer call came first. A job that
+    // throws fails with `error` instead of taking the process down.
+    void runOnWorker(quint64 generation, SongImportError error, std::function<void()> job);
+    // On the worker: encodes the clip and posts the outcome.
+    void encodeAndPost(quint64 generation, const SongClip &clip, qint64 windowStartMs,
+                       const std::function<void()> &hook);
     void startDecodeRun(quint64 generation, const QString &path, bool analyse, qint64 startMs, bool retry = false);
     void endDecodeRun();
     [[nodiscard]] std::optional<SongImportError> checkFile(const QString &path) const;
 
     SongImportLimits m_limits;
     bool m_forceDecoder = false;
+    std::function<void()> m_encodeHook; // copied into each job as it starts
     bool m_busy = false;
     std::atomic<quint64> m_generation{0};
     // Durations of analysed files, so a compressed window can be placed

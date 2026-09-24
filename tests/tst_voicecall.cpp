@@ -534,6 +534,18 @@ private slots:
         }
         {
             WavBuilder builder;
+            builder.sampleRate = 0x8000'0000U; // negative as an int
+            builder.data = QByteArray(8, '\1');
+            QTest::newRow("absurd-sample-rate") << builder.build() << error(WavError::Unsupported);
+        }
+        {
+            WavBuilder builder;
+            builder.sampleRate = quint32(WavFile::maxSampleRate) + 1;
+            builder.data = QByteArray(8, '\1');
+            QTest::newRow("sample-rate-past-the-bound") << builder.build() << error(WavError::Unsupported);
+        }
+        {
+            WavBuilder builder;
             builder.bitsPerSample = 12; // a real depth, but not one this reader decodes
             builder.data = QByteArray(8, '\1');
             QTest::newRow("unsupported-depth") << builder.build() << error(WavError::Unsupported);

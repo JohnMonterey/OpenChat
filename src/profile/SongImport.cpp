@@ -259,8 +259,12 @@ struct WavSource final {
         return Result<WavSource, SongImportError>::failure(wavError(decoded.error()));
     WavSource source;
     source.audio = std::move(decoded).value();
+    // WavFile refuses these already; the arithmetic below must never see a
+    // rate that makes it negative, whoever reads the header.
+    if (source.audio.sampleRate < 1 || source.audio.sampleRate > WavFile::maxSampleRate)
+        return Result<WavSource, SongImportError>::failure(SongImportError::UnsupportedFormat);
     source.tags = readWavTags(bytes);
-    const qint64 maxFrames = limits.maxSourceMs * source.audio.sampleRate / 1000;
+    const qint64 maxFrames = std::max<qint64>(0, limits.maxSourceMs * source.audio.sampleRate / 1000);
     if (source.audio.frameCount() > maxFrames) {
         source.audio.samples.resize(maxFrames * source.audio.channels);
         source.audio.samples.squeeze(); // a long file's tail is not kept in memory either
@@ -514,7 +518,7 @@ private:
             if (m_rate == 0) {
                 m_rate = format.sampleRate();
                 m_channels = format.channelCount();
-                if (m_rate <= 0 || m_channels <= 0) {
+                if (m_rate <= 0 || m_rate > WavFile::maxSampleRate || m_channels <= 0) {
                     fail(SongImportError::DecodeFailed);
                     return;
                 }
@@ -819,9 +823,7 @@ void SongImporter::analyse(const QString &path)
     }
     if (!m_forceDecoder && isRiffWave(path)) {
         const SongImportLimits limits = m_limits;
-        m_pool.start([this, generation, path, limits] {
-            if (!isCurrent(generation))
-                return;
+        runOnWorker(generation, SongImportError::DecodeFailed, [this, generation, path, limits] {
             auto outcome = std::make_shared<Result<SongSourceInfo, SongImportError>>(analyseWav(path, limits));
             QMetaObject::invokeMethod(
                 this,
@@ -851,38 +853,19 @@ void SongImporter::encodeWindow(const QString &path, qint64 startMs)
     }
     if (!m_forceDecoder && isRiffWave(path)) {
         const SongImportLimits limits = m_limits;
-        m_pool.start([this, generation, path, limits, startMs] {
-            if (!isCurrent(generation))
-                return;
-            WindowClip window;
-            {
-                auto read = readWav(path, limits);
-                if (!read) {
-                    QMetaObject::invokeMethod(
-                        this, [this, generation, error = read.error()] { deliverFailure(generation, error); },
-                        Qt::QueuedConnection);
-                    return;
-                }
-                window = sliceWindow(read.value().audio, startMs, silenceThresholdDb());
-            } // the whole source is freed before the encode
-            auto encoded = encodeSong(window.clip, {}, [this, generation] { return !isCurrent(generation); });
-            if (!encoded) {
-                if (const auto error = encodeError(encoded.error())) {
-                    QMetaObject::invokeMethod(
-                        this, [this, generation, error = *error] { deliverFailure(generation, error); },
-                        Qt::QueuedConnection);
-                }
-                return;
-            }
-            const QByteArray container = std::move(encoded).value();
-            const qint64 durationMs = decodeSongContainer(container).value_or(SongContainer{}).durationMs();
-            QMetaObject::invokeMethod(
-                this,
-                [this, generation, container, durationMs, windowStartMs = window.startMs] {
-                    deliverEncoded(generation, container, durationMs, windowStartMs);
-                },
-                Qt::QueuedConnection);
-        });
+        runOnWorker(generation, SongImportError::EncodeFailed,
+                    [this, generation, path, limits, startMs, hook = m_encodeHook] {
+                        WindowClip window;
+                        {
+                            auto read = readWav(path, limits);
+                            if (!read) {
+                                postFailure(generation, read.error());
+                                return;
+                            }
+                            window = sliceWindow(read.value().audio, startMs, silenceThresholdDb());
+                        } // the whole source is freed before the encode
+                        encodeAndPost(generation, window.clip, window.startMs, hook);
+                    });
         return;
     }
     if (!canDecodeCompressed()) {
@@ -915,27 +898,57 @@ void SongImporter::startEncode(quint64 generation, SongClip clip, qint64 windowS
     if (!isCurrent(generation))
         return;
     auto shared = std::make_shared<SongClip>(std::move(clip));
-    m_pool.start([this, generation, shared, windowStartMs] {
+    runOnWorker(generation, SongImportError::EncodeFailed,
+                [this, generation, shared, windowStartMs, hook = m_encodeHook] {
+                    encodeAndPost(generation, *shared, windowStartMs, hook);
+                });
+}
+
+void SongImporter::runOnWorker(quint64 generation, SongImportError error, std::function<void()> job)
+{
+    m_pool.start([this, generation, error, job = std::move(job)] {
         if (!isCurrent(generation))
             return;
-        auto encoded = encodeSong(*shared, {}, [this, generation] { return !isCurrent(generation); });
-        if (!encoded) {
-            if (const auto error = encodeError(encoded.error())) {
-                QMetaObject::invokeMethod(
-                    this, [this, generation, error = *error] { deliverFailure(generation, error); },
-                    Qt::QueuedConnection);
-            }
-            return;
+        // An exception must never leave a pool thread (that is
+        // std::terminate): a job that throws, say out of memory on a
+        // hostile file, fails like any other.
+        try {
+            job();
+        } catch (...) {
+            postFailure(generation, error);
         }
-        const QByteArray container = std::move(encoded).value();
-        const qint64 durationMs = decodeSongContainer(container).value_or(SongContainer{}).durationMs();
-        QMetaObject::invokeMethod(
-            this,
-            [this, generation, container, durationMs, windowStartMs] {
-                deliverEncoded(generation, container, durationMs, windowStartMs);
-            },
-            Qt::QueuedConnection);
     });
+}
+
+void SongImporter::encodeAndPost(quint64 generation, const SongClip &clip, qint64 windowStartMs,
+                                 const std::function<void()> &hook)
+{
+    if (hook)
+        hook();
+    auto encoded = encodeSong(clip, {}, [this, generation] { return !isCurrent(generation); });
+    if (!encoded) {
+        if (const auto error = encodeError(encoded.error()))
+            postFailure(generation, *error);
+        return;
+    }
+    const QByteArray container = std::move(encoded).value();
+    const qint64 durationMs = decodeSongContainer(container).value_or(SongContainer{}).durationMs();
+    QMetaObject::invokeMethod(
+        this,
+        [this, generation, container, durationMs, windowStartMs] {
+            deliverEncoded(generation, container, durationMs, windowStartMs);
+        },
+        Qt::QueuedConnection);
+}
+
+void SongImporter::setEncodeHookForTesting(std::function<void()> hook)
+{
+    m_encodeHook = std::move(hook);
+}
+
+void SongImporter::waitForIdleForTesting()
+{
+    m_pool.waitForDone();
 }
 
 void SongImporter::postFailure(quint64 generation, SongImportError error)

@@ -736,13 +736,20 @@ void SongPlayer::outputFailed(const SongOutput *output, const QString &message)
 {
     // Queued, so the output is never destroyed inside its own signal; the
     // pointer is only compared, never followed.
+    if (output == nullptr)
+        return;
+    // The playing voice first notes where it got to. If the song had already
+    // played to the end, that retires the voice (the next position tick
+    // would have), and the failure is then a retiring output's like any
+    // other: the song is over, so there is nothing to report.
+    if (output == m_voice.output.get())
+        updatePosition();
     if (output == m_retiring.output.get()) {
         killRetiring();
         return;
     }
     if (output != m_voice.output.get())
         return;
-    updatePosition();
     m_positionTimer.stop();
     if (soundingPlayer() == this)
         soundingPlayer() = nullptr;

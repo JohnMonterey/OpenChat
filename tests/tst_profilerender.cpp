@@ -96,6 +96,16 @@ int pixelsNear(const QImage &image, const QColor &colour, int tolerance)
     return count;
 }
 
+// The families of every font the process itself has added (application font
+// ids are small and dense), as opposed to what the system has installed.
+QStringList applicationFontFamilies()
+{
+    QStringList families;
+    for (int id = 0; id < 256; ++id)
+        families += QFontDatabase::applicationFontFamilies(id);
+    return families;
+}
+
 int opaquePixels(const QImage &image, int minimumAlpha = 32)
 {
     const QImage argb = image.convertToFormat(QImage::Format_ARGB32);
@@ -319,20 +329,31 @@ private slots:
     {
         const QStringList bundled = ProfileFonts::bundledFamilies();
         QCOMPARE(bundled.size(), 11);
-        if (QFontDatabase::families().contains(QStringLiteral("Pacifico")))
-            QSKIP("Pacifico is installed on this system, so its absence cannot be observed");
-        // registerProfileQmlTypes() ran in initTestCase().
+        // registerProfileQmlTypes() ran in initTestCase(). Whether a family
+        // is in QFontDatabase::families() depends on what this machine has
+        // installed; what the app itself has loaded does not.
         QVERIFY(!ProfileFonts::isRegistered());
+        const QStringList loadedBefore = applicationFontFamilies();
         for (const QString &family : bundled)
-            QVERIFY2(!QFontDatabase::families().contains(family), qPrintable(family));
+            QVERIFY2(!loadedBefore.contains(family), qPrintable(family));
 
         ProfileFonts::ensureRegistered();
         QVERIFY(ProfileFonts::isRegistered());
+        const QStringList loaded = applicationFontFamilies();
         const QStringList families = QFontDatabase::families();
-        for (const QString &family : bundled)
+        for (const QString &family : bundled) {
+            QVERIFY2(loaded.contains(family), qPrintable(family));
             QVERIFY2(families.contains(family), qPrintable(family));
+        }
+        const qsizetype count = loaded.size();
         ProfileFonts::ensureRegistered(); // idempotent
+        QCOMPARE(applicationFontFamilies().size(), count);
+    }
 
+    void bundledFontsMapEveryFaceAndRole()
+    {
+        ProfileFonts::ensureRegistered();
+        const QStringList families = QFontDatabase::families();
         // Every face and role names a registered family, and the reverse
         // lookup finds it again.
         for (int f = 1; f <= int(Profile::Font::MarkerFont); ++f) {
@@ -1468,7 +1489,22 @@ private slots:
         QVERIFY(!name.elided());
         name.setAvailableWidth(natural * 0.2);
         QCOMPARE(name.renderedPixelSize() % 8, 0);
-        QCOMPARE(name.renderedPixelSize(), 16); // floor: 0.7 × 32 on the grid
+        // The floor, max(20, 0.7 × 32) = 22, rounds UP to the grid: a
+        // Pixel name never renders below 20 px either.
+        QCOMPARE(name.renderedPixelSize(), 24);
+        QVERIFY(name.elided());
+        // An explicit floor off the grid (what the page passes) rounds up too.
+        name.setMinPixelSize(22);
+        QCOMPARE(name.renderedPixelSize(), 24);
+        name.setMinPixelSize(-1);
+        // An M Pixel name (16) is at its floor already: it elides, never
+        // shrinking to 8.
+        name.setBasePixelSize(16);
+        QCOMPARE(name.renderedPixelSize(), 16);
+        QVERIFY(name.elided());
+        // An L one (24) likewise.
+        name.setBasePixelSize(24);
+        QCOMPARE(name.renderedPixelSize(), 24);
         QVERIFY(name.elided());
         // A glittering Pixel name is fancy: at least 30 px, on the grid.
         name.setAvailableWidth(0);
@@ -1479,6 +1515,49 @@ private slots:
         name.setAvailableWidth(natural * 0.2);
         QCOMPARE(name.renderedPixelSize(), 32);
         QVERIFY(name.elided());
+    }
+
+    // SPEC §7.1: fancy names (Glitter, Script, Gothic) always get the glitter
+    // keyline, whatever their effect (Midnight Emo is a glowing Gothic name).
+    void fancyNamesGetTheKeylineWithEveryEffect()
+    {
+        ProfileFonts::ensureRegistered();
+        // A bright ink and a blue second colour, so the keyline (the ink
+        // darkened by .42 on a light box) is told apart from everything else.
+        const QColor ink(0xFF, 0x40, 0x80);
+        const QColor rim = Readability::darken(ink, 0.42);
+        const auto rimPixels = [&](const QString &family, Profile::NameEffect effect) {
+            ProfileNameText name;
+            name.setText(QStringLiteral("Alex"));
+            name.setFontFamily(family);
+            name.setBasePixelSize(40);
+            name.setColor(ink);
+            name.setColor2(QColor(0x40, 0xC0, 0xFF));
+            name.setEffect(int(effect));
+            name.setAnimate(false);
+            name.setSize(QSizeF(name.implicitWidth(), name.implicitHeight()));
+            const QImage frame = name.renderFrame(1.0).convertToFormat(QImage::Format_ARGB32);
+            int count = 0;
+            for (int y = 0; y < frame.height(); ++y) {
+                const auto *line = reinterpret_cast<const QRgb *>(frame.constScanLine(y));
+                for (int x = 0; x < frame.width(); ++x)
+                    count += qAlpha(line[x]) > 200 && near(QColor::fromRgb(line[x]), rim, 12) ? 1 : 0;
+            }
+            return count;
+        };
+        const QString gothic = ProfileFonts::family(Profile::Font::GothicFont, ProfileFonts::Role::Name);
+        const QString script = ProfileFonts::family(Profile::Font::ScriptFont, ProfileFonts::Role::Name);
+        for (const auto effect : {Profile::NameEffect::PlainName, Profile::NameEffect::GlowName,
+                                  Profile::NameEffect::OutlineName, Profile::NameEffect::GradientName,
+                                  Profile::NameEffect::ShadowName}) {
+            const QString label = effectSlug(int(effect));
+            QVERIFY2(rimPixels(gothic, effect) > 40, qPrintable(QStringLiteral("gothic ") + label));
+            QVERIFY2(rimPixels(script, effect) > 40, qPrintable(QStringLiteral("script ") + label));
+            // An interface-face name is not fancy: no keyline.
+            QVERIFY2(rimPixels(QString(), effect) < 5, qPrintable(QStringLiteral("interface ") + label));
+        }
+        // Glitter is fancy in any face.
+        QVERIFY(rimPixels(QString(), Profile::NameEffect::GlitterName) > 40);
     }
 
     void flourishIsPaintedButNotInTheAccessibleName()

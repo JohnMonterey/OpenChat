@@ -98,7 +98,8 @@ public:
     };
 
     // Connects engine.profileUpdateReceived and engine.linkUp; runs a
-    // collection; schedules background requests for page-less contacts;
+    // collection; schedules background requests for page-less contacts and
+    // for stored pages whose media never came (again on every linkUp);
     // starts the pump if work is owed.
     ProfilePageSync(ProfileSession &session, SyncEngine &engine, Clock clock, Random random,
                     Limits limits = {}, QObject *parent = nullptr);
@@ -224,6 +225,7 @@ private:
     // Viewer requests.
     void requestIfDue(const AccountId &account, Trigger trigger);
     void scheduleStartupRequests();
+    void setMediaRequestedRevision(const AccountId &account, qint64 revision);
     void schedule(const AccountId &contact, std::optional<Trigger> trigger, qint64 dueAtMs);
     void unschedule(const AccountId &contact, Trigger trigger);
     [[nodiscard]] bool isScheduled(const AccountId &contact, Trigger trigger) const;

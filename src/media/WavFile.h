@@ -55,6 +55,9 @@ public:
     // 256 MiB: far above any plausible call fixture, far below a size that could
     // exhaust memory on the machines this runs on.
     static constexpr qint64 defaultMaxBytes = 256LL * 1024 * 1024;
+    // The highest sample rate real audio uses. The header field is 32 bits,
+    // so a hostile one would otherwise reach callers as a negative int.
+    static constexpr int maxSampleRate = 768'000;
 
     [[nodiscard]] static Result<WavAudio, WavError> readFile(const QString &path,
                                                              qint64 maxBytes = defaultMaxBytes);

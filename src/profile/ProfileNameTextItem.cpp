@@ -235,24 +235,24 @@ void ProfileNameText::relayout()
     const bool fancy = m_effect == int(NameEffect::GlitterName) || resolved == Profile::Font::ScriptFont
                        || resolved == Profile::Font::GothicFont;
 
-    // The size ladder: the base (Pixel on its 8 px grid), down to the floor.
-    // Fancy names never go below 30 px, so an M script name renders at 30
-    // (a glittering Pixel name at 32, the grid step above).
+    // The size ladder: the base (Pixel on its 8 px grid), down to the floor:
+    // 70% of the base and never below 20 px. Fancy names never go below 30
+    // px, so an M script name renders at 30. The floor is a minimum, so on
+    // the Pixel grid it rounds up: an M Pixel name (16) never shrinks, an XL
+    // one (32) stops at 24, and a glittering M Pixel name renders at 32.
     const auto snapDown = [grid](int px) { return grid > 0 ? std::max(grid, px / grid * grid) : px; };
     const auto snapUp = [grid](int px) { return grid > 0 ? (px + grid - 1) / grid * grid : px; };
     int base = snapDown(m_basePixelSize);
     int floorSize = 0;
     if (m_minPixelSize >= 0)
-        floorSize = snapDown(m_minPixelSize);
-    else if (grid > 0)
-        floorSize = snapDown(int(0.7 * base));
+        floorSize = m_minPixelSize;
     else
         floorSize = fancy ? 30 : std::max(20, int(std::lround(0.7 * base)));
     if (fancy) {
         base = std::max(base, snapUp(30));
-        floorSize = std::max(floorSize, snapUp(30));
+        floorSize = std::max(floorSize, 30);
     }
-    floorSize = std::min(floorSize, base);
+    floorSize = std::min(snapUp(floorSize), base);
 
     const auto flourish = Profile::Flourish(m_flourish);
     const QString prefix = Profile::flourishPrefix(flourish);
@@ -302,6 +302,7 @@ void ProfileNameText::relayout()
     m_padY = padY;
     m_boxHeight = boxHeight;
     m_baselineShift = ProfileFonts::nameBaselineShift(resolved);
+    m_fancy = fancy;
     setImplicitSize(std::ceil(textWidth) + 2 * padX, boxHeight + 2 * padY);
     if (changed)
         emit layoutChanged();
@@ -319,7 +320,12 @@ QString ProfileNameText::cacheKey(qreal dpr) const
         .arg(m_color2.rgba(), 8, 16)
         .arg(m_effect)
         .arg(int(m_darkBox))
-        .arg(QStringLiteral("%1x%2@%3|%4").arg(width()).arg(height()).arg(dpr, 0, 'f', 3).arg(m_textWidth));
+        .arg(QStringLiteral("%1x%2@%3|%4|%5")
+                 .arg(width())
+                 .arg(height())
+                 .arg(dpr, 0, 'f', 3)
+                 .arg(m_textWidth)
+                 .arg(int(m_fancy)));
 }
 
 void ProfileNameText::paintFrame(QPainter &p, int phase) const
@@ -339,9 +345,21 @@ void ProfileNameText::paintFrame(QPainter &p, int phase) const
     QPainterPath glyphs;
     glyphs.addText(QPointF(x, baseline), font, m_shown);
     const bool light = !m_darkBox;
+    // Glitter's keyline (SPEC §7.2), which every fancy name carries (§7.1).
+    // Stroked before the fill, its outer half shows: the same rim glitter
+    // gets by stroking over its first fill.
+    const auto keyline = [&] {
+        p.strokePath(glyphs, QPen(Readability::darken(m_color, light ? 0.42 : 0.55), std::max(2.0, s / 13),
+                                  Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    };
+    const auto fancyKeyline = [&] {
+        if (m_fancy)
+            keyline();
+    };
 
     switch (NameEffect(m_effect)) {
     case NameEffect::PlainName:
+        fancyKeyline();
         p.fillPath(glyphs, m_color);
         break;
     case NameEffect::GlowName: {
@@ -349,14 +367,17 @@ void ProfileNameText::paintFrame(QPainter &p, int phase) const
         const qreal blur = std::max(8.0, 0.4 * s);
         shadowOf(p, glyphs, m_color2, blur);
         shadowOf(p, glyphs, m_color2, blur);
+        fancyKeyline();
         p.fillPath(glyphs, m_color);
         break;
     }
     case NameEffect::OutlineName:
         p.strokePath(glyphs, QPen(m_color2, std::max(3.0, s / 8), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        fancyKeyline();
         p.fillPath(glyphs, m_color);
         break;
     case NameEffect::GradientName: {
+        fancyKeyline();
         QLinearGradient ramp(0, mid - s * 0.5, 0, mid + s * 0.45);
         ramp.setColorAt(0, m_color);
         ramp.setColorAt(1, m_color2);
@@ -366,6 +387,7 @@ void ProfileNameText::paintFrame(QPainter &p, int phase) const
     case NameEffect::ShadowName: {
         const qreal offset = std::max(2.0, std::round(s / 14));
         p.fillPath(glyphs.translated(offset, offset), m_color2);
+        fancyKeyline();
         p.fillPath(glyphs, m_color);
         break;
     }
@@ -373,9 +395,8 @@ void ProfileNameText::paintFrame(QPainter &p, int phase) const
         // 1. A soft halo in the name colour.
         shadowOf(p, glyphs, withAlpha(m_color, light ? 0.45 : 0.8), s * (light ? 0.22 : 0.30));
         p.fillPath(glyphs, m_color);
-        // 2. A keyline, so the letterforms stay crisp under the sparkle.
-        p.strokePath(glyphs, QPen(Readability::darken(m_color, light ? 0.42 : 0.55), std::max(2.0, s / 13),
-                                  Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        // 2. The keyline, so the letterforms stay crisp under the sparkle.
+        keyline();
         // 3. A vertical sheen.
         QLinearGradient sheen(0, mid - s * 0.5, 0, mid + s * 0.45);
         sheen.setColorAt(0, Readability::lighten(m_color, 0.5));
@@ -422,7 +443,8 @@ void ProfileNameText::paintFrame(QPainter &p, int phase) const
         shadowOf(p, glyphs, withAlpha(m_color, 0.9), s * 0.42);
         p.fillPath(glyphs, withAlpha(m_color, 0.9));
         // 2. A hard drop shadow; 3. a navy outline (the dark rim that exempts
-        //    chrome from the contrast floor).
+        //    chrome from the contrast floor; it is also a fancy chrome
+        //    name's keyline, which a second rim in darkened ink would muddy).
         p.fillPath(glyphs.translated(2, 3), QColor(0, 0, 0, 140));
         p.strokePath(glyphs, QPen(QColor(0x0B, 0x10, 0x30), std::max(2.0, s / 16), Qt::SolidLine, Qt::RoundCap,
                                   Qt::RoundJoin));

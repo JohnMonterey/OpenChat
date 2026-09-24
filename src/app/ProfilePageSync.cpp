@@ -51,6 +51,14 @@ constexpr int maxUnanswered = 1'000;
            && contact.peerDeviceId.has_value();
 }
 
+// Whether the missing media of `revision` still gets its one background
+// request: not asked for yet, and not evicted (a look asks for that).
+[[nodiscard]] bool owesMissingMediaRequest(const PageRequestState &state, qint64 revision)
+{
+    return state.mediaRequestedRevision != PageRequestState::mediaEvicted
+           && state.mediaRequestedRevision < revision;
+}
+
 [[nodiscard]] const ContactRecord *findContact(const QVector<ContactRecord> &contacts,
                                                const AccountId &account)
 {
@@ -332,16 +340,15 @@ void ProfilePageSync::markViewed(const AccountId &contact)
 
     // Opening a page sends nothing (the owner must not learn when their page
     // was looked at), with one documented exception: media we evicted under
-    // the storage cap, which only a request can bring back. Eviction leaves
-    // the revision's media marked unasked (enforceSoftCap); media still in
-    // transit has its grace request scheduled, and media we asked for once
-    // is marked asked, so neither is chased from here.
+    // the storage cap, which only a request can bring back. Only eviction
+    // writes that marker (enforceSoftCap), so media merely still missing is
+    // never chased from here, not even after a restart: its grace request
+    // is re-armed in the background instead (scheduleStartupRequests).
+    const auto state = repository->requestState(contact);
+    if (!state.hasValue() || state.value().mediaRequestedRevision != PageRequestState::mediaEvicted)
+        return;
     const auto stored = repository->contactPage(contact);
     if (!stored.hasValue() || !stored.value() || missingMedia(*stored.value()).isEmpty())
-        return;
-    const auto state = repository->requestState(contact);
-    if (!state.hasValue() || state.value().mediaRequestedRevision >= stored.value()->revision
-        || isScheduled(contact, Trigger::MissingMedia))
         return;
     requestIfDue(contact, Trigger::Viewed);
 }
@@ -720,6 +727,12 @@ void ProfilePageSync::receiveCore(const ContactRecord &contact, const QByteArray
     for (const Trigger trigger : {Trigger::Acceptance, Trigger::Startup, Trigger::MissingMedia})
         unschedule(account, trigger);
     m_requests.removeIf([&](const Request &request) { return request.contact == account; });
+    // An eviction marker spoke of the replaced revision's media. This one's
+    // is only on its way (or never comes): that is for the grace request,
+    // never for a look.
+    if (const auto state = repository->requestState(account);
+        state.hasValue() && state.value().mediaRequestedRevision == PageRequestState::mediaEvicted)
+        setMediaRequestedRevision(account, PageRequestState::neverAsked);
 
     collectGarbage();
     enforceSoftCap();
@@ -728,11 +741,12 @@ void ProfilePageSync::receiveCore(const ContactRecord &contact, const QByteArray
         emit awaitingChanged(account);
 
     // Media may trail its core in transit; ask once for this revision if it
-    // has not come by the grace.
+    // has not come by the grace. (If the cap just evicted what had come, a
+    // look asks for it instead.)
     if (missingMedia(stored).isEmpty())
         return;
     const auto state = repository->requestState(account);
-    if (state.hasValue() && state.value().mediaRequestedRevision < stored.revision)
+    if (state.hasValue() && owesMissingMediaRequest(state.value(), stored.revision))
         schedule(account, Trigger::MissingMedia, now() + m_limits.missingMediaGraceMs);
 }
 
@@ -874,20 +888,26 @@ void ProfilePageSync::enforceSoftCap()
     for (const AccountId &account : order.value()) {
         if (remaining <= m_limits.receivedMediaTargetBytes)
             break;
+        // What their page lacked before, to tell media this takes from it
+        // apart from media that never came (a pending blob is not a page's).
+        const auto page = repository->contactPage(account);
+        const std::optional<StoredContactPage> stored =
+            page.hasValue() ? page.value() : std::optional<StoredContactPage>();
+        const qsizetype missingBefore = stored ? missingMedia(*stored).size() : 0;
         if (!repository->evictContactMedia(account).hasValue()) {
             qCWarning(contactsLog) << "Could not evict a contact's profile media";
             break;
         }
         evicted.push_back(account);
-        // Mark this revision's media unasked: opening the page is then what
-        // asks for it again (markViewed), never a background request.
-        unschedule(account, Trigger::MissingMedia);
-        if (const auto state = repository->requestState(account);
-            state.hasValue() && state.value().mediaRequestedRevision != -1) {
-            PageRequestState unasked = state.value();
-            unasked.mediaRequestedRevision = -1;
-            if (!repository->saveRequestState(unasked).hasValue())
-                qCWarning(contactsLog) << "Could not mark evicted profile media";
+        if (stored && missingMedia(*stored).size() > missingBefore) {
+            // Opening the page is now what asks for it again (markViewed),
+            // never a background request: a grace request, scheduled or
+            // queued, would fetch it all back at once.
+            unschedule(account, Trigger::MissingMedia);
+            m_requests.removeIf([&](const Request &request) {
+                return request.contact == account && request.trigger == Trigger::MissingMedia;
+            });
+            setMediaRequestedRevision(account, PageRequestState::mediaEvicted);
         }
         const auto after = repository->receivedMediaBytes();
         if (!after.hasValue())
@@ -921,7 +941,7 @@ void ProfilePageSync::requestIfDue(const AccountId &account, Trigger trigger)
     const PageRequestState &asked = state.value();
     if (trigger == Trigger::MissingMedia) {
         // Once per core revision, and never held back by the back-off.
-        if (!stored.value() || asked.mediaRequestedRevision >= stored.value()->revision)
+        if (!stored.value() || !owesMissingMediaRequest(asked, stored.value()->revision))
             return;
     } else {
         // An older client never answers: 30 min, 1 h, 2 h … up to a day.
@@ -979,15 +999,50 @@ void ProfilePageSync::scheduleStartupRequests()
         return;
     const qint64 nowMs = now();
     for (const ContactRecord &contact : deliverableContacts()) {
-        const auto stored = repository->contactPage(contact.accountId);
-        if (!stored.hasValue() || stored.value())
+        const AccountId &account = contact.accountId;
+        const auto stored = repository->contactPage(account);
+        if (!stored.hasValue())
             continue;
-        if (isScheduled(contact.accountId, Trigger::Acceptance))
-            continue; // its own request is coming
-        // Spread out, so a start or reconnect does not ask everyone at once.
-        schedule(contact.accountId, Trigger::Startup,
-                 nowMs + randomBelow(m_limits.startupRequestJitterMs));
+        if (!stored.value()) {
+            if (isScheduled(account, Trigger::Acceptance))
+                continue; // its own request is coming
+            // Spread out, so a start or reconnect does not ask everyone at once.
+            schedule(account, Trigger::Startup, nowMs + randomBelow(m_limits.startupRequestJitterMs));
+            continue;
+        }
+        // A grace request (C) lives only in memory: one a quit dropped before
+        // it went out, scheduled or waiting for the link, is armed again, or
+        // the page would lack its media until a look, which must never ask
+        // for anything but evicted media. Never before the core's own grace.
+        const bool queued = std::any_of(m_requests.cbegin(), m_requests.cend(),
+                                        [&](const Request &request) { return request.contact == account; });
+        if (queued || isScheduled(account, Trigger::MissingMedia) || missingMedia(*stored.value()).isEmpty())
+            continue;
+        const auto state = repository->requestState(account);
+        if (!state.hasValue() || !owesMissingMediaRequest(state.value(), stored.value()->revision))
+            continue;
+        schedule(account, Trigger::MissingMedia,
+                 std::max(nowMs + randomBelow(m_limits.startupRequestJitterMs),
+                          stored.value()->receivedAtMs + m_limits.missingMediaGraceMs));
     }
+}
+
+void ProfilePageSync::setMediaRequestedRevision(const AccountId &account, qint64 revision)
+{
+    ProfilePageRepository *repository = pages();
+    if (repository == nullptr)
+        return;
+    const auto state = repository->requestState(account);
+    if (!state.hasValue()) {
+        qCWarning(contactsLog) << "Could not read a profile page request record";
+        return;
+    }
+    if (state.value().mediaRequestedRevision == revision)
+        return;
+    PageRequestState marked = state.value();
+    marked.mediaRequestedRevision = revision;
+    if (!repository->saveRequestState(marked).hasValue())
+        qCWarning(contactsLog) << "Could not record which profile media was asked for";
 }
 
 void ProfilePageSync::schedule(const AccountId &contact, std::optional<Trigger> trigger,

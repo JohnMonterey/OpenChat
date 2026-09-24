@@ -8,6 +8,7 @@
 #include <QAudioDevice>
 #include <QAudioFormat>
 #include <QFile>
+#include <QSemaphore>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtEndian>
@@ -28,6 +29,15 @@ using namespace Qt::StringLiterals;
 namespace {
 
 constexpr int songRate = SongContainer::sampleRate;
+
+// The playback levels ARCH §5.5 fixes, spelled out rather than read back from
+// SongStream: a weaker guard must fail here, not move the expectations with it.
+constexpr double specPlaybackGain = 0.56;
+constexpr double specRmsCeilingDb = -14.0;
+constexpr double specPeakCeilingDb = -1.0;
+static_assert(SongStream::playbackGain == specPlaybackGain);
+static_assert(SongStream::rmsCeilingDb == specRmsCeilingDb);
+static_assert(SongStream::peakCeilingDb == specPeakCeilingDb);
 
 // ---------------------------------------------------------------------------
 // Signals and measurements
@@ -276,6 +286,7 @@ QByteArray makeWav(const WavAudio &audio, const WavSpec &spec = {})
 struct FakeOutputState {
     QAudioFormat format;
     QIODevice *stream = nullptr;
+    SongOutput *output = nullptr; // while it lives: a test makes the device fail through it
     bool started = false;
     bool stopped = false;
     bool destroyed = false;
@@ -287,10 +298,12 @@ public:
     explicit FakeSongOutput(std::shared_ptr<FakeOutputState> state)
         : m_state(std::move(state))
     {
+        m_state->output = this;
     }
     ~FakeSongOutput() override
     {
         m_state->stream = nullptr;
+        m_state->output = nullptr;
         m_state->destroyed = true;
     }
     [[nodiscard]] QAudioFormat format() const override { return m_state->format; }
@@ -329,6 +342,19 @@ QVector<qint16> pull(FakeOutputState &state, int ms)
     QVector<qint16> samples(bytes.size() / 2);
     std::memcpy(samples.data(), bytes.constData(), std::size_t(samples.size()) * 2);
     return samples;
+}
+
+// Pulls until the stream gives no more (the song's end, or a fade's);
+// returns how many frames came.
+qsizetype pullToTheEnd(FakeOutputState &state)
+{
+    qsizetype frames = 0;
+    for (;;) {
+        const QVector<qint16> chunk = pull(state, 1'000);
+        if (chunk.isEmpty())
+            return frames;
+        frames += chunk.size() / std::max(1, state.format.channelCount());
+    }
 }
 
 // Everything a stream gives, in 4 KiB reads, as the sink would take it.
@@ -383,6 +409,7 @@ private slots:
     void analyseReadsWavPeaksDurationAndInfoTags();
     void encodeWindowSlicesTheChosenPart();
     void newerWindowCancelsTheOlderEncode();
+    void workerThatThrowsFailsInsteadOfAborting();
     void importRefusesUnreadableAndOversizedFiles();
     void importCompressedWhenDecoderAvailable();
     void analyseKeepsOnlyTheSourceLimit();
@@ -396,6 +423,9 @@ private slots:
     void playerNeverStartsByItself();
     void playerRefusesWhileSuspended();
     void playerWithoutDeviceReportsError();
+    void playerStopsAndRewindsAtTheEnd();
+    void outputFailureStopsThePlayerAndSaysSo();
+    void outputFailureAfterTheSongEndedIsHarmless();
     void songLibraryKeepsTheThreeLatestSongs();
 
 private:
@@ -980,15 +1010,34 @@ void ProfileSongTest::newerWindowCancelsTheOlderEncode()
     SongImporter importer;
     QSignalSpy encoded(&importer, &SongImporter::encoded);
     QSignalSpy failed(&importer, &SongImporter::failed);
+    // Every encode waits on the worker until the test lets it go, so "under
+    // way" and "done" are the test's to say, not the CPU's speed. (Bounded,
+    // so a failing test cannot leave the worker, and the importer's
+    // destructor, waiting for good.)
+    QSemaphore started;
+    QSemaphore go;
+    importer.setEncodeHookForTesting([&started, &go] {
+        started.release();
+        (void)go.tryAcquire(1, 30'000);
+    });
+    // Everything the worker produced has been posted; deliver it.
+    const auto drain = [&importer] {
+        importer.waitForIdleForTesting();
+        QCoreApplication::sendPostedEvents(&importer, QEvent::MetaCall);
+    };
 
     importer.encodeWindow(path, 0);
     QVERIFY(importer.busy());
-    QTest::qWait(150); // the first encode is under way
+    QVERIFY(started.tryAcquire(1, 30'000)); // the first encode is under way
     importer.encodeWindow(path, 15'000);
     QVERIFY(importer.busy());
-    QVERIFY(encoded.wait(30'000));
-    QTest::qWait(500); // time enough for a stale result to arrive, if one were coming
-    QCOMPARE(encoded.count(), 1);
+    go.release(); // the first one runs on, stale now
+    // One worker: the second is under way only once the first has finished
+    // and posted whatever it had.
+    QVERIFY(started.tryAcquire(1, 30'000));
+    go.release();
+    drain();
+    QCOMPARE(encoded.count(), 1); // only the newer window's
     QCOMPARE(encoded.at(0).at(2).toLongLong(), qint64(15'000));
     QCOMPARE(failed.count(), 0);
     QVERIFY(!importer.busy());
@@ -996,11 +1045,44 @@ void ProfileSongTest::newerWindowCancelsTheOlderEncode()
     // cancel() drops the running one and says nothing.
     encoded.clear();
     importer.encodeWindow(path, 5'000);
+    QVERIFY(started.tryAcquire(1, 30'000));
     importer.cancel();
     QVERIFY(!importer.busy());
-    QTest::qWait(2'500);
+    go.release();
+    drain();
     QCOMPARE(encoded.count(), 0);
     QCOMPARE(failed.count(), 0);
+
+    // The same encode, not cancelled, does report: the silence above was
+    // cancel()'s doing.
+    importer.encodeWindow(path, 5'000);
+    QVERIFY(started.tryAcquire(1, 30'000));
+    go.release();
+    drain();
+    QCOMPARE(encoded.count(), 1);
+    QCOMPARE(encoded.at(0).at(2).toLongLong(), qint64(5'000));
+}
+
+void ProfileSongTest::workerThatThrowsFailsInsteadOfAborting()
+{
+    // An exception leaving a pool thread is std::terminate. Whatever a job
+    // throws (out of memory on a hostile file, say) must become a failure.
+    const QString path = writeFile(u"thrown.wav"_s, makeWav(tone(440.0, 5.0)));
+    SongImporter importer;
+    QSignalSpy failed(&importer, &SongImporter::failed);
+    QSignalSpy encoded(&importer, &SongImporter::encoded);
+    importer.setEncodeHookForTesting([] { throw std::bad_alloc(); });
+    importer.encodeWindow(path, 0);
+    QVERIFY(failed.wait(30'000));
+    QCOMPARE(failed.at(0).at(0).value<SongImportError>(), SongImportError::EncodeFailed);
+    QCOMPARE(encoded.count(), 0);
+    QVERIFY(!importer.busy());
+
+    // And the importer works on.
+    importer.setEncodeHookForTesting({});
+    importer.encodeWindow(path, 0);
+    QVERIFY(encoded.wait(30'000));
+    QCOMPARE(failed.count(), 1);
 }
 
 void ProfileSongTest::importRefusesUnreadableAndOversizedFiles()
@@ -1045,6 +1127,15 @@ void ProfileSongTest::importRefusesUnreadableAndOversizedFiles()
     adpcm.formatTag = 0x0011;
     const QString adpcmPath = writeFile(u"adpcm.wav"_s, makeWav(tone(440.0, 1.0), adpcm));
     expectFailure(importer, [&] { importer.analyse(adpcmPath); }, SongImportError::UnsupportedFormat);
+    // A sample rate no real file has: 2^31 Hz turned negative as an int and
+    // aborted the process from the worker; 768 kHz + 1 is just past the bound.
+    for (const quint32 rate : {0x8000'0000U, 0xFFFF'FFFFU, quint32(WavFile::maxSampleRate) + 1}) {
+        QByteArray absurd = makeWav(tone(440.0, 1.0));
+        qToLittleEndian(rate, absurd.data() + 24); // the fmt chunk's rate field
+        const QString absurdPath = writeFile(u"absurd-rate.wav"_s, absurd);
+        expectFailure(importer, [&] { importer.analyse(absurdPath); }, SongImportError::UnsupportedFormat);
+        expectFailure(importer, [&] { importer.encodeWindow(absurdPath, 0); }, SongImportError::UnsupportedFormat);
+    }
 
     // Readable files that can never become a song say so at once.
     expectFailure(importer, [&] { importer.analyse(writeFile(u"blip.wav"_s, makeWav(tone(440.0, 0.5)))); },
@@ -1202,7 +1293,7 @@ void ProfileSongTest::songStreamProducesDecodedPcmAndEnds()
         QCOMPARE(stream.bytesAvailable(), 0);
         QVERIFY(stream.read(4096).isEmpty());
         const double ratio = rmsMs(out, 1, 0, 500, 2'500) / rmsMs(decoded, 1, 0, 500, 2'500);
-        QVERIFY2(std::abs(ratio - SongStream::playbackGain) < 0.02, qPrintable(QString::number(ratio)));
+        QVERIFY2(std::abs(ratio - specPlaybackGain) < 0.02, qPrintable(QString::number(ratio)));
         QVERIFY(dominates(out, 1, 0, 1.0, 1.0, songRate, 440.0, {415.3, 466.2}));
     }
     // 44.1 kHz stereo: resampled, the mono song on both sides, same pitch.
@@ -1229,7 +1320,7 @@ void ProfileSongTest::songStreamProducesDecodedPcmAndEnds()
             sum += double(values[i]) * values[i];
         }
         const double level = std::sqrt(sum / songRate);
-        const double expected = rmsMs(decoded, 1, 0, 1'000, 2'000) * SongStream::playbackGain;
+        const double expected = rmsMs(decoded, 1, 0, 1'000, 2'000) * specPlaybackGain;
         QVERIFY2(std::abs(level / expected - 1.0) < 0.03, qPrintable(QString::number(level / expected)));
     }
     // Starting part way plays the rest.
@@ -1269,9 +1360,9 @@ void ProfileSongTest::playbackGuardTamesAFullScaleSquareWave()
     const double steadyDb = amplitudeToDb(rmsMs(out, 1, 0, 1'500, 3'500));
     // -14 dBFS short-term ceiling, then the 0.56 playback gain (-5 dB):
     // about -19 dBFS instead of -5.
-    const double expectedDb = SongStream::rmsCeilingDb + amplitudeToDb(SongStream::playbackGain);
+    const double expectedDb = specRmsCeilingDb + amplitudeToDb(specPlaybackGain);
     QVERIFY2(steadyDb < expectedDb + 0.5 && steadyDb > expectedDb - 2.0, qPrintable(QString::number(steadyDb)));
-    const double peakLimit = dbToAmplitude(SongStream::peakCeilingDb) * SongStream::playbackGain;
+    const double peakLimit = dbToAmplitude(specPeakCeilingDb) * specPlaybackGain;
     QVERIFY2(peakOf(out) <= peakLimit + 2.0 / 32768.0, qPrintable(QString::number(peakOf(out))));
 
     // An ordinary song (-16 dBFS) passes the guard untouched.
@@ -1280,7 +1371,7 @@ void ProfileSongTest::playbackGuardTamesAFullScaleSquareWave()
     const QVector<qint16> plainOut = asS16(readAll(plain));
     const QVector<qint16> plainDecoded = decodeAll(m_monoSong);
     const double change = amplitudeToDb(rmsMs(plainOut, 1, 0, 500, 2'500) / rmsMs(plainDecoded, 1, 0, 500, 2'500))
-        - amplitudeToDb(SongStream::playbackGain);
+        - amplitudeToDb(specPlaybackGain);
     QVERIFY2(std::abs(change) < 0.3, qPrintable(QString::number(change)));
 }
 
@@ -1484,6 +1575,89 @@ void ProfileSongTest::playerWithoutDeviceReportsError()
     player.play();
     QVERIFY(player.playing());
     QVERIFY(player.error().isEmpty());
+}
+
+void ProfileSongTest::playerStopsAndRewindsAtTheEnd()
+{
+    // ARCH §5.5: "at the end: stop, position 0".
+    SongLibrary::instance().put(keyA, m_monoSong);
+    SongPlayer player;
+    player.setSongKey(keyA);
+    player.play();
+    QVERIFY(player.playing());
+    QSignalSpy states(&player, &SongPlayer::stateChanged);
+    FakeOutputState &output = *m_outputs.at(0);
+    QCOMPARE(pullToTheEnd(output), qsizetype(3) * songRate); // the whole 3 s song
+    QTRY_VERIFY(!player.playing());
+    QCOMPARE(player.positionMs(), 0);
+    QCOMPARE(states.count(), 1);
+    QVERIFY(player.error().isEmpty());
+    // The device plays out what it holds, then goes.
+    QTRY_VERIFY(output.destroyed);
+
+    // Play again starts over, on a new output.
+    player.play();
+    QVERIFY(player.playing());
+    QCOMPARE(m_factoryCalls, 2);
+    QCOMPARE(player.positionMs(), 0);
+    QCOMPARE(pull(*m_outputs.at(1), 100).size(), qsizetype(songRate / 10));
+}
+
+void ProfileSongTest::outputFailureStopsThePlayerAndSaysSo()
+{
+    SongLibrary::instance().put(keyA, m_monoSong);
+    SongPlayer player;
+    player.setSongKey(keyA);
+    player.play();
+    FakeOutputState &output = *m_outputs.at(0);
+    pull(output, 1'000);
+    QTRY_VERIFY(player.positionMs() >= 900);
+
+    // The headphones are pulled out mid-song.
+    QSignalSpy states(&player, &SongPlayer::stateChanged);
+    emit output.output->failed(u"The audio output stopped working."_s);
+    QTRY_VERIFY(!player.playing());
+    QCOMPARE(player.error(), u"The audio output stopped working."_s);
+    QVERIFY(player.positionMs() >= 900); // where it stopped
+    QCOMPARE(states.count(), 1);
+    QVERIFY(output.stopped);
+    QVERIFY(output.destroyed);
+
+    // Pressing play again tries a fresh output and clears the error.
+    player.play();
+    QVERIFY(player.playing());
+    QVERIFY(player.error().isEmpty());
+    QCOMPARE(m_factoryCalls, 2);
+}
+
+void ProfileSongTest::outputFailureAfterTheSongEndedIsHarmless()
+{
+    // The device fails after pulling the song's last frame but before the
+    // next position tick noticed the end (a sink may report a device error
+    // as the stream runs dry).
+    SongLibrary::instance().put(keyA, m_monoSong);
+    SongPlayer player;
+    player.setSongKey(keyA);
+    player.play();
+    FakeOutputState &output = *m_outputs.at(0);
+    QCOMPARE(pullToTheEnd(output), qsizetype(3) * songRate);
+    QVERIFY(player.playing()); // no tick has run: the event loop has not
+    QSignalSpy states(&player, &SongPlayer::stateChanged);
+    emit output.output->failed(u"The audio output stopped working."_s);
+    // Only the queued failure, never the position timer, runs here.
+    QCoreApplication::sendPostedEvents(&player, QEvent::MetaCall);
+
+    // The song is over as if it had ended normally: stopped, rewound, and
+    // with nothing to report; the failed device is let go at once.
+    QVERIFY(!player.playing());
+    QCOMPARE(player.positionMs(), 0);
+    QVERIFY(player.error().isEmpty());
+    QCOMPARE(states.count(), 1);
+    QVERIFY(output.destroyed);
+
+    player.play();
+    QVERIFY(player.playing());
+    QCOMPARE(m_factoryCalls, 2);
 }
 
 void ProfileSongTest::songLibraryKeepsTheThreeLatestSongs()

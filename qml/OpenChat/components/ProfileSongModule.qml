@@ -358,7 +358,7 @@ Item {
         anchors.rightMargin: 11
         anchors.verticalCenter: groove.verticalCenter
         text: song.loading ? "Arriving…"
-              : song.state_ === "idle" ? song.clock(song.durationMs)
+              : song.state_ === "idle" || !song.player ? song.clock(song.durationMs)
               : song.clock(song.player.positionMs) + " / " + song.clock(song.durationMs)
         textFormat: Text.PlainText
         color: song.secondaryInk

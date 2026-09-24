@@ -320,11 +320,25 @@ struct Stage final {
         return window->grabWindow();
     }
 
+    // Positioners place new delegates on the next frame: let one pass
+    // before aiming at an item.
+    void settleLayout()
+    {
+        window->update();
+        QTest::qWait(40);
+    }
     void click(QQuickItem *item, Qt::MouseButton button = Qt::LeftButton)
     {
+        QVERIFY(item);
+        settleLayout();
         QTest::mouseClick(window.get(), button, Qt::NoModifier, centreOf(item));
     }
-    void hover(QQuickItem *item) { QTest::mouseMove(window.get(), centreOf(item)); }
+    void hover(QQuickItem *item)
+    {
+        QVERIFY(item);
+        settleLayout();
+        QTest::mouseMove(window.get(), centreOf(item));
+    }
     void key(int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
     {
         QTest::keyClick(window.get(), Qt::Key(key), modifiers);
@@ -359,6 +373,17 @@ bool openPerson(Stage &stage, const QString &contact, int origin = -1)
         return stage.settled();
     }
     return stage.profiles().openContact(contact, origin) && stage.settled();
+}
+
+// The index of the Top Friend called `name` on the page on screen, or -1.
+int friendIndex(ProfileController &profiles, const QString &name)
+{
+    const QVariantList friends = profiles.view()->topFriends();
+    for (int i = 0; i < friends.size(); ++i) {
+        if (friends.at(i).toMap().value(QStringLiteral("name")).toString() == name)
+            return i;
+    }
+    return -1;
 }
 
 QString slugOf(Preset preset)
@@ -493,7 +518,8 @@ private slots:
 
         Stage stage;
         QVERIFY(stage.load(QSize(std::max(width, 720), 800)));
-        QVERIFY(openPerson(stage, QStringLiteral("michael")));
+        // The preview is of your own page, the only one you edit.
+        QVERIFY(openPerson(stage, preview ? Reference::selfId() : QStringLiteral("michael")));
         QQuickItem *view = stage.view();
         QVERIFY(view);
         if (preview) {
@@ -505,6 +531,7 @@ private slots:
             QCOMPARE(view->width(), qreal(width));
             QTRY_VERIFY(shown(view, QStringLiteral("profileIdentityBox")));
         }
+        stage.settleLayout();
         checkGeometry(view, width, margin, content, gutter, vgap, narrow, wide, side);
     }
 
@@ -946,8 +973,8 @@ private slots:
         Stage stage;
         QVERIFY(stage.load());
         QVERIFY(openPerson(stage, QStringLiteral("michael")));
-        QVERIFY(stage.profiles().openTopFriend(0));
-        QVERIFY(stage.profiles().openTopFriend(0));
+        QVERIFY(stage.profiles().openTopFriend(friendIndex(stage.profiles(), QStringLiteral("Jessica"))));
+        QVERIFY(stage.profiles().openTopFriend(friendIndex(stage.profiles(), QStringLiteral("Alex"))));
         QCOMPARE(stage.profiles().depth(), 3);
 
         stage.key(Qt::Key_Escape);
@@ -1032,15 +1059,20 @@ private slots:
                 return false;
             QMetaObject::invokeMethod(dialog, "reject");
             ++opened;
-            return QTest::qWaitFor([&] { return !dialog->property("visible").toBool(); });
+            if (!QTest::qWaitFor([&] { return !dialog->property("visible").toBool(); }))
+                return false;
+            // The dialog was a window of its own: the page's takes the keys back.
+            stage.window->requestActivate();
+            return QTest::qWaitForWindowActive(stage.window.get());
         };
         stage.click(photo);
-        QVERIFY(openedAndClose());
+        QVERIFY2(openedAndClose(), "click");
         photo->forceActiveFocus();
+        QTRY_VERIFY(photo->hasActiveFocus());
         stage.key(Qt::Key_Return);
-        QVERIFY(openedAndClose());
+        QVERIFY2(openedAndClose(), "enter");
         stage.click(stage.action(QStringLiteral("picture")));
-        QVERIFY(openedAndClose());
+        QVERIFY2(openedAndClose(), "your profile box");
         QCOMPARE(opened, 3);
         // Ctrl+E opens the editor, as the bar's Edit profile does.
         stage.key(Qt::Key_E, Qt::ControlModifier);
@@ -1103,7 +1135,7 @@ private slots:
         QTRY_VERIFY(stage.page()->property("popupOpen").toBool());
         QQuickItem *cancel = nullptr;
         QTRY_VERIFY((cancel = stage.item(QStringLiteral("profileConfirmCancel"))));
-        QVERIFY(cancel->hasActiveFocus());
+        QTRY_VERIFY(cancel->hasActiveFocus());
         stage.click(cancel);
         QTRY_VERIFY(!stage.page()->property("popupOpen").toBool());
         QCOMPARE(requests->rowCount(), 1);
@@ -1380,6 +1412,10 @@ private slots:
     {
         QTest::addColumn<QString>("shot");
         QTest::addColumn<bool>("dark");
+        if (!capturing()) {
+            QTest::newRow("off") << QString() << false;
+            return;
+        }
         for (const char *shot : {"final-default", "final-default-1920", "final-scene", "final-classic-1280",
                                  "final-preset-glitter-girl", "final-preset-safety-pin", "final-preset-chrome-y2k",
                                  "final-preset-linen", "final-preset-neon-zebra", "final-preset-midnight-emo",
@@ -1448,7 +1484,6 @@ private slots:
             m_devices->refuse = true;
             auto *player = stage.page()->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer"));
             QTRY_VERIFY(player->valid());
-            QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*")));
             player->play();
             QTRY_VERIFY(!player->error().isEmpty());
         } else if (shot == QStringLiteral("final-preset-chrome-y2k")) {

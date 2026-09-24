@@ -94,6 +94,7 @@ Window {
             page: harness.profiles.draft
             profiles: harness.profiles
             mode: "preview"
+            songPlayer: harness.page ? harness.page.songPlayer : null
             editingTarget: harness.previewTarget
             onEditRequested: target => harness.editRequests = harness.editRequests.concat([target])
         }

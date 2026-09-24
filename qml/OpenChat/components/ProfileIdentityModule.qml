@@ -201,7 +201,7 @@ ProfileBox {
                     lineHeight: 1.12
                 }
                 Item {
-                    visible: headline.visible
+                    visible: headline.text.length > 0
                     width: 1
                     height: 8
                 }
@@ -252,7 +252,8 @@ ProfileBox {
         }
 
         Column {
-            visible: moodRow.visible || statusRow.visible
+            // (Not moodRow.visible: a child's visibility includes this one's.)
+            visible: card.moodWord.length > 0 || statusText.text.length > 0
             width: parent.width
             spacing: 3
 

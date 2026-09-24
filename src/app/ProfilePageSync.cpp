@@ -769,6 +769,11 @@ void ProfilePageSync::receiveMedia(const ContactRecord &contact, const QByteArra
         qCWarning(contactsLog) << "Could not store a contact's profile media";
         return;
     }
+    // A page complete now needs no grace request. Left scheduled, it would
+    // fire later and fetch again anything the cap evicts meanwhile, which is
+    // for opening the page to do (markViewed).
+    if (named && stored.value() && missingMedia(*stored.value()).isEmpty())
+        unschedule(account, Trigger::MissingMedia);
     collectGarbage();
     enforceSoftCap();
     if (named)
@@ -872,7 +877,8 @@ void ProfilePageSync::enforceSoftCap()
         }
         evicted.push_back(account);
         // Mark this revision's media unasked: opening the page is then what
-        // asks for it again (markViewed).
+        // asks for it again (markViewed), never a background request.
+        unschedule(account, Trigger::MissingMedia);
         if (const auto state = repository->requestState(account);
             state.hasValue() && state.value().mediaRequestedRevision != -1) {
             PageRequestState unasked = state.value();

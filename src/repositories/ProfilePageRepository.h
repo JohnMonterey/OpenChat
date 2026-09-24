@@ -27,6 +27,18 @@ struct StoredLocalPage final {
     std::optional<QByteArray> publishedBackground;
     std::optional<QByteArray> publishedSong;
     qint64 publishedAtMs = 0;
+    // The blobs the draft's and the published page's panels name.
+    QVector<QByteArray> draftPanelMedia;
+    QVector<QByteArray> publishedPanelMedia;
+};
+
+// A blob a contact's panels name, and the kind the core names it as
+// (Profile::MediaKind as a plain int).
+struct PanelMediaRef final {
+    int kind = 0;
+    QByteArray sha256;
+
+    friend bool operator==(const PanelMediaRef &, const PanelMediaRef &) = default;
 };
 
 // The newest page a contact sent us, with the media refs its core names.
@@ -38,6 +50,13 @@ struct StoredContactPage final {
     std::optional<QByteArray> song;
     qint64 receivedAtMs = 0;
     qint64 viewedAtMs = 0;
+    QVector<PanelMediaRef> panelMedia; // what the core's panels name
+    // 1: stored before panels (migration 017), so panelMedia was never
+    // recorded and the core may be older than the owner's; 2: current.
+    int format = currentFormat;
+
+    static constexpr int legacyFormat = 1;
+    static constexpr int currentFormat = 2;
 };
 
 // Owner side: what one contact has been sent, against which of their devices,
@@ -99,7 +118,9 @@ public:
     // transaction (creating the local row if needed), so no collection can
     // delete a just-imported blob before the draft names it. The slot's
     // previous blob is left to the collection's grace period, which starts
-    // now (see collectGarbage).
+    // now (see collectGarbage). A panel kind (3 or more) has no slot: the
+    // blob joins the draft's panel media instead, until the next saveDraft
+    // says what the panels name.
     [[nodiscard]] virtual Result<void, RepositoryError>
     putLocalDraftMedia(int kind, QByteArrayView sha256, QByteArrayView data, qint64 nowMs) = 0;
 
@@ -173,10 +194,11 @@ public:
     // always an encoded core; clearDraft() drops one); an empty songSource is
     // stored as none. Every write to the local page takes `nowMs` because a
     // blob it stops naming starts its grace then (see collectGarbage).
+    // `panelMedia` (each 32 bytes) replaces what the draft's panels name.
     [[nodiscard]] virtual Result<void, RepositoryError>
     saveDraft(QByteArrayView core, const std::optional<QByteArray> &background,
               const std::optional<QByteArray> &song, const QString &songSource,
-              qint64 nowMs) = 0;
+              qint64 nowMs, const QVector<QByteArray> &panelMedia = {}) = 0;
     [[nodiscard]] virtual Result<void, RepositoryError> clearDraft(qint64 nowMs) = 0;
 
     // Stores the published page and clears the draft, in the same
@@ -185,7 +207,8 @@ public:
     // highest revision they saw, so a lower one would never show.
     [[nodiscard]] virtual Result<void, RepositoryError>
     savePublished(QByteArrayView core, qint64 revision, const std::optional<QByteArray> &background,
-                  const std::optional<QByteArray> &song, qint64 nowMs) = 0;
+                  const std::optional<QByteArray> &song, qint64 nowMs,
+                  const QVector<QByteArray> &panelMedia = {}) = 0;
 
     // --- Contacts' pages.
 
@@ -204,6 +227,13 @@ public:
     // sends it again.
     [[nodiscard]] virtual Result<bool, RepositoryError>
     storeContactPage(const StoredContactPage &page) = 0;
+
+    // Accounts whose stored page is still StoredContactPage::legacyFormat.
+    [[nodiscard]] virtual Result<QVector<AccountId>, RepositoryError> legacyContactPages() = 0;
+    // Records what a legacy core's panels name and marks it current, without
+    // touching anything else (the core, its revision, its media records).
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    upgradeContactPage(const AccountId &account, const QVector<PanelMediaRef> &panelMedia) = 0;
 
     // A no-op for an account with no stored page.
     [[nodiscard]] virtual Result<void, RepositoryError>

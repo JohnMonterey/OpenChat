@@ -39,15 +39,19 @@ public:
     [[nodiscard]] Result<void, RepositoryError>
     saveDraft(QByteArrayView core, const std::optional<QByteArray> &background,
               const std::optional<QByteArray> &song, const QString &songSource,
-              qint64 nowMs) override;
+              qint64 nowMs, const QVector<QByteArray> &panelMedia = {}) override;
     [[nodiscard]] Result<void, RepositoryError> clearDraft(qint64 nowMs) override;
     [[nodiscard]] Result<void, RepositoryError>
     savePublished(QByteArrayView core, qint64 revision, const std::optional<QByteArray> &background,
-                  const std::optional<QByteArray> &song, qint64 nowMs) override;
+                  const std::optional<QByteArray> &song, qint64 nowMs,
+                  const QVector<QByteArray> &panelMedia = {}) override;
     [[nodiscard]] Result<std::optional<StoredContactPage>, RepositoryError>
     contactPage(const AccountId &account) override;
     [[nodiscard]] Result<bool, RepositoryError>
     storeContactPage(const StoredContactPage &page) override;
+    [[nodiscard]] Result<QVector<AccountId>, RepositoryError> legacyContactPages() override;
+    [[nodiscard]] Result<void, RepositoryError>
+    upgradeContactPage(const AccountId &account, const QVector<PanelMediaRef> &panelMedia) override;
     [[nodiscard]] Result<void, RepositoryError>
     markViewed(const AccountId &account, qint64 nowMs) override;
     [[nodiscard]] Result<PageDelivery, RepositoryError> delivery(const AccountId &account) override;

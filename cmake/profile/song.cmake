@@ -13,3 +13,13 @@ target_sources(openchat_profile PRIVATE
     src/profile/SongImport.cpp
     src/profile/SongPlayer.cpp
 )
+
+# openchat_opus is named so the test can build a packet libopus itself refuses
+# (the premise of the concealment test). Playback runs against a fake output,
+# so the suite needs no sound card and makes no sound.
+add_executable(tst_profilesong tests/tst_profilesong.cpp)
+target_include_directories(tst_profilesong PRIVATE src)
+target_link_libraries(tst_profilesong PRIVATE
+    openchat_profile openchat_media openchat_domain openchat_opus Qt6::Multimedia Qt6::Test)
+add_test(NAME tst_profilesong COMMAND tst_profilesong)
+set_tests_properties(tst_profilesong PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

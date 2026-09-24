@@ -653,7 +653,7 @@ private:
         const quint64 generation = m_generation;
         if (m_frames == 0 || m_rate <= 0) {
             owner.endDecodeRun();
-            owner.deliverFailure(generation, SongImportError::DecodeFailed);
+            owner.postFailure(generation, SongImportError::DecodeFailed);
             return;
         }
         SongSourceInfo info;
@@ -669,12 +669,15 @@ private:
         const QString path = m_path;
         const bool audible = m_firstAudibleMs.has_value();
         owner.endDecodeRun(); // deletes this later; nothing of it is used below
-        if (info.durationMs < SongEncodeOptions{}.minDurationMs)
-            owner.deliverFailure(generation, SongImportError::TooShort);
-        else if (!audible)
-            owner.deliverFailure(generation, SongImportError::Silent);
-        else
-            owner.deliverAnalysis(generation, path, info);
+        if (info.durationMs < SongEncodeOptions{}.minDurationMs) {
+            owner.postFailure(generation, SongImportError::TooShort);
+        } else if (!audible) {
+            owner.postFailure(generation, SongImportError::Silent);
+        } else {
+            QMetaObject::invokeMethod(
+                &owner, [&owner, generation, path, info] { owner.deliverAnalysis(generation, path, info); },
+                Qt::QueuedConnection);
+        }
     }
 
     void decodeFailed(QAudioDecoder::Error error)
@@ -705,7 +708,9 @@ private:
         SongImporter &owner = m_owner;
         const quint64 generation = m_generation;
         owner.endDecodeRun();
-        owner.deliverFailure(generation, error);
+        // Queued: a decoder can fail inside start(), which runs inside the
+        // caller's analyse() or encodeWindow().
+        owner.postFailure(generation, error);
     }
 
     SongImporter &m_owner;

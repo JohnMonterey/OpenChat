@@ -167,8 +167,19 @@ Window {
             Qt.callLater(root.restoreFocusAfterProfile);
         }
     }
+    // Only when the keyboard is still on the closing page (or nowhere): an
+    // action that left the page for the chat has already put it in the
+    // composer, and that is where it belongs.
     function restoreFocusAfterProfile() {
-        if (!root.profiles.open && root.focusBeforeProfile)
+        if (root.profiles.open || !root.focusBeforeProfile)
+            return;
+        for (let item = root.activeFocusItem; item !== null; item = item.parent) {
+            if (item === profileLoader) {
+                root.focusBeforeProfile.forceActiveFocus();
+                return;
+            }
+        }
+        if (root.activeFocusItem === null || root.activeFocusItem === root.contentItem)
             root.focusBeforeProfile.forceActiveFocus();
     }
     // The Safety Number dialog floats above the page; the ✓ appears once the

@@ -5651,6 +5651,34 @@ private slots:
         QVERIFY(input->hasActiveFocus());
     }
 
+    void sendMessageFromAProfileFocusesTheComposer()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = showMain(engine, {{QStringLiteral("chatController"),
+                                                  QVariant::fromValue(&controller)}});
+        QVERIFY(window);
+        auto *search = findVisualItem(window->contentItem(), QStringLiteral("contactSearch"));
+        auto *input = findVisualItem(window->contentItem(), QStringLiteral("messageInput"));
+        QVERIFY(search && input);
+        // The keyboard was in the search field when the profile opened...
+        search->forceActiveFocus();
+        QTRY_VERIFY(search->hasActiveFocus());
+        QVERIFY(controller.profiles()->openContact(QStringLiteral("jessica")));
+        QTRY_VERIFY(settledProfilePage(window));
+        auto *message = findVisualItem(window->contentItem(), QStringLiteral("profileAction_message"));
+        QVERIFY(message && message->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(message));
+        // ...but Send Message leaves it in Jessica's composer, not back there.
+        QTRY_VERIFY(!controller.profiles()->isOpen());
+        QTRY_COMPARE(controller.currentContactId(), QStringLiteral("jessica"));
+        QTRY_VERIFY(input->hasActiveFocus());
+        QTRY_VERIFY(!profileLoaderActive(window));
+        QVERIFY(input->hasActiveFocus());
+        QVERIFY(!search->hasActiveFocus());
+    }
+
     void ctrlIOpensTheSelectedChatsProfile()
     {
         failOnQmlWarnings();

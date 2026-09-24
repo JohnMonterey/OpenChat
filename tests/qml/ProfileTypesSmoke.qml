@@ -90,4 +90,11 @@ Item {
         active: false
         fps: 10
     }
+
+    SongPlayer {
+        objectName: "profileSongPlayer"
+        songKey: ""
+        active: false
+        suspended: false
+    }
 }

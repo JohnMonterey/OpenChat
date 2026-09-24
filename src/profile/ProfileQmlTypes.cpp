@@ -9,13 +9,7 @@
 #include "profile/ProfilePresetThumbItem.h"
 #include "profile/ProfileRenderPolicy.h"
 #include "profile/ProfileTicker.h"
-
-// The song player belongs to the song unit, which lands beside this one; it
-// is registered here as soon as its header is part of the tree.
-#if __has_include("profile/SongPlayer.h")
 #include "profile/SongPlayer.h"
-#define OPENCHAT_HAS_SONG_PLAYER 1
-#endif
 
 #include <QQmlEngine>
 
@@ -45,9 +39,7 @@ void registerProfileQmlTypes()
     qmlRegisterType<ProfilePresetThumb>("OpenChat.Native", 1, 0, "ProfilePresetThumb");
     qmlRegisterType<ProfileMoodFace>("OpenChat.Native", 1, 0, "ProfileMoodFace");
     qmlRegisterType<ProfileTickerClient>("OpenChat.Native", 1, 0, "ProfileTickerClient");
-#ifdef OPENCHAT_HAS_SONG_PLAYER
     qmlRegisterType<SongPlayer>("OpenChat.Native", 1, 0, "SongPlayer");
-#endif
     qmlRegisterSingletonType<ProfileRenderPolicy>(
         "OpenChat.Native", 1, 0, "ProfileRenderPolicy",
         [](QQmlEngine *, QJSEngine *) { return processInstance<ProfileRenderPolicy>(); });

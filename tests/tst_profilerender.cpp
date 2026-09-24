@@ -37,6 +37,7 @@
 #include "profile/ProfileReadability.h"
 #include "profile/ProfileRenderPolicy.h"
 #include "profile/ProfileTicker.h"
+#include "profile/SongPlayer.h"
 
 using namespace OpenChat;
 namespace Readability = OpenChat::ProfileReadability;
@@ -1826,6 +1827,11 @@ private slots:
         auto *client = root->findChild<ProfileTickerClient *>(QStringLiteral("profileTickerClient"));
         QVERIFY(client);
         QCOMPARE(client->fps(), 10);
+        auto *player = root->findChild<SongPlayer *>(QStringLiteral("profileSongPlayer"));
+        QVERIFY(player);
+        QCOMPARE(player->active(), false);
+        QCOMPARE(player->valid(), false); // no song key, nothing loaded
+        QCOMPARE(player->playing(), false); // never starts by itself
     }
 
 private:

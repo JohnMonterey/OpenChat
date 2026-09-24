@@ -399,12 +399,15 @@ bool ProfilePageSync::hasOwedDeliveries() const
         if (!delivery.hasValue())
             continue;
         const PageDelivery &recorded = delivery.value();
-        // A changed device voids every record (see currentDelivery).
-        const bool restart = recorded.device != contact.peerDeviceId;
-        if (revision > 0 && m_unsendableRevision != revision
-            && (restart || recorded.sentRevision < revision))
-            return true;
-        if (restart || !recorded.pageCapable)
+        // A changed device voids every record (see currentDelivery). Media
+        // follows its core, as in the pump.
+        const bool coreBehind = recorded.device != contact.peerDeviceId || recorded.sentRevision < revision;
+        if (coreBehind) {
+            if (revision > 0 && m_unsendableRevision != revision)
+                return true;
+            continue;
+        }
+        if (!recorded.pageCapable)
             continue;
         for (const auto &[kind, hash] : blobs) {
             const auto sentAt = repository->mediaSentAt(contact.accountId, hash);

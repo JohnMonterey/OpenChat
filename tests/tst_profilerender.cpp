@@ -252,7 +252,8 @@ void capture(const QString &name, const QImage &image)
 
 QString motifSlug(Motif motif)
 {
-    return Profile::motifName(motif).toLower().replace(QLatin1Char(' '), QLatin1Char('-'));
+    static const QRegularExpression separators(QStringLiteral("[^a-z0-9]+"));
+    return Profile::motifName(motif).toLower().replace(separators, QStringLiteral("-"));
 }
 
 QString presetSlugOf(int preset)
@@ -1583,20 +1584,22 @@ private slots:
         QVERIFY(stage.show());
         QTRY_VERIFY(ambient->animating());
 
+        // Held still: nothing moves over several ticks' worth of time.
         const auto moves = [ambient] {
             const QVector<QPointF> before = ambient->spritePositions();
             QTest::qWait(150);
             return ambient->spritePositions() != before;
         };
-        QVERIFY(moves());
-        // Snow falls.
+        // Snow falls: every sprite moves down (one may wrap to the top).
         const QVector<QPointF> start = ambient->spritePositions();
-        QTest::qWait(200);
-        const QVector<QPointF> later = ambient->spritePositions();
-        int fell = 0;
-        for (int i = 0; i < start.size(); ++i)
-            fell += later[i].y() > start[i].y() ? 1 : 0;
-        QVERIFY(fell >= start.size() - 1); // one may have wrapped to the top
+        const auto fallen = [&] {
+            const QVector<QPointF> now = ambient->spritePositions();
+            int fell = 0;
+            for (int i = 0; i < start.size(); ++i)
+                fell += now[i].y() >= start[i].y() + 2 ? 1 : 0;
+            return fell;
+        };
+        QTRY_VERIFY(fallen() >= start.size() - 1);
 
         stage.window.hide();
         QVERIFY(!ambient->animating());

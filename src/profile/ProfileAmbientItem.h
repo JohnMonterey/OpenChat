@@ -16,7 +16,8 @@ class ProfileItemAnimation;
 
 // A page's falling stars, hearts or snow, or floating sparkles (SPEC §8.2):
 // up to 28 small child sprites, each painted once, moved on the shared ticker
-// at 30 fps (20–45 px/s with a ±8 px sine drift, respawning at the far edge).
+// at 30 fps (falling 20–45 px/s with a ±8 px sine drift, respawning at the
+// top).
 // It never repaints the viewport: moving a sprite only moves its node. It sits
 // above the backdrop and below the boxes, so it never covers text, and it
 // holds still whenever the page is not really on screen or animation is not

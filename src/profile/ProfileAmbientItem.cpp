@@ -157,11 +157,18 @@ void ProfileAmbient::geometryChange(const QRectF &newGeometry, const QRectF &old
     QQuickItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.size() == oldGeometry.size())
         return;
-    if (densityFor(newGeometry.size()) != spriteCount() || m_sprites.empty())
+    if (densityFor(newGeometry.size()) != spriteCount() || m_sprites.empty()) {
         rebuild();
-    else
-        for (Sprite &sprite : m_sprites)
-            place(sprite);
+        return;
+    }
+    // Same density: keep the sprites where they are across the viewport.
+    const qreal scaleX = oldGeometry.width() > 0 ? newGeometry.width() / oldGeometry.width() : 1.0;
+    const qreal scaleY = oldGeometry.height() > 0 ? newGeometry.height() / oldGeometry.height() : 1.0;
+    for (Sprite &sprite : m_sprites) {
+        sprite.baseX *= scaleX;
+        sprite.y *= scaleY;
+        place(sprite);
+    }
 }
 
 void ProfileAmbient::updateAnimation()
@@ -208,17 +215,13 @@ void ProfileAmbient::step()
 {
     const qreal dt = 1.0 / fps;
     m_time += dt;
-    // Sparkles float up; everything else falls. A sprite that leaves the
-    // viewport comes back at the opposite edge at a new place along it.
-    const bool rising = m_kind == int(Ambient::FloatingSparkles);
+    // Every kind drifts down (SPEC §8.2); a sprite that falls out of the
+    // viewport comes back just above the top, somewhere new along it.
     for (Sprite &sprite : m_sprites) {
         const qreal margin = sprite.item->height();
-        sprite.y += (rising ? -1 : 1) * sprite.speed * dt;
-        if (!rising && sprite.y > height() + margin) {
+        sprite.y += sprite.speed * dt;
+        if (sprite.y > height() + margin) {
             sprite.y = -margin;
-            sprite.baseX = m_random->next() * width();
-        } else if (rising && sprite.y < -margin) {
-            sprite.y = height() + margin;
             sprite.baseX = m_random->next() * width();
         }
         place(sprite);

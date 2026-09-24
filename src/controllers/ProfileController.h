@@ -217,7 +217,8 @@ public:
     void setRelay(RelayClient *relay); // own-handle backfill, stranger handle lookups
     // Previews and tests: a mock contact's page, or the own page for "self".
     void setMockPage(const QString &contactId, const Profile::Page &page);
-    // Makes a blob available to mock pages that name it; returns its ref.
+    // Makes a blob available to mock pages that name it; returns its ref,
+    // unset in live mode or for bytes a contact's client would refuse.
     Profile::MediaRef addMockMedia(Profile::MediaKind kind, const QByteArray &bytes);
     void setMockLinkOnline(bool online);
     [[nodiscard]] ProfilePageSync *sync() const noexcept { return m_sync.get(); }

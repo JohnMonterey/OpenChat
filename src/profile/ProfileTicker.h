@@ -3,7 +3,13 @@
 #include <QEvent>
 #include <QHash>
 #include <QObject>
+#include <QPointer>
+#include <QQuickItem>
 #include <QTimer>
+
+#include <functional>
+
+class QQuickWindow;
 
 namespace OpenChat {
 
@@ -79,7 +85,7 @@ private:
 
 // QML's handle on the ticker: `ProfileTickerClient { active: …; fps: 10 }`
 // counts its own frames while active and the clock runs.
-class ProfileTickerClient final : public QObject
+class ProfileTickerClient : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool active READ active WRITE setActive NOTIFY activeChanged)
@@ -110,6 +116,42 @@ private:
     bool m_active = false;
     int m_fps = 10;
     int m_frame = 0;
+};
+
+// A native item's subscription, run only while the item is really on screen:
+// it wants to animate, it and its parents are visible, it has a window, that
+// window is neither hidden nor minimised (QWindow::visibilityChanged is
+// watched, which the avatar frames' ticker does not do), and
+// ProfileRenderPolicy allows animation. The owning item forwards its
+// itemChange() here.
+class ProfileItemAnimation final : public QObject
+{
+public:
+    using TickFn = std::function<void(int frame)>;
+    using StateFn = std::function<void(bool running)>;
+
+    ProfileItemAnimation(QQuickItem *item, int fps, TickFn onTick, StateFn onRunningChanged = {});
+    ~ProfileItemAnimation() override;
+
+    void setWanted(bool wanted);
+    [[nodiscard]] bool running() const noexcept { return m_running; }
+    void itemChange(QQuickItem::ItemChange change, const QQuickItem::ItemChangeData &value);
+
+protected:
+    void customEvent(QEvent *event) override;
+
+private:
+    void watchWindow(QQuickWindow *window);
+    void reevaluate();
+
+    QQuickItem *m_item;
+    int m_fps;
+    TickFn m_onTick;
+    StateFn m_onRunningChanged;
+    QPointer<QQuickWindow> m_window;
+    QMetaObject::Connection m_windowVisibility;
+    bool m_wanted = false;
+    bool m_running = false;
 };
 
 } // namespace OpenChat

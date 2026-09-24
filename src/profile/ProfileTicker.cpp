@@ -4,6 +4,7 @@
 
 #include <QCoreApplication>
 #include <QPointer>
+#include <QQuickWindow>
 #include <QVector>
 
 #include <algorithm>
@@ -137,6 +138,73 @@ void ProfileTickerClient::customEvent(QEvent *event)
     }
     ++m_frame;
     emit frameChanged();
+}
+
+ProfileItemAnimation::ProfileItemAnimation(QQuickItem *item, int fps, TickFn onTick, StateFn onRunningChanged)
+    : m_item(item), m_fps(fps), m_onTick(std::move(onTick)), m_onRunningChanged(std::move(onRunningChanged))
+{
+    connect(&ProfileRenderPolicy::instance(), &ProfileRenderPolicy::changed, this,
+            &ProfileItemAnimation::reevaluate);
+    watchWindow(item->window());
+}
+
+ProfileItemAnimation::~ProfileItemAnimation()
+{
+    ProfileTicker::instance().unsubscribe(this);
+}
+
+void ProfileItemAnimation::setWanted(bool wanted)
+{
+    if (m_wanted == wanted)
+        return;
+    m_wanted = wanted;
+    reevaluate();
+}
+
+void ProfileItemAnimation::itemChange(QQuickItem::ItemChange change, const QQuickItem::ItemChangeData &value)
+{
+    if (change == QQuickItem::ItemSceneChange)
+        watchWindow(value.window);
+    if (change == QQuickItem::ItemSceneChange || change == QQuickItem::ItemVisibleHasChanged)
+        reevaluate();
+}
+
+void ProfileItemAnimation::watchWindow(QQuickWindow *window)
+{
+    if (m_window == window)
+        return;
+    disconnect(m_windowVisibility);
+    m_window = window;
+    if (window) {
+        m_windowVisibility =
+            connect(window, &QWindow::visibilityChanged, this, &ProfileItemAnimation::reevaluate);
+    }
+}
+
+void ProfileItemAnimation::reevaluate()
+{
+    const QWindow::Visibility visibility = m_window ? m_window->visibility() : QWindow::Hidden;
+    const bool run = m_wanted && m_item->isVisible() && m_window && visibility != QWindow::Hidden
+                     && visibility != QWindow::Minimized && ProfileRenderPolicy::instance().animationsAllowed();
+    if (run == m_running)
+        return;
+    m_running = run;
+    if (run)
+        ProfileTicker::instance().subscribe(this, m_fps);
+    else
+        ProfileTicker::instance().unsubscribe(this);
+    if (m_onRunningChanged)
+        m_onRunningChanged(run);
+}
+
+void ProfileItemAnimation::customEvent(QEvent *event)
+{
+    if (event->type() != ProfileTickEvent::eventType()) {
+        QObject::customEvent(event);
+        return;
+    }
+    if (m_onTick)
+        m_onTick(static_cast<ProfileTickEvent *>(event)->frame());
 }
 
 } // namespace OpenChat

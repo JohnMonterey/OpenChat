@@ -1,6 +1,7 @@
 #include <QtTest>
 
 #include "CallTestSupport.h"
+#include "app/AppearanceSettings.h"
 #include "app/ContactRequestService.h"
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
@@ -39,6 +40,7 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QMetaProperty>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -379,9 +381,18 @@ class ChatControllerTest final : public QObject
 {
     Q_OBJECT
 
+    // What the controllers and settings objects remember (appearance, recent
+    // colours, call preferences) lives here for the run, never in a
+    // developer's own settings.
+    QTemporaryDir m_settingsDirectory;
+
 private slots:
     void initTestCase()
     {
+        QVERIFY(m_settingsDirectory.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settingsDirectory.path());
+
         // Every live controller here also runs profile page sync. Its
         // background page requests (production: up to two minutes after
         // start, under a minute after an acceptance) are pushed an hour out,
@@ -657,6 +668,46 @@ private slots:
         controller.setCurrentSettingsCategory(99);
         QCOMPARE(controller.currentSettingsCategory(), 3);
         QCOMPARE(categorySpy.count(), 3);
+    }
+
+    // Appearance › Profiles and a profile's "Plain style" switch are one
+    // remembered choice, off until the user turns it on.
+    void plainProfilesIsARememberedAppearanceChoice()
+    {
+        using OpenChat::AppearanceSettings;
+        const QString key = QStringLiteral("Appearance/plainProfiles");
+        QSettings().remove(key);
+
+        AppearanceSettings appearance;
+        QVERIFY(!appearance.plainProfiles());
+        const bool dark = appearance.darkMode();
+        QSignalSpy changed(&appearance, &AppearanceSettings::plainProfilesChanged);
+        appearance.setPlainProfiles(true);
+        QVERIFY(appearance.plainProfiles());
+        QCOMPARE(changed.count(), 1);
+        appearance.setPlainProfiles(true);
+        QCOMPARE(changed.count(), 1);
+        QVERIFY(QSettings().value(key).toBool());
+        // Its own setting: the app's look is untouched.
+        QCOMPARE(appearance.darkMode(), dark);
+
+        // The next start reads it back.
+        AppearanceSettings restarted;
+        QVERIFY(restarted.plainProfiles());
+
+        // QML reads and writes it by name, and hears it change.
+        const QMetaObject &meta = AppearanceSettings::staticMetaObject;
+        const QMetaProperty property = meta.property(meta.indexOfProperty("plainProfiles"));
+        QVERIFY(property.isValid());
+        QVERIFY(property.isWritable());
+        QVERIFY(property.hasNotifySignal());
+        QCOMPARE(property.notifySignal().name(), QByteArray("plainProfilesChanged"));
+        QSignalSpy restartedChanged(&restarted, &AppearanceSettings::plainProfilesChanged);
+        QVERIFY(property.write(&restarted, false));
+        QVERIFY(!restarted.plainProfiles());
+        QCOMPARE(restartedChanged.count(), 1);
+        QVERIFY(!QSettings().value(key).toBool());
+        QVERIFY(!AppearanceSettings().plainProfiles());
     }
 
     void anInboundMessageAsksForADesktopNotification()

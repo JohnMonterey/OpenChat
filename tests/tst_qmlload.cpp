@@ -1334,6 +1334,7 @@ private slots:
             {QStringLiteral("Custom Vocal FX"), QStringLiteral("customVocalFxPanel")},
             {QStringLiteral("Connection"), QStringLiteral("connectionSettingsPanel")},
             {QStringLiteral("Theme"), QStringLiteral("darkModeSwitch")},
+            {QStringLiteral("Profiles"), QStringLiteral("plainProfilesSwitch")},
             {QStringLiteral("Avatar frame"), QStringLiteral("cosmeticPicker_frame")},
             {QStringLiteral("Name flair"), QStringLiteral("cosmeticPicker_flair")},
             {QStringLiteral("Presence bead"), QStringLiteral("cosmeticPicker_bead")},

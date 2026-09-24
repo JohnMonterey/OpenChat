@@ -2024,6 +2024,13 @@ private slots:
         p.undo();
         QVERIFY(d.hasSong());
         QCOMPARE(p.songSource().value(QStringLiteral("fileName")).toString(), reference->fileName);
+
+        // Saved and reopened, the Song tab still knows the file it was cut from.
+        QVERIFY(p.publish());
+        QVERIFY(p.view()->hasSong());
+        QVERIFY(p.beginEditing());
+        QCOMPARE(p.songSource().value(QStringLiteral("fileName")).toString(), reference->fileName);
+        QCOMPARE(p.songWindowStartMs(), reference->defaultWindowStartMs);
     }
 
     void songWindowReencodesAfterTheDebounce()
@@ -2518,19 +2525,30 @@ private slots:
 
     void draftSurvivesRestart()
     {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString song = writeSong(dir, QStringLiteral("demo.wav"), 50.0, 2.0);
         PageSyncTest::TwoPeerFixture fixture;
         QVERIFY(fixture.setUp());
         useFixtureTime(fixture);
         const qint64 writtenAt = fixture.clock.nowMs;
+        QString songKey;
+        qint64 windowStartMs = -1;
         {
             LiveChat live(fixture.a());
             ProfileController &p = live.profiles();
             p.openOwn();
             QVERIFY(p.beginEditing());
+            p.importSong(QUrl::fromLocalFile(song));
+            QTRY_VERIFY_WITH_TIMEOUT(!p.songImporting(), 90'000);
+            QVERIFY(p.draft()->hasSong());
+            songKey = p.draft()->songKey();
+            windowStartMs = p.songWindowStartMs();
             p.draft()->setHeadline(QStringLiteral("Half-written"));
             p.draft()->setBoxRadius(int(Profile::BoxRadius::RoundCorners));
             p.endEditing();
         }
+        SongLibrary::instance().clear(); // a restart starts with no song bytes in memory
         fixture.clock.advance(60'000);
         QVERIFY(fixture.reopen(fixture.a()));
 
@@ -2544,6 +2562,14 @@ private slots:
         QCOMPARE(p.draft()->headline(), QStringLiteral("Half-written"));
         QCOMPARE(p.draft()->boxRadius(), int(Profile::BoxRadius::RoundCorners));
         QVERIFY(p.draftDirty());
+        // The song came through too, bytes and the file it was cut from.
+        QCOMPARE(p.draft()->songKey(), songKey);
+        QVERIFY(!p.draft()->songPending());
+        QVERIFY(!SongLibrary::instance().get(songKey).isEmpty());
+        QCOMPARE(p.songSource().value(QStringLiteral("fileName")).toString(), QStringLiteral("demo.wav"));
+        QVERIFY(p.songSource().value(QStringLiteral("available")).toBool());
+        QCOMPARE(p.songWindowStartMs(), windowStartMs);
+        QCOMPARE(p.songPeaks().size(), 120);
     }
 
     void ownHandleIsBackfilledFromTheRelay()

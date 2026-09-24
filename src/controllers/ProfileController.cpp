@@ -426,7 +426,7 @@ bool ProfileController::openContact(const QString &contactId, int origin)
         openOwn(origin); // your own id: your own profile
         return true;
     }
-    if (!account || !rosterContact(contactId))
+    if (!account || !rosterContact(rosterIdFor(*account)))
         return false; // a group, or nobody this roster knows
     startStack(personForAccount(*account, QString(), QString(), Origin::FromChat), originFromSection(origin));
     return true;

@@ -1116,6 +1116,18 @@ private slots:
             QVERIFY(minContrast(presence, boxes) >= 4.5);
         QVERIFY(Readability::contrastRatio(palette.monogramInk, palette.monogramTop) >= 3.0);
         QVERIFY(Readability::contrastRatio(palette.monogramInk, palette.monogramBottom) >= 3.0);
+        QVERIFY(Readability::contrastRatio(palette.altMonogramInk, palette.altMonogramTop) >= 3.0);
+        QVERIFY(Readability::contrastRatio(palette.altMonogramInk, palette.altMonogramBottom) >= 3.0);
+        // Alt boxes start their initials from the alt sub-head ink (Classic
+        // '06's brown), not the label ink: nearer the one than the other.
+        if (theme.altHeader && palette.blurbSubhead != palette.label) {
+            const auto distance = [](const QColor &a, const QColor &b) {
+                return std::abs(a.redF() - b.redF()) + std::abs(a.greenF() - b.greenF())
+                       + std::abs(a.blueF() - b.blueF());
+            };
+            QVERIFY(distance(palette.altMonogramInk, palette.blurbSubhead)
+                    < distance(palette.altMonogramInk, palette.label));
+        }
         QCOMPARE(palette.songMaterial, palette.boxDark ? 1 : 0);
     }
 

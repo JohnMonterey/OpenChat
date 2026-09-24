@@ -405,19 +405,22 @@ Palette resolve(const Profile::Theme &theme, const QVector<QColor> &samplesIn, c
         out.presence[i] = ensureN(dark ? darkPresence[i] : lightPresence[i], boxes, floors.presence);
 
     // Monogram tiles (SPEC §5.8): quiet glass tinted from the box towards the
-    // box's own border; initials in the label ink a quarter of the way to
-    // the tile, held at 3:1 against both of its stops.
-    const auto monogram = [&](const QColor &tint, QColor &top, QColor &bottom, QColor &rim, QColor &ink) {
+    // box's own border; initials in the label ink (in alt boxes the alt
+    // sub-head ink, as the mockup's MonogramTile inkBase) a quarter of the
+    // way to the tile, held at 3:1 against both of its stops.
+    const auto monogram = [&](const QColor &tint, const QColor &inkBase, QColor &top, QColor &bottom, QColor &rim,
+                              QColor &ink) {
         top = mix(box, tint, dark ? 0.12 : 0.10);
         bottom = mix(box, tint, dark ? 0.26 : 0.34);
         rim = mix(box, tint, dark ? 0.50 : 0.55);
-        ink = ensureAll(mix(out.label, mix(top, bottom, 0.5), 0.25), {top, bottom}, floors.ornament, 0.05, 1.0);
+        ink = ensureAll(mix(inkBase, mix(top, bottom, 0.5), 0.25), {top, bottom}, floors.ornament, 0.05, 1.0);
     };
-    monogram(accent, out.monogramTop, out.monogramBottom, out.monogramRim, out.monogramInk);
+    monogram(accent, out.label, out.monogramTop, out.monogramBottom, out.monogramRim, out.monogramInk);
     const QColor altAccent = !theme.altHeader       ? accent
                              : theme.borderWidth > 0 ? rgb(theme.altBorderColor)
                                                      : rgb(theme.altHeaderFill);
-    monogram(altAccent, out.altMonogramTop, out.altMonogramBottom, out.altMonogramRim, out.altMonogramInk);
+    monogram(altAccent, out.blurbSubhead, out.altMonogramTop, out.altMonogramBottom, out.altMonogramRim,
+             out.altMonogramInk);
 
     out.songMaterial = dark ? 1 : 0;
     // Ambient sprites are white; over a light base they get a faint outline

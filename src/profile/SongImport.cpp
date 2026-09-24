@@ -412,12 +412,13 @@ QString songImportErrorText(SongImportError error)
 class SongImporter::DecodeRun final : public QObject
 {
 public:
-    DecodeRun(SongImporter &owner, quint64 generation, QString path, bool analyse, qint64 startMs)
+    DecodeRun(SongImporter &owner, quint64 generation, QString path, bool analyse, qint64 startMs, bool retry)
         : QObject(&owner)
         , m_owner(owner)
         , m_generation(generation)
         , m_path(std::move(path))
         , m_analyse(analyse)
+        , m_retry(retry)
         , m_startMs(startMs)
         , m_decoder(this)
         , m_timeout(this)
@@ -602,12 +603,26 @@ private:
         const qint64 decodedMs = m_rate > 0 ? m_frames * 1000 / m_rate : 0;
         const qint64 collectedFrames = m_channels > 0 ? m_window.size() / m_channels : 0;
         const qint64 wantedFrames = std::min<qint64>(m_windowMs, decodedMs) * m_rate / 1000;
-        if (!m_retried && m_startMs > 0 && collectedFrames + m_rate / 10 < wantedFrames) {
+        if (!m_retry && m_startMs > 0 && collectedFrames + m_rate / 10 < wantedFrames) {
             // The file ended inside the window and its length was not known
-            // beforehand: start again from where a full window fits.
+            // beforehand. Now it is: decode again, once, from where a full
+            // window fits. A fresh run, from the event loop, because a
+            // decoder cannot be restarted from inside its own finished().
             const qint64 corrected = std::max<qint64>(0, decodedMs - m_windowMs);
             if (corrected < m_startMs) {
-                restartWindowAt(corrected);
+                m_done = true;
+                SongImporter &owner = m_owner;
+                const quint64 generation = m_generation;
+                const QString path = m_path;
+                owner.m_knownDurations.insert(path, decodedMs);
+                owner.endDecodeRun(); // deletes this later; nothing of it is used below
+                QMetaObject::invokeMethod(
+                    &owner,
+                    [&owner, generation, path, corrected] {
+                        if (owner.isCurrent(generation))
+                            owner.startDecodeRun(generation, path, false, corrected, true);
+                    },
+                    Qt::QueuedConnection);
                 return;
             }
         }
@@ -628,20 +643,6 @@ private:
         const qint64 startMs = m_startMs;
         owner.endDecodeRun(); // deletes this later; nothing of it is used below
         owner.startEncode(generation, std::move(clip), startMs);
-    }
-
-    void restartWindowAt(qint64 startMs)
-    {
-        m_retried = true;
-        m_decodeDone = false;
-        m_startMs = startMs;
-        m_frames = 0;
-        m_window.clear();
-        m_audibleBefore = false;
-        m_audibleAfter = false;
-        m_decoder.stop();
-        m_timeout.start(m_owner.m_limits.timeoutMs);
-        m_decoder.start();
     }
 
     void finishAnalysisIfReady()
@@ -717,6 +718,7 @@ private:
     const quint64 m_generation;
     const QString m_path;
     const bool m_analyse;
+    const bool m_retry; // the second pass of a window placed past the end
     qint64 m_startMs = 0;
     qint64 m_windowMs = songWindowMs;
     QAudioDecoder m_decoder;
@@ -737,7 +739,6 @@ private:
     QVector<qint16> m_window;
     bool m_audibleBefore = false;
     bool m_audibleAfter = false;
-    bool m_retried = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -885,10 +886,11 @@ void SongImporter::encodeWindow(const QString &path, qint64 startMs)
     startDecodeRun(generation, path, false, startMs);
 }
 
-void SongImporter::startDecodeRun(quint64 generation, const QString &path, bool analyse, qint64 startMs)
+void SongImporter::startDecodeRun(quint64 generation, const QString &path, bool analyse, qint64 startMs,
+                                  bool retry)
 {
     endDecodeRun();
-    m_run = new DecodeRun(*this, generation, path, analyse, startMs);
+    m_run = new DecodeRun(*this, generation, path, analyse, startMs, retry);
     m_run->start();
 }
 

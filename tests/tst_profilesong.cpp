@@ -170,7 +170,7 @@ double bitrateOf(const SongContainer &song)
     for (const QByteArray &packet : song.packets)
         bytes += packet.size();
     const double seconds = double(song.packets.size()) * song.frameSamples / songRate;
-    return bytes * 8.0 / seconds;
+    return double(bytes) * 8.0 / seconds;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +385,7 @@ private slots:
     void newerWindowCancelsTheOlderEncode();
     void importRefusesUnreadableAndOversizedFiles();
     void importCompressedWhenDecoderAvailable();
+    void analyseKeepsOnlyTheSourceLimit();
 
     // Playback
     void songStreamProducesDecodedPcmAndEnds();
@@ -395,6 +396,7 @@ private slots:
     void playerNeverStartsByItself();
     void playerRefusesWhileSuspended();
     void playerWithoutDeviceReportsError();
+    void songLibraryKeepsTheThreeLatestSongs();
 
 private:
     QString writeFile(const QString &name, const QByteArray &bytes);
@@ -1112,7 +1114,24 @@ void ProfileSongTest::importCompressedWhenDecoderAvailable()
     const std::optional<SongContainer> song = decodeSongContainer(bytes);
     QVERIFY(song);
     QCOMPARE(song->channels, 1); // asked for stereo, folded back to the file's mono
-    QVERIFY(dominates(decodeAll(bytes), 1, 0, 5.0, 1.0, songRate, 440.0, {415.3, 466.2, 479.0}));
+    const QVector<qint16> window = decodeAll(bytes);
+    QVERIFY(dominates(window, 1, 0, 5.0, 1.0, songRate, 440.0, {415.3, 466.2, 479.0}));
+    // The tone plays on both sides of [3 s, 48 s): both edges get the long fade.
+    const double steady = rmsMs(window, 1, 0, 5'000, 6'000);
+    QVERIFY(rmsMs(window, 1, 0, 0, 50) < 0.1 * steady);
+    QVERIFY(rmsMs(window, 1, 0, 225, 275) > 0.3 * steady);
+    QVERIFY(rmsMs(window, 1, 0, 45'000 - 50, 45'000) < 0.1 * steady);
+
+    // Without an analysis first the length is unknown; a window that runs
+    // past the end is noticed at the end and decoded again where it fits.
+    SongImporter fresh;
+    fresh.setForceDecoderForTesting(true);
+    QSignalSpy freshEncoded(&fresh, &SongImporter::encoded);
+    fresh.encodeWindow(path, 30'000);
+    QVERIFY(freshEncoded.wait(30'000));
+    QCOMPARE(freshEncoded.at(0).at(1).toLongLong(), qint64(45'000));
+    QVERIFY2(std::abs(freshEncoded.at(0).at(2).toLongLong() - 5'000) <= 50,
+             qPrintable(QString::number(freshEncoded.at(0).at(2).toLongLong())));
 
     // A real stereo file stays stereo.
     const QString stereoPath = writeFile(u"stereo-through-decoder.wav"_s,
@@ -1126,6 +1145,28 @@ void ProfileSongTest::importCompressedWhenDecoderAvailable()
     const std::optional<SongContainer> stereo = decodeSongContainer(encoded.at(0).at(0).toByteArray());
     QVERIFY(stereo);
     QCOMPARE(stereo->channels, 2);
+}
+
+void ProfileSongTest::analyseKeepsOnlyTheSourceLimit()
+{
+    // Only the first maxSourceMs can be picked from, so nothing after it is
+    // measured, drawn or offered as a window.
+    const QString path = writeFile(u"long.wav"_s, makeWav(tone(440.0, 30.0, 22'050)));
+    SongImportLimits limits;
+    limits.maxSourceMs = 20'000;
+    SongImporter importer(limits);
+    QSignalSpy analysed(&importer, &SongImporter::analysed);
+    QSignalSpy encoded(&importer, &SongImporter::encoded);
+    importer.analyse(path);
+    QVERIFY(analysed.wait(20'000));
+    const auto info = analysed.at(0).at(0).value<SongSourceInfo>();
+    QCOMPARE(info.durationMs, qint64(20'000));
+    QCOMPARE(info.peaks.size(), qsizetype(120));
+    QVERIFY(info.formatLabel.contains(u"0:20"_s));
+    importer.encodeWindow(path, 10'000);
+    QVERIFY(encoded.wait(30'000));
+    QCOMPARE(encoded.at(0).at(1).toLongLong(), qint64(20'000));
+    QCOMPARE(encoded.at(0).at(2).toLongLong(), qint64(0));
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,6 +1476,37 @@ void ProfileSongTest::playerWithoutDeviceReportsError()
     player.play();
     QVERIFY(player.playing());
     QVERIFY(player.error().isEmpty());
+}
+
+void ProfileSongTest::songLibraryKeepsTheThreeLatestSongs()
+{
+    SongLibrary &library = SongLibrary::instance();
+    const QString keyD = QString(64, u'd');
+    library.put(keyA, m_monoSong);
+    library.put(keyB, m_stereoSong);
+    library.put(keyC, m_monoSong);
+    library.put(keyA, m_monoSong); // put again: now the most recent
+    library.put(keyD, m_stereoSong);
+    QCOMPARE(library.get(keyA), m_monoSong);
+    QVERIFY(library.get(keyB).isEmpty()); // the least recently put went
+    QCOMPARE(library.get(keyC), m_monoSong);
+    QCOMPARE(library.get(keyD), m_stereoSong);
+    library.put(QString(), m_monoSong);
+    library.put(keyB, QByteArray());
+    QVERIFY(library.get(keyB).isEmpty());
+    QCOMPARE(library.get(keyA), m_monoSong);
+
+    // A player keeps the song it loaded when the library lets it go.
+    SongPlayer player;
+    player.setSongKey(keyC);
+    QVERIFY(player.valid());
+    library.release(keyC);
+    QVERIFY(library.get(keyC).isEmpty());
+    player.play();
+    QVERIFY(player.playing());
+    QCOMPARE(pull(*m_outputs.at(0), 200).size(), qsizetype(songRate / 5));
+    library.clear();
+    QVERIFY(library.get(keyA).isEmpty());
 }
 
 QTEST_MAIN(ProfileSongTest)

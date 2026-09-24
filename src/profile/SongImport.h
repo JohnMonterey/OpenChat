@@ -102,7 +102,7 @@ private:
     void deliverAnalysis(quint64 generation, const QString &path, const SongSourceInfo &info);
     void deliverEncoded(quint64 generation, const QByteArray &container, qint64 durationMs, qint64 windowStartMs);
     void startEncode(quint64 generation, SongClip clip, qint64 windowStartMs);
-    void startDecodeRun(quint64 generation, const QString &path, bool analyse, qint64 startMs);
+    void startDecodeRun(quint64 generation, const QString &path, bool analyse, qint64 startMs, bool retry = false);
     void endDecodeRun();
     [[nodiscard]] std::optional<SongImportError> checkFile(const QString &path) const;
 

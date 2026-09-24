@@ -197,6 +197,7 @@ ProfileRenderStyle::Values ProfileRenderStyle::compute(const Theme &owner, const
     v.headingBold = ProfileFonts::useBold(theme.headingFont, Role::Heading);
     v.headingLift = theme.headingFont == Profile::Font::ScriptFont ? -1 : 0;
     v.headingFactor = headingFactor;
+    v.monogramFamily = ProfileFonts::family(theme.headingFont, Role::Body);
     v.bodyFamily = ProfileFonts::family(theme.bodyFont, Role::Body);
     v.bodyPixelSize = scaled(bodySizes.at(size), ProfileFonts::sizeFactor(theme.bodyFont, Role::Body));
     v.labelFamily = ProfileFonts::family(theme.bodyFont, Role::Label);

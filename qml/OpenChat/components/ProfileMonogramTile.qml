@@ -20,14 +20,9 @@ Item {
     readonly property color tintRim: render ? (alt ? render.altMonogramRim : render.monogramRim) : "#a9c8e2"
     readonly property color initialsInk: render ? (alt ? render.altMonogramInk : render.monogramInk) : "#35618f"
 
-    // The heading faces' regular cuts: a monogram is never bold.
-    function regularFamily(family) {
-        if (family === "Fredoka SemiBold")
-            return "Fredoka Medium";
-        if (family === "OpenChat Serif Bold")
-            return "OpenChat Serif Regular";
-        return family.length > 0 ? family : Theme.uiFont;
-    }
+    // The heading face's regular cut (the renderer's monogramFamily): a
+    // monogram is never bold.
+    readonly property string family: render && render.monogramFamily ? render.monogramFamily : Theme.uiFont
 
     Accessible.ignored: true
 
@@ -59,7 +54,7 @@ Item {
         text: tile.initials
         textFormat: Text.PlainText
         color: tile.initialsInk
-        font.family: tile.regularFamily(tile.render ? tile.render.headingFamily : "")
+        font.family: tile.family
         font.pixelSize: Math.max(8, Math.round(tile.height * 0.27 * (tile.render ? tile.render.headingFactor : 1)))
         font.weight: Font.Normal
         renderType: Text.NativeRendering

@@ -67,6 +67,8 @@ class ProfileRenderStyle final : public QObject
     Q_PROPERTY(bool headingBold READ headingBold NOTIFY changed)
     Q_PROPERTY(int headingLift READ headingLift NOTIFY changed) // Pacifico sits 1 px higher
     Q_PROPERTY(qreal headingFactor READ headingFactor NOTIFY changed) // for sizes QML derives (the banner)
+    // The heading face's regular cut, for monogram initials ("" = the interface font).
+    Q_PROPERTY(QString monogramFamily READ monogramFamily NOTIFY changed)
     Q_PROPERTY(QString bodyFamily READ bodyFamily NOTIFY changed)
     Q_PROPERTY(int bodyPixelSize READ bodyPixelSize NOTIFY changed)
     Q_PROPERTY(QString labelFamily READ labelFamily NOTIFY changed)
@@ -146,6 +148,7 @@ public:
         bool headingBold = false;
         int headingLift = 0;
         qreal headingFactor = 1.0;
+        QString monogramFamily;
         QString bodyFamily;
         int bodyPixelSize = 13;
         QString labelFamily;
@@ -234,6 +237,7 @@ public:
     [[nodiscard]] bool headingBold() const { return m_values.headingBold; }
     [[nodiscard]] int headingLift() const { return m_values.headingLift; }
     [[nodiscard]] qreal headingFactor() const { return m_values.headingFactor; }
+    [[nodiscard]] QString monogramFamily() const { return m_values.monogramFamily; }
     [[nodiscard]] QString bodyFamily() const { return m_values.bodyFamily; }
     [[nodiscard]] int bodyPixelSize() const { return m_values.bodyPixelSize; }
     [[nodiscard]] QString labelFamily() const { return m_values.labelFamily; }

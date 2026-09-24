@@ -1065,14 +1065,22 @@ void ProfileSongTest::importRefusesUnreadableAndOversizedFiles()
     if (!SongImporter::canDecodeCompressed()) {
         expectFailure(importer, [&] { importer.analyse(junkPath); }, SongImportError::DecoderUnavailable);
     } else {
-        QSignalSpy failed(&importer, &SongImporter::failed);
-        QSignalSpy analysed(&importer, &SongImporter::analysed);
-        importer.analyse(junkPath);
-        QVERIFY(failed.wait(30'000));
+        // How the backend words its refusal varies; a hung backend is cut off
+        // by the pass's own timeout. What must hold: a failure, never a song.
+        SongImportLimits limits;
+        limits.timeoutMs = 10'000;
+        SongImporter decoding(limits);
+        QSignalSpy failed(&decoding, &SongImporter::failed);
+        QSignalSpy analysed(&decoding, &SongImporter::analysed);
+        decoding.analyse(junkPath);
+        QCOMPARE(failed.count(), 0);
+        QVERIFY(failed.wait(20'000));
         const auto error = failed.at(0).at(0).value<SongImportError>();
-        QVERIFY2(error == SongImportError::UnsupportedFormat || error == SongImportError::DecodeFailed,
+        QVERIFY2(error == SongImportError::UnsupportedFormat || error == SongImportError::DecodeFailed
+                     || error == SongImportError::TimedOut,
                  qPrintable(QString::number(int(error))));
         QCOMPARE(analysed.count(), 0);
+        QVERIFY(!decoding.busy());
     }
 }
 

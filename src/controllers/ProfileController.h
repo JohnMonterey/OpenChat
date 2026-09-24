@@ -138,6 +138,9 @@ public:
     static constexpr int autosaveDelayMs = 400;
     static constexpr int songWindowDelayMs = 400;
     static constexpr int refreshIntervalMs = 5'000;
+    // How long a closed page (or a left editor) keeps its decoded picture and
+    // song bytes: past the close and slide-out animations, then released.
+    static constexpr int idleMediaReleaseMs = 1'000;
     static constexpr int maxRecentColors = 8;
 
     // How the ProfilePageSync this controller builds keeps time and picks
@@ -413,6 +416,11 @@ private:
     void releaseSong(const QByteArray &sha256);
     void onImageReady(const QString &key);
     [[nodiscard]] std::optional<QByteArray> storeLocalMedia(Profile::MediaKind kind, const QByteArray &bytes);
+    // The draft's blobs are the owner's, but only the editor shows them.
+    [[nodiscard]] MediaSource draftMediaSource() const;
+    // Lets go of what no page on screen shows any more: the view's media once
+    // the stack is closed, the draft's and try-on's once the editor is.
+    void releaseIdleMedia();
     void applyViewer();
 
     // Editing
@@ -485,6 +493,7 @@ private:
     quint64 m_navigation = 0;       // bumped by every move on the stack
     quint64 m_viewedNavigation = 0; // the move whose contact page was marked viewed
     QTimer m_refreshTimer;
+    QTimer m_idleMediaTimer;
 
     ProfilePageObject m_view;
     ProfilePageObject m_draft;

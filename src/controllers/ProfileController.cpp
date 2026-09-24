@@ -169,6 +169,9 @@ ProfileController::ProfileController(ChatController &chats, QObject *parent)
         updateLinkOnline();
         refreshPerson();
     });
+    m_idleMediaTimer.setSingleShot(true);
+    m_idleMediaTimer.setInterval(idleMediaReleaseMs);
+    connect(&m_idleMediaTimer, &QTimer::timeout, this, &ProfileController::releaseIdleMedia);
     m_autosaveTimer.setSingleShot(true);
     m_autosaveTimer.setInterval(autosaveDelayMs);
     connect(&m_autosaveTimer, &QTimer::timeout, this, &ProfileController::saveDraftNow);
@@ -387,8 +390,8 @@ void ProfileController::setMockPage(const QString &contactId, const Profile::Pag
 Profile::MediaRef ProfileController::addMockMedia(Profile::MediaKind kind, const QByteArray &bytes)
 {
     Profile::MediaRef ref;
-    if (!passesArrivalChecks(kind, bytes))
-        return ref;
+    if (m_live || !passesArrivalChecks(kind, bytes))
+        return ref; // live pages carry only media that really arrived
     ref.sha256 = pageMediaHash(bytes);
     ref.bytes = quint32(bytes.size());
     if (kind == Profile::MediaKind::BackgroundImageMedia) {
@@ -531,6 +534,7 @@ void ProfileController::closeAll()
     m_stack.clear();
     m_entryScrollY = 0;
     m_refreshTimer.stop();
+    m_idleMediaTimer.start();
     ++m_navigation;
     emit navigationChanged();
 }
@@ -1153,12 +1157,13 @@ void ProfileController::updateMedia(ProfilePageObject &object, const MediaSource
         const QByteArray bytes =
             songHash.isEmpty() ? QByteArray() : blob(source, songHash, Profile::MediaKind::SongMedia);
         const QByteArray oldHash = held.songHash;
+        const bool hadSong = held.songPresent;
         held.songHash = songHash;
         held.songPresent = !bytes.isEmpty();
         // The page's player is handed only the key; the bytes wait here.
         if (held.songPresent)
             SongLibrary::instance().put(QString::fromLatin1(songHash.toHex()), bytes);
-        if (!oldHash.isEmpty() && oldHash != songHash)
+        if (hadSong && (oldHash != songHash || !held.songPresent))
             releaseSong(oldHash);
     }
     held.source = source;
@@ -1177,8 +1182,8 @@ void ProfileController::releaseImage(const QString &key)
 void ProfileController::releaseSong(const QByteArray &sha256)
 {
     for (const HeldMedia *held : {&m_viewMedia, &m_draftMedia, &m_tryOnMedia}) {
-        if (held->songHash == sha256)
-            return;
+        if (held->songPresent && held->songHash == sha256)
+            return; // another page object still hands it to a player
     }
     SongLibrary::instance().release(QString::fromLatin1(sha256.toHex()));
 }
@@ -1192,6 +1197,23 @@ void ProfileController::onImageReady(const QString &key)
         m_draft.refreshRender();
     if (m_tryOnMedia.imageKey == key)
         m_tryOn.refreshRender();
+}
+
+ProfileController::MediaSource ProfileController::draftMediaSource() const
+{
+    return m_editing ? MediaSource{MediaSource::Owner::Own, {}} : MediaSource{};
+}
+
+void ProfileController::releaseIdleMedia()
+{
+    // A closed page keeps its words (the close fade shows them) but not its
+    // decoded picture or song bytes; reopening fetches them again.
+    if (m_stack.isEmpty())
+        updateMedia(m_view, {});
+    if (!m_editing) {
+        updateMedia(m_draft, {});
+        updateMedia(m_tryOn, {});
+    }
 }
 
 std::optional<QByteArray> ProfileController::storeLocalMedia(Profile::MediaKind kind, const QByteArray &bytes)
@@ -1217,9 +1239,9 @@ void ProfileController::applyViewer()
     m_draft.setViewer({m_darkMode, false});
     m_tryOn.setViewer({m_darkMode, false});
     updateMedia(m_view, m_viewMedia.source);
-    updateMedia(m_draft, {MediaSource::Owner::Own, {}});
+    updateMedia(m_draft, draftMediaSource());
     if (m_tryOnPreset >= 0)
-        updateMedia(m_tryOn, {MediaSource::Owner::Own, {}});
+        updateMedia(m_tryOn, draftMediaSource());
 }
 
 void ProfileController::setDarkMode(bool dark)
@@ -1317,15 +1339,16 @@ bool ProfileController::beginEditing()
     // Unsaved changes survive a restart; a stored draft equal to the
     // published page is nothing to offer.
     const bool surviving = stored && !Profile::samePublishedContent(*stored, m_published);
-    m_songSources.clear();
+    // The files songs were cut from stay known by song for this run, so the
+    // Song tab still shows a published song's file card after a save.
     m_songSource = {};
     m_history.clear();
     m_tryOnPreset = -1;
-    loadDraft(surviving ? *stored : m_published);
+    m_editing = true; // before loading: the editor shows the draft's media
     if (surviving)
         restoreSongSource(source);
+    loadDraft(surviving ? *stored : m_published);
     m_survivingDraftAtMs = surviving ? storedAtMs : 0;
-    m_editing = true;
     // A blob only the draft named may have been collected meanwhile.
     m_applyingHistory = true;
     (void)dropUnresolvedDraftMedia();
@@ -1374,7 +1397,6 @@ void ProfileController::resetDraftToPublished()
         m_mockDraftSource.clear();
         m_mockDraftAtMs = 0;
     }
-    m_songSources.clear();
     m_songSource = {};
     m_history.clear();
     m_survivingDraftAtMs = 0;
@@ -1403,6 +1425,7 @@ void ProfileController::leaveEditing()
     m_history.clear();
     const bool tryingOn = m_tryOnPreset >= 0;
     m_tryOnPreset = -1;
+    m_idleMediaTimer.start();
     emit editingChanged();
     emit historyChanged();
     if (tryingOn)
@@ -1416,7 +1439,7 @@ void ProfileController::loadDraft(const Profile::Page &page)
     m_draft.load(page);
     m_draftShadow = m_draft.page();
     followDraftSong();
-    updateMedia(m_draft, {MediaSource::Owner::Own, {}}, true);
+    updateMedia(m_draft, draftMediaSource(), true);
     refreshTryOn();
 }
 
@@ -1531,7 +1554,7 @@ void ProfileController::onDraftEdited()
     // After an undo the blobs resolve only once the draft is saved; the
     // history step reads its media then (applyHistoryPage).
     if (!m_applyingHistory)
-        updateMedia(m_draft, {MediaSource::Owner::Own, {}});
+        updateMedia(m_draft, draftMediaSource());
     if (friendsChanged)
         updateCandidates();
     emitHistoryIfChanged(couldUndo, couldRedo);
@@ -1574,7 +1597,7 @@ void ProfileController::refreshTryOn()
         return;
     m_tryOn.setViewer({m_darkMode, false});
     m_tryOn.load(Profile::applyPreset(m_draft.page(), Profile::Preset(m_tryOnPreset)));
-    updateMedia(m_tryOn, {MediaSource::Owner::Own, {}});
+    updateMedia(m_tryOn, draftMediaSource());
 }
 
 void ProfileController::scheduleAutosave()
@@ -1694,7 +1717,7 @@ void ProfileController::applyHistoryPage(const Profile::Page &page)
     m_applyingHistory = false;
     m_draftShadow = m_draft.page();
     updateDirty();
-    updateMedia(m_draft, {MediaSource::Owner::Own, {}}, true);
+    updateMedia(m_draft, draftMediaSource(), true);
     refreshTryOn();
     emit historyChanged();
 }
@@ -1930,7 +1953,7 @@ void ProfileController::onBackgroundImported(const QByteArray &jpeg, QSize size)
     page.theme.backgroundKind = Profile::BackgroundKind::ImageBackground;
     editDraft(page);
     saveDraftNow();
-    updateMedia(m_draft, {MediaSource::Owner::Own, {}}, true);
+    updateMedia(m_draft, draftMediaSource(), true);
     emit importChanged();
     finishPendingPublish(true);
 }
@@ -2021,7 +2044,7 @@ void ProfileController::onSongEncoded(const QByteArray &container, qint64 durati
     SongLibrary::instance().put(QString::fromLatin1(sha256->toHex()), container);
     editDraft(page);
     saveDraftNow();
-    updateMedia(m_draft, {MediaSource::Owner::Own, {}}, true);
+    updateMedia(m_draft, draftMediaSource(), true);
     emit importChanged();
     finishPendingPublish(true);
 }

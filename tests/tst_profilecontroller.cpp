@@ -1727,6 +1727,68 @@ private slots:
         QVERIFY(!view.backgroundImageKey().isEmpty());
     }
 
+    void closedPagesLetGoOfTheirMedia()
+    {
+        // Low memory mode frees a released picture at once, which makes the
+        // release visible.
+        ProfileMediaStore &store = ProfileMediaStore::instance();
+        store.setKeepDecoded(false);
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        Profile::Page jessica = *Reference::seededPage(QStringLiteral("jessica"));
+        jessica.background = p.addMockMedia(Profile::MediaKind::BackgroundImageMedia, realJpeg(Qt::darkMagenta));
+        jessica.theme.backgroundKind = Profile::BackgroundKind::ImageBackground;
+        jessica.song = p.addMockMedia(Profile::MediaKind::SongMedia, PageSyncTest::testSong());
+        QVERIFY(jessica.background.isSet() && jessica.song.isSet());
+        p.setMockPage(QStringLiteral("jessica"), jessica);
+        ProfilePageObject &view = *p.view();
+
+        QVERIFY(p.openContact(QStringLiteral("jessica")));
+        const QString imageKey = view.backgroundImageKey();
+        const QString songKey = view.songKey();
+        QVERIFY(!imageKey.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(store.image(imageKey).has_value(), 5'000);
+        QVERIFY(!SongLibrary::instance().get(songKey).isEmpty());
+
+        // The close fade still shows the page whole; then its media goes.
+        p.closeAll();
+        QCOMPARE(view.backgroundImageKey(), imageKey);
+        QVERIFY(store.image(imageKey).has_value());
+        QTRY_VERIFY_WITH_TIMEOUT(!store.image(imageKey).has_value(), 5'000);
+        QCOMPARE(view.backgroundImageKey(), QString());
+        QVERIFY(SongLibrary::instance().get(songKey).isEmpty());
+        QCOMPARE(view.headline(), jessica.content.headline);
+
+        // Opened again, it is all back.
+        QVERIFY(p.openContact(QStringLiteral("jessica")));
+        QCOMPARE(view.backgroundImageKey(), imageKey);
+        QVERIFY(!view.backgroundPending());
+        QVERIFY(!view.songPending());
+        QVERIFY(!SongLibrary::instance().get(songKey).isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(store.image(imageKey).has_value(), 5'000);
+        // Reopened within the delay, nothing is let go.
+        p.closeAll();
+        QVERIFY(p.openContact(QStringLiteral("jessica")));
+        QTest::qWait(ProfileController::idleMediaReleaseMs + 300);
+        QCOMPARE(view.backgroundImageKey(), imageKey);
+        QVERIFY(store.image(imageKey).has_value());
+
+        // The editor's copy of your own picture goes when the editor closes.
+        Profile::Page own = publishedPage(QStringLiteral("Mine"));
+        own.background = p.addMockMedia(Profile::MediaKind::BackgroundImageMedia, realJpeg(Qt::darkCyan));
+        own.theme.backgroundKind = Profile::BackgroundKind::ImageBackground;
+        p.setMockPage(Reference::selfId(), own);
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        const QString draftKey = p.draft()->backgroundImageKey();
+        QVERIFY(!draftKey.isEmpty());
+        p.endEditing();
+        QTRY_COMPARE_WITH_TIMEOUT(p.draft()->backgroundImageKey(), QString(), 5'000);
+        QCOMPARE(p.view()->backgroundImageKey(), draftKey); // the page on screen keeps it
+        QVERIFY(p.beginEditing());
+        QCOMPARE(p.draft()->backgroundImageKey(), draftKey);
+    }
+
     void adaptiveThemeFollowsDarkMode()
     {
         ChatController chat;

@@ -9,6 +9,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QHash>
 #include <QSet>
 #include <QTemporaryDir>
 #include <QtTest/QTest>

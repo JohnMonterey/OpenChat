@@ -261,8 +261,10 @@ struct WavSource final {
     source.audio = std::move(decoded).value();
     source.tags = readWavTags(bytes);
     const qint64 maxFrames = limits.maxSourceMs * source.audio.sampleRate / 1000;
-    if (source.audio.frameCount() > maxFrames)
+    if (source.audio.frameCount() > maxFrames) {
         source.audio.samples.resize(maxFrames * source.audio.channels);
+        source.audio.samples.squeeze(); // a long file's tail is not kept in memory either
+    }
     return Result<WavSource, SongImportError>::success(std::move(source));
 }
 
@@ -546,8 +548,10 @@ private:
             }
             m_frames += frames;
         }
-        if (const qint64 duration = m_decoder.duration(); duration > 0)
-            emit m_owner.progressChanged(std::clamp(0.95 * double(m_frames * 1000 / m_rate) / double(duration), 0.0, 0.95));
+        if (const qint64 duration = m_decoder.duration(); duration > 0) {
+            const double decodedMs = double(m_frames) * 1000.0 / m_rate;
+            emit m_owner.progressChanged(std::clamp(0.95 * decodedMs / double(duration), 0.0, 0.95));
+        }
         if (m_frames >= limitFrames) {
             // Only the first maxSourceMs can be picked from; the rest need
             // not be decoded.
@@ -582,8 +586,10 @@ private:
                 || findAudibleMs(chunk, silenceThresholdDb(), relative(endFrame, frames), relative(lookEnd, frames))
                        .has_value();
         m_frames += frames;
-        if (m_decoder.duration() > 0)
-            emit m_owner.progressChanged(std::clamp(0.5 * double(m_frames * 1000 / m_rate - m_startMs) / double(m_windowMs), 0.0, 0.5));
+        // Decoding is the first half of the work; the encode is the second.
+        const double intoWindowMs = double(m_frames) * 1000.0 / m_rate - double(m_startMs);
+        const double windowMs = double(std::max<qint64>(m_windowMs, 1));
+        emit m_owner.progressChanged(std::clamp(0.5 * intoWindowMs / windowMs, 0.0, 0.5));
         if (m_audibleAfter || m_frames >= lookEnd) {
             m_decoder.stop();
             decodeFinished();

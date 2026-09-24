@@ -441,12 +441,14 @@ QImage leopardTile(qreal cell, qreal dpr, const Inks &k)
     return image;
 }
 
-QImage linenTile(qreal dpr, const QColor &ink, qreal opacity)
+QImage linenTile(qreal pitch3, qreal dpr, const QColor &ink, qreal opacity)
 {
-    // 64 threads each way, 3 px apart, each with its own jittered strength;
-    // threads cross over each other (SourceOver), as in the mockup.
+    // 64 hairline threads each way, 3 px apart at M, each with its own
+    // jittered strength; threads cross over each other (SourceOver), as in
+    // the mockup. (The mockup's weave ignores the Size knob; here it scales
+    // like every other motif, so the editor's S / M / L is never a no-op.)
     constexpr int threads = 64;
-    const int sidePx = devicePixels(threads * 3.0, dpr);
+    const int sidePx = devicePixels(threads * pitch3, dpr);
     const qreal side = sidePx / dpr;
     const qreal pitch = side / threads;
     QImage image = blankTile(sidePx, sidePx, dpr);
@@ -522,7 +524,7 @@ QImage renderTile(Motif motif, const QColor &ink, qreal opacity, qreal s, qreal 
     case Motif::Leopard:
         return leopardTile(64 * s, dpr, k);
     case Motif::LinenWeave:
-        return linenTile(dpr, ink, opacity);
+        return linenTile(3 * s, dpr, ink, opacity);
     case Motif::Zebra:
     case Motif::Halftone:
     case Motif::CyberGrid:
@@ -772,7 +774,7 @@ QSizeF tilePeriod(Motif motif, Profile::MotifScale scale)
     case Motif::Leopard:
         return {256 * s, 256 * s};
     case Motif::LinenWeave:
-        return {192, 192};
+        return {192 * s, 192 * s};
     case Motif::Zebra:
     case Motif::Halftone:
     case Motif::CyberGrid:

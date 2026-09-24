@@ -91,39 +91,55 @@ ImageStats ProfileMediaStore::computeStats(const QImage &source)
     ImageStats stats;
     if (source.isNull())
         return stats;
-    // Nearest-neighbour on purpose: averaging would turn a fine black-and-
-    // white texture into flat grey and hide the extremes text must survive.
-    constexpr int side = 256;
-    constexpr int tile = 8;
-    const QImage small = source.scaled(side, side, Qt::IgnoreAspectRatio, Qt::FastTransformation)
-                             .convertToFormat(QImage::Format_RGB32);
+    // A 32 × 32 grid of tiles over the full-resolution picture, each giving
+    // its darkest and lightest pixel. Nothing is averaged or resampled first:
+    // averaging turns a fine black-and-white texture into flat grey, and
+    // even nearest-neighbour decimation can land on one colour of a
+    // checkerboard (at 2:1 it does), hiding the extremes text must survive.
+    constexpr int grid = 32;
+    const QImage image = source.convertToFormat(QImage::Format_RGB32);
+    const int width = image.width();
+    const int height = image.height();
     std::vector<std::pair<double, QRgb>> minima;
     std::vector<std::pair<double, QRgb>> maxima;
-    minima.reserve((side / tile) * (side / tile));
-    maxima.reserve(minima.capacity());
+    minima.reserve(grid * grid);
+    maxima.reserve(grid * grid);
     double sumR = 0;
     double sumG = 0;
     double sumB = 0;
-    for (int ty = 0; ty < side; ty += tile) {
-        for (int tx = 0; tx < side; tx += tile) {
+    for (int row = 0; row < grid; ++row) {
+        const int top = row * height / grid;
+        const int bottom = std::max(top + 1, (row + 1) * height / grid);
+        for (int column = 0; column < grid; ++column) {
+            const int left = column * width / grid;
+            const int right = std::max(left + 1, (column + 1) * width / grid);
+            if (top >= height || left >= width)
+                continue;
             std::pair<double, QRgb> lowest{2.0, 0};
             std::pair<double, QRgb> highest{-1.0, 0};
-            for (int y = ty; y < ty + tile; ++y) {
-                const auto *line = reinterpret_cast<const QRgb *>(small.constScanLine(y));
-                for (int x = tx; x < tx + tile; ++x) {
+            for (int y = top; y < std::min(bottom, height); ++y) {
+                const auto *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+                for (int x = left; x < std::min(right, width); ++x) {
                     const QRgb pixel = line[x];
                     const double lum = luminance(pixel);
                     if (lum < lowest.first)
                         lowest = {lum, pixel};
                     if (lum > highest.first)
                         highest = {lum, pixel};
-                    sumR += qRed(pixel);
-                    sumG += qGreen(pixel);
-                    sumB += qBlue(pixel);
                 }
             }
             minima.push_back(lowest);
             maxima.push_back(highest);
+        }
+    }
+    // The mean over every pixel once (a picture under 32 px has overlapping
+    // tiles above).
+    for (int y = 0; y < height; ++y) {
+        const auto *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+        for (int x = 0; x < width; ++x) {
+            sumR += qRed(line[x]);
+            sumG += qGreen(line[x]);
+            sumB += qBlue(line[x]);
         }
     }
     const auto byLuminance = [](const auto &a, const auto &b) { return a.first < b.first; };
@@ -135,7 +151,7 @@ ImageStats ProfileMediaStore::computeStats(const QImage &source)
     };
     stats.darkest = percentile(minima, 0.05);
     stats.lightest = percentile(maxima, 0.95);
-    const double count = double(side) * side;
+    const double count = double(width) * height;
     stats.average = QColor(int(std::lround(sumR / count)), int(std::lround(sumG / count)),
                            int(std::lround(sumB / count)));
     return stats;

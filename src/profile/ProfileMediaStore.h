@@ -70,10 +70,10 @@ public:
     void setDecodeHookForTesting(std::function<void()> hook);
     [[nodiscard]] int decodedCount() const;
 
-    // The tile-extreme statistics of an image (exposed for tests): scaled to
-    // 256×256 without averaging, split into 8×8 tiles; darkest = the 5th
-    // percentile of the tiles' darkest pixels, lightest = the 95th percentile
-    // of their lightest, average = the mean colour.
+    // The tile-extreme statistics of an image (exposed for tests): the full-
+    // resolution picture split into a 32 × 32 grid of tiles, never resampled;
+    // darkest = the 5th percentile of the tiles' darkest pixels, lightest =
+    // the 95th percentile of their lightest, average = the mean colour.
     [[nodiscard]] static ImageStats computeStats(const QImage &image);
 
 signals:

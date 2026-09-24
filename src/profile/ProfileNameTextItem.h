@@ -55,7 +55,7 @@ class ProfileNameText : public QQuickPaintedItem
     // The width of the text line itself (without the overhang).
     Q_PROPERTY(qreal textWidth READ textWidth NOTIFY layoutChanged)
     // What screen readers get: the plain name, never the flourish.
-    Q_PROPERTY(QString accessibleName READ text NOTIFY textChanged)
+    Q_PROPERTY(QString accessibleName READ accessibleName NOTIFY textChanged)
     // What is painted: flourish and elision included.
     Q_PROPERTY(QString paintedText READ paintedText NOTIFY layoutChanged)
 
@@ -94,6 +94,7 @@ public:
     [[nodiscard]] qreal glyphTop() const noexcept { return m_padY; }
     [[nodiscard]] qreal textWidth() const noexcept { return m_textWidth; }
     [[nodiscard]] QString paintedText() const { return m_shown; }
+    [[nodiscard]] QString accessibleName() const { return m_text; }
     // Whether the shared ticker is driving the glitter right now.
     [[nodiscard]] bool animating() const;
 

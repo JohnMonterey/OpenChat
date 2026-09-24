@@ -272,9 +272,18 @@ Palette resolve(const Profile::Theme &theme, const QVector<QColor> &samplesIn, c
     while (percent < 100 && !inksPass(boxesAt(percent, samples)))
         percent = std::min(100, percent + 2);
     if (percent > chosen) {
-        // Blame the background when the box over the plain base colour was
-        // fine and only the pattern or picture made it fail.
-        const bool baseAlonePasses = inksPass(boxesAt(chosen, {samples.first()}));
+        // Blame the background when the box over the plain base colour would
+        // have kept every ink that can be readable at all readable: then only
+        // the pattern, gradient or picture made it fail. (An ink too faint
+        // even on a solid box forces 100% by itself; the Text tab tells the
+        // owner about that one.)
+        const QVector<QColor> solid{fill};
+        const QVector<QColor> overBase = boxesAt(chosen, {samples.first()});
+        const auto keeps = [&](const QColor &ink, double floor) {
+            return minContrast(ink, solid) < floor || minContrast(ink, overBase) >= floor;
+        };
+        const bool baseAlonePasses = keeps(ownerBody, floors.body) && keeps(ownerLabel, floors.body)
+                                     && keeps(ownerLink, floors.body) && (chrome || keeps(ownerName, floors.name));
         out.adjustments.push_back(
             {baseAlonePasses ? Profile::EditorTab::BackgroundTab : Profile::EditorTab::BoxesTab, -1,
              QStringLiteral("Boxes are drawn %1% solid (you chose %2%) so text stays clear over this background.")
@@ -290,9 +299,18 @@ Palette resolve(const Profile::Theme &theme, const QVector<QColor> &samplesIn, c
     out.boxDark = isDark(box);
     const bool dark = out.boxDark;
 
-    // 2. Move each ink that still fails towards black or white.
+    // An ink no single colour can make readable is kept at its best and
+    // gets the last-resort halo (step 4).
     bool anyFailed = false;
     QColor failedInk;
+    const auto noteFailure = [&](bool failed, const QColor &shown) {
+        if (failed && !anyFailed) {
+            anyFailed = true;
+            failedInk = shown;
+        }
+    };
+
+    // 2. Move each ink that still fails towards black or white.
     const auto fixInk = [&](InkRole role, const QColor &owner, double floor, Profile::EditorTab tab) {
         bool failed = false;
         const QColor shown = ensureN(owner, boxes, floor, &failed);
@@ -300,10 +318,7 @@ Palette resolve(const Profile::Theme &theme, const QVector<QColor> &samplesIn, c
             out.adjustments.push_back({tab, int(role), shiftSentence(role, owner, shown, QStringLiteral("your boxes"))});
             out.inkAdjusted.insert(int(role), true);
         }
-        if (failed && !anyFailed) {
-            anyFailed = true;
-            failedInk = shown;
-        }
+        noteFailure(failed, shown);
         return shown;
     };
     out.body = fixInk(InkRole::BodyInk, ownerBody, floors.body, Profile::EditorTab::TextTab);
@@ -317,9 +332,11 @@ Palette resolve(const Profile::Theme &theme, const QVector<QColor> &samplesIn, c
     //    steps, up to 48%); only then does the owner's title colour shift.
     const auto resolveStrip = [&](const QColor &ownerFill, const QColor &ownerText, InkRole role, bool alt) {
         StripResult result;
+        bool failed = false;
         if (theme.headerStyle == HeaderStyle::NoHeader) {
             result.recipe = stripRecipe(ownerFill, HeaderStyle::NoHeader);
-            result.text = ensureN(ownerText, boxes, floors.strip);
+            result.text = ensureN(ownerText, boxes, floors.strip, &failed);
+            noteFailure(failed, result.text);
             if (result.text != ownerText) {
                 out.adjustments.push_back({Profile::EditorTab::BoxesTab, int(role),
                                            shiftSentence(role, ownerText, result.text, QStringLiteral("your boxes"))});
@@ -341,7 +358,10 @@ Palette resolve(const Profile::Theme &theme, const QVector<QColor> &samplesIn, c
                      .arg(alt ? QStringLiteral("Right-column header") : QStringLiteral("Header"),
                           lightText ? QStringLiteral("deepened") : QStringLiteral("lightened"))});
         }
-        result.text = ensureN(ownerText, stopList(result.recipe), floors.strip);
+        // A glossy strip spans a wide range; a title that fits none of it
+        // even at 48% keeps its best pole and is haloed.
+        result.text = ensureN(ownerText, stopList(result.recipe), floors.strip, &failed);
+        noteFailure(failed, result.text);
         if (result.text != ownerText) {
             out.adjustments.push_back({Profile::EditorTab::BoxesTab, int(role),
                                        shiftSentence(role, ownerText, result.text, QStringLiteral("its strip"))});

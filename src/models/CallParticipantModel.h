@@ -26,6 +26,9 @@ struct CallParticipantRow final {
     // The member's shared screen, if they are sharing one. A live surface
     // rather than a frame, so a roster refresh costs nothing to carry.
     ScreenCanvasPtr screenCanvas;
+    // The member's AccountId hex, contact or not; empty when the call does
+    // not know it. What a tile opens the member's profile with.
+    QString accountId;
 };
 
 class CallParticipantModel final : public QAbstractListModel
@@ -48,6 +51,7 @@ public:
         VideoAspectRole,
         ScreenCanvasRole,
         ScreenSharingRole,
+        AccountIdRole,
     };
     Q_ENUM(Role)
 

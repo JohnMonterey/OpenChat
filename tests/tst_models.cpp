@@ -1,8 +1,11 @@
 #include <QtTest>
 
+#include "models/CallParticipantModel.h"
 #include "models/ContactListModel.h"
 #include "models/MessageListModel.h"
 
+using OpenChat::CallParticipantModel;
+using OpenChat::CallParticipantRow;
 using OpenChat::Contact;
 using OpenChat::ContactListModel;
 using OpenChat::MessageListModel;
@@ -194,6 +197,63 @@ private slots:
         QVERIFY(model.appendOutgoing(QStringLiteral("Reply"), QTime(10, 16)));
         QCOMPARE(model.count(), 2);
         QCOMPARE(countChanged.count(), 2);
+    }
+
+    // A group call tile opens its member's profile by account, contact or
+    // not, so every row carries the account the call knows for it.
+    void callParticipantsExposeAccountIds()
+    {
+        CallParticipantModel model;
+        const QHash<int, QByteArray> roles = model.roleNames();
+        QCOMPARE(roles.value(CallParticipantModel::AccountIdRole), QByteArray("accountId"));
+        // Appended: the roles QML already binds to keep their numbers.
+        QCOMPARE(int(CallParticipantModel::AccountIdRole),
+                 int(CallParticipantModel::ScreenSharingRole) + 1);
+        QCOMPARE(roles.value(CallParticipantModel::DeviceIdRole), QByteArray("deviceId"));
+        QCOMPARE(roles.value(CallParticipantModel::ScreenSharingRole), QByteArray("screenSharing"));
+
+        const QString contactAccount = QStringLiteral("0a1b2c3d4e5f60718293a4b5c6d7e8f9");
+        const QString strangerAccount = QStringLiteral("f9e8d7c6b5a4938271605f4e3d2c1b0a");
+        CallParticipantRow contact{QStringLiteral("d1"), QStringLiteral("Jessica"),
+                                   QStringLiteral("jessica"), QString(), true, false, false, 0.0};
+        contact.accountId = contactAccount;
+        CallParticipantRow stranger{QStringLiteral("d2"), QStringLiteral("dana"),
+                                    QStringLiteral("userpfp_none"), QStringLiteral("Ringing…"),
+                                    false, true, false, 0.0};
+        stranger.accountId = strangerAccount;
+        // A member who joined mid-call before the roster named them.
+        const CallParticipantRow unknown{QStringLiteral("d3"), QStringLiteral("Unknown"),
+                                         QStringLiteral("userpfp_none"), QString(), true, false,
+                                         false, 0.0};
+        model.setParticipants({contact, stranger, unknown});
+
+        QCOMPARE(model.rowCount(), 3);
+        QCOMPARE(model.data(model.index(0), CallParticipantModel::AccountIdRole).toString(),
+                 contactAccount);
+        QCOMPARE(model.data(model.index(1), CallParticipantModel::AccountIdRole).toString(),
+                 strangerAccount);
+        const QVariant none = model.data(model.index(2), CallParticipantModel::AccountIdRole);
+        QVERIFY(none.isValid());
+        QVERIFY(none.toString().isEmpty());
+        // The other roles are where they were.
+        QCOMPARE(model.data(model.index(1), CallParticipantModel::NameRole).toString(),
+                 QStringLiteral("dana"));
+        QCOMPARE(model.data(model.index(1), CallParticipantModel::DeviceIdRole).toString(),
+                 QStringLiteral("d2"));
+
+        // The roster names the late joiner: the same devices in the same order
+        // update in place, and the tile learns the account.
+        QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        CallParticipantRow named = unknown;
+        named.name = QStringLiteral("Ryan");
+        named.accountId = QStringLiteral("00112233445566778899aabbccddeeff");
+        model.setParticipants({contact, stranger, named});
+        QCOMPARE(reset.count(), 0);
+        QCOMPARE(changed.count(), 1);
+        QCOMPARE(model.data(model.index(2), CallParticipantModel::AccountIdRole).toString(),
+                 named.accountId);
+        QCOMPARE(model.participants().at(2).accountId, named.accountId);
     }
 };
 

@@ -1,5 +1,6 @@
 #include "domain/ProfilePageCodec.h"
 
+#include "domain/ClipContainer.h"
 #include "domain/Identifiers.h"
 #include "domain/SongContainer.h"
 
@@ -21,10 +22,17 @@ namespace P = Profile;
 
 constexpr char pageTag = '\xFF';
 constexpr qsizetype sha256Bytes = 32;
-constexpr int maxWantedMedia = 2;
-// Only the first entries of a module list are looked at: there are six
-// modules today, and a future client with more still fits in sixteen.
+constexpr int maxWantedMedia = maxRequestedMedia;
+// Only the first entries of a module list are looked at: six built-in
+// modules and at most ten panels, the same sixteen a 0.2.9 client reads.
 constexpr qsizetype maxModuleEntries = 16;
+// Arrays longer than normalized() keeps are read only this far, so a
+// hostile core cannot make the decoder build thousands of throwaway entries.
+constexpr qsizetype maxPanelEntries = Profile::PanelBounds::maxPanels;
+constexpr qsizetype maxBlockEntries = Profile::PanelBounds::maxBlocksPerPanel;
+constexpr qsizetype maxImageEntries = Profile::PanelBounds::maxImagesPerBlock;
+constexpr qsizetype maxItemEntries = Profile::PanelBounds::maxItemsPerList;
+constexpr qsizetype maxSegmentEntries = Profile::PanelBounds::maxSegments;
 
 // Keys, as frozen in ARCH §1. Every map is written in ascending key order,
 // so an encoding is deterministic; decoders accept any order.
@@ -33,7 +41,7 @@ enum class PageType : qint64 { Core = 1, Media = 2, Request = 3 };
 
 namespace CoreKey {
 enum : qint64 { Revision = 2, PublishedAt = 3, Theme = 4, Layout = 5, Content = 6, TopFriends = 7, Media = 8,
-                Preset = 9 };
+                Preset = 9, Panels = 10 };
 }
 namespace ThemeKey {
 enum : qint64 { BackgroundKind = 1, BackgroundColor1, BackgroundColor2, Motif, MotifInk, MotifOpacity,
@@ -48,7 +56,34 @@ namespace LayoutKey {
 enum : qint64 { Layout = 1, Modules = 2 };
 }
 namespace ModuleKey {
-enum : qint64 { Module = 1, Column = 2, Visible = 3 };
+// Panel: the panel id a CustomPanelModule entry places; written only then.
+enum : qint64 { Module = 1, Column = 2, Visible = 3, Panel = 4 };
+}
+// The panels (docs/profile-panels.md). A block writes only its own kind's
+// keys; a reader takes whatever keys are there and normalized() keeps those
+// of the block's kind.
+namespace PanelKey {
+enum : qint64 { Id = 1, Title = 2, Icon = 3, Look = 4, Blocks = 5 };
+}
+namespace LookKey {
+enum : qint64 { OwnColours = 1, HeaderFill = 2, HeaderText = 3, BoxFill = 4, BodyInk = 5, ShowTitle = 6 };
+}
+namespace BlockKey {
+enum : qint64 { Id = 1, Kind = 2, Text = 3, TextStyle = 4, Align = 5, Images = 6, Gallery = 7, Frame = 8,
+                Video = 9, Loop = 10, Caption = 11, ListStyle = 12, Items = 13, Divider = 14 };
+}
+namespace ImageKey {
+enum : qint64 { Ref = 1, Caption = 2 };
+}
+namespace ItemKey {
+enum : qint64 { Title = 1, Detail = 2, Rating = 3, Status = 4, Cover = 5 };
+}
+namespace VideoKey {
+enum : qint64 { Segments = 1, Poster = 2 };
+}
+// A panel's media ref; unlike the page's own refs, one key set for every kind.
+namespace PanelRefKey {
+enum : qint64 { Sha256 = 1, Bytes = 2, Width = 3, Height = 4, DurationMs = 5 };
 }
 namespace ContentKey {
 enum : qint64 { DisplayName = 1, Headline, InfoLines, Mood, Interests, Details, AboutMe, Meet, SongTitle,
@@ -351,6 +386,8 @@ struct PageMessage {
         entry.insert(qint64(ModuleKey::Module), wire(placement.module));
         entry.insert(qint64(ModuleKey::Column), wire(placement.column));
         entry.insert(qint64(ModuleKey::Visible), placement.visible);
+        if (placement.panel != 0)
+            entry.insert(qint64(ModuleKey::Panel), qint64(placement.panel));
         modules.append(entry);
     }
     QCborMap map;
@@ -423,6 +460,105 @@ struct PageMessage {
         map.insert(qint64(MediaRefsKey::Song), ref);
     }
     return map;
+}
+
+[[nodiscard]] QCborMap writePanelRef(const P::MediaRef &ref)
+{
+    QCborMap map;
+    map.insert(qint64(PanelRefKey::Sha256), ref.sha256);
+    map.insert(qint64(PanelRefKey::Bytes), qint64(ref.bytes));
+    if (ref.width != 0)
+        map.insert(qint64(PanelRefKey::Width), qint64(ref.width));
+    if (ref.height != 0)
+        map.insert(qint64(PanelRefKey::Height), qint64(ref.height));
+    if (ref.durationMs != 0)
+        map.insert(qint64(PanelRefKey::DurationMs), qint64(ref.durationMs));
+    return map;
+}
+
+[[nodiscard]] QCborMap writeBlock(const P::Block &block)
+{
+    QCborMap map;
+    map.insert(qint64(BlockKey::Id), qint64(block.id));
+    map.insert(qint64(BlockKey::Kind), wire(block.kind));
+    switch (block.kind) {
+    case P::BlockKind::TextBlock:
+        map.insert(qint64(BlockKey::Text), block.text);
+        map.insert(qint64(BlockKey::TextStyle), wire(block.textStyle));
+        map.insert(qint64(BlockKey::Align), wire(block.align));
+        break;
+    case P::BlockKind::ImageBlock: {
+        QCborArray images;
+        for (const P::PanelImage &image : block.images) {
+            QCborMap entry;
+            entry.insert(qint64(ImageKey::Ref), writePanelRef(image.ref));
+            entry.insert(qint64(ImageKey::Caption), image.caption);
+            images.append(entry);
+        }
+        map.insert(qint64(BlockKey::Images), images);
+        map.insert(qint64(BlockKey::Gallery), wire(block.gallery));
+        map.insert(qint64(BlockKey::Frame), wire(block.frame));
+        break;
+    }
+    case P::BlockKind::VideoBlock: {
+        QCborMap video;
+        QCborArray segments;
+        for (const P::MediaRef &segment : block.video.segments)
+            segments.append(writePanelRef(segment));
+        video.insert(qint64(VideoKey::Segments), segments);
+        if (block.video.poster.isSet())
+            video.insert(qint64(VideoKey::Poster), writePanelRef(block.video.poster));
+        map.insert(qint64(BlockKey::Video), video);
+        map.insert(qint64(BlockKey::Loop), block.loop);
+        map.insert(qint64(BlockKey::Caption), block.caption);
+        break;
+    }
+    case P::BlockKind::ListBlock: {
+        QCborArray items;
+        for (const P::ListItem &item : block.items) {
+            QCborMap entry;
+            entry.insert(qint64(ItemKey::Title), item.title);
+            entry.insert(qint64(ItemKey::Detail), item.detail);
+            entry.insert(qint64(ItemKey::Rating), qint64(item.rating));
+            entry.insert(qint64(ItemKey::Status), wire(item.status));
+            if (item.cover.isSet())
+                entry.insert(qint64(ItemKey::Cover), writePanelRef(item.cover));
+            items.append(entry);
+        }
+        map.insert(qint64(BlockKey::ListStyle), wire(block.listStyle));
+        map.insert(qint64(BlockKey::Items), items);
+        break;
+    }
+    case P::BlockKind::DividerBlock:
+        map.insert(qint64(BlockKey::Divider), wire(block.divider));
+        break;
+    }
+    return map;
+}
+
+[[nodiscard]] QCborArray writePanels(const QVector<P::Panel> &panels)
+{
+    QCborArray array;
+    for (const P::Panel &panel : panels) {
+        QCborMap look;
+        look.insert(qint64(LookKey::OwnColours), panel.look.ownColours);
+        look.insert(qint64(LookKey::HeaderFill), qint64(panel.look.headerFill));
+        look.insert(qint64(LookKey::HeaderText), qint64(panel.look.headerText));
+        look.insert(qint64(LookKey::BoxFill), qint64(panel.look.boxFill));
+        look.insert(qint64(LookKey::BodyInk), qint64(panel.look.bodyInk));
+        look.insert(qint64(LookKey::ShowTitle), panel.look.showTitle);
+        QCborArray blocks;
+        for (const P::Block &block : panel.blocks)
+            blocks.append(writeBlock(block));
+        QCborMap entry;
+        entry.insert(qint64(PanelKey::Id), qint64(panel.id));
+        entry.insert(qint64(PanelKey::Title), panel.title);
+        entry.insert(qint64(PanelKey::Icon), wire(panel.icon));
+        entry.insert(qint64(PanelKey::Look), look);
+        entry.insert(qint64(PanelKey::Blocks), blocks);
+        array.append(entry);
+    }
+    return array;
 }
 
 // --- PageCore: decoding -----------------------------------------------------
@@ -506,14 +642,17 @@ struct PageMessage {
         const auto module = reader.unsignedValue(ModuleKey::Module);
         const auto column = reader.unsignedValue(ModuleKey::Column);
         const auto visible = reader.boolean(ModuleKey::Visible);
+        const auto panel = reader.unsignedValue(ModuleKey::Panel);
         if (!reader.ok())
             return false;
         if (!module)
             continue; // nothing to place
         // An absent column reads as 255, out of range, which normalized()
-        // turns into the module's default column.
+        // turns into the module's default column. A panel id past 255 names
+        // no panel (ids are 1…255) and is dropped with its entry.
+        const qint64 panelId = panel.value_or(0);
         modules.push_back({enumFromWire<P::Module>(*module), enumFromWire<P::Column>(column.value_or(255)),
-                           visible.value_or(true)});
+                           visible.value_or(true), panelId > 255 ? quint8(0) : quint8(panelId)});
     }
     return true;
 }
@@ -653,6 +792,190 @@ struct PageMessage {
     return !song || readMediaRef(*song, false, page.song);
 }
 
+// A panel's ref: a map with a 32-byte hash (anything else makes the core
+// malformed). Sizes are kept as read; normalized() drops a ref out of range.
+[[nodiscard]] bool readPanelRef(const QCborValue &value, P::MediaRef &ref)
+{
+    const auto fields = Fields::read(value);
+    if (!fields)
+        return false;
+    FieldReader reader(*fields);
+    const auto sha256 = reader.bytes(PanelRefKey::Sha256);
+    const auto bytes = reader.unsignedValue(PanelRefKey::Bytes);
+    const auto width = reader.unsignedValue(PanelRefKey::Width);
+    const auto height = reader.unsignedValue(PanelRefKey::Height);
+    const auto durationMs = reader.unsignedValue(PanelRefKey::DurationMs);
+    if (!reader.ok() || !sha256 || sha256->size() != sha256Bytes)
+        return false;
+    ref.sha256 = *sha256;
+    ref.bytes = saturatedFromWire<quint32>(bytes.value_or(0));
+    ref.width = saturatedFromWire<quint16>(width.value_or(0));
+    ref.height = saturatedFromWire<quint16>(height.value_or(0));
+    ref.durationMs = saturatedFromWire<quint32>(durationMs.value_or(0));
+    return true;
+}
+
+[[nodiscard]] bool readImages(const QCborArray &array, QVector<P::PanelImage> &images)
+{
+    const qsizetype count = std::min(array.size(), maxImageEntries);
+    for (qsizetype i = 0; i < count; ++i) {
+        const auto fields = Fields::read(array.at(i));
+        if (!fields)
+            return false;
+        FieldReader reader(*fields);
+        const auto ref = reader.map(ImageKey::Ref);
+        const auto caption = reader.text(ImageKey::Caption);
+        if (!reader.ok())
+            return false;
+        P::PanelImage image;
+        if (ref && !readPanelRef(*ref, image.ref))
+            return false;
+        image.caption = caption.value_or(QString());
+        images.push_back(std::move(image));
+    }
+    return true;
+}
+
+[[nodiscard]] bool readItems(const QCborArray &array, QVector<P::ListItem> &items)
+{
+    const qsizetype count = std::min(array.size(), maxItemEntries);
+    for (qsizetype i = 0; i < count; ++i) {
+        const auto fields = Fields::read(array.at(i));
+        if (!fields)
+            return false;
+        FieldReader reader(*fields);
+        P::ListItem item;
+        item.title = reader.text(ItemKey::Title).value_or(QString());
+        item.detail = reader.text(ItemKey::Detail).value_or(QString());
+        if (const auto rating = reader.unsignedValue(ItemKey::Rating))
+            item.rating = smallFromWire(*rating);
+        if (const auto status = reader.unsignedValue(ItemKey::Status))
+            item.status = enumFromWire<P::GameStatus>(*status);
+        const auto cover = reader.map(ItemKey::Cover);
+        if (!reader.ok())
+            return false;
+        if (cover && !readPanelRef(*cover, item.cover))
+            return false;
+        items.push_back(std::move(item));
+    }
+    return true;
+}
+
+[[nodiscard]] bool readVideo(const QCborValue &value, P::VideoClip &video)
+{
+    const auto fields = Fields::read(value);
+    if (!fields)
+        return false;
+    FieldReader reader(*fields);
+    const auto segments = reader.array(VideoKey::Segments);
+    const auto poster = reader.map(VideoKey::Poster);
+    if (!reader.ok())
+        return false;
+    if (poster && !readPanelRef(*poster, video.poster))
+        return false;
+    if (segments) {
+        // More segments than a clip may have: normalized() drops the clip
+        // whole, so reading one past the limit is enough to know.
+        const qsizetype count = std::min(segments->size(), maxSegmentEntries + 1);
+        for (qsizetype i = 0; i < count; ++i) {
+            P::MediaRef segment;
+            if (!readPanelRef(segments->at(i), segment))
+                return false;
+            video.segments.push_back(segment);
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool readBlock(const QCborValue &value, P::Block &block)
+{
+    const auto fields = Fields::read(value);
+    if (!fields)
+        return false;
+    FieldReader reader(*fields);
+    const auto choice = [&]<typename Enum>(qint64 key, Enum &out) {
+        if (const auto raw = reader.unsignedValue(key))
+            out = enumFromWire<Enum>(*raw);
+    };
+    if (const auto id = reader.unsignedValue(BlockKey::Id))
+        block.id = *id > 65535 ? quint16(0) : quint16(*id);
+    // A block without a kind is one this version cannot place: kind 0 is
+    // no kind, and normalized() drops it.
+    block.kind = enumFromWire<P::BlockKind>(reader.unsignedValue(BlockKey::Kind).value_or(0));
+    block.text = reader.text(BlockKey::Text).value_or(QString());
+    choice(BlockKey::TextStyle, block.textStyle);
+    choice(BlockKey::Align, block.align);
+    const auto images = reader.array(BlockKey::Images);
+    choice(BlockKey::Gallery, block.gallery);
+    choice(BlockKey::Frame, block.frame);
+    const auto video = reader.map(BlockKey::Video);
+    block.loop = reader.boolean(BlockKey::Loop).value_or(false);
+    block.caption = reader.text(BlockKey::Caption).value_or(QString());
+    choice(BlockKey::ListStyle, block.listStyle);
+    const auto items = reader.array(BlockKey::Items);
+    choice(BlockKey::Divider, block.divider);
+    if (!reader.ok())
+        return false;
+    if (images && !readImages(*images, block.images))
+        return false;
+    if (video && !readVideo(*video, block.video))
+        return false;
+    return !items || readItems(*items, block.items);
+}
+
+[[nodiscard]] bool readLook(const QCborValue &value, P::PanelLook &look)
+{
+    const auto fields = Fields::read(value);
+    if (!fields)
+        return false;
+    FieldReader reader(*fields);
+    const auto colour = [&](qint64 key, quint32 &out) {
+        if (const auto raw = reader.unsignedValue(key))
+            out = colourFromWire(*raw);
+    };
+    look.ownColours = reader.boolean(LookKey::OwnColours).value_or(false);
+    colour(LookKey::HeaderFill, look.headerFill);
+    colour(LookKey::HeaderText, look.headerText);
+    colour(LookKey::BoxFill, look.boxFill);
+    colour(LookKey::BodyInk, look.bodyInk);
+    look.showTitle = reader.boolean(LookKey::ShowTitle).value_or(true);
+    return reader.ok();
+}
+
+[[nodiscard]] bool readPanels(const QCborArray &array, QVector<P::Panel> &panels)
+{
+    const qsizetype count = std::min(array.size(), maxPanelEntries);
+    for (qsizetype i = 0; i < count; ++i) {
+        const auto fields = Fields::read(array.at(i));
+        if (!fields)
+            return false;
+        FieldReader reader(*fields);
+        P::Panel panel;
+        if (const auto id = reader.unsignedValue(PanelKey::Id))
+            panel.id = *id > 255 ? quint8(0) : quint8(*id);
+        panel.title = reader.text(PanelKey::Title).value_or(QString());
+        if (const auto icon = reader.unsignedValue(PanelKey::Icon))
+            panel.icon = enumFromWire<P::PanelIcon>(*icon);
+        const auto look = reader.map(PanelKey::Look);
+        const auto blocks = reader.array(PanelKey::Blocks);
+        if (!reader.ok())
+            return false;
+        if (look && !readLook(*look, panel.look))
+            return false;
+        if (blocks) {
+            const qsizetype blockCount = std::min(blocks->size(), maxBlockEntries);
+            for (qsizetype b = 0; b < blockCount; ++b) {
+                P::Block block;
+                if (!readBlock(blocks->at(b), block))
+                    return false;
+                panel.blocks.push_back(std::move(block));
+            }
+        }
+        panels.push_back(std::move(panel));
+    }
+    return true;
+}
+
 } // namespace
 
 ProfilePayloadKind classifyProfilePayload(QByteArrayView payload)
@@ -670,7 +993,7 @@ ProfilePayloadKind classifyProfilePayload(QByteArrayView payload)
         // not a broken message: ignore it without complaint.
         FieldReader reader(message->fields);
         const auto kind = reader.unsignedValue(MediaKey::Kind);
-        if (kind && *kind != wire(P::MediaKind::BackgroundImageMedia) && *kind != wire(P::MediaKind::SongMedia))
+        if (kind && (*kind < wire(P::MediaKind::BackgroundImageMedia) || *kind > wire(P::MediaKind::VideoSegmentMedia)))
             return ProfilePayloadKind::UnknownPage;
         return ProfilePayloadKind::PageMedia;
     }
@@ -692,6 +1015,10 @@ QByteArray encodePageCore(const P::Page &input)
     map.insert(qint64(CoreKey::TopFriends), writeTopFriends(page.topFriends));
     map.insert(qint64(CoreKey::Media), writeMedia(page));
     map.insert(qint64(CoreKey::Preset), wire(page.preset));
+    // Written only when there are panels, so a page without any encodes to
+    // exactly the bytes it did before panels existed.
+    if (!page.panels.isEmpty())
+        map.insert(qint64(CoreKey::Panels), writePanels(page.panels));
     return tagged(map);
 }
 
@@ -715,7 +1042,10 @@ std::optional<P::Page> decodePageCore(QByteArrayView payload)
     const auto media = reader.map(CoreKey::Media);
     if (const auto preset = reader.unsignedValue(CoreKey::Preset))
         page.preset = enumFromWire<P::Preset>(*preset);
+    const auto panels = reader.array(CoreKey::Panels);
     if (!reader.ok())
+        return std::nullopt;
+    if (panels && !readPanels(*panels, page.panels))
         return std::nullopt;
     if (theme && !readTheme(*theme, page.theme))
         return std::nullopt;
@@ -752,20 +1082,31 @@ std::optional<PageMediaMessage> decodePageMedia(QByteArrayView payload)
     if (!reader.ok() || !kind || !sha256 || !data || sha256->size() != sha256Bytes)
         return std::nullopt;
 
+    // A JPEG with no scan draws nothing; more than maxJpegScans is a
+    // progressive file built to make every viewer's decoder work hard.
+    const auto isAcceptableJpeg = [&](qsizetype cap) {
+        if (data->size() > cap || !looksLikeJpeg(*data))
+            return false;
+        const int scans = jpegScanCount(*data);
+        return scans >= 1 && scans <= maxJpegScans;
+    };
     PageMediaMessage result;
     if (*kind == wire(P::MediaKind::BackgroundImageMedia)) {
-        // A JPEG with no scan draws nothing; more than maxJpegScans is a
-        // progressive file built to make every viewer's decoder work hard.
-        if (data->size() > maxBackgroundImageBytes || !looksLikeJpeg(*data))
-            return std::nullopt;
-        const int scans = jpegScanCount(*data);
-        if (scans < 1 || scans > maxJpegScans)
+        if (!isAcceptableJpeg(maxBackgroundImageBytes))
             return std::nullopt;
         result.kind = P::MediaKind::BackgroundImageMedia;
     } else if (*kind == wire(P::MediaKind::SongMedia)) {
         if (data->size() > maxSongBytes || !decodeSongContainer(*data))
             return std::nullopt;
         result.kind = P::MediaKind::SongMedia;
+    } else if (*kind == wire(P::MediaKind::PanelImageMedia)) {
+        if (!isAcceptableJpeg(maxPanelImageBytes))
+            return std::nullopt;
+        result.kind = P::MediaKind::PanelImageMedia;
+    } else if (*kind == wire(P::MediaKind::VideoSegmentMedia)) {
+        if (data->size() > maxClipSegmentBytes || !decodeClipContainer(*data))
+            return std::nullopt;
+        result.kind = P::MediaKind::VideoSegmentMedia;
     } else {
         return std::nullopt;
     }

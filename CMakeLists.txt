@@ -433,6 +433,7 @@ add_library(openchat_domain STATIC
     src/domain/ProfilePage.cpp
     src/domain/ProfilePageCodec.cpp
     src/domain/SongContainer.cpp
+    src/domain/ClipContainer.cpp
     src/domain/GroupUpdate.cpp
     src/domain/MessageContent.cpp
 )
@@ -836,6 +837,11 @@ add_executable(tst_profilepage tests/tst_profilepage.cpp)
 target_include_directories(tst_profilepage PRIVATE src)
 target_link_libraries(tst_profilepage PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_profilepage COMMAND tst_profilepage)
+
+add_executable(tst_profilepanels tests/tst_profilepanels.cpp)
+target_include_directories(tst_profilepanels PRIVATE src)
+target_link_libraries(tst_profilepanels PRIVATE openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_profilepanels COMMAND tst_profilepanels)
 
 add_executable(tst_groupupdate tests/tst_groupupdate.cpp)
 target_include_directories(tst_groupupdate PRIVATE src)

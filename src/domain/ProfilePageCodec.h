@@ -29,11 +29,21 @@ inline constexpr qsizetype mlsPlaintextCapBytes = 256 * 1024;
 inline constexpr qsizetype maxPageSendBytes = 240 * 1024;       // asserted before every send
 inline constexpr qsizetype maxBackgroundImageBytes = 224 * 1024; // JPEG data only
 inline constexpr qsizetype maxSongBytes = 224 * 1024;            // song container only
+inline constexpr qsizetype maxPanelImageBytes = 224 * 1024;      // a panel's JPEG
+inline constexpr qsizetype maxClipSegmentBytes = 224 * 1024;     // one ClipContainer
 inline constexpr qsizetype maxPageMediaMessageBytes = 224 * 1024 + 512;
-inline constexpr qsizetype maxPageCoreBytes = 24 * 1024;
+// Raised from 24 KiB when panels came (docs/profile-panels.md). A 0.2.9
+// client still refuses cores over legacyMaxPageCoreBytes; a page without
+// panels always fits, since its fields are bounded as before.
+inline constexpr qsizetype maxPageCoreBytes = 96 * 1024;
+inline constexpr qsizetype legacyMaxPageCoreBytes = 24 * 1024;
 inline constexpr qsizetype maxPageRequestBytes = 256;
+// Blobs one request may ask for: six 32-byte hashes keep a request under
+// maxPageRequestBytes, which a 0.2.9 owner also enforces (it keeps two).
+inline constexpr int maxRequestedMedia = 6;
 inline constexpr int maxJpegScans = 32; // progressive encoders emit at most 12
 static_assert(maxPageMediaMessageBytes <= maxPageSendBytes && maxPageSendBytes < mlsPlaintextCapBytes);
+static_assert(maxPageCoreBytes < maxPageMediaMessageBytes);
 
 enum class ProfilePayloadKind {
     Legacy,      // first byte is not 0xFF: hand it to decodeProfileUpdate as before
@@ -68,10 +78,11 @@ struct PageMediaMessage final {
 [[nodiscard]] std::optional<PageMediaMessage> decodePageMedia(QByteArrayView payload);
 
 // A viewer asking a contact for their page (haveRevision absent: "I have no
-// page of yours") and/or for up to two blobs its stored core names.
+// page of yours") and/or for up to maxRequestedMedia blobs its stored core
+// names.
 struct PageRequestMessage final {
     std::optional<qint64> haveRevision;
-    QVector<QByteArray> wantMedia; // each 32 bytes, at most 2
+    QVector<QByteArray> wantMedia; // each 32 bytes, at most maxRequestedMedia
 
     friend bool operator==(const PageRequestMessage &, const PageRequestMessage &) = default;
 };

@@ -169,6 +169,65 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/CaseTile.qml
         qml/OpenChat/components/CosmeticPreview.qml
         qml/OpenChat/components/CosmeticPicker.qml
+        qml/OpenChat/components/ProfilePage.qml
+        qml/OpenChat/components/ProfileTopBar.qml
+        qml/OpenChat/components/ProfileBackChip.qml
+        qml/OpenChat/components/ProfilePageView.qml
+        qml/OpenChat/components/ProfilePreviewDecor.qml
+        qml/OpenChat/components/ProfileBox.qml
+        qml/OpenChat/components/ProfileStrip.qml
+        qml/OpenChat/components/ProfileBoxBorder.qml
+        qml/OpenChat/components/ProfileIdentityModule.qml
+        qml/OpenChat/components/ProfileContactingModule.qml
+        qml/OpenChat/components/ProfileActionCell.qml
+        qml/OpenChat/components/ProfileHandleModule.qml
+        qml/OpenChat/components/ProfileSongModule.qml
+        qml/OpenChat/components/ProfileInfoTable.qml
+        qml/OpenChat/components/ProfileInterestsModule.qml
+        qml/OpenChat/components/ProfileDetailsModule.qml
+        qml/OpenChat/components/ProfileBannerModule.qml
+        qml/OpenChat/components/ProfileBlurbsModule.qml
+        qml/OpenChat/components/ProfileFriendSpaceModule.qml
+        qml/OpenChat/components/ProfileFriendTile.qml
+        qml/OpenChat/components/ProfileMonogramTile.qml
+        qml/OpenChat/components/ProfileNoPageModule.qml
+        qml/OpenChat/components/ProfileStubCard.qml
+        qml/OpenChat/components/ProfileRequestButton.qml
+        qml/OpenChat/components/ProfileConfirmPopup.qml
+        qml/OpenChat/components/ProfileAvatarAffordance.qml
+        qml/OpenChat/components/ProfileBadge.qml
+        qml/OpenChat/components/ProfileGlyph.qml
+        qml/OpenChat/components/ProfileTip.qml
+        qml/OpenChat/components/ProfileChipButton.qml
+        qml/OpenChat/components/ProfileDefaultButton.qml
+        qml/OpenChat/components/ProfileToast.qml
+        qml/OpenChat/components/ProfileSpinner.qml
+        qml/OpenChat/components/ProfileFocusRing.qml
+        qml/OpenChat/components/ProfileEditor.qml
+        qml/OpenChat/components/ProfileEditorBar.qml
+        qml/OpenChat/components/ProfileEditorRail.qml
+        qml/OpenChat/components/ProfileEditorPanel.qml
+        qml/OpenChat/components/ProfilePreviewFrame.qml
+        qml/OpenChat/components/ProfileThemesTab.qml
+        qml/OpenChat/components/ProfileBackgroundTab.qml
+        qml/OpenChat/components/ProfileBoxesTab.qml
+        qml/OpenChat/components/ProfileTextTab.qml
+        qml/OpenChat/components/ProfileNameTab.qml
+        qml/OpenChat/components/ProfileAboutTab.qml
+        qml/OpenChat/components/ProfileFriendsTab.qml
+        qml/OpenChat/components/ProfileSongTab.qml
+        qml/OpenChat/components/ProfileLayoutTab.qml
+        qml/OpenChat/components/ProfileColorWell.qml
+        qml/OpenChat/components/ProfileColorPicker.qml
+        qml/OpenChat/components/ProfileSegmented.qml
+        qml/OpenChat/components/ProfileTextArea.qml
+        qml/OpenChat/components/ProfileFieldLabel.qml
+        qml/OpenChat/components/ProfileFold.qml
+        qml/OpenChat/components/ProfileTileGrid.qml
+        qml/OpenChat/components/ProfileWaveform.qml
+        qml/OpenChat/components/ProfileReadabilityNotice.qml
+        qml/OpenChat/components/ProfileLeaveDialog.qml
+        qml/OpenChat/components/ProfileDiscardPopover.qml
     # The logo and the placeholder picture ship as 256 px copies of the
     # full-size artwork beside them: neither is ever drawn larger, and the
     # window icon stays decoded for as long as the process runs.
@@ -1408,3 +1467,7 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_capture.cmake
 )
 set_tests_properties(capture_call PROPERTIES TIMEOUT 5)
+
+# Profile pages while they are being built: last, so every target above exists
+# for the fragments to add to. Folded into this file when the feature is done.
+include(cmake/ProfilePages.cmake)

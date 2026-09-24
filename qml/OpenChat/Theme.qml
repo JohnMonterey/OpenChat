@@ -146,4 +146,23 @@ QtObject {
     readonly property color switchKnobTop: darkMode ? "#e0edf6" : "#ffffff"
     readonly property color switchKnobBottom: darkMode ? "#b1c8d9" : "#e3edf4"
     readonly property color onAccentText: "#ffffff"
+
+    // Profile pages: a secondary ink that still reads on the bar and content
+    // surfaces (textSecondary is too faint there), the Windows 7 default button,
+    // the request card's soft Accept / Decline, the picture affordance's halo and
+    // badge rim, and the dot in the Unsaved changes pill.
+    readonly property color textSecondaryStrong: darkMode ? "#a9bccd" : "#5a6a80"
+    readonly property color defaultButtonTop: darkMode ? "#3d6b8c" : "#f4faff"
+    readonly property color defaultButtonBottom: darkMode ? "#264a64" : "#d3e9f8"
+    readonly property color defaultButtonText: darkMode ? "#ffffff" : "#1c3550"
+    readonly property color defaultButtonInner: darkMode ? "#30ffffff" : "#a0ffffff"
+    readonly property color acceptSoftTop: darkMode ? "#34502b" : "#f4fbee"
+    readonly property color acceptSoftBottom: darkMode ? "#2a4223" : "#dcf0cb"
+    readonly property color acceptSoftText: darkMode ? "#d3f0c2" : "#2b5516"
+    readonly property color declineSoftTop: darkMode ? "#553330" : "#fdf3f1"
+    readonly property color declineSoftBottom: darkMode ? "#472a27" : "#f7dcd7"
+    readonly property color declineSoftText: darkMode ? "#ffd2cb" : "#8a2a1f"
+    readonly property color avatarHalo: darkMode ? "#4d80bde6" : "#4478acd3"
+    readonly property color accentOrbRim: darkMode ? "#9fd0f2" : "#3a78a6"
+    readonly property color unsavedDot: darkMode ? "#f0c24b" : "#d99a12"
 }

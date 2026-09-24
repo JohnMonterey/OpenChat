@@ -34,6 +34,13 @@ Item {
         focusIndex = index;
         activated(index);
     }
+    function arrow(event, index) {
+        if (event.modifiers & Qt.AltModifier) {
+            event.accepted = false;
+            return;
+        }
+        moveFocus(index);
+    }
     function moveFocus(index) {
         if (index < 0 || index >= count || index === focusIndex)
             return;
@@ -52,10 +59,12 @@ Item {
             highlighted(focusIndex);
         }
     }
-    Keys.onLeftPressed: moveFocus(focusIndex - 1)
-    Keys.onRightPressed: moveFocus(focusIndex + 1)
-    Keys.onUpPressed: moveFocus(focusIndex - columns)
-    Keys.onDownPressed: moveFocus(focusIndex + columns)
+    // Alt+arrows are left to the grid's user (reordering its tiles): they
+    // reach its Keys.onPressed, which the plain arrows here never do.
+    Keys.onLeftPressed: event => arrow(event, focusIndex - 1)
+    Keys.onRightPressed: event => arrow(event, focusIndex + 1)
+    Keys.onUpPressed: event => arrow(event, focusIndex - columns)
+    Keys.onDownPressed: event => arrow(event, focusIndex + columns)
     Keys.onReturnPressed: activate(focusIndex)
     Keys.onEnterPressed: activate(focusIndex)
     Keys.onSpacePressed: activate(focusIndex)

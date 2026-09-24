@@ -122,6 +122,7 @@ Rectangle {
             spacing: 8
             Text {
                 id: noticeText
+                objectName: "profileSurvivingDraftText"
                 width: parent.width
                 wrapMode: Text.Wrap
                 text: "You have unsaved changes from "

@@ -203,6 +203,7 @@ Item {
             }
             Text {
                 id: pillText
+                objectName: "profileTryOnPillText"
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Trying on " + tryOnPill.presetName + ". Click to keep it."
                 color: Theme.textPrimary

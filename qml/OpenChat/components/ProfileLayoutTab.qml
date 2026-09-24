@@ -31,6 +31,9 @@ Item {
     property int dragModule: -1
     property point dragPoint: Qt.point(0, 0)
     property string dragName: ""
+    // Where a row dragged over the other column will land when dropped.
+    property int dropColumn: -1
+    property int dropIndex: -1
 
     function columnRows(column) {
         return column === Profile.NarrowColumn ? narrowRows : wideRows;
@@ -76,12 +79,39 @@ Item {
         }
         return { column: best.list.moduleColumn, index: Math.min(index, rows.length) };
     }
+    function startDrag(module, name, point) {
+        dragName = name;
+        dragModule = module;
+        dragPoint = point;
+        profiles.beginGesture("layout:drag");
+    }
+    // Within its column the row moves as it is dragged, so the preview
+    // reorders live; over the other column an insertion line shows where it
+    // will land, and it moves there on the drop. (A move between columns
+    // rebuilds both lists, which would take the drag away from the grip.)
     function dragTo(point) {
         dragPoint = point;
         const target = dropTarget(point);
         const column = arrangement.find(entry => entry.module === dragModule).column;
-        if (target.column !== column || target.index !== indexIn(column, dragModule))
-            move(dragModule, target.column, target.index);
+        if (target.column === column) {
+            dropColumn = -1;
+            dropIndex = -1;
+            if (target.index !== indexIn(column, dragModule))
+                move(dragModule, column, target.index);
+        } else {
+            dropColumn = target.column;
+            dropIndex = target.index;
+        }
+    }
+    function endDrag() {
+        if (dragModule < 0)
+            return;
+        if (dropColumn >= 0)
+            move(dragModule, dropColumn, dropIndex);
+        dragModule = -1;
+        dropColumn = -1;
+        dropIndex = -1;
+        profiles.endGesture();
     }
     function focusField(field) {
         layouts.forceActiveFocus(Qt.OtherFocusReason);
@@ -93,6 +123,7 @@ Item {
     component LockedRow: Rectangle {
         property string label: ""
         property string note: ""
+        objectName: "profileLayoutLockedRow"
         width: column.width
         height: 34
         radius: 5
@@ -145,7 +176,9 @@ Item {
         function rowAt(index) {
             return itemAt(index);
         }
-        model: rows
+        // One delegate per row, kept while rows reorder: a drag keeps its
+        // grab and a row its hover.
+        model: rows.length
         columns: 1
         rowSpacing: 4
         ringRadius: 5
@@ -176,22 +209,25 @@ Item {
         }
         delegate: Item {
             id: row
-            required property var modelData
             required property int index
-            readonly property int module: modelData.module
-            readonly property bool shown: modelData.visible
-            readonly property bool hot: rowMouse.containsMouse || (list.activeFocus && list.focusIndex === index)
+            readonly property var entry: list.rows[index] || ({ module: -1, name: "", visible: true, hasContent: true })
+            readonly property int module: entry.module
+            readonly property bool shown: entry.visible
+            // A HoverHandler, not the row's MouseArea: pressing one of the
+            // row's own chips must not end the row's hover (and hide the chip).
+            readonly property bool hot: rowHover.hovered || (list.activeFocus && list.focusIndex === index)
             readonly property bool lifted: tab.dragModule === module
             objectName: "profileLayoutRow_" + module
             width: column.width
             height: 34
             Accessible.role: Accessible.ListItem
-            Accessible.name: modelData.name + (shown ? "" : ", hidden") + (modelData.hasContent ? "" : ", empty")
+            Accessible.name: entry.name + (shown ? "" : ", hidden") + (entry.hasContent ? "" : ", empty")
 
+            HoverHandler {
+                id: rowHover
+            }
             MouseArea {
-                id: rowMouse
                 anchors.fill: parent
-                hoverEnabled: true
                 onClicked: list.focusIndex = row.index
             }
             Rectangle {
@@ -203,9 +239,9 @@ Item {
                 border.color: row.hot || row.lifted ? Theme.focusBorder : Theme.buttonBorder
                 Rectangle { x: 4; y: 1; width: parent.width - 8; height: 1; color: Theme.gloss }
             }
-            // Where the dragged row now sits.
+            // Where the dragged row now sits, or will land from the other column.
             Item {
-                visible: row.lifted
+                visible: row.lifted || (tab.dropColumn === list.moduleColumn && tab.dropIndex === row.index)
                 y: -3
                 width: parent.width
                 height: 2
@@ -225,24 +261,13 @@ Item {
                     anchors.fill: parent
                     anchors.margins: -6
                     cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
-                    onPressed: mouse => {
-                        tab.dragName = row.modelData.name;
-                        tab.dragModule = row.module;
-                        tab.dragPoint = mapToItem(tab, mouse.x, mouse.y);
-                        tab.profiles.beginGesture("layout:drag");
-                    }
+                    onPressed: mouse => tab.startDrag(row.module, row.entry.name, mapToItem(tab, mouse.x, mouse.y))
                     onPositionChanged: mouse => {
                         if (pressed && tab.dragModule >= 0)
                             tab.dragTo(mapToItem(tab, mouse.x, mouse.y));
                     }
-                    onReleased: {
-                        tab.dragModule = -1;
-                        tab.profiles.endGesture();
-                    }
-                    onCanceled: {
-                        tab.dragModule = -1;
-                        tab.profiles.endGesture();
-                    }
+                    onReleased: tab.endDrag()
+                    onCanceled: tab.endDrag()
                 }
             }
             Text {
@@ -250,7 +275,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 width: parent.width - 28 - actions.width - 12
                 elide: Text.ElideRight
-                text: row.modelData.name
+                text: row.entry.name
                 textFormat: Text.PlainText
                 color: row.shown ? Theme.textPrimary : Theme.buttonDisabledText
                 opacity: row.shown ? 1 : 0.55
@@ -310,7 +335,7 @@ Item {
                     border.width: 1
                     border.color: row.shown ? Theme.buttonBorder : Theme.buttonDisabledBorder
                     Accessible.role: Accessible.CheckBox
-                    Accessible.name: "Show " + row.modelData.name
+                    Accessible.name: "Show " + row.entry.name
                     Accessible.checkable: true
                     Accessible.checked: row.shown
                     ProfileEditorRail.Glyph {

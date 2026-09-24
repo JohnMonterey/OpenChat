@@ -21,13 +21,6 @@ Item {
     readonly property var friends: draft ? draft.topFriends : []
     readonly property int maxFriends: profiles ? profiles.limits.maxTopFriends || 8 : 8
     readonly property int slotSize: Math.floor((width - 32 - 24) / 4)
-    // One entry per slot: the friend's tile, or an empty map.
-    readonly property var slotModel: {
-        const slots = [];
-        for (let i = 0; i < maxFriends; ++i)
-            slots.push(i < friends.length ? friends[i] : ({}));
-        return slots;
-    }
     readonly property var candidates: {
         const all = profiles ? Array.from(profiles.topFriendCandidates) : [];
         const needle = search.text.trim().toLowerCase();
@@ -48,6 +41,17 @@ Item {
     }
     function add(contactId) {
         profiles.addTopFriend(contactId);
+    }
+    // The drop of a dragged picture. The slots are rebuilt by the move, so
+    // this runs here rather than in the slot that started the drag.
+    function finishDrag() {
+        if (dragFrom >= 0) {
+            if (dragTo >= 0 && dragTo !== dragFrom)
+                profiles.moveTopFriend(dragFrom, dragTo);
+            profiles.endGesture();
+        }
+        dragFrom = -1;
+        dragTo = -1;
     }
     function slotAt(point) {
         for (let i = 0; i < slots.count; ++i) {
@@ -102,7 +106,9 @@ Item {
             id: slots
             objectName: "profileFriendSlots"
             accessibleName: "Top Friends"
-            model: tab.slotModel
+            // One delegate per slot, kept while friends come and go, so a
+            // slot keeps its hover and a drag its grab.
+            model: tab.maxFriends
             columns: 4
             columnSpacing: 8
             rowSpacing: 8
@@ -134,28 +140,28 @@ Item {
 
             delegate: Item {
                 id: slot
-                required property var modelData
                 required property int index
-                readonly property bool filled: index < tab.friends.length
+                readonly property var entry: index < tab.friends.length ? tab.friends[index] : null
+                readonly property bool filled: entry !== null
                 readonly property bool nextFree: index === tab.friends.length
                 objectName: "profileFriendSlot_" + index
                 width: tab.slotSize
                 height: tab.slotSize + 18
                 opacity: tab.dragFrom === index ? 0.4 : 1
                 Accessible.role: Accessible.ListItem
-                Accessible.name: filled ? "Number " + (index + 1) + ", " + modelData.name
+                Accessible.name: filled ? "Number " + (index + 1) + ", " + entry.name
                                         : nextFree ? "Number " + (index + 1) + ", empty. Add someone" : "Number " + (index + 1) + ", empty"
 
                 Avatar {
-                    visible: slot.filled && slot.modelData.avatarKey.length > 0
+                    visible: slot.filled && slot.entry.avatarKey.length > 0
                     width: tab.slotSize
                     height: tab.slotSize
                     cornerRadius: 5
-                    avatarKey: slot.filled && slot.modelData.avatarKey.length > 0 ? slot.modelData.avatarKey : "userpfp_none"
+                    avatarKey: slot.filled && slot.entry.avatarKey.length > 0 ? slot.entry.avatarKey : "userpfp_none"
                 }
                 // Someone this viewer has no picture for: their initials.
                 Rectangle {
-                    visible: slot.filled && slot.modelData.avatarKey.length === 0
+                    visible: slot.filled && slot.entry.avatarKey.length === 0
                     width: tab.slotSize
                     height: tab.slotSize
                     radius: 5
@@ -164,7 +170,7 @@ Item {
                     border.color: Theme.inputBorder
                     Text {
                         anchors.centerIn: parent
-                        text: slot.filled ? slot.modelData.initials : ""
+                        text: slot.filled ? slot.entry.initials : ""
                         textFormat: Text.PlainText
                         color: Theme.categoryText
                         font.family: Theme.uiFont
@@ -233,7 +239,7 @@ Item {
                     width: tab.slotSize
                     horizontalAlignment: Text.AlignHCenter
                     elide: Text.ElideRight
-                    text: slot.filled ? slot.modelData.name : slot.nextFree ? "Add" : ""
+                    text: slot.filled ? slot.entry.name : slot.nextFree ? "Add" : ""
                     textFormat: Text.PlainText
                     color: slot.filled ? Theme.textPrimary : Theme.focusBorder
                     font.family: Theme.uiFont
@@ -268,15 +274,8 @@ Item {
                             tab.dragTo = at >= 0 && at < tab.friends.length ? at : -1;
                         }
                     }
-                    onReleased: {
-                        if (tab.dragFrom >= 0) {
-                            if (tab.dragTo >= 0 && tab.dragTo !== tab.dragFrom)
-                                tab.profiles.moveTopFriend(tab.dragFrom, tab.dragTo);
-                            tab.profiles.endGesture();
-                        }
-                        tab.dragFrom = -1;
-                        tab.dragTo = -1;
-                    }
+                    onReleased: tab.finishDrag()
+                    onCanceled: tab.finishDrag()
                     onClicked: mouse => {
                         slots.focusIndex = slot.index;
                         if (mouse.button === Qt.RightButton && slot.filled)
@@ -327,7 +326,8 @@ Item {
             id: contacts
             objectName: "profileFriendCandidates"
             accessibleName: "Your contacts"
-            model: tab.candidates
+            // Stable delegates (a row keeps its hover as people are placed).
+            model: tab.candidates.length
             columns: 1
             columnSpacing: 0
             rowSpacing: 0
@@ -340,16 +340,18 @@ Item {
             }
             delegate: Item {
                 id: row
-                required property var modelData
                 required property int index
-                readonly property bool placed: modelData.placedIndex >= 0
+                readonly property var entry: tab.candidates[index] || ({ contactId: "", name: "", avatarKey: "", placedIndex: -1 })
+                readonly property bool placed: entry.placedIndex >= 0
+                // A HoverHandler, not the row's MouseArea: pressing "Add as
+                // #n" must not end the row's hover (and hide the button).
                 readonly property bool hot: !placed && !tab.full
-                                            && (rowMouse.containsMouse || (contacts.activeFocus && contacts.focusIndex === index))
-                objectName: "profileFriendCandidate_" + modelData.contactId
+                                            && (rowHover.hovered || (contacts.activeFocus && contacts.focusIndex === index))
+                objectName: "profileFriendCandidate_" + entry.contactId
                 width: column.width
                 height: 38
                 Accessible.role: Accessible.ListItem
-                Accessible.name: modelData.name + (placed ? ", number " + (modelData.placedIndex + 1) : "")
+                Accessible.name: entry.name + (placed ? ", number " + (entry.placedIndex + 1) : "")
 
                 Rectangle {
                     visible: row.hot
@@ -374,14 +376,14 @@ Item {
                     width: 28
                     height: 28
                     cornerRadius: 4
-                    avatarKey: row.modelData.avatarKey.length > 0 ? row.modelData.avatarKey : "userpfp_none"
+                    avatarKey: row.entry.avatarKey.length > 0 ? row.entry.avatarKey : "userpfp_none"
                 }
                 Text {
                     x: 44
                     anchors.verticalCenter: parent.verticalCenter
                     width: parent.width - 44 - 110
                     elide: Text.ElideRight
-                    text: row.modelData.name
+                    text: row.entry.name
                     textFormat: Text.PlainText
                     color: Theme.textPrimary
                     font.family: Theme.uiFont
@@ -397,7 +399,7 @@ Item {
                     Text {
                         objectName: "profileFriendCandidatePlace"
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "#" + (row.modelData.placedIndex + 1)
+                        text: "#" + (row.entry.placedIndex + 1)
                         color: Theme.textSecondaryStrong
                         font.family: Theme.uiFont
                         font.pixelSize: 12
@@ -417,10 +419,11 @@ Item {
                         }
                     }
                 }
+                HoverHandler {
+                    id: rowHover
+                }
                 MouseArea {
-                    id: rowMouse
                     anchors.fill: parent
-                    hoverEnabled: true
                     onClicked: contacts.focusIndex = row.index
                 }
                 ProfileEditorRail.Button {
@@ -435,7 +438,7 @@ Item {
                     label: "Add as #" + (tab.friends.length + 1)
                     fontPixelSize: 12
                     activeFocusOnTab: false
-                    onClicked: tab.add(row.modelData.contactId)
+                    onClicked: tab.add(row.entry.contactId)
                 }
             }
         }

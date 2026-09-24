@@ -277,7 +277,7 @@ public:
     [[nodiscard]] bool songImporting() const;
     [[nodiscard]] QVariantMap songSource() const;
     [[nodiscard]] QVariantList songPeaks() const;
-    [[nodiscard]] qint64 songWindowStartMs() const noexcept { return m_songSource.windowStartMs; }
+    [[nodiscard]] qint64 songWindowStartMs() const { return shownSongSource().windowStartMs; }
     [[nodiscard]] qint64 songWindowMs() const;
     [[nodiscard]] qint64 songClipBytes() const;
     [[nodiscard]] QVariantList topFriendCandidates() const { return m_candidates; }

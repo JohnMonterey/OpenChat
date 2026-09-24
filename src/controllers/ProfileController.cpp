@@ -256,10 +256,10 @@ void ProfileController::setLiveServices(ProfileSession *session, SyncEngine *eng
         if (m_person.accountHex == contact.toHex())
             refreshPerson();
     });
-    connect(engine, &SyncEngine::linkUp, this, &ProfileController::updateLinkOnline);
+    connect(engine, &SyncEngine::linkUp, this, &ProfileController::updateLinkOnline, Qt::UniqueConnection);
     // The sync borrows the session and the engine: it must be gone before
     // the session locks, and the engine is the first thing lock() destroys.
-    connect(engine, &QObject::destroyed, this, &ProfileController::dropSync);
+    connect(engine, &QObject::destroyed, this, &ProfileController::dropSync, Qt::UniqueConnection);
     if (requests != nullptr) {
         connect(requests, &ContactRequestService::contactAccepted, m_sync.get(),
                 &ProfilePageSync::onContactAccepted);
@@ -418,11 +418,13 @@ void ProfileController::setMockLinkOnline(bool online)
 
 bool ProfileController::openContact(const QString &contactId, int origin)
 {
-    if (!rosterContact(contactId))
-        return false; // a group, or nobody this roster knows
     const std::optional<AccountId> account = accountFor(contactId);
-    if (!account)
-        return false;
+    if (account && account->toHex() == localAccountHex()) {
+        openOwn(origin); // your own id: your own profile
+        return true;
+    }
+    if (!account || !rosterContact(contactId))
+        return false; // a group, or nobody this roster knows
     startStack(personForAccount(*account, QString(), QString(), Origin::FromChat), originFromSection(origin));
     return true;
 }
@@ -667,7 +669,19 @@ std::optional<AccountId> ProfileController::accountFor(const QString &idOrHex) c
 
 QString ProfileController::rosterIdFor(const AccountId &account) const
 {
-    return m_live ? account.toHex() : ProfileReferencePages::mockIdFor(account);
+    if (m_live)
+        return account.toHex();
+    if (QString id = ProfileReferencePages::mockIdFor(account); !id.isEmpty())
+        return id;
+    // A mock roster someone else filled (a preview, a test) names people the
+    // reference pages do not know; their accounts derive from their ids.
+    const ContactListModel *roster = m_chats.contacts();
+    for (int row = 0; row < roster->rowCount(); ++row) {
+        const std::optional<Contact> contact = roster->contactAt(row);
+        if (contact && !contact->isGroup && ProfileReferencePages::mockAccountFor(contact->id) == account)
+            return contact->id;
+    }
+    return {};
 }
 
 std::optional<Contact> ProfileController::rosterContact(const QString &rosterId) const
@@ -796,9 +810,16 @@ ProfileController::PersonState ProfileController::resolveIdentity(const PersonRe
             handle = person.handle;
         state.handle = handle;
         state.handlePending = handle.isEmpty() && m_pendingLookups.contains(state.accountHex);
-        state.name = !handle.isEmpty()       ? handle
-                     : !person.label.isEmpty() ? person.label
-                                               : shortIdLabel(state.accountHex);
+        // A request goes by the name its row shows (the app's, from the
+        // relay); anyone else by the relay-confirmed handle once there is
+        // one, and meanwhile by the label they were opened with (a Top
+        // Friend's is the page owner's word for them, so it gives way).
+        if (person.kind == PersonRef::Kind::Request && !person.label.isEmpty())
+            state.name = person.label;
+        else
+            state.name = !handle.isEmpty()         ? handle
+                         : !person.label.isEmpty() ? person.label
+                                                   : shortIdLabel(state.accountHex);
         state.avatarKey = person.avatarKey.isEmpty() ? QStringLiteral("userpfp_none") : person.avatarKey;
         state.referrerName = person.referrerName;
         state.presence = int(Presence::Offline);
@@ -973,7 +994,9 @@ QVariantList ProfileController::tilesFor(const QVector<Profile::TopFriend> &frie
         // A page can never put a chosen label under a real, recognisable
         // photo: a picture comes only with the viewer's own name for them.
         const QString name = isSelf ? localName() : contact ? contact->name : person.name;
-        const QString avatar = isSelf ? m_chats.localAvatarKey() : contact ? contact->avatarKey : QString();
+        QString avatar = isSelf ? m_chats.localAvatarKey() : contact ? contact->avatarKey : QString();
+        if ((isSelf || contact) && avatar.isEmpty())
+            avatar = QStringLiteral("userpfp_none"); // someone the viewer knows is never a monogram
         tiles.append(QVariantMap{{QStringLiteral("index"), int(index)},
                                  {QStringLiteral("accountId"), hex},
                                  {QStringLiteral("name"), name},
@@ -1013,7 +1036,19 @@ void ProfileController::updateCandidates()
                 ids.append(record.accountId.toHex());
         }
     } else {
-        ids = ProfileReferencePages::rosterIds();
+        // Everyone in the mock roster is an accepted contact: the reference
+        // people (found even while a sidebar search hides their rows), then
+        // anyone a preview or test put in the roster instead.
+        for (const QString &id : ProfileReferencePages::rosterIds()) {
+            if (rosterContact(id))
+                ids.append(id);
+        }
+        const ContactListModel *roster = m_chats.contacts();
+        for (int row = 0; row < roster->rowCount(); ++row) {
+            const std::optional<Contact> contact = roster->contactAt(row);
+            if (contact && !contact->isGroup && !ids.contains(contact->id))
+                ids.append(contact->id);
+        }
     }
     const QVector<Profile::TopFriend> &placed = m_draft.page().topFriends;
     QVariantList candidates;
@@ -1604,11 +1639,12 @@ void ProfileController::resetToPreset()
 {
     if (!m_editing)
         return;
+    // Only the style knobs go back (what the "edited" tag compares); the
+    // arrangement the owner made since picking the preset stays.
     Profile::Page page = m_draft.page();
-    if (isShippedPreset(int(page.preset)))
-        page = Profile::applyPreset(page, page.preset);
-    else
-        page.theme = Profile::presetTheme(page.preset); // a Custom page's defaults
+    page.theme = Profile::presetTheme(page.preset); // a Custom page: the default look
+    if (page == m_draft.page())
+        return;
     editDraft(page);
 }
 

@@ -100,16 +100,15 @@ void ProfileMoodFace::paint(QPainter *painter)
         p.fillRect(QRectF(0.33, 0.585, 0.34, 0.07), QColor(255, 255, 255, 220)); // teeth
         break;
     }
-    case MoodFace::FlatFace:
+    case MoodFace::FlatFace: {
         eye(0.35);
         eye(0.65);
-        p.strokePath([] {
-            QPainterPath mouth;
-            mouth.moveTo(0.33, 0.67);
-            mouth.lineTo(0.67, 0.67);
-            return mouth;
-        }(), line);
+        QPainterPath mouth;
+        mouth.moveTo(0.33, 0.67);
+        mouth.lineTo(0.67, 0.67);
+        p.strokePath(mouth, line);
         break;
+    }
     case MoodFace::FrownFace: {
         eye(0.35);
         eye(0.65);

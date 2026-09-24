@@ -131,17 +131,20 @@ Item {
 
     // --- Scrolling. contentY moves only on navigation (0 on a push, the
     // saved position on a pop) and is reported back, debounced, so this
-    // entry reopens where it was left. A resize keeps the top module in pageView.
+    // entry reopens where it was left. A resize keeps the top module in view.
     property real pendingScroll: -1
     property string anchorKey: ""
     property real anchorOffset: 0
     property bool restoringAnchor: false
+    // While a resize reflows the columns, the anchor is the one from before.
+    property bool anchorLocked: false
 
     function applyNavigationScroll() {
         if (pageView.preview || !pageView.profiles)
             return;
         pageView.pendingScroll = Math.max(0, pageView.profiles.entryScrollY);
         pageView.anchorKey = "";
+        pendingScrollExpiry.restart();
         Qt.callLater(pageView.flushPendingScroll);
     }
     function maxScroll() {
@@ -167,9 +170,15 @@ Item {
                 const slot = column.children[i];
                 if (!slot.visible || slot.moduleKey === undefined)
                     continue;
+                // The module the top edge of the view cuts through (or the
+                // first one below it): of those, the one that starts lowest.
                 const top = column.y + slot.y;
-                if (top + slot.height > y && (best === null || top < best.top))
-                    best = { key: slot.moduleKey, top: top };
+                if (top + slot.height <= y)
+                    continue;
+                const crossing = top <= y;
+                if (best === null || (crossing && (!best.crossing || top > best.top))
+                        || (!crossing && !best.crossing && top < best.top))
+                    best = { key: slot.moduleKey, top: top, crossing: crossing };
             }
         }
         return best;
@@ -186,7 +195,7 @@ Item {
         return null;
     }
     function rememberAnchor() {
-        if (pageView.restoringAnchor)
+        if (pageView.restoringAnchor || pageView.anchorLocked)
             return;
         const slot = pageView.slotAt(flick.contentY);
         pageView.anchorKey = slot ? slot.key : "";
@@ -202,9 +211,23 @@ Item {
         flick.contentY = Math.max(0, Math.min(slot.top + pageView.anchorOffset, pageView.maxScroll()));
         pageView.restoringAnchor = false;
     }
-    onWidthChanged: Qt.callLater(pageView.restoreAnchor)
+    onWidthChanged: {
+        pageView.anchorLocked = true;
+        anchorUnlock.restart();
+        Qt.callLater(pageView.restoreAnchor);
+    }
+    Timer {
+        id: anchorUnlock
+        interval: 150
+        onTriggered: {
+            pageView.restoreAnchor();
+            pageView.anchorLocked = false;
+        }
+    }
+    // Only a resize moves the view to its anchor: content that settles
+    // after a restored position must not nudge it.
     function columnsSettled() {
-        if (pageView.pendingScroll < 0)
+        if (pageView.anchorLocked && pageView.pendingScroll < 0)
             pageView.restoreAnchor();
     }
 
@@ -215,6 +238,13 @@ Item {
             if (pageView.profiles.open)
                 pageView.applyNavigationScroll();
         }
+    }
+    // A restored position waits for the columns to grow back to it, but
+    // not for ever, and never against the viewer's own scrolling.
+    Timer {
+        id: pendingScrollExpiry
+        interval: 1000
+        onTriggered: pageView.pendingScroll = -1
     }
     Timer {
         id: reportScroll
@@ -281,6 +311,10 @@ Item {
                 reportScroll.restart();
         }
         onContentHeightChanged: Qt.callLater(pageView.flushPendingScroll)
+        onMovementStarted: {
+            pageView.pendingScroll = -1;
+            pageView.anchorLocked = false;
+        }
 
         ScrollBar.vertical: ScrollBar {
             id: scrollBar

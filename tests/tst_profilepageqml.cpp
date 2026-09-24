@@ -100,6 +100,13 @@ QList<QQuickItem *> allItems(QQuickItem *root)
     return out;
 }
 
+// The text of the first on-screen item called `name` under `root`, or "".
+QString textIn(QQuickItem *root, const QString &name)
+{
+    QQuickItem *found = shown(root, name);
+    return found ? found->property("text").toString() : QString();
+}
+
 QPoint centreOf(QQuickItem *item)
 {
     return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
@@ -581,6 +588,34 @@ private slots:
         QVERIFY(right.top() < left.bottom());
     }
 
+    // Resizing reflows live and keeps the module at the top of the view
+    // where it was (SPEC §3.2).
+    void resizeKeepsTheTopModuleInView()
+    {
+        Stage stage;
+        QVERIFY(stage.load(QSize(860, 560)));
+        QVERIFY(openPerson(stage, QStringLiteral("michael")));
+        auto *flick = stage.item(QStringLiteral("profilePageFlickable"));
+        QQuickItem *interests = stage.item(QStringLiteral("profileInterestsBox"));
+        QVERIFY(interests);
+        stage.settleLayout();
+        const auto offset = [&] { return interests->mapToItem(flick, QPointF(0, 0)).y(); };
+        // Interests at the top of the view, 10 px into it.
+        flick->setProperty("contentY", interests->mapToItem(flick->property("contentItem").value<QQuickItem *>(),
+                                                            QPointF(0, 0)).y() + 10);
+        QTRY_VERIFY(std::abs(offset() + 10) < 0.5);
+        const qreal before = sceneRect(interests).width();
+
+        stage.window->resize(1280, 560);
+        QTRY_VERIFY(sceneRect(interests).width() > before); // reflowed: wider boxes
+        QTest::qWait(250);
+        QVERIFY2(std::abs(offset() + 10) < 0.5, qPrintable(QString::number(offset())));
+        stage.window->resize(720, 560);
+        QTRY_VERIFY(sceneRect(interests).width() < before);
+        QTest::qWait(250);
+        QVERIFY2(std::abs(offset() + 10) < 0.5, qPrintable(QString::number(offset())));
+    }
+
     void paintedAreaStaysWithinBudget()
     {
         Stage stage;
@@ -1013,8 +1048,7 @@ private slots:
         QQuickItem *contacting = shown(preview, QStringLiteral("profileContactingBox"));
         stage.hover(contacting);
         QQuickItem *slot = shown(preview, QStringLiteral("profileModule_contacting"));
-        QTRY_COMPARE(shown(slot, QStringLiteral("profilePreviewChipText"))->property("text").toString(),
-                     QStringLiteral("Shown by OpenChat"));
+        QTRY_COMPARE(textIn(slot, QStringLiteral("profilePreviewChipText")), QStringLiteral("Shown by OpenChat"));
         pressAt(contacting);
         QCOMPARE(requests().size(), 7);
 
@@ -1024,8 +1058,7 @@ private slots:
         QQuickItem *placeholder = shown(interests, QStringLiteral("profilePreviewPlaceholder"));
         QVERIFY(placeholder);
         stage.hover(placeholder);
-        QTRY_COMPARE(shown(interests, QStringLiteral("profilePreviewChipText"))->property("text").toString(),
-                     QStringLiteral("Edit"));
+        QTRY_COMPARE(textIn(interests, QStringLiteral("profilePreviewChipText")), QStringLiteral("Edit"));
         pressAt(placeholder);
         QCOMPARE(requests().last(), QStringLiteral("interests"));
 
@@ -1034,8 +1067,7 @@ private slots:
         stage.window->setProperty("previewTarget", QStringLiteral("meet"));
         QQuickItem *blurbs = shown(preview, QStringLiteral("profileModule_m5"));
         QTRY_VERIFY(shown(blurbs, QStringLiteral("profilePreviewOutline")));
-        QCOMPARE(shown(blurbs, QStringLiteral("profilePreviewChipText"))->property("text").toString(),
-                 QStringLiteral("Editing"));
+        QTRY_COMPARE(textIn(blurbs, QStringLiteral("profilePreviewChipText")), QStringLiteral("Editing"));
         QTRY_VERIFY(!shown(shown(preview, QStringLiteral("profileModule_identity")),
                            QStringLiteral("profilePreviewOutline")));
 

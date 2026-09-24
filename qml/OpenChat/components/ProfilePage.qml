@@ -96,7 +96,7 @@ FocusScope {
             action();
             return;
         }
-        d.pending.push(action);
+        d.pending = d.pending.concat([action]);
         if (fadeOut.running)
             return;
         fadeIn.stop();
@@ -387,7 +387,10 @@ FocusScope {
             font.pixelSize: 13
             renderType: Text.NativeRendering
         }
+        // Each new line gets its full six seconds.
+        onTextChanged: if (text.length > 0) noticeTimer.restart()
         Timer {
+            id: noticeTimer
             running: notice.visible
             interval: 6000
             onTriggered: {

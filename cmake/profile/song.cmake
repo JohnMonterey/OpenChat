@@ -5,3 +5,10 @@
 target_sources(openchat_media PRIVATE
     src/media/SongCodec.cpp
 )
+
+# Import (WAV by hand everywhere; other formats through QAudioDecoder) and the
+# page's mini player. Both reach Qt Multimedia only on demand: a WAV import
+# never loads it and a player loads it on its first play().
+target_sources(openchat_profile PRIVATE
+    src/profile/SongPlayer.cpp
+)

@@ -459,14 +459,25 @@ class FakeTransport final : public SyncTransport
 {
 public:
     bool isConnected() const override { return connected; }
-    void sendEnvelope(const CiphertextEnvelopeV1 &envelope) override { sent.append(envelope); }
+    void sendEnvelope(const CiphertextEnvelopeV1 &envelope) override
+    {
+        sent.append(envelope);
+        // A socket that has written nothing yet: what it is handed stays
+        // unsent until the test empties the backlog.
+        if (backlogGrowsOnSend && backlog >= 0)
+            backlog += encodeCanonical(envelope).size();
+    }
     void sendDatagram(const CiphertextEnvelopeV1 &envelope) override { datagrams.append(envelope); }
     void acknowledge(const EnvelopeId &envelopeId, quint64 watermark) override
     {
         acks.append({envelopeId, watermark});
     }
+    qint64 pendingSendBytes() const override { return backlog; }
 
     bool connected = true;
+    // -1 is "cannot say", what a transport without a backlog figure answers.
+    qint64 backlog = -1;
+    bool backlogGrowsOnSend = false;
     QVector<CiphertextEnvelopeV1> sent;
     QVector<CiphertextEnvelopeV1> datagrams;
     QVector<std::pair<EnvelopeId, quint64>> acks;
@@ -629,6 +640,11 @@ private slots:
     void editOfAQueuedOrUnknownMessageDoesNothing();
     void inboundEditAppliesOnlyToTheSendersNewerEdit();
     void unreadableTaggedMessageIsConsumedWithoutARow();
+    void drainPausesWhileTheLinkIsBacklogged();
+    void drainResumesInOrder();
+    void unknownBacklogNeverGates();
+    void retryOfALargeEnvelopeWaitsForItsUpload();
+    void linkUpIsSignalled();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -2200,6 +2216,247 @@ void SyncEngineTest::unreadableTaggedMessageIsConsumedWithoutARow()
     QVERIFY(store.received.isEmpty());
     QCOMPARE(transport.acks.size(), 1);
     QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::drainPausesWhileTheLinkIsBacklogged()
+{
+    // A few page envelopes of headroom, little enough that a chat message
+    // behind them is not held up for long. makeConfig leaves it at its default.
+    QCOMPARE(makeConfig().maxDrainBacklogBytes, qint64(64 * 1024));
+
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.connected = false;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    engine.enqueueText(conversation, peer, QStringLiteral("one"));
+    engine.enqueueText(conversation, peer, QStringLiteral("two"));
+    QCOMPARE(store.outboxes.size(), 2);
+
+    // The link is back but more than 64 KiB is still unsent: nothing is
+    // claimed or sent, and no attempt is spent.
+    transport.connected = true;
+    transport.backlog = 64 * 1024 + 1;
+    transport.onConnected();
+    // A send made meanwhile is stored and waits with the rest.
+    engine.enqueueText(conversation, peer, QStringLiteral("three"));
+    QCOMPARE(store.outboxes.size(), 3);
+    QCOMPARE(transport.sent.size(), 0);
+    for (const StoredOutbox &outbox : std::as_const(store.outboxes)) {
+        QCOMPARE(outbox.record.state, OutboxState::Pending);
+        QCOMPARE(outbox.record.attemptCount, 0);
+    }
+
+    // Exactly at the limit the link takes one more envelope. That envelope
+    // pushes the backlog over, and the check before the next claim holds the
+    // other two back: the backlog is looked at per envelope, not per drain.
+    transport.backlog = 64 * 1024;
+    transport.backlogGrowsOnSend = true;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(transport.sent.first().ciphertext, QByteArray("ENC:one"));
+    QCOMPARE(store.outboxes.at(0).record.attemptCount, 1);
+    for (int i = 1; i < store.outboxes.size(); ++i) {
+        QCOMPARE(store.outboxes.at(i).record.state, OutboxState::Pending);
+        QCOMPARE(store.outboxes.at(i).record.attemptCount, 0);
+    }
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::drainResumesInOrder()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.connected = false;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    engine.enqueueText(conversation, peer, QStringLiteral("first"));
+    engine.sendCallSignal(conversation, peer, QByteArray("OFFER"));
+    engine.enqueueText(conversation, peer, QStringLiteral("third"));
+
+    // A large upload is still leaving: the first envelope goes, the rest wait.
+    transport.connected = true;
+    transport.backlog = 64 * 1024 - 1;
+    transport.backlogGrowsOnSend = true;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 1);
+
+    // The socket empties. With no reconnect and no new send, the one-second
+    // retry timer resumes the drain where it stopped, in the order queued.
+    transport.backlog = 0;
+    transport.backlogGrowsOnSend = false;
+    QTRY_COMPARE_WITH_TIMEOUT(transport.sent.size(), 3, 2500);
+    QCOMPARE(transport.sent.at(0).ciphertext, QByteArray("ENC:first"));
+    QCOMPARE(transport.sent.at(1).ciphertext, QByteArray("ENC:OFFER"));
+    QCOMPARE(transport.sent.at(2).ciphertext, QByteArray("ENC:third"));
+    // Each left exactly once: the clock did not move, so no retry was due.
+    for (const StoredOutbox &outbox : std::as_const(store.outboxes))
+        QCOMPARE(outbox.record.attemptCount, 1);
+    QCOMPARE(mls.encryptCount, 3);
+}
+
+void SyncEngineTest::unknownBacklogNeverGates()
+{
+    const auto queueThreeOffline = [](SyncEngine &engine) {
+        const ConversationId conversation = ConversationId::generate();
+        const DeviceId peer = DeviceId::generate();
+        for (const QString &text : {QStringLiteral("a"), QStringLiteral("b"), QStringLiteral("c")})
+            engine.enqueueText(conversation, peer, text);
+    };
+
+    // A transport that cannot count its unsent bytes answers -1, and the
+    // drain behaves exactly as it did before it had a gate, however small
+    // the limit.
+    {
+        FakeStore store;
+        FakeMls mls;
+        FakeTransport transport;
+        transport.connected = false;
+        SyncEngine::Config config = makeConfig();
+        config.maxDrainBacklogBytes = 1;
+        SyncEngine engine(config, store, mls, transport, okSigner(), clock());
+        engine.start();
+        queueThreeOffline(engine);
+        transport.connected = true;
+        QCOMPARE(engine.pendingSendBytes(), qint64(-1));
+        transport.onConnected();
+        QCOMPARE(transport.sent.size(), 3);
+    }
+
+    // A limit of zero or below turns the gate off, whatever the link reports.
+    for (const qint64 disabled : {qint64(0), qint64(-1)}) {
+        FakeStore store;
+        FakeMls mls;
+        FakeTransport transport;
+        transport.connected = false;
+        SyncEngine::Config config = makeConfig();
+        config.maxDrainBacklogBytes = disabled;
+        SyncEngine engine(config, store, mls, transport, okSigner(), clock());
+        engine.start();
+        queueThreeOffline(engine);
+        transport.connected = true;
+        transport.backlog = 16LL * 1024 * 1024;
+        transport.onConnected();
+        QCOMPARE(transport.sent.size(), 3);
+    }
+
+    // With nothing holding it back, one drain still hands over at most
+    // drainBatch envelopes; the rest stay Pending for the next one.
+    {
+        FakeStore store;
+        FakeMls mls;
+        FakeTransport transport;
+        transport.connected = false;
+        SyncEngine::Config config = makeConfig();
+        config.drainBatch = 2;
+        SyncEngine engine(config, store, mls, transport, okSigner(), clock());
+        engine.start();
+        queueThreeOffline(engine);
+        transport.connected = true;
+        transport.onConnected();
+        QCOMPARE(transport.sent.size(), 2);
+        QCOMPARE(store.outboxes.at(2).record.state, OutboxState::Pending);
+        QCOMPARE(store.outboxes.at(2).record.attemptCount, 0);
+        transport.onConnected();
+        QCOMPARE(transport.sent.size(), 3);
+        QCOMPARE(transport.sent.at(2).ciphertext, QByteArray("ENC:c"));
+    }
+}
+
+void SyncEngineTest::retryOfALargeEnvelopeWaitsForItsUpload()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    // The largest payload the profile page sync hands the engine: 240 KiB.
+    const QByteArray payload(245'760, 'p');
+    const qint64 sentAt = m_now;
+    engine.sendProfileUpdate(ConversationId::generate(), DeviceId::generate(), payload);
+    QCOMPARE(transport.sent.size(), 1);
+    const qsizetype envelopeBytes = store.outboxes.first().record.envelope.size();
+    QVERIFY(envelopeBytes > payload.size());
+
+    // The first backoff (1 s) plus the envelope's own upload at 16 KB/s,
+    // about 15 s for this one.
+    const qint64 upload = envelopeBytes / 16;
+    QVERIFY(upload >= 15'000);
+    QCOMPARE(store.outboxes.first().record.nextAttemptMs, sentAt + 1'000 + upload);
+
+    // Past the plain backoff but not past the upload: it is not sent twice
+    // and spends no second attempt.
+    m_now = sentAt + 1'000 + upload - 1;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(store.outboxes.first().record.attemptCount, 1);
+
+    // Once that time has passed it is re-sent as stored, and the next attempt
+    // again waits its (doubled) backoff plus the upload.
+    m_now = sentAt + 1'000 + upload;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 2);
+    QCOMPARE(transport.sent.last().ciphertext, transport.sent.first().ciphertext);
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.outboxes.first().record.attemptCount, 2);
+    QCOMPARE(store.outboxes.first().record.nextAttemptMs, m_now + 2'000 + upload);
+
+    // A text's allowance is a fraction of a second, so a lost text is still
+    // retried about a second later.
+    engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("hi"));
+    const OutboxRecord text = store.outboxes.last().record;
+    QCOMPARE(text.attemptCount, 1);
+    QVERIFY(text.nextAttemptMs > m_now + 1'000);
+    QVERIFY(text.nextAttemptMs <= m_now + 1'100);
+}
+
+void SyncEngineTest::linkUpIsSignalled()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.connected = false;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy linkUp(&engine, &SyncEngine::linkUp);
+    qsizetype sentWhenSignalled = -1;
+    connect(&engine, &SyncEngine::linkUp, &engine,
+            [&] { sentWhenSignalled = transport.sent.size(); });
+    engine.start();
+    QVERIFY(!engine.isLinkUp());
+    QCOMPARE(linkUp.count(), 0); // starting is not a connection
+
+    engine.enqueueText(ConversationId::generate(), DeviceId::generate(), QStringLiteral("waiting"));
+    QCOMPARE(transport.sent.size(), 0);
+
+    // isLinkUp follows the transport itself, not the signal.
+    transport.connected = true;
+    QVERIFY(engine.isLinkUp());
+    QCOMPARE(linkUp.count(), 0);
+
+    transport.onConnected();
+    QCOMPARE(linkUp.count(), 1);
+    // Emitted after the outbox resumed: what was waiting is already on the
+    // link, so whatever a listener sends in response leaves behind it.
+    QCOMPARE(sentWhenSignalled, qsizetype(1));
+
+    // Every reconnect is signalled.
+    transport.connected = false;
+    QVERIFY(!engine.isLinkUp());
+    transport.connected = true;
+    transport.onConnected();
+    QCOMPARE(linkUp.count(), 2);
+
+    // A stopped engine no longer listens for the link.
+    engine.stop();
+    QVERIFY(!transport.onConnected);
+    QCOMPARE(linkUp.count(), 2);
 }
 
 QTEST_MAIN(SyncEngineTest)

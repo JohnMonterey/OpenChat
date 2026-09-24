@@ -166,6 +166,23 @@ bool insertOutbox(sqlite3 *database, const OutboxRecord &outbox)
            && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
+// Deletes an envelope once it has settled (Accepted 2 or Failed 3), unless a
+// visible message row stands behind it. Nothing reads a settled row again
+// (claimDue takes Pending and Leased only), and a control envelope (receipt,
+// profile or page update, call signal, group control, edit) has no row of its
+// own, so without this its whole signed ciphertext would stay on disk forever.
+// A row that backs a message is kept exactly as before. Runs inside the
+// caller's transaction, after the UPDATE that settled the envelope.
+bool deleteSettledControlEnvelope(sqlite3 *database, const EnvelopeId &envelopeId)
+{
+    Statement statement(database,
+                        "DELETE FROM outbox WHERE envelope_id=?1 AND state IN (2,3) "
+                        "AND NOT EXISTS (SELECT 1 FROM messages "
+                        "WHERE messages.id = outbox.message_id)");
+    return statement.isValid() && statement.bindBlob(1, envelopeId.bytes())
+           && sqlite3_step(statement.get()) == SQLITE_DONE;
+}
+
 // Same UPSERT as SqlCipherDatabase::storeMlsState, run as one statement inside
 // the caller's transaction so the ratchet state commits atomically with the rest.
 bool upsertMlsState(sqlite3 *database, const ProfileId &profileId, QByteArrayView state)
@@ -580,16 +597,30 @@ Result<bool, RepositoryError> SqlCipherSyncStore::canEditSent(const Conversation
 Result<void, RepositoryError> SqlCipherSyncStore::failEnvelope(const EnvelopeId &envelopeId)
 {
     return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("envelope.fail.begin")));
         Statement outbox(database,
                          "UPDATE outbox SET state=3, lease_until_ms=0 "
                          "WHERE envelope_id=?1 AND state IN (0,1)");
         if (!outbox.isValid() || !outbox.bindBlob(1, envelopeId.bytes())
-            || sqlite3_step(outbox.get()) != SQLITE_DONE)
+            || sqlite3_step(outbox.get()) != SQLITE_DONE) {
+            rollback(database);
             return Result<void, RepositoryError>::failure(
                 internalError(QStringLiteral("envelope.fail")));
-        if (sqlite3_changes(database) == 0)
+        }
+        if (sqlite3_changes(database) == 0) {
+            rollback(database);
             return Result<void, RepositoryError>::failure(
                 error(RepositoryErrorCode::NotFound, QStringLiteral("envelope.fail.missing")));
+        }
+        // A group text's envelopes carry its message id and stay; a group
+        // control or edit envelope goes with its ciphertext.
+        if (!deleteSettledControlEnvelope(database, envelopeId) || !commit(database)) {
+            rollback(database);
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("envelope.fail.prune")));
+        }
         return Result<void, RepositoryError>::success();
     });
 }
@@ -1175,11 +1206,14 @@ Result<void, RepositoryError> SqlCipherSyncStore::failSend(const EnvelopeId &env
         Statement message(database,
                           "UPDATE messages SET delivery_state=6 "
                           "WHERE id=?1 AND delivery_state IN (1,2,6)");
+        // A message row behind the envelope is marked Failed and keeps its
+        // envelope; an envelope with no row behind it is deleted.
         if (!outbox.isValid() || !outbox.bindBlob(1, envelopeId.bytes())
             || !outbox.bindBlob(2, messageId.bytes()) || sqlite3_step(outbox.get()) != SQLITE_DONE
             || sqlite3_changes(database) != 1
             || !message.isValid() || !message.bindBlob(1, messageId.bytes())
-            || sqlite3_step(message.get()) != SQLITE_DONE || !commit(database)) {
+            || sqlite3_step(message.get()) != SQLITE_DONE
+            || !deleteSettledControlEnvelope(database, envelopeId) || !commit(database)) {
             rollback(database);
             return Result<void, RepositoryError>::failure(internalError(QStringLiteral("send.fail")));
         }
@@ -1190,18 +1224,33 @@ Result<void, RepositoryError> SqlCipherSyncStore::failSend(const EnvelopeId &env
 Result<void, RepositoryError> SqlCipherSyncStore::markAccepted(const EnvelopeId &envelopeId)
 {
     return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("outbox.accept.begin")));
         Statement statement(database,
                             "UPDATE outbox SET state=?1, lease_until_ms=0 "
                             "WHERE envelope_id=?2");
         if (!statement.isValid()
             || !statement.bindInt(1, static_cast<int>(OutboxState::Accepted))
             || !statement.bindBlob(2, envelopeId.bytes())
-            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            || sqlite3_step(statement.get()) != SQLITE_DONE) {
+            rollback(database);
             return Result<void, RepositoryError>::failure(
                 internalError(QStringLiteral("outbox.accept")));
-        if (sqlite3_changes(database) == 0)
+        }
+        // A control envelope's row is gone after its first acceptance, so a
+        // duplicate acceptance (the relay taking a re-sent copy too) lands
+        // here and changes nothing.
+        if (sqlite3_changes(database) == 0) {
+            rollback(database);
             return Result<void, RepositoryError>::failure(
                 error(RepositoryErrorCode::NotFound, QStringLiteral("outbox.accept.missing")));
+        }
+        if (!deleteSettledControlEnvelope(database, envelopeId) || !commit(database)) {
+            rollback(database);
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("outbox.accept.prune")));
+        }
         return Result<void, RepositoryError>::success();
     });
 }

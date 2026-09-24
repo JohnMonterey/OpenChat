@@ -1,5 +1,5 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 import OpenChat
 
 // The editor's 300 px panel (SPEC §14.3): contentBackground with a right rule,

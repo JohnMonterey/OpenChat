@@ -1,5 +1,5 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 import OpenChat
 
 // The bar's Discard (SPEC §14.12): a small popover anchored under the button,

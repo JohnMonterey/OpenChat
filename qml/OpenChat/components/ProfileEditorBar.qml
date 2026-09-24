@@ -1,5 +1,5 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 import OpenChat
 
 // The top bar in edit mode (SPEC §2): the app's own 48 px chrome with

@@ -1,5 +1,5 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 import OpenChat
 
 // Leaving the editor with unsaved changes (SPEC §14.12, `final-editor-leave.png`):

@@ -1,5 +1,5 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 import OpenChat
 
 // The top bar's Back chip (SPEC §1.2, §2): labelled with where it goes

@@ -533,12 +533,13 @@ public:
         return transport.pendingSendBytes() > config.maxDrainBacklogBytes;
     }
 
-    // Hands due envelopes to the link one at a time, oldest first, up to
-    // drainBatch per call. The backlog is looked at again before every claim:
-    // one large envelope can fill the socket on its own, and a batch claimed
-    // up front would pile everything behind it (a chat message, a call offer)
-    // into the TLS buffer too. A row that is not claimed stays Pending and
-    // spends no attempt; the retry timer comes back for it within a second.
+    // Hands due envelopes to the link one at a time, in the store's order
+    // (earliest due, then first queued), up to drainBatch per call. The
+    // backlog is looked at again before every claim: one large envelope can
+    // fill the socket on its own, and a batch claimed up front would pile
+    // everything behind it (a chat message, a call offer) into the TLS buffer
+    // too. A row that is not claimed stays Pending and spends no attempt; the
+    // retry timer comes back for it within a second.
     void drainOutbox()
     {
         const qint64 nowMs = now();

@@ -157,6 +157,9 @@ public:
     // the editor at `size`.
     explicit EditorFixture(QSize size = QSize(1024, 768), bool daniel = true)
     {
+        // The viewer is Daniel, so the preview's titles say "Daniel's
+        // Blurbs" and "Contacting Daniel" as in the mockups.
+        m_chat.setLocalUserName(QStringLiteral("Daniel"));
         if (daniel)
             m_chat.profiles()->setMockPage(Reference::selfId(), Reference::ownReferencePage());
         m_chat.profiles()->openOwn();

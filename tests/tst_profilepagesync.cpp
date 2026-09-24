@@ -21,6 +21,7 @@ namespace {
 using Kind = ProfilePayloadKind;
 constexpr auto Background = Profile::MediaKind::BackgroundImageMedia;
 constexpr auto Song = Profile::MediaKind::SongMedia;
+constexpr auto PanelImage = Profile::MediaKind::PanelImageMedia;
 constexpr qint64 minute = 60'000;
 constexpr qint64 hour = 60 * minute;
 
@@ -115,16 +116,21 @@ std::shared_ptr<int> countSignals(ProfilePageSync &sync, Signal signal, const Ac
 class OutboxInspector final
 {
 public:
-    OutboxInspector(const QString &path, const QByteArray &key)
+    OutboxInspector(const QString &path, const QByteArray &key, bool writable = false)
     {
         sqlite3 *handle = nullptr;
-        const int opened = sqlite3_open_v2(path.toUtf8().constData(), &handle, SQLITE_OPEN_READONLY, nullptr);
+        const int opened = sqlite3_open_v2(path.toUtf8().constData(), &handle,
+                                           writable ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY, nullptr);
         m_connection.reset(handle);
         m_keyed = opened == SQLITE_OK && sqlite3_key(handle, key.constData(), int(key.size())) == SQLITE_OK;
     }
 
     [[nodiscard]] bool isReadable() const { return m_keyed && rows() >= 0; }
     [[nodiscard]] int rows() const { return count("SELECT count(*) FROM outbox"); }
+    [[nodiscard]] bool exec(const char *sql) const
+    {
+        return sqlite3_exec(m_connection.get(), sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+    }
     // Envelopes with no visible message behind them: receipts, profile and
     // page updates, call signals.
     [[nodiscard]] int controlRows() const
@@ -951,6 +957,10 @@ private slots:
         QVERIFY(net.setUp());
         Peer &a = net.a();
         Peer &b = net.b(); // sends by hand
+        // A small bound keeps the test short; the production one is every
+        // blob one page may name (26).
+        QCOMPARE(ProfilePageSyncLimits{}.maxPendingMediaPerContact, 26);
+        net.limits.maxPendingMediaPerContact = 2;
         net.startSync(a);
         const QByteArray first = testJpeg('\x01');
         const QByteArray second = testSong('\x02');
@@ -1771,6 +1781,110 @@ private slots:
         QCOMPARE(a.sync->publishedRevision(), qint64(0));
         net.settle();
         QCOMPARE(TwoPeerFixture::envelopesTo(a, b.device), 0);
+    }
+
+    // A panel's pictures travel after the core, like the background, and a
+    // viewer reads each only as the kind the core names it as.
+    void panelMediaFollowsItsCore()
+    {
+        TwoPeerFixture net;
+        QVERIFY(net.setUp());
+        Peer &a = net.a();
+        Peer &b = net.b();
+        net.startSync(a);
+        net.startSync(b);
+        QVERIFY(makeCapable(net, b));
+
+        const QByteArray first = testJpeg('\x71');
+        const QByteArray second = testJpeg('\x72');
+        const QByteArray cover = testJpeg('\x73');
+        for (const QByteArray *picture : {&first, &second, &cover})
+            QVERIFY(a.sync->addLocalMedia(PanelImage, *picture));
+        Profile::Page page = pageWith(QStringLiteral("Panels"));
+        Profile::Panel panel = Profile::panelFromTemplate(page, Profile::PanelTemplate::PhotoPanel);
+        panel.blocks[0].images = {{backgroundRef(first), QStringLiteral("One")}, {backgroundRef(second), {}}};
+        Profile::Block games = Profile::newBlock(page, Profile::BlockKind::ListBlock);
+        games.id = 99;
+        games.listStyle = Profile::ListStyle::GameList;
+        games.items = {{QStringLiteral("Halo"), {}, 5, Profile::GameStatus::PlayingNow, backgroundRef(cover)}};
+        panel.blocks.push_back(games);
+        page.panels = {panel};
+        const qint64 revision = a.sync->publish(page);
+        QVERIFY(revision > 0);
+        net.settle();
+
+        QCOMPARE(countFrom(b, a, Kind::PageCore), 1);
+        QCOMPARE(mediaHashesFrom(b, a), (QVector<QByteArray>{pageMediaHash(first), pageMediaHash(second),
+                                                            pageMediaHash(cover)}));
+        const auto received = b.sync->contactPage(a.account);
+        QVERIFY(received);
+        QCOMPARE(received->page.panels.size(), 1);
+        QCOMPARE(received->panelMediaPresent.size(), 3);
+        QCOMPARE(b.sync->contactMedia(a.account, pageMediaHash(cover), PanelImage), cover);
+        QVERIFY(b.sync->contactMedia(a.account, pageMediaHash(cover), Background).isEmpty());
+        QVERIFY(!a.sync->hasOwedDeliveries());
+
+        // Dropping a picture: the next core alone goes, and Bob forgets it.
+        net.clock.advance(1'000);
+        page.panels[0].blocks[0].images.removeLast();
+        QVERIFY(a.sync->publish(page) > revision);
+        net.settle();
+        QCOMPARE(countFrom(b, a, Kind::PageMedia), 3);
+        QVERIFY(!holds(b, a, second, PanelImage));
+        QCOMPARE(b.sync->contactPage(a.account)->panelMediaPresent.size(), 2);
+    }
+
+    // A page a client before panels stored: its panel refs are read from the
+    // core on the first start, and its owner is asked once for anything newer.
+    void legacyPageIsUpgradedAndRefreshedOnce()
+    {
+        TwoPeerFixture net;
+        QVERIFY(net.setUp());
+        Peer &a = net.a();
+        Peer &b = net.b();
+        net.startSync(a);
+        net.startSync(b);
+        QVERIFY(makeCapable(net, b));
+        const QByteArray picture = testJpeg('\x74');
+        QVERIFY(a.sync->addLocalMedia(PanelImage, picture));
+        Profile::Page page = pageWith(QStringLiteral("Before"));
+        Profile::Panel panel = Profile::panelFromTemplate(page, Profile::PanelTemplate::PhotoPanel);
+        panel.blocks[0].images = {{backgroundRef(picture), {}}};
+        page.panels = {panel};
+        const qint64 revision = a.sync->publish(page);
+        QVERIFY(revision > 0);
+        net.settle();
+        QCOMPARE(b.sync->contactPage(a.account)->panelMediaPresent.size(), 1);
+        const int requestsBefore = countFrom(a, b, Kind::PageRequest);
+
+        // Bob's store as 0.2.9 left it: the core, no panel refs, format 1.
+        net.stopSync(b);
+        {
+            const OutboxInspector raw(b.paths.database, b.vault.databaseKey(), true);
+            QVERIFY(raw.exec("DELETE FROM contact_page_panel_media; UPDATE contact_pages SET format = 1;"));
+        }
+        net.limits.startupRequestJitterMs = 50;
+        net.random = [](qint64) { return qint64(20); };
+        net.startSync(b);
+        const auto upgraded = b.sync->contactPage(a.account);
+        QVERIFY(upgraded);
+        QCOMPARE(upgraded->panelMediaPresent.size(), 1);
+        QCOMPARE(b.sync->contactMedia(a.account, pageMediaHash(picture), PanelImage), picture);
+
+        // One refresh, naming the revision Bob kept; Alice has nothing newer.
+        net.clock.advance(20);
+        net.settle(80);
+        QCOMPARE(countFrom(a, b, Kind::PageRequest), requestsBefore + 1);
+        QCOMPARE(requestsFrom(a, b).last().haveRevision, std::optional<qint64>(revision));
+        QCOMPARE(countFrom(b, a, Kind::PageCore), 1);
+        QCOMPARE(requestStateOf(b, a).unanswered, 0);
+
+        // Never again, however often Bob restarts.
+        net.stopSync(b);
+        net.startSync(b);
+        net.clock.advance(20);
+        net.settle(80);
+        QCOMPARE(countFrom(a, b, Kind::PageRequest), requestsBefore + 1);
     }
 };
 

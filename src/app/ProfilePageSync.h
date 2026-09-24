@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QTimer>
 #include <QVector>
@@ -44,7 +45,7 @@ struct ProfilePageSyncLimits final {
     int pumpPayloadsPerTick = 8;
     // --- Storage
     qint64 pendingMediaTtlMs = 24LL * 60 * 60 * 1000;
-    int maxPendingMediaPerContact = 2;
+    int maxPendingMediaPerContact = 2 + Profile::PanelBounds::maxMedia; // every blob one page may name
     qint64 localBlobGraceMs = 10LL * 60 * 1000;
     qint64 receivedMediaSoftCapBytes = 96LL * 1024 * 1024;
     qint64 receivedMediaTargetBytes = 80LL * 1024 * 1024;
@@ -94,6 +95,7 @@ public:
         Profile::Page page;
         bool backgroundPresent = false; // this contact sent the background its core names
         bool songPresent = false;
+        QSet<QByteArray> panelMediaPresent; // the panel blobs this contact sent as their core names them
         qint64 receivedAtMs = 0;
     };
 
@@ -170,7 +172,8 @@ signals:
 
 private:
     // The four background request triggers (ARCH §4.7 A–D).
-    enum class Trigger : quint8 { Acceptance, Startup, MissingMedia, Viewed };
+    // Refresh: once, for a page stored before panels (docs/profile-panels.md).
+    enum class Trigger : quint8 { Acceptance, Startup, MissingMedia, Viewed, Refresh };
 
     // A timed piece of viewer work: a background request, or (no trigger)
     // the end of a request's loading window, when awaitingChanged is due.
@@ -228,6 +231,8 @@ private:
     // Viewer requests.
     void requestIfDue(const AccountId &account, Trigger trigger);
     void scheduleStartupRequests();
+    // Records what pages stored before panels name, and asks their owners once.
+    void upgradeLegacyPages();
     void setMediaRequestedRevision(const AccountId &account, qint64 revision);
     void schedule(const AccountId &contact, std::optional<Trigger> trigger, qint64 dueAtMs);
     void unschedule(const AccountId &contact, Trigger trigger);
@@ -254,6 +259,7 @@ private:
     Limits m_limits;
 
     StoredLocalPage m_local;
+    QVector<std::pair<Profile::MediaKind, QByteArray>> m_publishedBlobs; // from m_local.publishedCore
     // conversation → contact, a hint only: every hit is re-checked against
     // the stored contact, and any miss rebuilds it from a fresh read.
     QHash<ConversationId, AccountId> m_senderCache;

@@ -28,8 +28,9 @@ Item {
     signal editRequested(string target)
 
     readonly property var wantedPage: profiles ? (profiles.tryOnPreset >= 0 ? profiles.tryOn : profiles.draft) : null
-    // What the view shows: follows wantedPage through the fade.
-    property var shownPage: wantedPage
+    // What the view shows: follows wantedPage through the fade (so it is
+    // set only here and by the fade, never bound).
+    property var shownPage: null
     readonly property bool animated: ProfileRenderPolicy.animationsAllowed
 
     // SPEC §3.1 at the preview's own width.
@@ -50,6 +51,7 @@ Item {
             viewArea.forceActiveFocus(Qt.TabFocusReason);
     }
 
+    Component.onCompleted: shownPage = wantedPage
     onWantedPageChanged: {
         if (!animated || shownPage === null) {
             fade.stop();

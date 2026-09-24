@@ -1768,6 +1768,32 @@ private slots:
         QCOMPARE(f.profiles().lastTab(), int(EditorTab::SongTab));
     }
 
+    // SPEC §17: the slide and the try-on fade take 140 and 60 + 60 ms, and
+    // are instant under Low memory mode (or reduced motion).
+    void motionIsInstantWhenAnimationsAreOff()
+    {
+        {
+            EditorFixture f;
+            QVERIFY(f.ready());
+            f.profiles().setTryOnPreset(int(Profile::Preset::LinenPreset));
+            // The body fades out on the draft before it shows the try-on.
+            QCOMPARE(f.frame()->property("shownPage").value<QObject *>(), f.profiles().draft());
+            QTRY_COMPARE(f.frame()->property("shownPage").value<QObject *>(), f.profiles().tryOn());
+            f.click(QStringLiteral("profilePreviewToggle"));
+            QVERIFY(f.item(QStringLiteral("profileEditorRail"))->x() > -376.0);
+            QTRY_COMPARE(f.item(QStringLiteral("profileEditorRail"))->x(), -376.0);
+        }
+        ProfileRenderPolicy::instance().setLowMemoryMode(true);
+        EditorFixture f;
+        QVERIFY(f.ready());
+        f.profiles().setTryOnPreset(int(Profile::Preset::LinenPreset));
+        QCOMPARE(f.frame()->property("shownPage").value<QObject *>(), f.profiles().tryOn());
+        QCOMPARE(f.item(QStringLiteral("profilePreviewArea"))->opacity(), 1.0);
+        f.click(QStringLiteral("profilePreviewToggle"));
+        QCOMPARE(f.item(QStringLiteral("profileEditorRail"))->x(), -376.0);
+        ProfileRenderPolicy::instance().setLowMemoryMode(false);
+    }
+
     void previewCaptionFollowsWidth()
     {
         const QString two = QStringLiteral("Live preview: what your contacts will see after you save");

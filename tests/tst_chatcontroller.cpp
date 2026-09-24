@@ -3,6 +3,7 @@
 #include "CallTestSupport.h"
 #include "app/AppearanceSettings.h"
 #include "app/ContactRequestService.h"
+#include "app/MemorySettings.h"
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
 #include "domain/GroupUpdate.h"
@@ -25,6 +26,8 @@
 #include "storage/SqlCipherDatabase.h"
 
 #include "domain/ProfileUpdate.h"
+#include "profile/ProfileMediaStore.h"
+#include "profile/ProfileRenderPolicy.h"
 #include "render/AvatarStore.h"
 
 #include "app/ProfilePageSync.h"
@@ -708,6 +711,45 @@ private slots:
         QCOMPARE(restartedChanged.count(), 1);
         QVERIFY(!QSettings().value(key).toBool());
         QVERIFY(!AppearanceSettings().plainProfiles());
+    }
+
+    // Low memory mode reaches the profile renderer at once, both ways: its
+    // animations hold still and a page's background picture is not kept
+    // decoded. A start with the mode saved on applies it before any page.
+    void lowMemoryModeReachesProfilePages()
+    {
+        using namespace OpenChat;
+        const auto restore = qScopeGuard([] {
+            QSettings().remove(QStringLiteral("Performance/lowMemoryMode"));
+            ProfileRenderPolicy::instance().resetForTesting();
+            ProfileMediaStore::instance().resetForTesting();
+        });
+        QSettings().remove(QStringLiteral("Performance/lowMemoryMode"));
+        ProfileRenderPolicy::instance().resetForTesting();
+        ProfileMediaStore::instance().resetForTesting();
+        QVERIFY(!ProfileRenderPolicy::instance().lowMemoryMode());
+        QVERIFY(ProfileMediaStore::instance().keepDecoded());
+
+        {
+            MemorySettings memory;
+            QVERIFY(!ProfileRenderPolicy::instance().lowMemoryMode());
+            QVERIFY(ProfileMediaStore::instance().keepDecoded());
+            memory.setLowMemoryMode(true);
+            QVERIFY(ProfileRenderPolicy::instance().lowMemoryMode());
+            QVERIFY(!ProfileRenderPolicy::instance().animationsAllowed());
+            QVERIFY(!ProfileMediaStore::instance().keepDecoded());
+            memory.setLowMemoryMode(false);
+            QVERIFY(!ProfileRenderPolicy::instance().lowMemoryMode());
+            QVERIFY(ProfileMediaStore::instance().keepDecoded());
+            memory.setLowMemoryMode(true);
+        }
+
+        ProfileRenderPolicy::instance().resetForTesting();
+        ProfileMediaStore::instance().resetForTesting();
+        const MemorySettings restarted;
+        QVERIFY(restarted.lowMemoryMode());
+        QVERIFY(ProfileRenderPolicy::instance().lowMemoryMode());
+        QVERIFY(!ProfileMediaStore::instance().keepDecoded());
     }
 
     void anInboundMessageAsksForADesktopNotification()

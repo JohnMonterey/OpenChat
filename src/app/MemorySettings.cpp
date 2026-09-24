@@ -1,5 +1,7 @@
 #include "app/MemorySettings.h"
 
+#include "profile/ProfileMediaStore.h"
+#include "profile/ProfileRenderPolicy.h"
 #include "render/AvatarStore.h"
 
 #include <QCoreApplication>
@@ -93,6 +95,11 @@ void MemorySettings::restartApplication()
 void MemorySettings::apply()
 {
     AvatarStore::instance().setKeepDecoded(!m_lowMemoryMode);
+    // Profile pages follow at once too: their animations (name glitter,
+    // falling effects, transitions) hold still, and a page's background
+    // picture is decoded only while a page shows it, one at a time.
+    ProfileRenderPolicy::instance().setLowMemoryMode(m_lowMemoryMode);
+    ProfileMediaStore::instance().setKeepDecoded(!m_lowMemoryMode);
     if (m_lowMemoryMode) {
         releaseFreedHeap();
         m_trimTimer.start();

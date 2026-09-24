@@ -966,7 +966,7 @@ private slots:
         QCOMPARE(f.item(QStringLiteral("profileFlourishGrid"))->property("count").toInt(), 7);
         f.click(f.item(QStringLiteral("profileFlourish_1")));
         QCOMPARE(f.draft().nameFlourish(), int(Profile::Flourish::StarFlourish));
-        f.click(f.segment(QStringLiteral("profileAmbient"), QStringLiteral("Snow")));
+        f.click(f.segment(QStringLiteral("profileAmbientChoice"), QStringLiteral("Snow")));
         QCOMPARE(f.draft().ambient(), int(Profile::Ambient::FallingSnow));
 
         // The close-up shows the name with its flourish, effect and colours.
@@ -1878,7 +1878,11 @@ private slots:
         if (view->property("page").isValid()) {
             QCOMPARE(view->property("page").value<QObject *>(), f.profiles().draft());
             QCOMPARE(view->property("mode").toString(), QStringLiteral("preview"));
-            QCOMPARE(view->property("editingTarget").toString(), QStringLiteral("interests"));
+            // The view marks what the panel is editing, and nothing while
+            // focus is elsewhere (as now, on the rail).
+            QCOMPARE(view->property("editingTarget").toString(), QString());
+            QMetaObject::invokeMethod(f.frame(), "editRequested", Q_ARG(QString, QStringLiteral("interests")));
+            QTRY_COMPARE(view->property("editingTarget").toString(), QStringLiteral("interests"));
             QMetaObject::invokeMethod(view, "editRequested", Q_ARG(QString, QStringLiteral("song")));
             QCOMPARE(f.profiles().lastTab(), int(EditorTab::SongTab));
         } else {

@@ -377,7 +377,7 @@ Item {
         }
         Item { width: 1; height: 5 }
         ProfileSegmented {
-            objectName: "profileAmbient"
+            objectName: "profileAmbientChoice"
             width: parent.width
             accessibleName: "Falling sparkle"
             options: tab.profiles ? tab.profiles.ambientChoices.map(choice => choice.name) : []

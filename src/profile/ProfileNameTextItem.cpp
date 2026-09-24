@@ -235,22 +235,23 @@ void ProfileNameText::relayout()
     const bool fancy = m_effect == int(NameEffect::GlitterName) || resolved == Profile::Font::ScriptFont
                        || resolved == Profile::Font::GothicFont;
 
-    // The size ladder: the base (Pixel on its grid; fancy names at 30 or
-    // more, so an M script name renders at 30), down to the floor.
-    int base = m_basePixelSize;
-    if (grid > 0)
-        base = std::max(grid, base / grid * grid);
-    if (fancy)
-        base = std::max(base, 30);
+    // The size ladder: the base (Pixel on its 8 px grid), down to the floor.
+    // Fancy names never go below 30 px, so an M script name renders at 30
+    // (a glittering Pixel name at 32, the grid step above).
+    const auto snapDown = [grid](int px) { return grid > 0 ? std::max(grid, px / grid * grid) : px; };
+    const auto snapUp = [grid](int px) { return grid > 0 ? (px + grid - 1) / grid * grid : px; };
+    int base = snapDown(m_basePixelSize);
     int floorSize = 0;
     if (m_minPixelSize >= 0)
-        floorSize = m_minPixelSize;
+        floorSize = snapDown(m_minPixelSize);
     else if (grid > 0)
-        floorSize = std::max(grid, int(0.7 * base) / grid * grid);
+        floorSize = snapDown(int(0.7 * base));
     else
         floorSize = fancy ? 30 : std::max(20, int(std::lround(0.7 * base)));
-    if (fancy)
-        floorSize = std::max(floorSize, 30);
+    if (fancy) {
+        base = std::max(base, snapUp(30));
+        floorSize = std::max(floorSize, snapUp(30));
+    }
     floorSize = std::min(floorSize, base);
 
     const auto flourish = Profile::Flourish(m_flourish);

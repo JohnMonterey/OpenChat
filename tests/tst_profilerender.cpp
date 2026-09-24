@@ -1453,6 +1453,15 @@ private slots:
         QCOMPARE(name.renderedPixelSize() % 8, 0);
         QCOMPARE(name.renderedPixelSize(), 16); // floor: 0.7 × 32 on the grid
         QVERIFY(name.elided());
+        // A glittering Pixel name is fancy: at least 30 px, on the grid.
+        name.setAvailableWidth(0);
+        name.setBasePixelSize(16);
+        QCOMPARE(name.renderedPixelSize(), 16);
+        name.setEffect(int(Profile::NameEffect::GlitterName));
+        QCOMPARE(name.renderedPixelSize(), 32);
+        name.setAvailableWidth(natural * 0.2);
+        QCOMPARE(name.renderedPixelSize(), 32);
+        QVERIFY(name.elided());
     }
 
     void flourishIsPaintedButNotInTheAccessibleName()

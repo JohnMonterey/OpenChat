@@ -43,6 +43,18 @@ jobs:
                 "$plugins"/quick/libpdfquickplugin.dylib "$plugins"/quick/libqtquickscene*.dylib \
                 "$plugins"/quick/libqtquicktimeline*.dylib "$plugins"/quick/libqtqmlstatemachineplugin.dylib \
                 "$plugins"/imageformats/libqpdf.dylib
+          # The offscreen platform too: the launch check below (and a
+          # tester's headless diagnostics) run the bundle without a screen.
+          cp "$(brew --prefix qtbase)/share/qt/plugins/platforms/libqoffscreen.dylib" "$plugins/platforms/" 2>/dev/null \
+            || cp "$(find "$(brew --prefix)" -name libqoffscreen.dylib -print -quit)" "$plugins/platforms/"
+          chmod u+w "$plugins/platforms/libqoffscreen.dylib"
+          for dep in $(otool -L "$plugins/platforms/libqoffscreen.dylib" | tail -n +3 | awk '{print $1}'); do
+            case "$dep" in
+              /opt/homebrew/*Qt*.framework/*)
+                install_name_tool -change "$dep" "@rpath/${dep#*/lib/}" "$plugins/platforms/libqoffscreen.dylib" ;;
+            esac
+          done
+          install_name_tool -add_rpath @loader_path/../../Frameworks "$plugins/platforms/libqoffscreen.dylib" 2>/dev/null || true
           install_name_tool -add_rpath @executable_path/../Frameworks "$app/Contents/MacOS/OpenChat" 2>/dev/null || true
 
       - name: Check every library resolves inside the bundle

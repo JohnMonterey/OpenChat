@@ -901,15 +901,25 @@ void RepositoryTest::arrivalsAreCountedOncePerPart()
     QVERIFY(!transfer->hasPart(AttachmentLimits::maxParts));
     QVERIFY(!transfer->hasPart(-1));
 
-    // A damaged part is dropped again, once.
-    arrival = attachments.clearPart(ref, AttachmentLimits::maxParts - 1, 700, 13'000);
+    // Its message says what the parts are: the ones that do not belong are
+    // dropped, and what is left is counted at the sizes it gives them, not
+    // at whatever size those frames came in.
+    AttachmentDescriptor described = photo(AttachmentLimits::partBytes + 5'000); // two parts
+    described.attachmentId = ref.attachmentId;
+    QVERIFY(attachments.recordPartArrived(ref, 1, AttachmentLimits::partBytes + 16, 12'500).value().changed);
+    arrival = attachments.dropParts(ref, {1}, described, 13'000);
     QVERIFY(arrival.value().changed);
-    QCOMPARE(arrival.value().haveCount, 1);
-    QCOMPARE(arrival.value().haveBytes, qint64(1'000));
-    QVERIFY(!attachments.clearPart(ref, AttachmentLimits::maxParts - 1, 700, 13'000).value().changed);
-    // Clearing a part of nothing starts nothing.
+    QCOMPARE(arrival.value().haveCount, 1); // part 73 is past the last: nothing it could be
+    QCOMPARE(arrival.value().haveBytes, qint64(AttachmentLimits::partBytes + 16));
+    transfer = attachments.transfer(ref).value();
+    QVERIFY(transfer->hasPart(0));
+    QVERIFY(!transfer->hasPart(1));
+    QVERIFY(!transfer->hasPart(AttachmentLimits::maxParts - 1));
+    QCOMPARE(transfer->haveBytes, qint64(AttachmentLimits::partBytes + 16));
+    QVERIFY(!attachments.dropParts(ref, {1}, described, 13'000).value().changed);
+    // Dropping parts of nothing starts nothing.
     const AttachmentRef unknown{ref.conversationId, ref.senderDeviceId, AttachmentId::generate()};
-    QVERIFY(!attachments.clearPart(unknown, 0, 1, 1).value().changed);
+    QVERIFY(!attachments.dropParts(unknown, {0}, described, 1).value().changed);
     QVERIFY(!attachments.transfer(unknown).value());
 
     QCOMPARE(attachments.recordPartArrived(ref, AttachmentLimits::maxParts, 1, 1).error().code,

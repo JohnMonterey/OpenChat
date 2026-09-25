@@ -125,10 +125,14 @@ public:
     // Idempotent: a part already held changes nothing.
     [[nodiscard]] virtual Result<PartArrival, RepositoryError>
     recordPartArrived(const AttachmentRef &ref, int index, qint64 bytes, qint64 nowMs) = 0;
-    // The reverse, for a part found to be damaged: `bytes` is what
-    // recordPartArrived was told.
+    // Once the message of frames that came first has arrived: drops the
+    // parts that turned out not to belong to it (`indices`), and counts what
+    // is left again at the sizes `descriptor` gives each part. Parts kept
+    // before the message were counted at whatever size they came in; only
+    // the descriptor can say what they should have been.
     [[nodiscard]] virtual Result<PartArrival, RepositoryError>
-    clearPart(const AttachmentRef &ref, int index, qint64 bytes, qint64 nowMs) = 0;
+    dropParts(const AttachmentRef &ref, const QVector<int> &indices, const AttachmentDescriptor &descriptor,
+              qint64 nowMs) = 0;
     // A Preview frame's sealed body (at most maxPreviewBytes +
     // controlSealOverhead)
     // kept until its descriptor arrives; an empty body clears it.

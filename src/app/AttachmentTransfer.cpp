@@ -911,12 +911,8 @@ void AttachmentTransfer::adoptOrphans(const StoredAttachment &stored, const Atta
             if (attachments == nullptr)
                 return;
             const qint64 nowMs = owner.now();
-            for (const int index : bad) {
-                const qsizetype bytes = index < stored.descriptor.partCount
-                                            ? sealedPartSize(stored.descriptor, index)
-                                            : AttachmentLimits::partBytes + sealOverhead;
-                (void)attachments->clearPart(stored.ref, index, bytes, nowMs);
-            }
+            // Also counts the parts kept at the sizes the message gives them.
+            (void)attachments->dropParts(stored.ref, bad, stored.descriptor, nowMs);
             if (hadSealedPreview)
                 (void)attachments->setSealedPreview(stored.ref, QByteArrayView(), nowMs);
             if (!preview.isEmpty()) {

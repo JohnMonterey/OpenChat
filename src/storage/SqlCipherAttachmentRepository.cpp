@@ -453,16 +453,66 @@ SqlCipherAttachmentRepository::recordPartArrived(const AttachmentRef &ref, int i
 }
 
 Result<PartArrival, RepositoryError>
-SqlCipherAttachmentRepository::clearPart(const AttachmentRef &ref, int index, qint64 bytes,
-                                         qint64 nowMs)
+SqlCipherAttachmentRepository::dropParts(const AttachmentRef &ref, const QVector<int> &indices,
+                                         const AttachmentDescriptor &descriptor, qint64 nowMs)
 {
-    if (index < 0 || index >= AttachmentLimits::maxParts || bytes < 0
-        || bytes > AttachmentLimits::maxFrameBytes)
-        return Result<PartArrival, RepositoryError>::failure(
-            error(RepositoryErrorCode::InvalidInput, QStringLiteral("attachment.clear.input")));
+    using Ret = Result<PartArrival, RepositoryError>;
+    if (!isValidDescriptor(descriptor))
+        return Ret::failure(error(RepositoryErrorCode::InvalidInput, QStringLiteral("attachment.drop.input")));
     return m_database.withConnection([&](sqlite3 *database) {
-        return changePart(database, ref, index, bytes, nowMs, false,
-                          QStringLiteral("attachment.clear"));
+        if (!begin(database))
+            return Ret::failure(internalError(QStringLiteral("attachment.drop.begin")));
+        Statement read(database,
+                       "SELECT have_count, have_bytes, present FROM attachment_transfers "
+                       "WHERE conversation_id=?1 AND sender_device_id=?2 AND attachment_id=?3");
+        if (!read.isValid() || !bindRef(read, 1, ref)) {
+            rollback(database);
+            return Ret::failure(internalError(QStringLiteral("attachment.drop.read")));
+        }
+        const int step = sqlite3_step(read.get());
+        if (step == SQLITE_DONE) {
+            rollback(database);
+            return Ret::success(PartArrival{});
+        }
+        if (step != SQLITE_ROW) {
+            rollback(database);
+            return Ret::failure(internalError(QStringLiteral("attachment.drop.read")));
+        }
+        const int oldCount = sqlite3_column_int(read.get(), 0);
+        const qint64 oldBytes = sqlite3_column_int64(read.get(), 1);
+        QByteArray present = RepositorySql::blob(read.get(), 2);
+        present.resize(bitmapBytes, '\0');
+        const auto clear = [&present](int index) {
+            present[index / 8] = char(quint8(present[index / 8]) & ~(1 << (index % 8)));
+        };
+        for (const int index : indices) {
+            if (index >= 0 && index < AttachmentLimits::maxParts)
+                clear(index);
+        }
+        PartArrival arrival;
+        for (int index = 0; index < AttachmentLimits::maxParts; ++index) {
+            if (((quint8(present[index / 8]) >> (index % 8)) & 1) == 0)
+                continue;
+            if (index >= descriptor.partCount) { // no such part: nothing it could be
+                clear(index);
+                continue;
+            }
+            ++arrival.haveCount;
+            arrival.haveBytes += attachmentPartSize(descriptor, index) + AttachmentLimits::sealOverhead;
+        }
+        arrival.changed = arrival.haveCount != oldCount || arrival.haveBytes != oldBytes;
+        Statement update(database,
+                         "UPDATE attachment_transfers SET present=?4, have_count=?5, have_bytes=?6, "
+                         "updated_at_ms=?7 "
+                         "WHERE conversation_id=?1 AND sender_device_id=?2 AND attachment_id=?3");
+        if (!update.isValid() || !bindRef(update, 1, ref) || !update.bindBlob(4, present)
+            || !update.bindInt(5, arrival.haveCount) || !update.bindInt64(6, arrival.haveBytes)
+            || !update.bindInt64(7, nowMs) || sqlite3_step(update.get()) != SQLITE_DONE
+            || !commit(database)) {
+            rollback(database);
+            return Ret::failure(internalError(QStringLiteral("attachment.drop.update")));
+        }
+        return Ret::success(arrival);
     });
 }
 

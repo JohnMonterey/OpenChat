@@ -38,7 +38,8 @@ public:
     [[nodiscard]] Result<PartArrival, RepositoryError>
     recordPartArrived(const AttachmentRef &ref, int index, qint64 bytes, qint64 nowMs) override;
     [[nodiscard]] Result<PartArrival, RepositoryError>
-    clearPart(const AttachmentRef &ref, int index, qint64 bytes, qint64 nowMs) override;
+    dropParts(const AttachmentRef &ref, const QVector<int> &indices, const AttachmentDescriptor &descriptor,
+              qint64 nowMs) override;
     [[nodiscard]] Result<void, RepositoryError>
     setSealedPreview(const AttachmentRef &ref, QByteArrayView sealedBody, qint64 nowMs) override;
     [[nodiscard]] Result<void, RepositoryError>

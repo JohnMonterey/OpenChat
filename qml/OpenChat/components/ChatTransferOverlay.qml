@@ -24,7 +24,8 @@ Item {
         // narrow.
         readonly property real markWidth: overlay.transferring ? 28 : 24
         anchors.centerIn: parent
-        width: Math.min(parent.width - 12, 6 + markWidth + 8 + status.implicitWidth + 14)
+        // Whole pixels, so the drawn pill and the marks inside it agree.
+        width: Math.min(Math.floor(parent.width - 12), 5 + markWidth + 9 + Math.ceil(status.implicitWidth) + 14)
         height: 38
         radius: 19
         color: "#b0101820"
@@ -37,7 +38,8 @@ Item {
             Item {
                 id: ring
                 objectName: "chatTransferRing"
-                x: 6
+                // Centred on the pill's rounded end: 19 − 28 / 2.
+                x: 5
                 anchors.verticalCenter: parent.verticalCenter
                 width: 28
                 height: 28
@@ -95,27 +97,36 @@ Item {
             }
             // Stopped for good: a warning mark in place of the ring.
             Rectangle {
-                x: 10
+                x: 9 // centred on the pill's rounded end, like the ring
                 anchors.verticalCenter: parent.verticalCenter
                 visible: overlay.stopped
                 width: 20
                 height: 20
                 radius: 10
                 color: overlay.row.transferState === 3 ? "#80ffffff" : "#e8806f"
-                Text {
-                    anchors.centerIn: parent
-                    text: "!"
+                // The "!" as two bars, so it sits exactly in the middle
+                // (a font's "!" is centred on its line, a pixel high).
+                Rectangle {
+                    x: 9
+                    y: 4
+                    width: 2
+                    height: 8
+                    radius: 1
                     color: "#ffffff"
-                    font.family: Theme.uiFont
-                    font.pixelSize: 13
-                    font.bold: true
-                    renderType: Text.NativeRendering
+                }
+                Rectangle {
+                    x: 9
+                    y: 14
+                    width: 2
+                    height: 2
+                    radius: 1
+                    color: "#ffffff"
                 }
             }
             Text {
                 id: status
                 objectName: "chatTransferText"
-                x: 6 + pill.markWidth + 8
+                x: 5 + pill.markWidth + 9
                 anchors.verticalCenter: parent.verticalCenter
                 width: Math.min(implicitWidth, pill.width - x - 14)
                 text: overlay.row.transferText

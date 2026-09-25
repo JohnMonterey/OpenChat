@@ -3260,6 +3260,11 @@ private slots:
         QTRY_COMPARE(staged->rowCount(), 2);
         QTRY_VERIFY_WITH_TIMEOUT(staged->data(staged->index(1, 0),
                                               staged->roleNames().key("ready")).toBool(), 20'000);
+        // A notice above the tray, with its dismiss cross.
+        auto *notice = findVisualItem(window->contentItem(), QStringLiteral("attachmentNotice"));
+        QVERIFY(notice);
+        controller.attachFiles({QUrl(QStringLiteral("https://example.com/cat.png"))});
+        QTRY_VERIFY(notice->isVisible());
         auto *button = findVisualItem(window->contentItem(), QStringLiteral("attachButton"));
         auto *menu = window->findChild<QObject *>(QStringLiteral("attachmentMenu"));
         QVERIFY(button && menu);
@@ -3268,7 +3273,7 @@ private slots:
         QTest::qWait(400); // the rows rise into place
 
         QList<QQuickItem *> roots{findVisualItem(window->contentItem(), QStringLiteral("messageComposer")),
-                                  menu->property("contentItem").value<QQuickItem *>()};
+                                  notice, menu->property("contentItem").value<QQuickItem *>()};
         const std::function<void(QQuickItem *)> collectLoaders = [&](QQuickItem *item) {
             if (item->objectName() == QLatin1String("attachmentLoader"))
                 roots.append(item);

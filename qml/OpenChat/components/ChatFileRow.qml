@@ -74,10 +74,19 @@ Item {
                 GradientStop { position: 1; color: "#00ffffff" }
             }
         }
+        // The type and, lacking one, the glyph: both centred in the page below
+        // its turned-down corner (y 10.5 to 41.5), the type on its capitals.
+        FontMetrics {
+            id: extensionMetrics
+            font: extensionLabel.font
+        }
         Text {
+            id: extensionLabel
             visible: file.extension.length > 0
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: 23
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            y: Math.round(26 - extensionMetrics.capitalHeight / 2
+                          - (extensionMetrics.ascent - extensionMetrics.capitalHeight))
             text: file.extension
             textFormat: Text.PlainText
             color: Theme.attachChipGlyph
@@ -89,7 +98,7 @@ Item {
         ProfileGlyph {
             visible: file.extension.length === 0
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 17
+            y: 18
             width: 16
             height: 16
             kind: "file"

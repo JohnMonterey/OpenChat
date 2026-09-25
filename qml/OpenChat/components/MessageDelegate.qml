@@ -145,8 +145,11 @@ Item {
     readonly property real actionRowHeight: 20
     readonly property real footerY: bubble.y + bubble.height
 
-    implicitHeight: dateSectionHeight + (eventRow ? eventLabel.implicitHeight + 16
-        : senderHeight + bubbleHeight + retryHeight + editedHeight + actionRowHeight)
+    // Whole pixels, so every row below starts on a whole pixel too: the
+    // scene graph snaps plain rectangles to the pixel grid but draws shapes
+    // where they are, and a glyph in a button would drift from its disc.
+    implicitHeight: Math.ceil(dateSectionHeight + (eventRow ? eventLabel.implicitHeight + 16
+        : senderHeight + bubbleHeight + retryHeight + editedHeight + actionRowHeight))
     // A hovered message stays above its neighbours while its actions show.
     z: actionHover.hovered ? 1 : 0
 

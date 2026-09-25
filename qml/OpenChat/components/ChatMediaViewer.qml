@@ -478,7 +478,8 @@ Item {
         property string accessibleName: label
         signal clicked
 
-        width: label.length > 0 ? caption.implicitWidth + 44 : 32
+        // Whole pixels, so the drawn pill and the glyph inside it agree.
+        width: label.length > 0 ? Math.ceil(caption.implicitWidth) + 44 : 32
         height: 32
         radius: 16
         color: buttonMouse.containsMouse ? Theme.mediaChipHover : Theme.mediaChip

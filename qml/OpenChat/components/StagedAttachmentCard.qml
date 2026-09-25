@@ -114,13 +114,21 @@ Item {
             x: 4
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 4
-            width: lengthText.implicitWidth + 8
+            width: Math.ceil(lengthText.implicitWidth) + 8
             height: lengthText.implicitHeight + 2
             radius: 3
             color: "#b0000000"
+            // Centred on the digits' height, not the line's (see ChatTimeChip).
+            FontMetrics {
+                id: lengthMetrics
+                font: lengthText.font
+            }
             Text {
                 id: lengthText
-                anchors.centerIn: parent
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                y: Math.round((parent.height - lengthMetrics.capitalHeight) / 2
+                              - (lengthMetrics.ascent - lengthMetrics.capitalHeight))
                 text: card.durationText
                 textFormat: Text.PlainText
                 color: "white"

@@ -48,16 +48,17 @@ Item {
         Accessible.name: "Dismiss"
         Accessible.onPressAction: notice.dismiss()
 
+        // Even, like the 22 px slot, so centring lands on whole pixels.
         Shape {
             anchors.centerIn: parent
-            width: 7
-            height: 7
+            width: 8
+            height: 8
             ShapePath {
                 fillColor: "transparent"
                 strokeColor: dismissMouse.containsMouse ? Theme.textPrimary : Theme.noticeText
                 strokeWidth: 1.3
                 capStyle: ShapePath.RoundCap
-                PathSvg { path: "M 0 0 L 7 7 M 7 0 L 0 7" }
+                PathSvg { path: "M 0 0 L 8 8 M 8 0 L 0 8" }
             }
         }
         MouseArea {

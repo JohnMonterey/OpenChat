@@ -143,11 +143,8 @@ public:
     // Transfers whose attachment Failed or was Cancelled: their bytes can go.
     [[nodiscard]] virtual Result<QVector<AttachmentRef>, RepositoryError> abandonedTransfers() = 0;
     [[nodiscard]] virtual Result<void, RepositoryError> deleteTransfer(const AttachmentRef &ref) = 0;
-    // Sealed bytes stored for every transfer / for the transfers from
-    // `sender` in `conversation` that no descriptor names yet.
+    // Sealed bytes stored for every transfer.
     [[nodiscard]] virtual Result<qint64, RepositoryError> receivedBytes() = 0;
-    [[nodiscard]] virtual Result<qint64, RepositoryError>
-    orphanBytes(const ConversationId &conversation, const DeviceId &sender) = 0;
 
     // The conversation exists and was not left: frames for anything else are
     // dropped unread.

@@ -601,27 +601,6 @@ Result<qint64, RepositoryError> SqlCipherAttachmentRepository::receivedBytes()
     });
 }
 
-Result<qint64, RepositoryError>
-SqlCipherAttachmentRepository::orphanBytes(const ConversationId &conversation,
-                                           const DeviceId &sender)
-{
-    return m_database.withConnection([&](sqlite3 *database) {
-        Statement statement(database,
-                            "SELECT COALESCE(SUM(t.have_bytes), 0) FROM attachment_transfers t "
-                            "WHERE t.conversation_id=?1 AND t.sender_device_id=?2 "
-                            "AND NOT EXISTS (SELECT 1 FROM message_attachments a "
-                            "WHERE a.conversation_id = t.conversation_id "
-                            "AND a.sender_device_id = t.sender_device_id "
-                            "AND a.attachment_id = t.attachment_id)");
-        if (!statement.isValid() || !statement.bindBlob(1, conversation.bytes())
-            || !statement.bindBlob(2, sender.bytes())
-            || sqlite3_step(statement.get()) != SQLITE_ROW)
-            return Result<qint64, RepositoryError>::failure(
-                internalError(QStringLiteral("attachment.orphanBytes")));
-        return Result<qint64, RepositoryError>::success(sqlite3_column_int64(statement.get(), 0));
-    });
-}
-
 Result<bool, RepositoryError>
 SqlCipherAttachmentRepository::conversationIsLive(const ConversationId &conversation)
 {

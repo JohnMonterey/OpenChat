@@ -43,7 +43,10 @@ struct AttachmentTransferLimits final {
     // --- Storage
     qint64 collectIntervalMs = 60LL * 60 * 1000;
     qint64 orphanTtlMs = 24LL * 60 * 60 * 1000;       // frames whose message never came
-    qint64 orphanBytesPerSender = 32LL * 1024 * 1024; // per conversation and sender, before their message
+    // Per conversation and sender, before their message: how far their files
+    // reach on disk (a part sits at its fixed offset), and how many files.
+    qint64 orphanBytesPerSender = 32LL * 1024 * 1024;
+    int orphanFilesPerSender = 16;
     int orphanPreviewsPerSender = 16;
     qint64 minFreeDiskBytes = 512LL * 1024 * 1024;
     qint64 maxReceivedBytes = 8LL * 1024 * 1024 * 1024;

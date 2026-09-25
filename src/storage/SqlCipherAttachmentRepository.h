@@ -48,8 +48,6 @@ public:
     [[nodiscard]] Result<QVector<AttachmentRef>, RepositoryError> abandonedTransfers() override;
     [[nodiscard]] Result<void, RepositoryError> deleteTransfer(const AttachmentRef &ref) override;
     [[nodiscard]] Result<qint64, RepositoryError> receivedBytes() override;
-    [[nodiscard]] Result<qint64, RepositoryError>
-    orphanBytes(const ConversationId &conversation, const DeviceId &sender) override;
 
     [[nodiscard]] Result<bool, RepositoryError>
     conversationIsLive(const ConversationId &conversation) override;

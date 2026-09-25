@@ -39,6 +39,17 @@ constexpr int maxRememberedAnswers = 256;
     return attachmentPartSize(descriptor, index) + sealOverhead;
 }
 
+// How far an orphan's file reaches: to the end of the slot of the last part
+// it holds.
+[[nodiscard]] qint64 orphanExtent(const AttachmentTransferRecord &orphan)
+{
+    for (int index = int(orphan.present.size()) * 8 - 1; index >= 0; --index) {
+        if (orphan.hasPart(index))
+            return AttachmentFileStore::partOffset(index + 1);
+    }
+    return 0;
+}
+
 // Every part of `descriptor` read back from `files` and opened: the blob, or
 // nothing when one is missing or does not open. On a worker.
 [[nodiscard]] std::optional<QByteArray> assemble(const AttachmentFileStore &files, const AttachmentRef &ref,
@@ -625,16 +636,40 @@ void AttachmentTransfer::receivePart(const AttachmentRef &ref, int index, const 
         return;
     const qint64 nowMs = now();
     if (!found.value()) {
-        // Before its message (the relay can reorder): kept sealed, within a
-        // budget per sender, and checked once the message says what it is.
+        // Before its message (the relay can reorder): kept sealed, from
+        // someone in the chat, within a budget per sender, and checked once
+        // the message says what it is. A part lands at its fixed offset in
+        // the file, so the budget counts how far each file reaches rather
+        // than the bytes it holds: one high part would otherwise cost a
+        // whole file's worth of disk for a few counted bytes.
         if (body.size() > AttachmentLimits::partBytes + sealOverhead)
             return;
-        const auto held = attachments->transfer(ref);
-        if (held.hasValue() && held.value() && held.value()->hasPart(index))
+        if (!m_roster || !m_roster(ref.conversationId).contains(ref.senderDeviceId))
             return;
-        const auto orphaned = attachments->orphanBytes(ref.conversationId, ref.senderDeviceId);
-        if (!orphaned.hasValue() || orphaned.value() + body.size() > m_limits.orphanBytesPerSender
-            || !storageAllows(body.size()))
+        const auto orphans = attachments->orphans(LLONG_MAX);
+        if (!orphans.hasValue())
+            return;
+        qint64 charged = 0;
+        qint64 heldExtent = 0;
+        int files = 0;
+        bool known = false;
+        for (const AttachmentTransferRecord &orphan : orphans.value()) {
+            if (orphan.ref.conversationId != ref.conversationId
+                || orphan.ref.senderDeviceId != ref.senderDeviceId || orphan.haveCount == 0)
+                continue;
+            if (orphan.ref == ref) {
+                if (orphan.hasPart(index))
+                    return;
+                heldExtent = orphanExtent(orphan);
+                known = true;
+            }
+            charged += orphanExtent(orphan);
+            ++files;
+        }
+        const qint64 extent = std::max(heldExtent, AttachmentFileStore::partOffset(index + 1));
+        if ((!known && files >= m_limits.orphanFilesPerSender)
+            || charged - heldExtent + extent > m_limits.orphanBytesPerSender
+            || !storageAllows(extent - heldExtent))
             return;
         if (m_files->writePart(ref, index, body).hasValue())
             (void)attachments->recordPartArrived(ref, index, body.size(), nowMs);

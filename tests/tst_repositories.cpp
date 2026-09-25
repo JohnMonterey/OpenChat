@@ -996,8 +996,6 @@ void RepositoryTest::orphansAndAbandonedTransfersCanBeCollected()
     for (const AttachmentTransferRecord &orphan : orphans)
         QVERIFY(orphan.ref == oldOrphan || orphan.ref == strangersOrphan);
     QCOMPARE(attachments.orphans(100'000).value().size(), 3);
-    QCOMPARE(attachments.orphanBytes(conversationId, peer).value(), qint64(350));
-    QCOMPARE(attachments.orphanBytes(ConversationId::generate(), peer).value(), qint64(0));
     QCOMPARE(attachments.receivedBytes().value(), qint64(3'750));
     const auto abandoned = attachments.abandonedTransfers().value();
     QCOMPARE(abandoned.size(), 1);

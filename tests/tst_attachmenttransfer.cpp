@@ -802,6 +802,49 @@ private slots:
         QVERIFY(!f.anyFailedClosed());
     }
 
+    void framesAheadOfTheirMessageCostOnlyWhatTheBudgetAllows()
+    {
+        Fixture f;
+        QVERIFY(f.setUp());
+        f.start(f.fx.a());
+        Side &bob = f.start(f.fx.b());
+        const QByteArray key(32, 'k');
+        const AttachmentFileStore files = Fixture::filesOf(bob);
+
+        // The last part a file may have, with next to nothing in it: it
+        // reaches almost 17 MB into its file, and that is what it costs.
+        const quint32 last = quint32(AttachmentLimits::maxParts - 1);
+        QList<AttachmentRef> kept;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            const AttachmentId id = AttachmentId::generate();
+            f.deliverFrame(f.fx.a(), f.fx.b(), f.direct,
+                           sealAttachmentFrame(key, AttachmentFrameType::Part, id, last, QByteArray()));
+            const AttachmentRef ref{f.direct, f.fx.a().device, id};
+            if (Fixture::heldParts(bob, ref) == 1)
+                kept.append(ref);
+        }
+        // 32 MiB holds one such file, not two.
+        QCOMPARE(kept.size(), 1);
+        QVERIFY(files.contains(kept.first()));
+        // Low parts still fit beside it, but no more than a few files' worth.
+        int lowKept = 0;
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            const AttachmentId id = AttachmentId::generate();
+            f.deliverFrame(f.fx.a(), f.fx.b(), f.direct,
+                           sealAttachmentFrame(key, AttachmentFrameType::Part, id, 0, QByteArray(10, 'p')));
+            lowKept += Fixture::heldParts(bob, {f.direct, f.fx.a().device, id});
+        }
+        QCOMPARE(lowKept, AttachmentTransferLimits{}.orphanFilesPerSender - 1);
+
+        // Nothing is kept from someone who is not in the chat.
+        f.members.insert(f.direct.bytes(), {f.fx.b().device});
+        const AttachmentId fromStranger = AttachmentId::generate();
+        f.deliverFrame(f.fx.a(), f.fx.b(), f.direct,
+                       sealAttachmentFrame(key, AttachmentFrameType::Part, fromStranger, 0, QByteArray(10, 'p')));
+        QCOMPARE(Fixture::heldParts(bob, {f.direct, f.fx.a().device, fromStranger}), 0);
+        QVERIFY(!f.anyFailedClosed());
+    }
+
     void hostileFramesNeverStopTheEngine()
     {
         Fixture f;

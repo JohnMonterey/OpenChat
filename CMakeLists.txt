@@ -182,8 +182,8 @@ set_target_properties(OpenChat PROPERTIES WIN32_EXECUTABLE TRUE)
 if(APPLE)
     configure_file(cmake/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist @ONLY)
     # Declare usage strings to Qt's permission-plugin finalizer and embed them
-    # in the existing standalone executable as well as any future app bundle.
-    set_target_properties(OpenChat PROPERTIES
+    # in the executable, which is built as the OpenChat.app bundle.
+    set_target_properties(OpenChat PROPERTIES MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist)
     target_link_options(OpenChat PRIVATE
         "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/OpenChat-Info.plist")

@@ -34,6 +34,10 @@ namespace AttachmentLimits {
 inline constexpr qsizetype partBytes = 224 * 1024;
 // The GCM tag each sealed body carries.
 inline constexpr qsizetype sealOverhead = 16;
+// A Preview, Request or Cancel body also carries its own random 12-byte
+// nonce ahead of the ciphertext (see the frame layout below).
+inline constexpr qsizetype controlNonceBytes = 12;
+inline constexpr qsizetype controlSealOverhead = sealOverhead + controlNonceBytes;
 // The largest frame handed to the engine, header and tag included.
 inline constexpr qsizetype maxFrameBytes = 240 * 1024;
 inline constexpr qint64 maxImageBytes = 2LL * 1024 * 1024;
@@ -122,9 +126,15 @@ struct AttachmentDescriptor final {
 //
 //   0      0xAC            1   version (1)      2   type (AttachmentFrameType)
 //   3…18   attachment id   19…22  index (u32, big-endian; 0 unless a Part)
-//   23…    the sealed body: AES-256-GCM under the descriptor's key, nonce
-//          = 00 00 00 00 ‖ u32 type ‖ u32 index, the 23 header bytes as
-//          associated data, ciphertext then the 16-byte tag.
+//   23…    the sealed body: AES-256-GCM under the descriptor's key, the 23
+//          header bytes as associated data, ciphertext then the 16-byte tag.
+//
+// A Part's nonce is 00 00 00 00 ‖ u32 type ‖ u32 index: each part is sealed
+// once and sent again byte for byte, never re-encrypted. Every other type can
+// be sealed again with different content under the same key (a receiver asks
+// again for fewer parts; each member of a group asks for its own), so its body
+// starts with a fresh random 12-byte nonce whose top bit is set, keeping it out
+// of the Part nonces' space: nonce ‖ ciphertext ‖ tag.
 //
 // Bodies: Part = that part's bytes; Preview = a baseline JPEG; Request = a
 // bitmap of the parts still missing (bit i of byte i/8, least significant
@@ -149,7 +159,8 @@ struct AttachmentFrameHeader final {
                                                const AttachmentId &attachmentId, quint32 index);
 // The header and the sealed body, or nothing for a frame over maxFrameBytes,
 // of another version or an unknown type, a Part index of maxParts or more, a
-// non-zero index on any other type, or a body shorter than a tag.
+// non-zero index on any other type, or a body shorter than a tag (than a nonce
+// and a tag, for any type but a Part).
 [[nodiscard]] std::optional<std::pair<AttachmentFrameHeader, QByteArray>>
 splitAttachmentFrame(QByteArrayView frame);
 

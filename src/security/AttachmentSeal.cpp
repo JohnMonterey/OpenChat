@@ -11,20 +11,34 @@
 namespace OpenChat {
 namespace {
 
-constexpr qsizetype nonceBytes = 12;
+constexpr qsizetype nonceBytes = AttachmentLimits::controlNonceBytes;
 constexpr qsizetype tagBytes = AttachmentLimits::sealOverhead;
 static_assert(tagBytes == 16, "AES-GCM's full tag");
+static_assert(nonceBytes == 12, "AES-GCM's standard nonce");
 
 using CipherContextPointer = std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
 
-// 00 00 00 00 ‖ u32 type ‖ u32 index. A key belongs to one attachment and
-// each (type, index) is sealed under it once (a part sent again is the same
-// sealed bytes, never a new encryption of them), so no nonce repeats.
-[[nodiscard]] QByteArray frameNonce(quint8 type, quint32 index)
+// A Part's nonce, 00 00 00 00 ‖ u32 type ‖ u32 index. A key belongs to one
+// attachment and each part is sealed under it once (a part sent again is the
+// same sealed bytes, never a new encryption of them), so none repeats.
+[[nodiscard]] QByteArray partNonce(quint32 index)
 {
     QByteArray nonce(nonceBytes, '\0');
-    qToBigEndian<quint32>(type, nonce.data() + 4);
+    qToBigEndian<quint32>(quint32(AttachmentFrameType::Part), nonce.data() + 4);
     qToBigEndian<quint32>(index, nonce.data() + 8);
+    return nonce;
+}
+
+// Any other frame can be sealed again with different content (a receiver asks
+// again for fewer parts, and every member of a group asks under the same key),
+// so each seal draws its own nonce and carries it ahead of the ciphertext. Its
+// top bit is set, which no Part nonce has. Empty if the generator fails.
+[[nodiscard]] QByteArray randomNonce()
+{
+    QByteArray nonce(nonceBytes, Qt::Uninitialized);
+    if (RAND_bytes(reinterpret_cast<unsigned char *>(nonce.data()), int(nonce.size())) != 1)
+        return {};
+    nonce[0] = char(quint8(nonce[0]) | 0x80);
     return nonce;
 }
 
@@ -62,16 +76,23 @@ QByteArray sealAttachmentFrame(const QByteArray &key, AttachmentFrameType type,
                                const AttachmentId &attachmentId, quint32 index,
                                QByteArrayView plaintext)
 {
+    const bool isPart = type == AttachmentFrameType::Part;
+    const qsizetype overhead = isPart ? tagBytes : AttachmentLimits::controlSealOverhead;
     if (key.size() != AttachmentLimits::keyBytes || !isSendableHeader(type, index)
-        || attachmentFrameHeaderBytes + plaintext.size() + tagBytes > AttachmentLimits::maxFrameBytes)
+        || attachmentFrameHeaderBytes + plaintext.size() + overhead > AttachmentLimits::maxFrameBytes)
         return {};
 
     const QByteArray header = attachmentFrameHeader(type, attachmentId, index);
-    const QByteArray nonce = frameNonce(quint8(type), index);
+    const QByteArray nonce = isPart ? partNonce(index) : randomNonce();
+    if (nonce.isEmpty())
+        return {};
     const int length = int(plaintext.size());
     QByteArray frame = header;
-    frame.resize(header.size() + length + tagBytes);
-    auto *out = reinterpret_cast<unsigned char *>(frame.data()) + header.size();
+    if (!isPart)
+        frame += nonce;
+    const qsizetype bodyStart = frame.size();
+    frame.resize(bodyStart + length + tagBytes);
+    auto *out = reinterpret_cast<unsigned char *>(frame.data()) + bodyStart;
 
     CipherContextPointer context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
     EVP_CIPHER_CTX *cipher = context.get();
@@ -107,15 +128,23 @@ std::optional<QByteArray> openAttachmentBody(const QByteArray &key, QByteArrayVi
 {
     // Bounded like a whole frame, so every length below fits an int.
     if (key.size() != AttachmentLimits::keyBytes || header.size() != attachmentFrameHeaderBytes
-        || sealedBody.size() < tagBytes
         || header.size() + sealedBody.size() > AttachmentLimits::maxFrameBytes)
         return std::nullopt;
 
-    // The nonce is rebuilt from the header, which is also the associated
-    // data: a body presented under any other header fails the tag.
+    // A Part's nonce is rebuilt from the header; any other type's leads its
+    // body. The header is also the associated data, so a body presented under
+    // any other header fails the tag.
     const quint8 type = quint8(header[2]);
     const quint32 index = qFromBigEndian<quint32>(header.data() + 19);
-    const QByteArray nonce = frameNonce(type, index);
+    const bool isPart = type == quint8(AttachmentFrameType::Part);
+    if (sealedBody.size() < (isPart ? tagBytes : AttachmentLimits::controlSealOverhead))
+        return std::nullopt;
+    const QByteArray nonce = isPart ? partNonce(index) : sealedBody.first(nonceBytes).toByteArray();
+    // A nonce without the top bit could only repeat a Part's.
+    if (!isPart && (quint8(nonce[0]) & 0x80) == 0)
+        return std::nullopt;
+    if (!isPart)
+        sealedBody = sealedBody.sliced(nonceBytes);
     const QByteArrayView ciphertext = sealedBody.first(sealedBody.size() - tagBytes);
     const int length = int(ciphertext.size());
     QByteArray tag = sealedBody.last(tagBytes).toByteArray();

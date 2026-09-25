@@ -673,7 +673,7 @@ void AttachmentTransfer::receivePreview(const AttachmentRef &ref, const QByteArr
         return;
     if (!found.value()) {
         // Kept sealed until its message comes, a few per sender at most.
-        if (body.size() > AttachmentLimits::maxPreviewBytes + sealOverhead)
+        if (body.size() > AttachmentLimits::maxPreviewBytes + AttachmentLimits::controlSealOverhead)
             return;
         const auto orphans = attachments->orphans(LLONG_MAX);
         if (!orphans.hasValue())

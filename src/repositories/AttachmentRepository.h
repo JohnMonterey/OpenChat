@@ -129,7 +129,8 @@ public:
     // recordPartArrived was told.
     [[nodiscard]] virtual Result<PartArrival, RepositoryError>
     clearPart(const AttachmentRef &ref, int index, qint64 bytes, qint64 nowMs) = 0;
-    // A Preview frame's sealed body (at most maxPreviewBytes + sealOverhead)
+    // A Preview frame's sealed body (at most maxPreviewBytes +
+    // controlSealOverhead)
     // kept until its descriptor arrives; an empty body clears it.
     [[nodiscard]] virtual Result<void, RepositoryError>
     setSealedPreview(const AttachmentRef &ref, QByteArrayView sealedBody, qint64 nowMs) = 0;

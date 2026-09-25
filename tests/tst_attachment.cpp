@@ -456,6 +456,11 @@ private slots:
                                 AttachmentFrameType::Cancel}) {
             QVERIFY(splitAttachmentFrame(attachmentFrameHeader(type, id, 0) + body));
             QVERIFY(!splitAttachmentFrame(attachmentFrameHeader(type, id, 1) + body));
+            // Its own nonce and a tag, at least.
+            QVERIFY(splitAttachmentFrame(attachmentFrameHeader(type, id, 0)
+                                         + QByteArray(AttachmentLimits::controlSealOverhead, 'b')));
+            QVERIFY(!splitAttachmentFrame(attachmentFrameHeader(type, id, 0)
+                                          + QByteArray(AttachmentLimits::controlSealOverhead - 1, 'b')));
         }
         // Past the last part a file may have.
         QVERIFY(!splitAttachmentFrame(attachmentFrameHeader(AttachmentFrameType::Part, id,
@@ -515,7 +520,7 @@ private slots:
         QCOMPARE(openAttachmentFrame(key, request), std::optional<QByteArray>(QByteArray::fromHex("ff03")));
         // A cancel carries nothing, but is still authenticated.
         const QByteArray cancel = sealAttachmentFrame(key, AttachmentFrameType::Cancel, id, 0, {});
-        QCOMPARE(cancel.size(), attachmentFrameHeaderBytes + AttachmentLimits::sealOverhead);
+        QCOMPARE(cancel.size(), attachmentFrameHeaderBytes + AttachmentLimits::controlSealOverhead);
         const auto opened = openAttachmentFrame(key, cancel);
         QVERIFY(opened.has_value());
         QVERIFY(opened->isEmpty());
@@ -525,6 +530,54 @@ private slots:
         QCOMPARE(sealAttachmentFrame(key, AttachmentFrameType::Part, id, 5, part), frame);
         const QByteArray other = sealAttachmentFrame(key, AttachmentFrameType::Part, id, 6, part);
         QVERIFY(other.sliced(attachmentFrameHeaderBytes) != frame.sliced(attachmentFrameHeaderBytes));
+    }
+
+    void requestsNeverShareANonce()
+    {
+        // A receiver asks again for fewer parts, and every member of a group
+        // asks under the same key: each request must get a nonce of its own,
+        // or the relay could learn the keystream and forge frames.
+        const QByteArray key = randomAttachmentKey();
+        const AttachmentId id = AttachmentId::generate();
+        const QByteArray firstBitmap = QByteArray::fromHex("ffffffffffffffffff03");
+        const QByteArray secondBitmap = QByteArray::fromHex("0fffffffffffffffff03");
+        const QByteArray first = sealAttachmentFrame(key, AttachmentFrameType::Request, id, 0, firstBitmap);
+        const QByteArray second = sealAttachmentFrame(key, AttachmentFrameType::Request, id, 0, secondBitmap);
+        const QByteArray again = sealAttachmentFrame(key, AttachmentFrameType::Request, id, 0, firstBitmap);
+        for (const QByteArray &frame : {first, second, again}) {
+            QCOMPARE(frame.size(), attachmentFrameHeaderBytes + firstBitmap.size()
+                                       + AttachmentLimits::controlSealOverhead);
+            // Top bit set: never one of the Part nonces, which start 00.
+            QVERIFY(quint8(frame[attachmentFrameHeaderBytes]) & 0x80);
+        }
+        const auto nonceOf = [](const QByteArray &frame) {
+            return frame.mid(attachmentFrameHeaderBytes, AttachmentLimits::controlNonceBytes);
+        };
+        QVERIFY(nonceOf(first) != nonceOf(second));
+        QVERIFY(nonceOf(first) != nonceOf(again));
+        QVERIFY(first != again); // the same bitmap sealed twice is not the same bytes
+        // Their ciphertexts do not differ by what their plaintexts differ by.
+        const auto ciphertextOf = [&](const QByteArray &frame) {
+            return frame.mid(attachmentFrameHeaderBytes + AttachmentLimits::controlNonceBytes,
+                             firstBitmap.size());
+        };
+        QByteArray cipherXor = ciphertextOf(first);
+        QByteArray plainXor = firstBitmap;
+        for (qsizetype i = 0; i < cipherXor.size(); ++i) {
+            cipherXor[i] = char(cipherXor[i] ^ ciphertextOf(second)[i]);
+            plainXor[i] = char(plainXor[i] ^ secondBitmap[i]);
+        }
+        QVERIFY(cipherXor != plainXor);
+        QCOMPARE(openAttachmentFrame(key, first), std::optional<QByteArray>(firstBitmap));
+        QCOMPARE(openAttachmentFrame(key, second), std::optional<QByteArray>(secondBitmap));
+        QCOMPARE(openAttachmentFrame(key, again), std::optional<QByteArray>(firstBitmap));
+
+        // Previews and cancels draw their own too.
+        const QByteArray preview = realJpeg(32, 24);
+        QVERIFY(nonceOf(sealAttachmentFrame(key, AttachmentFrameType::Preview, id, 0, preview))
+                != nonceOf(sealAttachmentFrame(key, AttachmentFrameType::Preview, id, 0, preview)));
+        QVERIFY(nonceOf(sealAttachmentFrame(key, AttachmentFrameType::Cancel, id, 0, {}))
+                != nonceOf(sealAttachmentFrame(key, AttachmentFrameType::Cancel, id, 0, {})));
     }
 
     void tamperedFramesNeverOpen()
@@ -556,6 +609,25 @@ private slots:
             frame.sliced(attachmentFrameHeaderBytes)));
         QVERIFY(!openAttachmentBody(key, QByteArray(22, 'h'), frame.sliced(attachmentFrameHeaderBytes)));
         QVERIFY(!openAttachmentBody(key, frame.first(attachmentFrameHeaderBytes), QByteArray(15, 't')));
+
+        // A frame that carries its nonce: the nonce is bound too, and must
+        // keep its top bit.
+        const QByteArray request = sealAttachmentFrame(key, AttachmentFrameType::Request, id, 0,
+                                                       QByteArray::fromHex("ff03"));
+        QVERIFY(openAttachmentFrame(key, request).has_value());
+        QVERIFY(!openAttachmentFrame(key, flipped(request, attachmentFrameHeaderBytes + 5)));
+        QVERIFY(!openAttachmentFrame(key, withByte(request, attachmentFrameHeaderBytes,
+                                                   quint8(request[attachmentFrameHeaderBytes]) & 0x7F)));
+        QVERIFY(!openAttachmentFrame(key, flipped(request, request.size() - 1)));
+        QVERIFY(!openAttachmentFrame(key, withByte(request, 2, quint8(AttachmentFrameType::Preview))));
+        QVERIFY(!openAttachmentFrame(key, withByte(request, 2, quint8(AttachmentFrameType::Cancel))));
+        QVERIFY(!openAttachmentBody(key, request.first(attachmentFrameHeaderBytes),
+                                    request.sliced(attachmentFrameHeaderBytes).first(27)));
+        // A Part's body cannot pass for a Request's or the other way round.
+        QVERIFY(!openAttachmentBody(key, attachmentFrameHeader(AttachmentFrameType::Part, id, 0),
+                                    request.sliced(attachmentFrameHeaderBytes)));
+        QVERIFY(!openAttachmentBody(key, attachmentFrameHeader(AttachmentFrameType::Request, id, 0),
+                                    frame.sliced(attachmentFrameHeaderBytes)));
     }
 
     void sealingRefusesWhatNoReceiverWouldTake()
@@ -574,6 +646,12 @@ private slots:
                      .isEmpty());
         QVERIFY(sealAttachmentFrame(key, AttachmentFrameType::Part, id, 0, QByteArray(room + 1, 'r'))
                     .isEmpty());
+        // The others also carry their nonce.
+        const qsizetype controlRoom = room - AttachmentLimits::controlNonceBytes;
+        QVERIFY(!sealAttachmentFrame(key, AttachmentFrameType::Preview, id, 0,
+                                     QByteArray(controlRoom, 'r')).isEmpty());
+        QVERIFY(sealAttachmentFrame(key, AttachmentFrameType::Preview, id, 0,
+                                    QByteArray(controlRoom + 1, 'r')).isEmpty());
     }
 
     void randomKeysAreFresh()

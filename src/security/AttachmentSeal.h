@@ -10,10 +10,12 @@
 namespace OpenChat {
 
 // Seals and opens chat attachment frames (the layout is in
-// domain/Attachment.h): AES-256-GCM under the attachment's own key, with a
-// nonce made of the frame's type and index (so no two frames under one key
-// share one) and the frame header as associated data (so a body cannot be
-// moved to another attachment, index or type).
+// domain/Attachment.h): AES-256-GCM under the attachment's own key and the
+// frame header as associated data (so a body cannot be moved to another
+// attachment, index or type). A Part's nonce is made of its index, since a
+// part is sealed once; every other frame draws a random nonce at each seal
+// and carries it ahead of its ciphertext, so no two seals under one key share
+// one.
 
 // A fresh random key (AttachmentLimits::keyBytes) from the system CSPRNG;
 // empty if the generator fails, which callers treat as "cannot send".

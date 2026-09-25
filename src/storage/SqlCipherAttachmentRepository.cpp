@@ -15,7 +15,7 @@ using RepositorySql::Statement;
 // One bit per part a file may have.
 constexpr qsizetype bitmapBytes = (AttachmentLimits::maxParts + 7) / 8;
 constexpr qsizetype maxSealedPreviewBytes =
-    AttachmentLimits::maxPreviewBytes + AttachmentLimits::sealOverhead;
+    AttachmentLimits::maxPreviewBytes + AttachmentLimits::controlSealOverhead;
 
 RepositoryError error(RepositoryErrorCode code, const QString &diagnostic)
 {

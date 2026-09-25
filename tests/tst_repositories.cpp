@@ -950,7 +950,7 @@ void RepositoryTest::previewsAreBoundedAndKeptPerMessage()
 
     // A preview frame that came before its descriptor waits, sealed.
     const AttachmentRef early{conversationId, DeviceId::generate(), AttachmentId::generate()};
-    const QByteArray sealed(AttachmentLimits::maxPreviewBytes + AttachmentLimits::sealOverhead, 's');
+    const QByteArray sealed(AttachmentLimits::maxPreviewBytes + AttachmentLimits::controlSealOverhead, 's');
     QVERIFY(attachments.setSealedPreview(early, sealed, 20'000).hasValue());
     auto transfer = attachments.transfer(early).value();
     QCOMPARE(transfer->sealedPreview, sealed);

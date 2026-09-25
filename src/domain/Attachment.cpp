@@ -347,6 +347,10 @@ std::optional<std::pair<AttachmentFrameHeader, QByteArray>> splitAttachmentFrame
     if (type == quint8(AttachmentFrameType::Part) ? index >= quint32(AttachmentLimits::maxParts)
                                                   : index != 0)
         return std::nullopt;
+    // Every type but a Part carries its own nonce ahead of the tag.
+    if (type != quint8(AttachmentFrameType::Part)
+        && frame.size() < attachmentFrameHeaderBytes + AttachmentLimits::controlSealOverhead)
+        return std::nullopt;
 
     AttachmentFrameHeader header;
     header.type = AttachmentFrameType(type);

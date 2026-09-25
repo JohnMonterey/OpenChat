@@ -83,6 +83,7 @@ Item {
         }
         // On its way: a ring round the button fills.
         Shape {
+            preferredRendererType: Shape.CurveRenderer // smooth on the GPU too (see ProfileGlyph)
             visible: audio.row.transferState === 0
             x: -3
             y: -3

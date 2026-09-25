@@ -282,8 +282,8 @@ Item {
         readonly property real length: clipItem && clipItem.durationMs > 0 ? clipItem.durationMs : viewer.durationMs
         readonly property real position: clipItem ? clipItem.positionMs : 0
         visible: viewer.kind === 2 && viewer.expanded
-        x: frame.x + (frame.width - width) / 2
-        y: frame.y + frame.height + 12
+        x: Math.round(frame.x + (frame.width - width) / 2)
+        y: Math.round(frame.y + frame.height + 12)
         width: Math.max(300, Math.min(frame.width, 520))
         height: 40
 

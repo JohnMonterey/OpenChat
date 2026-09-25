@@ -13,17 +13,16 @@ Rectangle {
     color: "#8c101820"
     Accessible.ignored: true
 
-    // Digits and capitals have no descenders, so the text is centred on its
-    // cap height rather than on its line, which would sit it a pixel high.
-    FontMetrics {
-        id: metrics
-        font: label.font
-    }
     Text {
         id: label
         width: chip.width
         horizontalAlignment: Text.AlignHCenter
-        y: Math.round((chip.height - metrics.capitalHeight) / 2 - (metrics.ascent - metrics.capitalHeight))
+        // Digits and capitals have no descenders, so their middle, not the
+        // line's, goes in the middle of the chip: the baseline sits half a
+        // cap height (about 0.36 em) below it, on a whole device pixel.
+        anchors.baseline: chip.top
+        anchors.baselineOffset: Math.round((chip.height / 2 + 0.36 * font.pixelSize) * Screen.devicePixelRatio)
+                                / Screen.devicePixelRatio
         text: chip.text
         textFormat: Text.PlainText
         color: "#ffffff"

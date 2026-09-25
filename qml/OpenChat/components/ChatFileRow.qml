@@ -38,6 +38,7 @@ Item {
         readonly property color hue: Theme.attachFile
 
         Shape {
+            preferredRendererType: Shape.CurveRenderer // smooth on the GPU too (see ProfileGlyph)
             anchors.fill: parent
             ShapePath {
                 strokeColor: Qt.darker(page.hue, 1.3)

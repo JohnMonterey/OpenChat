@@ -49,6 +49,7 @@ Item {
                 Accessible.onPressAction: if (overlay.row.canCancel) overlay.row.cancelRequested()
 
                 Shape {
+                    preferredRendererType: Shape.CurveRenderer // smooth on the GPU too (see ProfileGlyph)
                     anchors.fill: parent
                     ShapePath {
                         fillColor: "transparent"

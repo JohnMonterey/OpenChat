@@ -108,13 +108,15 @@ Item {
     readonly property bool hasCaption: attachment && body.length > 0
     readonly property real mediaAspect: mediaWidth > 0 && mediaHeight > 0
         ? Math.max(0.4, Math.min(2.5, mediaWidth / mediaHeight)) : 4 / 3
+    // A picture's box is an even number of pixels each way, so the play
+    // button and the progress pill centred on it land on whole pixels.
     readonly property real mediaBoxWidth: !attachment ? 0
         : visualMedia
-          ? Math.round(Math.min(maximumBubbleWidth - bubbleTailWidth - 8,
-                                Math.max(140, Math.min(320, 320 * mediaAspect))))
+          ? 2 * Math.round(Math.min(maximumBubbleWidth - bubbleTailWidth - 8,
+                                    Math.max(140, Math.min(320, 320 * mediaAspect))) / 2)
           : Math.min(260, maximumBubbleWidth - horizontalContentInset)
     readonly property real mediaBoxHeight: !attachment ? 0
-        : visualMedia ? Math.round(Math.min(320, mediaBoxWidth / mediaAspect))
+        : visualMedia ? 2 * Math.round(Math.min(320, mediaBoxWidth / mediaAspect) / 2)
         : attachmentKind === 3 ? 40 : 44
     readonly property real mediaTop: isReply ? 50 : visualMedia ? 4 : 11
     readonly property real mediaBottom: mediaTop + mediaBoxHeight

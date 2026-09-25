@@ -17,6 +17,7 @@ Item {
     Accessible.onPressAction: cross.clicked()
 
     Shape {
+        preferredRendererType: Shape.CurveRenderer // smooth on the GPU too (see ProfileGlyph)
         anchors.centerIn: parent
         // Even, like the 18 px slot, so centring lands on whole pixels.
         width: 8

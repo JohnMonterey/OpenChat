@@ -61,6 +61,7 @@ Item {
     // Two rounded strokes; an eighth of a turn makes them the cross.
     Shape {
         objectName: "attachButtonGlyph"
+        preferredRendererType: Shape.CurveRenderer // smooth on the GPU too (see ProfileGlyph)
         anchors.centerIn: parent
         width: 14
         height: 14

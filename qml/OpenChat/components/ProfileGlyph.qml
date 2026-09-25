@@ -26,6 +26,10 @@ Item {
     Accessible.ignored: true
 
     Shape {
+        // Smooth on the GPU as well: the default geometry renderer draws
+        // shapes without antialiasing there, which chips a small glyph's
+        // points and shifts its weight (the software renderer ignores this).
+        preferredRendererType: Shape.CurveRenderer
         x: (glyph.width - glyph.size) / 2
         y: (glyph.height - glyph.size) / 2
         width: glyph.size

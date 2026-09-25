@@ -37,6 +37,9 @@ Item {
     ListView {
         id: messageList
         objectName: "messageList"
+        // A scroll never leaves the rows on half pixels, where a button's
+        // disc and its glyph would be drawn half a pixel apart.
+        pixelAligned: true
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top

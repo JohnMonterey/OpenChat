@@ -23,6 +23,7 @@ Item {
     ListView {
         id: cards
         objectName: "stagedAttachmentList"
+        pixelAligned: true // see MessageHistory
         anchors.fill: parent
         orientation: ListView.Horizontal
         spacing: 8

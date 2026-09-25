@@ -118,17 +118,14 @@ Item {
             height: lengthText.implicitHeight + 2
             radius: 3
             color: "#b0000000"
-            // Centred on the digits' height, not the line's (see ChatTimeChip).
-            FontMetrics {
-                id: lengthMetrics
-                font: lengthText.font
-            }
             Text {
                 id: lengthText
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
-                y: Math.round((parent.height - lengthMetrics.capitalHeight) / 2
-                              - (lengthMetrics.ascent - lengthMetrics.capitalHeight))
+                // Centred on the digits, not the line (see ChatTimeChip).
+                anchors.baseline: parent.top
+                anchors.baselineOffset: Math.round((parent.height / 2 + 0.36 * font.pixelSize)
+                                                   * Screen.devicePixelRatio) / Screen.devicePixelRatio
                 text: card.durationText
                 textFormat: Text.PlainText
                 color: "white"
@@ -230,6 +227,7 @@ Item {
             border.color: Theme.mediaChipBorder
         }
         Shape {
+            preferredRendererType: Shape.CurveRenderer // smooth on the GPU too (see ProfileGlyph)
             x: card.thumbnail ? 9 : 8
             y: card.thumbnail ? 9 : 8
             width: 6

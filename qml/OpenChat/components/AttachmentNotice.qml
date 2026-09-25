@@ -50,6 +50,7 @@ Item {
 
         // Even, like the 22 px slot, so centring lands on whole pixels.
         Shape {
+            preferredRendererType: Shape.CurveRenderer // smooth on the GPU too (see ProfileGlyph)
             anchors.centerIn: parent
             width: 8
             height: 8

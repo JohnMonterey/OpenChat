@@ -33,11 +33,78 @@ jobs:
 
       - name: Bundle
         run: |
-          "$(brew --prefix qt)/bin/macdeployqt" build/OpenChat.app -qmldir=qml -always-overwrite
+          app=build/OpenChat.app
+          # macdeployqt prints "Cannot resolve rpath" for plugins of Qt
+          # modules OpenChat never uses; those plugins are removed below.
+          "$(brew --prefix qt)/bin/macdeployqt" "$app" -qmldir=qml -always-overwrite || true
+          plugins="$app/Contents/PlugIns"
+          rm -rf "$plugins/platforminputcontexts"
+          rm -f "$plugins"/quick/libqtvkb*.dylib "$plugins"/quick/libvirtualkeyboardplugin.dylib \
+                "$plugins"/quick/libpdfquickplugin.dylib "$plugins"/quick/libqtquickscene*.dylib \
+                "$plugins"/quick/libqtquicktimeline*.dylib "$plugins"/quick/libqtqmlstatemachineplugin.dylib \
+                "$plugins"/imageformats/libqpdf.dylib
+          install_name_tool -add_rpath @executable_path/../Frameworks "$app/Contents/MacOS/OpenChat" 2>/dev/null || true
+
+      - name: Check every library resolves inside the bundle
+        run: |
+          app=build/OpenChat.app
+          fw="$app/Contents/Frameworks"
+          # Libraries a copied library needs but macdeployqt left behind
+          # (brotli, webp, sharpyuv): copy them from Homebrew, then repeat.
+          for pass in 1 2 3; do
+            missing=0
+            while IFS= read -r file; do
+              for dep in $(otool -L "$file" | tail -n +2 | awk '{print $1}'); do
+                case "$dep" in
+                  @rpath/*)
+                    name="${dep#@rpath/}"
+                    if [ ! -e "$fw/$name" ]; then
+                      base="$(basename "$name")"
+                      src="$(find "$(brew --prefix)/lib" "$(brew --prefix)/opt" -name "$base" -print -quit 2>/dev/null)"
+                      if [ -n "$src" ] && [[ "$name" != *.framework/* ]]; then
+                        cp -L "$src" "$fw/$base"; chmod u+w "$fw/$base"
+                        install_name_tool -id "@rpath/$base" "$fw/$base"
+                      else
+                        echo "MISSING $dep (needed by $file)"; missing=1
+                      fi
+                    fi ;;
+                  /opt/homebrew/*|/usr/local/*)
+                    echo "OUTSIDE $dep (needed by $file)"; missing=1 ;;
+                esac
+              done
+            done < <(find "$app" -type f \( -name '*.dylib' -o -perm -u+x \) -exec sh -c 'file "$1" | grep -q Mach-O' _ {} \; -print)
+            [ "$missing" = 0 ] && break
+          done
+          [ "$missing" = 0 ]
+
+      - name: Sign
+        run: |
           codesign --force --deep --sign - build/OpenChat.app
-          ditto -c -k --keepParent build/OpenChat.app "OpenChat-$(git rev-parse --short HEAD)-macos-arm64.zip"
+          codesign --verify --deep --strict build/OpenChat.app
+
+      - name: Launch check
+        run: |
+          # The bundled app, not the build tree: dyld must resolve everything
+          # from inside the bundle. Offscreen, it draws its first screen and
+          # the profile page and quits.
+          exe=build/OpenChat.app/Contents/MacOS/OpenChat
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+            "$exe" --capture launch.png --capture-delay 300 --width 860 --height 680
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+            "$exe" --profile scene-queen --capture profile.png --capture-delay 1500 --width 860 --height 680
+          test -s launch.png && test -s profile.png
+
+      - name: Zip
+        run: ditto -c -k --keepParent build/OpenChat.app "OpenChat-$(git rev-parse --short HEAD)-macos-arm64.zip"
 
       - uses: actions/upload-artifact@v4
         with:
           name: OpenChat-macos-arm64
           path: OpenChat-*-macos-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launch-captures
+          path: "*.png"
+          if-no-files-found: ignore

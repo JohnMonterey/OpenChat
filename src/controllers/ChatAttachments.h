@@ -102,6 +102,12 @@ public:
     };
     // Sends every ready card, or remembers to once none is being prepared.
     [[nodiscard]] SendOutcome send(const QString &caption, const std::optional<Message> &answered);
+    // A text for `conversation` while attachments sent before it are still
+    // being sealed: it waits behind them, so it never overtakes them. False
+    // when nothing is waiting there and the text can go at once.
+    [[nodiscard]] bool queueTextBehindAttachments(const ConversationId &conversation,
+                                                  const QList<DeviceId> &recipients, bool group,
+                                                  const QString &text, const std::optional<MessageQuote> &quote);
 
     // --- The bubbles
 
@@ -163,6 +169,9 @@ private:
         std::optional<MessageQuote> quote;
         std::deque<PreparedAttachment> items;
         bool captionSent = false;
+        // A text sent while attachments before it were being sealed: no
+        // items, the text in `caption`.
+        bool text = false;
     };
 
     // A mock row's bytes, and a demo video still being encoded.

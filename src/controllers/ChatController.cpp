@@ -774,10 +774,9 @@ bool ChatController::sendMessage()
         // The text is the first attachment's caption, the reply its quote.
         switch (m_attachments->send(body, answered)) {
         case ChatAttachments::SendOutcome::Nothing:
-            // Nothing could go: the text still can, on its own.
-            if (body.isEmpty())
-                return false;
-            break;
+            // Nothing could go, and the cards say why. The text stays: it was
+            // written as their caption, not to go on its own.
+            return false;
         case ChatAttachments::SendOutcome::Waiting:
             return true;
         case ChatAttachments::SendOutcome::Sent:
@@ -801,7 +800,9 @@ bool ChatController::sendMessage()
             QList<DeviceId> recipients;
             for (const GroupMember &member : group->members)
                 recipients.append(member.device);
-            m_engine->enqueueGroupText(group->conversation, recipients, body, quote);
+            // Behind any attachment sent before it that is still being sealed.
+            if (!m_attachments->queueTextBehindAttachments(group->conversation, recipients, true, body, quote))
+                m_engine->enqueueGroupText(group->conversation, recipients, body, quote);
             setComposerText({});
             cancelComposeMode();
             return true;
@@ -812,7 +813,8 @@ bool ChatController::sendMessage()
         // The engine encrypts, commits the row durably and reports it back through
         // messageQueued, which is where the visible row is appended: the model only
         // ever shows what the store holds.
-        m_engine->enqueueText(chat->conversation, *chat->peerDevice, body, quote);
+        if (!m_attachments->queueTextBehindAttachments(chat->conversation, {*chat->peerDevice}, false, body, quote))
+            m_engine->enqueueText(chat->conversation, *chat->peerDevice, body, quote);
         setComposerText({});
         cancelComposeMode();
         return true;

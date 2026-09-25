@@ -2251,6 +2251,35 @@ private slots:
         QVERIFY(!controller.hasStagedAttachments());
     }
 
+    void aCaptionNeverGoesOutWithoutItsAttachment()
+    {
+        using namespace OpenChat;
+        QTemporaryDir dir;
+        ChatController controller;
+        MessageListModel *messages = controller.messages();
+        const int before = messages->rowCount();
+        auto *tray = qobject_cast<StagedAttachmentModel *>(controller.stagedAttachments());
+
+        // Enter while the card is still being prepared, then it fails: the
+        // caption was written for the photo, so it waits in the field.
+        const QString empty = writeFile(dir, QStringLiteral("beach.jpg"), QByteArray());
+        controller.attachFiles({QUrl::fromLocalFile(empty)});
+        QVERIFY(controller.stagingBusy());
+        controller.setComposerText(QStringLiteral("The beach on Saturday"));
+        QVERIFY(controller.sendMessage());
+        QVERIFY(controller.sendWhenReady());
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy(), 20'000);
+        QTRY_VERIFY(!controller.sendWhenReady());
+        QTest::qWait(20);
+        QCOMPARE(messages->rowCount(), before);
+        QCOMPARE(controller.composerText(), QStringLiteral("The beach on Saturday"));
+        QCOMPARE(tray->rowCount(), 1);
+        // Sent on purpose now, with the failure in view, it is just a text.
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(messages->rowCount(), before + 1);
+        QCOMPARE(messages->data(messages->index(before), MessageListModel::KindRole).toInt(), int(MessageKind::Text));
+    }
+
     void pastingAttachesAPictureButNeverTakesText()
     {
         using namespace OpenChat;
@@ -2592,6 +2621,47 @@ private slots:
                                       [&loaded](const QByteArray &blob) { loaded = blob; });
         QTRY_VERIFY_WITH_TIMEOUT(loaded.has_value(), 10'000);
         QCOMPARE(*loaded, bytes);
+    }
+
+    void aTextSentRightAfterAttachmentsFollowsThem()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QTemporaryDir dir;
+        controller.attachFiles({QUrl::fromLocalFile(writeFile(dir, QStringLiteral("minutes.bin"),
+                                                              patternBytes(3 * AttachmentLimits::partBytes))),
+                                QUrl::fromLocalFile(writeFile(dir, QStringLiteral("agenda.bin"),
+                                                              patternBytes(2'000)))});
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy(), 20'000);
+        controller.setComposerText(QStringLiteral("The minutes"));
+        QVERIFY(controller.sendMessage());
+        // Written at once, while those are still being sealed.
+        controller.setComposerText(QStringLiteral("These are the signed copies"));
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(controller.composerText(), QString());
+
+        // Everyone reads them in the order they were sent.
+        QTRY_COMPARE_WITH_TIMEOUT(live.transport->sent.size(), qsizetype(3), 20'000);
+        QList<MessageContent::Type> order;
+        for (const CiphertextEnvelopeV1 &envelope : live.transport->sent) {
+            const auto processed = live.peer->process(live.conversation, envelope.ciphertext);
+            QVERIFY(processed.hasValue());
+            const auto content = decodeMessageContent(processed.value().applicationData);
+            QVERIFY(content);
+            order.append(content->type);
+        }
+        QCOMPARE(order, (QList<MessageContent::Type>{MessageContent::Type::Attachment,
+                                                     MessageContent::Type::Attachment,
+                                                     MessageContent::Type::Text}));
+        MessageListModel *messages = controller.messages();
+        QTRY_COMPARE_WITH_TIMEOUT(messages->rowCount(), 3, 10'000);
+        QCOMPARE(messages->data(messages->index(2), MessageListModel::BodyRole).toString(),
+                 QStringLiteral("These are the signed copies"));
     }
 
     void liveIncomingAttachmentsArriveAndCanBeSaved()

@@ -443,7 +443,9 @@ void ChatAttachments::cardSettled()
             m_sendQueued = false;
             if (!m_sendWhenReady || busy())
                 return;
-            if (!m_controller.sendMessage())
+            // Every card failed: the caption stays in the field rather than
+            // going out on its own, which nobody asked for.
+            if (!sendable() || !m_controller.sendMessage())
                 cancelSendWhenReady();
         },
         Qt::QueuedConnection);
@@ -678,12 +680,46 @@ bool ChatAttachments::sendLive(const QVector<Staged *> &ready, const QString &ca
     return true;
 }
 
+bool ChatAttachments::queueTextBehindAttachments(const ConversationId &conversation,
+                                                  const QList<DeviceId> &recipients, bool group,
+                                                  const QString &text, const std::optional<MessageQuote> &quote)
+{
+    const bool waiting = std::any_of(m_batches.cbegin(), m_batches.cend(),
+                                     [&](const Batch &batch) { return batch.conversation == conversation; });
+    if (!waiting)
+        return false;
+    Batch batch;
+    batch.conversation = conversation;
+    batch.recipients = recipients;
+    batch.group = group;
+    batch.caption = text;
+    batch.quote = quote;
+    batch.text = true;
+    m_batches.push_back(std::move(batch));
+    runBatches();
+    return true;
+}
+
 // One attachment at a time, in the order they were sent: sealed, then handed
-// to the engine, so their messages keep that order.
+// to the engine, so their messages keep that order (and a text sent after
+// them waits its turn).
 void ChatAttachments::runBatches()
 {
     while (!m_batchRunning && !m_batches.empty()) {
         Batch &batch = m_batches.front();
+        if (batch.text) {
+            // Its turn: everything sent before it is queued.
+            if (m_controller.m_engine != nullptr) {
+                if (batch.group)
+                    m_controller.m_engine->enqueueGroupText(batch.conversation, batch.recipients, batch.caption,
+                                                            batch.quote);
+                else if (!batch.recipients.isEmpty())
+                    m_controller.m_engine->enqueueText(batch.conversation, batch.recipients.first(), batch.caption,
+                                                       batch.quote);
+            }
+            m_batches.pop_front();
+            continue;
+        }
         if (batch.items.empty()) {
             // A caption none of its attachments could carry is given back,
             // when the composer is free to take it.

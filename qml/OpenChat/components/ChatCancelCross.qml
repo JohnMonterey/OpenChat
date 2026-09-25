@@ -18,15 +18,16 @@ Item {
 
     Shape {
         anchors.centerIn: parent
-        width: 7
-        height: 7
+        // Even, like the 18 px slot, so centring lands on whole pixels.
+        width: 8
+        height: 8
         opacity: crossMouse.containsMouse ? 1 : 0.7
         ShapePath {
             fillColor: "transparent"
             strokeColor: cross.ink
             strokeWidth: 1.4
             capStyle: ShapePath.RoundCap
-            PathSvg { path: "M 0 0 L 7 7 M 7 0 L 0 7" }
+            PathSvg { path: "M 0 0 L 8 8 M 8 0 L 0 8" }
         }
     }
     MouseArea {

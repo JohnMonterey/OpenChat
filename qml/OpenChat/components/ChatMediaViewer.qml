@@ -308,9 +308,9 @@ Item {
             Accessible.role: Accessible.Button
             Accessible.name: controls.playing ? "Pause" : "Play"
             Accessible.onPressAction: viewer.togglePlay()
+            // Play is drawn optically centred already (see ProfileGlyph).
             ProfileGlyph {
                 anchors.centerIn: parent
-                anchors.horizontalCenterOffset: controls.playing ? 0 : 1
                 width: 16
                 height: 16
                 kind: controls.playing ? "pause" : "play"

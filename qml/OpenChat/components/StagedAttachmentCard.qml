@@ -99,11 +99,12 @@ Item {
             color: "#a0000000"
             border.width: 1
             border.color: "#d0ffffff"
+            // Even like the badge, so it centres on whole pixels; play is
+            // drawn optically centred already.
             ProfileGlyph {
                 anchors.centerIn: parent
-                anchors.horizontalCenterOffset: 1
-                width: 11
-                height: 11
+                width: 12
+                height: 12
                 kind: "play"
                 ink: "white"
             }

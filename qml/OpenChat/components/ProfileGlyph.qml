@@ -152,6 +152,8 @@ Item {
             weight = Math.max(1.6, s / 10);
             break;
         case "play":
+            // Its centroid, not its box, sits in the middle: that is where
+            // the eye puts a triangle's centre, so callers never nudge it.
             fill = M(0.34, 0.2) + L(0.82, 0.5) + L(0.34, 0.8) + Z;
             break;
         case "pause":

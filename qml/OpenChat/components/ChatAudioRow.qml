@@ -73,9 +73,9 @@ Item {
                 GradientStop { position: 1; color: "#00ffffff" }
             }
         }
+        // Play is drawn optically centred already (see ProfileGlyph).
         ProfileGlyph {
             anchors.centerIn: parent
-            anchors.horizontalCenterOffset: audio.playing ? 0 : 1
             width: 16
             height: 16
             kind: audio.playing ? "pause" : "play"

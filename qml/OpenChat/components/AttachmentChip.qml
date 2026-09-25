@@ -46,9 +46,12 @@ Item {
             GradientStop { position: 1; color: "#08ffffff" }
         }
     }
+    // About 56 % of the bead, but always an even number of pixels less than
+    // it: centring snaps to whole pixels, so a glyph of the other parity
+    // would sit half a pixel up and to the left.
     ProfileGlyph {
         anchors.centerIn: parent
-        width: Math.round(parent.width * 0.56)
+        width: parent.width - 2 * Math.round(parent.width * 0.22)
         height: width
         kind: chip.glyph
         ink: Theme.attachChipGlyph

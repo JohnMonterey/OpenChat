@@ -26,6 +26,7 @@
 #include <qpa/qplatformsystemtrayicon.h>
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -3221,6 +3222,90 @@ private slots:
         auto *notice = findVisualItem(window->contentItem(), QStringLiteral("attachmentNoticeText"));
         QVERIFY(notice);
         QCOMPARE(notice->property("textFormat").toInt(), 0);
+    }
+
+    // Every glyph the attachment UI centres in a button or chip sits exactly
+    // in its middle: no nudges (the play triangle is drawn optically centred
+    // already) and a size of the container's parity, since centring snaps to
+    // whole pixels and an odd glyph in an even chip lands half a pixel up and
+    // to the left.
+    void attachmentGlyphsSitExactlyInTheMiddleOfTheirButtons()
+    {
+        failOnQmlWarnings();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString notes = dir.filePath(QStringLiteral("Meeting notes.txt"));
+        {
+            QFile file(notes);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("Bring the tickets.\n");
+        }
+        OpenChat::ChatController controller;
+        controller.injectDemoAttachmentsForCapture();
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to click into");
+        window->resize(1000, 1400);
+
+        // A file card in the tray beside the demo's photo, and the menu open.
+        controller.attachFiles({QUrl::fromLocalFile(notes)});
+        auto *staged = qobject_cast<QAbstractItemModel *>(controller.stagedAttachments());
+        QVERIFY(staged);
+        QTRY_COMPARE(staged->rowCount(), 2);
+        QTRY_VERIFY_WITH_TIMEOUT(staged->data(staged->index(1, 0),
+                                              staged->roleNames().key("ready")).toBool(), 20'000);
+        auto *button = findVisualItem(window->contentItem(), QStringLiteral("attachButton"));
+        auto *menu = window->findChild<QObject *>(QStringLiteral("attachmentMenu"));
+        QVERIFY(button && menu);
+        clickItem(window, button);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::qWait(400); // the rows rise into place
+
+        QList<QQuickItem *> roots{findVisualItem(window->contentItem(), QStringLiteral("messageComposer")),
+                                  menu->property("contentItem").value<QQuickItem *>()};
+        const std::function<void(QQuickItem *)> collectLoaders = [&](QQuickItem *item) {
+            if (item->objectName() == QLatin1String("attachmentLoader"))
+                roots.append(item);
+            for (QQuickItem *child : item->childItems())
+                collectLoaders(child);
+        };
+        collectLoaders(window->contentItem());
+        QVERIFY(!roots.contains(nullptr));
+        QVERIFY2(roots.size() >= 6, "the demo's bubbles should be on screen");
+
+        int checked = 0;
+        QStringList offCentre;
+        const std::function<void(QQuickItem *)> check = [&](QQuickItem *item) {
+            const QByteArray type = item->metaObject()->className();
+            const bool glyph = type.startsWith("ProfileGlyph") || item->inherits("QQuickShape");
+            auto *anchors = item->property("anchors").value<QObject *>();
+            QQuickItem *parent = item->parentItem();
+            if (glyph && item->isVisible() && anchors && parent
+                && anchors->property("centerIn").value<QQuickItem *>() == parent) {
+                ++checked;
+                const qreal dx = item->x() + item->width() / 2 - parent->width() / 2;
+                const qreal dy = item->y() + item->height() / 2 - parent->height() / 2;
+                if (std::abs(dx) > 0.01 || std::abs(dy) > 0.01)
+                    offCentre.append(QStringLiteral("%1 %2x%3 in %4 %5x%6: off by (%7, %8)")
+                                         .arg(QString::fromLatin1(type)).arg(item->width()).arg(item->height())
+                                         .arg(QString::fromLatin1(parent->metaObject()->className()))
+                                         .arg(parent->width()).arg(parent->height()).arg(dx).arg(dy));
+            }
+            for (QQuickItem *child : item->childItems())
+                check(child);
+        };
+        for (QQuickItem *root : std::as_const(roots))
+            check(root);
+        // The four menu chips, the tray's file chip, the "+" and the cross,
+        // the video's play button and the audio row's: at the very least.
+        QVERIFY2(checked >= 8, qPrintable(QString::number(checked)));
+        QVERIFY2(offCentre.isEmpty(), qPrintable(offCentre.join(QStringLiteral("\n"))));
     }
 
     // The chat with a sample of every kind (--attachment-demo): each bubble

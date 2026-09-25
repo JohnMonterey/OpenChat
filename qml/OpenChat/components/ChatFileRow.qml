@@ -77,7 +77,6 @@ Item {
         Text {
             visible: file.extension.length > 0
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.horizontalCenterOffset: -1
             y: 23
             text: file.extension
             textFormat: Text.PlainText

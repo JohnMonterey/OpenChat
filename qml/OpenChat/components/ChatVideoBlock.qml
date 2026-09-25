@@ -66,9 +66,10 @@ Item {
         color: playMouse.containsMouse ? "#c0000000" : "#a0000000"
         border.width: 2
         border.color: "#e6ffffff"
+        // The play glyph is drawn with its centroid in the middle, which is
+        // where the eye puts a triangle's centre; no further nudge.
         ProfileGlyph {
             anchors.centerIn: parent
-            anchors.horizontalCenterOffset: 2
             width: 22
             height: 22
             kind: "play"

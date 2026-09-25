@@ -909,8 +909,16 @@ public:
                 message.quotedSenderDeviceId = content->quotedSender;
                 message.quotedBody = content->quotedBody;
             }
-            if (isAttachment)
-                message.attachment = content->attachment;
+            // The store keeps no descriptor for an id this conversation has
+            // already used (the message would borrow another attachment's
+            // bytes), so the message surfaced now says the same as the one
+            // read back later: it has none, and shows as unavailable.
+            if (isAttachment) {
+                const auto fresh = store.canEnqueueAttachment(envelope.conversationId,
+                                                              content->attachment->attachmentId);
+                if (!fresh.hasValue() || fresh.value())
+                    message.attachment = content->attachment;
+            }
 
             const auto committed =
                 store.commitReceive(message, envelope.envelopeId, serverSequence, mlsState);

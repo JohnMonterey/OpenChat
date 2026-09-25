@@ -149,6 +149,8 @@ public:
             return Result<bool, RepositoryError>::success(false);
         seen.insert(envelopeId.bytes());
         received.append(message);
+        if (message.attachment)
+            attachmentIds.insert(message.conversationId.bytes() + message.attachment->attachmentId.bytes());
         lastMlsState = mlsState.toByteArray();
         watermarkValue = std::max(watermarkValue, watermark);
         return Result<bool, RepositoryError>::success(true);
@@ -3089,6 +3091,20 @@ void SyncEngineTest::attachmentMessageArrivesWithItsDescriptorAndQuote()
     QCOMPARE(*answer.replyToId, quote.target);
     QCOMPARE(*answer.quotedSenderDeviceId, quote.sender);
     QCOMPARE(answer.quotedBody, quote.body);
+
+    // An id the conversation already used gets no descriptor stored, and
+    // the message surfaced says so too: it would otherwise show a transfer
+    // that can never move, until the chat was reopened.
+    std::optional<bool> surfacedWithDescriptor;
+    QObject::connect(&engine, &SyncEngine::messageReceived, &engine, [&](const MessageRecord &message) {
+        surfacedWithDescriptor = message.attachment.has_value();
+    });
+    const QByteArray again = encodeMessageContent(MessageContent::attachmentMessage(QStringLiteral("Again"), photo));
+    engine.handleEnvelope(incomingEnvelope(conversation, mls.senderDevice, "ENC:" + again), 10);
+    QCOMPARE(store.received.size(), 3);
+    QCOMPARE(store.received.at(2).kind, ContentKind::Attachment);
+    QVERIFY(!store.received.at(2).attachment);
+    QCOMPARE(surfacedWithDescriptor, std::optional<bool>(false));
 }
 
 void SyncEngineTest::attachmentFromAnUnexpectedCredentialIsDroppedLikeText()

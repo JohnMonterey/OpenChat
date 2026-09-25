@@ -51,10 +51,18 @@ jobs:
           fw="$app/Contents/Frameworks"
           # Libraries a copied library needs but macdeployqt left behind
           # (brotli, webp, sharpyuv): copy them from Homebrew, then repeat.
+          # A copied dylib keeps its Homebrew install name; give every one
+          # an @rpath id like the rest.
+          for lib in "$fw"/*.dylib; do
+            chmod u+w "$lib"
+            install_name_tool -id "@rpath/$(basename "$lib")" "$lib"
+          done
           for pass in 1 2 3; do
             missing=0
             while IFS= read -r file; do
               for dep in $(otool -L "$file" | tail -n +2 | awk '{print $1}'); do
+                # A dylib lists its own id first; that is not a dependency.
+                [ "$(basename "$dep")" = "$(basename "$file")" ] && continue
                 case "$dep" in
                   @rpath/*)
                     name="${dep#@rpath/}"

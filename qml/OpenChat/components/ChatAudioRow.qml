@@ -190,11 +190,15 @@ Item {
         x: wave.x
         y: wave.y + wave.height + 2
         width: (cancel.visible ? cancel.x - 6 : parent.width) - x
+        // A left-to-right line whatever the file is called: the name is set
+        // apart (FSI … PDI), so a Hebrew or Arabic one neither swaps the two
+        // times round nor pushes the line to the right.
         text: audio.complete || audio.row.transferText.length === 0
-              ? audio.clock(audio.positionMs) + " / " + audio.clock(audio.durationMs)
-                + (audio.row.fileName.length > 0 ? "  ·  " + audio.row.fileName : "")
+              ? "\u200E" + audio.clock(audio.positionMs) + " / " + audio.clock(audio.durationMs)
+                + (audio.row.fileName.length > 0 ? "  ·  \u2068" + audio.row.fileName + "\u2069" : "")
               : audio.row.transferText
         textFormat: Text.PlainText
+        horizontalAlignment: Text.AlignLeft
         elide: Text.ElideRight
         color: audio.row.transferState >= 2 && !audio.skinned ? Theme.errorText : audio.secondaryInk
         style: audio.skinned ? Text.Raised : Text.Normal

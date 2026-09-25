@@ -115,6 +115,7 @@ Item {
         width: parent.width - x
         text: file.title
         textFormat: Text.PlainText
+        horizontalAlignment: Text.AlignLeft // a right-to-left name too
         elide: Text.ElideMiddle
         color: file.ink
         style: file.skinned ? Text.Raised : Text.Normal
@@ -137,6 +138,7 @@ Item {
                             - (cancel.visible ? cancel.width + 4 : 0))
             text: file.complete || file.row.transferText.length === 0 ? file.row.sizeText : file.row.transferText
             textFormat: Text.PlainText
+            horizontalAlignment: Text.AlignLeft
             elide: Text.ElideRight
             color: file.row.transferState >= 2 && !file.skinned ? Theme.errorText : file.secondaryInk
             style: file.skinned ? Text.Raised : Text.Normal

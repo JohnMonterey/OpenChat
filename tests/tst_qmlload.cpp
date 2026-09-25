@@ -17,6 +17,7 @@
 #include <QSettings>
 #include <QUrl>
 #include <QWindow>
+#include <QTextLayout>
 #include <QtTest>
 #include <QScopeGuard>
 #include <QStyleHints>
@@ -3157,6 +3158,96 @@ private slots:
         appearance->setDarkMode(false);
     }
 
+    // A photo is fitted whole in the viewer, whatever its shape.
+    void theViewerFitsAnyPhotoWhole()
+    {
+        failOnQmlWarnings();
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQuickWindow window;
+        window.resize(1000, 900);
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "ChatMediaViewer");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        std::unique_ptr<QObject> created(
+            component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+        auto *viewer = qobject_cast<QQuickItem *>(created.get());
+        QVERIFY(viewer);
+        QTRY_COMPARE(viewer->height(), qreal(900));
+        auto *frame = findVisualItem(viewer, QStringLiteral("chatMediaViewerFrame"));
+        QVERIFY(frame);
+        const qreal topRoom = viewer->property("topRoom").toReal();
+        for (const QSize media : {QSize(164, 2048), QSize(2048, 120), QSize(1600, 1200), QSize(24, 2048)}) {
+            QVariantMap info{{"stableId", "photo"}, {"attachmentKind", 1}, {"mediaWidth", media.width()},
+                             {"mediaHeight", media.height()}, {"caption", QString()}};
+            QMetaObject::invokeMethod(viewer, "show", Q_ARG(QVariant, info), Q_ARG(QVariant, QVariant()));
+            const QRectF room(0, topRoom, viewer->width(), viewer->height() - topRoom);
+            QTRY_VERIFY2(qAbs(frame->height() - viewer->property("fitHeight").toReal()) < 0.5
+                             && qAbs(frame->width() - viewer->property("fitWidth").toReal()) < 0.5,
+                         qPrintable(QStringLiteral("%1x%2").arg(media.width()).arg(media.height())));
+            const QRectF placed(frame->x(), frame->y(), frame->width(), frame->height());
+            QVERIFY2(room.contains(placed.adjusted(0.5, 0.5, -0.5, -0.5)),
+                     qPrintable(QStringLiteral("%1x%2 at %3,%4 %5x%6").arg(media.width()).arg(media.height())
+                                    .arg(placed.x()).arg(placed.y()).arg(placed.width()).arg(placed.height())));
+            // Its own shape, not squeezed.
+            const qreal shape = qreal(media.width()) / media.height();
+            QVERIFY(qAbs(placed.width() / placed.height() - shape) <= shape * 0.01);
+            QMetaObject::invokeMethod(viewer, "close", Q_ARG(QVariant, true));
+        }
+    }
+
+    // A Hebrew or Arabic file name must not turn the audio row's time line
+    // round ("3:06 / 0:00") or push it to the right.
+    void rightToLeftNamesLeaveTheLinesLeftToRight()
+    {
+        failOnQmlWarnings();
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        const QString hebrew = QStringLiteral("\u05E9\u05D9\u05E8 \u05E2\u05E8\u05E9.m4a");
+        std::unique_ptr<QObject> message(component.createWithInitialProperties({
+            {"direction", 0}, {"deliveryState", 3}, {"body", QString()}, {"timestamp", "10:15 AM"},
+            {"kind", 4}, {"dateLabel", ""}, {"showDateDivider", false}, {"senderName", "Dana"},
+            {"width", 720}, {"attachmentKind", 3}, {"fileName", hebrew}, {"mimeType", "audio/ogg"},
+            {"sizeText", "1 MB"}, {"durationMs", 186'000.0}, {"transferState", 1}, {"transferText", QString()}}));
+        QVERIFY2(message, qPrintable(component.errorString()));
+        auto *time = message->findChild<QQuickItem *>(QStringLiteral("chatAudioTime"));
+        QVERIFY(time);
+        const QString text = time->property("text").toString();
+        QVERIFY(text.contains(hebrew));
+        QVERIFY(!text.isRightToLeft());
+        QCOMPARE(time->property("effectiveHorizontalAlignment").toInt(), int(Qt::AlignLeft));
+        // Laid out, the position still comes before the length.
+        QTextLayout layout(text, QFont(QStringLiteral("Segoe UI"), 11));
+        layout.beginLayout();
+        QTextLine line = layout.createLine();
+        line.setLineWidth(2000);
+        layout.endLayout();
+        const int position = int(text.indexOf(QStringLiteral("0:00")));
+        const int length = int(text.indexOf(QStringLiteral("3:06")));
+        QVERIFY(position >= 0 && length > position);
+        QVERIFY(line.cursorToX(position) < line.cursorToX(length));
+        QVERIFY(line.cursorToX(length) < line.cursorToX(int(text.indexOf(hebrew.left(1)))));
+
+        // A file's name and its line keep to the left as well.
+        std::unique_ptr<QObject> file(component.createWithInitialProperties({
+            {"direction", 0}, {"deliveryState", 3}, {"body", QString()}, {"timestamp", "10:15 AM"},
+            {"kind", 4}, {"dateLabel", ""}, {"showDateDivider", false}, {"senderName", "Dana"},
+            {"width", 720}, {"attachmentKind", 4}, {"fileName", QStringLiteral("\u05D7\u05E9\u05D1\u05D5\u05DF.pdf")},
+            {"mimeType", "application/pdf"}, {"sizeText", "1 MB"}, {"transferState", 0},
+            {"transferText", QStringLiteral("Waiting for \u2068\u05D3\u05E0\u05D4\u2069")}}));
+        QVERIFY2(file, qPrintable(component.errorString()));
+        for (const QString &name : {QStringLiteral("chatFileName"), QStringLiteral("chatFileStatus")}) {
+            auto *item = file->findChild<QQuickItem *>(name);
+            QVERIFY(item);
+            QCOMPARE(item->property("effectiveHorizontalAlignment").toInt(), int(Qt::AlignLeft));
+        }
+    }
+
     // What came from the other side (a file's name, a caption, a sender's
     // name in the transfer line, a quote) is only ever shown as plain text,
     // wherever an attachment shows it.
@@ -3585,7 +3676,7 @@ private slots:
         QTRY_VERIFY(stream != nullptr);
         stream->read(qint64(48000) * 2 * streamChannels * 2); // two seconds of it
         QTRY_VERIFY(row->property("positionMs").toReal() >= 1500);
-        QVERIFY(time->property("text").toString().startsWith(QStringLiteral("0:0")));
+        QVERIFY(time->property("text").toString().startsWith(QStringLiteral("\u200E0:0")));
         captureAttachmentShot(window, QStringLiteral("audio-playing"));
 
         // Its bubble scrolls away and is gone; the sound plays on.

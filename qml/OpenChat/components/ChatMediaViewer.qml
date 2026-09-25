@@ -44,8 +44,12 @@ Item {
         : poster.sourceAspect > 0 ? poster.sourceAspect : mediaAspect
     readonly property real topRoom: 64
     readonly property real bottomRoom: (kind === 2 ? 64 : 24) + (captionText.visible ? captionText.height + 12 : 0)
-    readonly property real fitWidth: Math.max(80, Math.min(width - 56, (height - topRoom - bottomRoom) * aspect))
-    readonly property real fitHeight: fitWidth / aspect
+    // Whole, whatever its shape: a narrow full-page screenshot is as tall as
+    // the room and as narrow as it is, never cut off above and below.
+    readonly property real roomWidth: Math.max(1, width - 56)
+    readonly property real roomHeight: Math.max(1, height - topRoom - bottomRoom)
+    readonly property real fitHeight: Math.max(1, Math.min(roomHeight, roomWidth / aspect))
+    readonly property real fitWidth: Math.max(1, fitHeight * aspect) // a pixel at least, to draw
     property rect tileRect: Qt.rect(0, 0, 0, 0)
 
     anchors.fill: parent

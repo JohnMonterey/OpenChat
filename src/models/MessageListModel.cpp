@@ -220,8 +220,10 @@ QString MessageListModel::transferText(const Message &message) const
     if (message.kind != MessageKind::Attachment)
         return {};
     const bool outgoing = message.direction == MessageDirection::Outgoing;
-    const QString sender = message.transferPeer.isEmpty() ? QStringLiteral("The sender")
-                                                          : message.transferPeer;
+    // A name is set apart (FSI … PDI): a right-to-left one would otherwise
+    // turn the whole line round.
+    const QString peer = u'\u2068' + message.transferPeer + u'\u2069';
+    const QString sender = message.transferPeer.isEmpty() ? QStringLiteral("The sender") : peer;
     switch (message.transferState) {
     case AttachmentTransferState::Ready:
         return {};
@@ -254,7 +256,7 @@ QString MessageListModel::transferText(const Message &message) const
     }
     // Nothing has come yet: the sender has not started (or is offline).
     if (message.transferDone <= 0 && !message.transferPeer.isEmpty())
-        return QStringLiteral("Waiting for %1").arg(message.transferPeer);
+        return QStringLiteral("Waiting for %1").arg(peer);
     return QStringLiteral("Receiving… %1 of %2").arg(message.transferDone).arg(message.transferTotal);
 }
 

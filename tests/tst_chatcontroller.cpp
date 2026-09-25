@@ -2693,7 +2693,7 @@ private slots:
         QCOMPARE(role(0, MessageListModel::KindRole).toInt(), int(MessageKind::Attachment));
         QCOMPARE(role(0, MessageListModel::FileNameRole).toString(), QStringLiteral("report.pdf"));
         QCOMPARE(role(0, MessageListModel::SizeTextRole).toString(), QStringLiteral("225 KB"));
-        QCOMPARE(role(0, MessageListModel::TransferTextRole).toString(), QStringLiteral("Waiting for bob"));
+        QCOMPARE(role(0, MessageListModel::TransferTextRole).toString(), QStringLiteral("Waiting for \u2068bob\u2069"));
         QVERIFY(!role(0, MessageListModel::CanCancelRole).toBool());
         QVERIFY(!role(0, MessageListModel::CanSaveRole).toBool());
         // Announced by what it is.

@@ -295,7 +295,7 @@ private slots:
         const auto text = [&model](const Message &message) { return model.transferText(message); };
         QCOMPARE(text(photo), QStringLiteral("Receiving… 3 of 5"));
         photo.transferDone = 0;
-        QCOMPARE(text(photo), QStringLiteral("Waiting for Alice"));
+        QCOMPARE(text(photo), QStringLiteral("Waiting for \u2068Alice\u2069")); // the name set apart
         photo.transferState = AttachmentTransferState::Failed;
         photo.transferReason = 1;
         QCOMPARE(text(photo), QStringLiteral("Couldn't receive this photo"));
@@ -303,7 +303,7 @@ private slots:
         QCOMPARE(text(photo), QStringLiteral("Not enough space to receive this"));
         photo.transferState = AttachmentTransferState::Cancelled;
         photo.transferReason = 3;
-        QCOMPARE(text(photo), QStringLiteral("Alice stopped sending this"));
+        QCOMPARE(text(photo), QStringLiteral("\u2068Alice\u2069 stopped sending this"));
         photo.transferState = AttachmentTransferState::Unavailable;
         QCOMPARE(text(photo), QStringLiteral("Couldn't show this attachment"));
 

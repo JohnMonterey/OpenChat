@@ -886,8 +886,19 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
         // Stored whether or not the recipient is connected: an offline device
         // receives it from its inbox replay when it next connects.
         const auto submitted = m_envelopes.submit(device, message);
-        if (!submitted.hasValue())
+        if (!submitted.hasValue()) {
+            // A device that does not exist or was retired (a login elsewhere)
+            // will never take it: [9 (RecipientUnavailable), envelopeId], so
+            // the sender stops retrying at once. Anything else goes
+            // unanswered and is retried.
+            if (submitted.error() == RelayError::NotFound || submitted.error() == RelayError::Revoked) {
+                QCborArray refused;
+                refused.append(9);
+                refused.append(decoded.value().envelopeId.bytes());
+                socket->sendBinaryMessage(refused.toCborValue().toCbor());
+            }
             return;
+        }
         QCborArray ack;
         ack.append(1); // RelayAccepted
         ack.append(decoded.value().envelopeId.bytes());

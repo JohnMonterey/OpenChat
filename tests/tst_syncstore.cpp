@@ -1541,6 +1541,13 @@ void SyncStoreTest::pendingFramesAreCountedUntilSettled()
     QCOMPARE(store.pendingLowPriorityCount().value(), 2);
     QVERIFY(store.failSend(failed.envelopeId, failed.messageId).hasValue());
     QCOMPARE(store.pendingLowPriorityCount().value(), 1);
+    // Its first attempt out, it still counts; once the relay has left it
+    // unanswered past that, it retries without counting.
+    QVERIFY(store.scheduleRetry(waiting.envelopeId, 1, 9'000).hasValue());
+    QCOMPARE(store.pendingLowPriorityCount().value(), 1);
+    QVERIFY(!store.claimDue(9'000, 10, 14'000).value().isEmpty());
+    QVERIFY(store.scheduleRetry(waiting.envelopeId, 2, 12'000).hasValue());
+    QCOMPARE(store.pendingLowPriorityCount().value(), 0);
     // Settled frames leave the outbox altogether: no message row stands behind them.
     QVERIFY(!store.markAccepted(accepted.envelopeId).hasValue());
 }

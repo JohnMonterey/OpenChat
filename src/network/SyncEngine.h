@@ -367,8 +367,11 @@ public:
     // recipients, or a stopped engine.
     bool sendAttachmentFrame(const ConversationId &conversation, const QList<DeviceId> &recipients,
                              const QByteArray &frame);
-    // Attachment frames still waiting in the outbox (0 when the store cannot
-    // say). The attachment pump hands over the next frame only at 0.
+    // Attachment frames in the outbox that have not yet been handed to the
+    // link, or are on their first attempt (0 when the store cannot say). The
+    // attachment pump hands over the next frame only at 0; a frame the relay
+    // leaves unanswered past its first attempt retries on its own without
+    // holding up the others.
     [[nodiscard]] int pendingAttachmentFrames() const;
 
     // Sends one sealed media frame on the unreliable datagram path. `payload` is
@@ -442,6 +445,11 @@ signals:
     // the descriptor's key can.
     void attachmentFrameReceived(const OpenChat::ConversationId &conversation,
                                  const OpenChat::DeviceId &senderDevice, const QByteArray &frame);
+    // An envelope to `recipient` was given up because the relay will not take
+    // it: the relay said so (the device does not exist or was retired), or an
+    // attachment frame went through every attempt while the link was up.
+    void recipientUnreachable(const OpenChat::ConversationId &conversation,
+                              const OpenChat::DeviceId &recipient);
     void failedClosed();
     // The relay link (re)connected. Emitted after the engine has resumed its
     // own outbox, so anything a listener sends in response leaves behind the

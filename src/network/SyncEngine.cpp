@@ -675,12 +675,16 @@ public:
 
     void sendClaimed(const OutboxRecord &record, qint64 nowMs)
     {
+        const auto decoded = decodeEnvelope(record.envelope);
         if (record.attemptCount >= config.maxSendAttempts) {
             inflight.remove(record.envelopeId.bytes());
             failOne(record.envelopeId, record.messageId);
+            // A frame is only handed over while the link is up, so a relay
+            // that took none of its attempts will not take it for this device.
+            if (decoded.hasValue() && decoded.value().messageKind == EnvelopeMessageKind::AttachmentControl)
+                emit q->recipientUnreachable(decoded.value().conversationId, decoded.value().recipientDeviceId);
             return;
         }
-        const auto decoded = decodeEnvelope(record.envelope);
         if (!decoded.hasValue()) {
             (void)store.advanceDeliveryState(record.messageId, DeliveryState::Failed);
             (void)store.scheduleRetry(record.envelopeId, record.attemptCount,
@@ -694,7 +698,8 @@ public:
             failOne(record.envelopeId, record.messageId);
             return;
         }
-        inflight.insert(record.envelopeId.bytes(), record.messageId);
+        inflight.insert(record.envelopeId.bytes(),
+                        {record.messageId, decoded.value().conversationId, decoded.value().recipientDeviceId});
         if (store.advanceDeliveryState(record.messageId, DeliveryState::Sending).hasValue()
             && decoded.value().messageKind == EnvelopeMessageKind::MlsPrivateMessage)
             emit q->messageStateChanged(record.messageId, DeliveryState::Sending);
@@ -728,17 +733,19 @@ public:
             emit q->messageStateChanged(messageId, DeliveryState::Failed);
     }
 
-    // The relay refused to hold an envelope because its recipient was not
-    // connected. Current relays store for offline devices and never say this;
-    // an older relay still can, and then the send has nowhere to wait.
+    // The relay will never hold this envelope: its recipient device does not
+    // exist or was retired (a login elsewhere). Older relays said this for
+    // any recipient that was not connected. Either way the send has nowhere
+    // to wait.
     void onUnavailable(const EnvelopeId &envelopeId)
     {
         const auto it = inflight.constFind(envelopeId.bytes());
         if (it == inflight.cend())
             return;
-        const auto messageId = it.value();
+        const InflightSend send = it.value();
         inflight.remove(envelopeId.bytes());
-        failOne(envelopeId, messageId);
+        failOne(envelopeId, send.messageId);
+        emit q->recipientUnreachable(send.conversation, send.recipient);
     }
 
     void onAccepted(const EnvelopeId &envelopeId, quint64 /*serverSequence*/)
@@ -746,7 +753,7 @@ public:
         (void)store.markAccepted(envelopeId);
         const auto it = inflight.constFind(envelopeId.bytes());
         if (it != inflight.cend()) {
-            const MessageId messageId = it.value();
+            const MessageId messageId = it.value().messageId;
             inflight.erase(it);
             const auto progress = fanOut.find(messageId.bytes());
             if (progress != fanOut.end()) {
@@ -1069,7 +1076,13 @@ public:
     Signer signer;
     Clock clock;
     MlsTransactionCoordinator coordinator;
-    QHash<QByteArray, MessageId> inflight;
+    // Envelopes handed to the link and not yet settled, by envelope id.
+    struct InflightSend final {
+        MessageId messageId;
+        ConversationId conversation;
+        DeviceId recipient;
+    };
+    QHash<QByteArray, InflightSend> inflight;
     // Multi-recipient messages still waiting on some envelope, keyed by message
     // id: how many envelopes are unresolved and whether any was accepted.
     struct FanOutProgress final {

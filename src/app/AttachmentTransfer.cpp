@@ -116,6 +116,7 @@ AttachmentTransfer::AttachmentTransfer(ProfileSession &session, SyncEngine &engi
     connect(&m_engine, &SyncEngine::messageReceived, this, &AttachmentTransfer::onMessageReceived);
     connect(&m_engine, &SyncEngine::messageStateChanged, this, &AttachmentTransfer::onMessageStateChanged);
     connect(&m_engine, &SyncEngine::linkUp, this, &AttachmentTransfer::onLinkUp);
+    connect(&m_engine, &SyncEngine::recipientUnreachable, this, &AttachmentTransfer::onRecipientUnreachable);
 
     m_pumpTimer.setInterval(int(std::clamp<qint64>(m_limits.pumpIntervalMs, 1, INT_MAX)));
     connect(&m_pumpTimer, &QTimer::timeout, this, &AttachmentTransfer::pumpOnce);
@@ -296,10 +297,19 @@ void AttachmentTransfer::onMessageStateChanged(const MessageId &messageId, Deliv
     AttachmentRepository *attachments = repository();
     if (attachments == nullptr)
         return;
+    // Only when the message really failed: after a restart the engine can
+    // report one group envelope's failure for a message others received.
     const auto stored = attachments->descriptorFor(messageId);
     if (stored.hasValue() && stored.value() && stored.value()->flow == MessageFlow::Outgoing
-        && stored.value()->state == AttachmentState::Transferring)
+        && stored.value()->state == AttachmentState::Transferring
+        && stored.value()->deliveryState == DeliveryState::Failed)
         finishOutgoing(*stored.value(), AttachmentState::Cancelled, AttachmentFailure::SendFailed);
+}
+
+void AttachmentTransfer::onRecipientUnreachable(const ConversationId &conversation, const DeviceId &recipient)
+{
+    m_unreachable.insert(conversation.bytes() + recipient.bytes());
+    wakePump();
 }
 
 void AttachmentTransfer::onLinkUp()
@@ -463,6 +473,17 @@ QList<DeviceId> AttachmentTransfer::currentRecipients(const StoredAttachment &st
     return recipients;
 }
 
+QList<DeviceId> AttachmentTransfer::reachable(const ConversationId &conversation,
+                                              const QList<DeviceId> &recipients) const
+{
+    QList<DeviceId> devices;
+    for (const DeviceId &device : recipients) {
+        if (!m_unreachable.contains(conversation.bytes() + device.bytes()))
+            devices.append(device);
+    }
+    return devices;
+}
+
 QByteArray AttachmentTransfer::partFrame(const StoredAttachment &stored, int index) const
 {
     const AttachmentDescriptor &descriptor = stored.descriptor;
@@ -486,15 +507,25 @@ bool AttachmentTransfer::sendNextFrame(const StoredAttachment &stored)
         return false;
     }
     const ConversationId &conversation = stored.ref.conversationId;
+    // A device the relay will not take envelopes for is skipped rather than
+    // waited on; should it ask for the parts later, it gets them then.
+    const QList<DeviceId> targets = reachable(conversation, recipients);
+    const auto send = [&](const QByteArray &frame) {
+        if (targets.isEmpty())
+            return true;
+        if (!m_engine.sendAttachmentFrame(conversation, targets, frame))
+            return false;
+        ++m_framesSent;
+        return true;
+    };
     // The preview first, so the bubble shows something at once.
     if (descriptor.hasPreview && !stored.previewSent) {
         const auto preview = attachments->preview(stored.messageId);
         if (preview.hasValue() && previewIsAcceptable(preview.value())) {
             const QByteArray frame = sealAttachmentFrame(descriptor.key, AttachmentFrameType::Preview,
                                                          descriptor.attachmentId, 0, preview.value());
-            if (frame.isEmpty() || !m_engine.sendAttachmentFrame(conversation, recipients, frame))
+            if (frame.isEmpty() || !send(frame))
                 return false;
-            ++m_framesSent;
             (void)attachments->recordFrameSent(stored.messageId, stored.partsSent, true);
             return true;
         }
@@ -512,9 +543,8 @@ bool AttachmentTransfer::sendNextFrame(const StoredAttachment &stored)
         finishOutgoing(stored, AttachmentState::Failed, AttachmentFailure::SendFailed);
         return false;
     }
-    if (!m_engine.sendAttachmentFrame(conversation, recipients, frame))
+    if (!send(frame))
         return false;
-    ++m_framesSent;
     const int sent = index + 1;
     if (!attachments->recordFrameSent(stored.messageId, sent, true).hasValue())
         qCWarning(mediaLog) << "An attachment's progress could not be recorded";
@@ -595,6 +625,8 @@ void AttachmentTransfer::onFrameReceived(const ConversationId &conversation, con
     const auto split = splitAttachmentFrame(frame);
     if (attachments == nullptr || !local || !split || sender == *local)
         return;
+    // Whatever the relay said about it before, it is sending now.
+    m_unreachable.remove(conversation.bytes() + sender.bytes());
     // Nothing is kept for a conversation that is gone or was left.
     const auto live = attachments->conversationIsLive(conversation);
     if (!live.hasValue() || !live.value())

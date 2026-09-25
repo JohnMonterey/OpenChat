@@ -439,7 +439,7 @@ public:
     {
         int pending = 0;
         for (const StoredOutbox &item : outboxes)
-            pending += item.record.priority == 1
+            pending += item.record.priority == 1 && item.record.attemptCount <= 1
                        && (item.record.state == OutboxState::Pending
                            || item.record.state == OutboxState::Leased);
         return Result<int, RepositoryError>::success(pending);

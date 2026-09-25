@@ -686,9 +686,11 @@ Result<int, RepositoryError> SqlCipherSyncStore::pendingLowPriorityCount()
 {
     return m_database.withConnection([&](sqlite3 *database) {
         // state 0 Pending, 1 Leased: the outbox_due index narrows it to the
-        // few rows still waiting.
+        // few rows still waiting. A row past its first attempt is one the
+        // relay left unanswered; it retries on its own.
         Statement statement(database,
-                            "SELECT COUNT(*) FROM outbox WHERE state IN (0,1) AND priority=1");
+                            "SELECT COUNT(*) FROM outbox WHERE state IN (0,1) AND priority=1 "
+                            "AND attempt_count <= 1");
         if (!statement.isValid() || sqlite3_step(statement.get()) != SQLITE_ROW)
             return Result<int, RepositoryError>::failure(
                 internalError(QStringLiteral("pendingLowPriorityCount.read")));

@@ -473,6 +473,74 @@ private slots:
         QVERIFY(!f.anyFailedClosed());
     }
 
+    void aRetiredMemberDeviceNeitherStallsNorCancelsAnything()
+    {
+        Fixture f;
+        QVERIFY(f.setUp());
+        Peer *carol = f.fx.addPeer(QStringLiteral("carol"));
+        QVERIFY(carol);
+        const auto group = f.fx.makeGroupOf({&f.fx.a(), &f.fx.b(), carol});
+        QVERIFY(group);
+        const QList<DeviceId> others{f.fx.b().device, carol->device};
+        f.members.insert(group->bytes(), {f.fx.a().device, f.fx.b().device, carol->device});
+        Side &alice = f.start(f.fx.a());
+        Side &bob = f.start(f.fx.b());
+        // Carol logged in elsewhere: the relay refuses anything for this
+        // device, and says so.
+        const auto relay = [&] {
+            Peer &from = f.fx.a();
+            for (const CiphertextEnvelopeV1 &envelope : from.transport.sent) {
+                if (envelope.recipientDeviceId == carol->device && !from.routed.contains(envelope.envelopeId.bytes())) {
+                    from.routed.insert(envelope.envelopeId.bytes());
+                    from.transport.onRecipientUnavailable(envelope.envelopeId);
+                }
+            }
+            f.fx.routeAll();
+        };
+        const auto groupFile = f.send(alice, *group, others, true,
+                                      fileAttachment(randomBytes(3 * AttachmentLimits::partBytes, 21)));
+        QVERIFY(groupFile);
+        const auto directFile = f.send(alice, f.direct, {f.fx.b().device}, false,
+                                       fileAttachment(randomBytes(AttachmentLimits::partBytes, 22)));
+        QVERIFY(directFile);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (elapsed.elapsed() < 20'000
+               && (Fixture::stateOf(bob, *groupFile) != AttachmentState::Complete
+                   || Fixture::stateOf(bob, *directFile) != AttachmentState::Complete)) {
+            QTest::qWait(1);
+            relay();
+        }
+        // Both arrive at bob's, in seconds rather than minutes per frame.
+        QCOMPARE(Fixture::stateOf(bob, *groupFile), AttachmentState::Complete);
+        QCOMPARE(Fixture::stateOf(bob, *directFile), AttachmentState::Complete);
+        QCOMPARE(Fixture::stateOf(alice, *groupFile), AttachmentState::Complete);
+        // The relay refused carol's device the message itself, so no frame
+        // was pushed to it.
+        QCOMPARE(framesFrom(f.fx.a(), AttachmentFrameType::Part, carol->device), 0);
+        QCOMPARE(framesFrom(f.fx.a(), AttachmentFrameType::Cancel), 0);
+        QVERIFY(!f.anyFailedClosed());
+    }
+
+    void aFailureReportedForAMessageThatWentOutCancelsNothing()
+    {
+        Fixture f;
+        QVERIFY(f.setUp());
+        Side &alice = f.start(f.fx.a());
+        Side &bob = f.start(f.fx.b());
+        const auto id = f.send(alice, f.direct, {f.fx.b().device}, false,
+                               fileAttachment(randomBytes(3 * AttachmentLimits::partBytes, 23)));
+        QVERIFY(id);
+        QVERIFY(f.settleUntil([&] { return Fixture::heldParts(bob, Fixture::stored(alice, *id)->ref) >= 1; }));
+        QCOMPARE(Fixture::stored(alice, *id)->deliveryState, DeliveryState::Sent);
+        // After a restart the engine can report one stale group envelope's
+        // failure for a message the others received; the row says Sent.
+        emit f.fx.a().engine().messageStateChanged(*id, DeliveryState::Failed);
+        QVERIFY(f.settleUntil([&] { return Fixture::stateOf(bob, *id) == AttachmentState::Complete; }));
+        QCOMPARE(Fixture::stateOf(alice, *id), AttachmentState::Complete);
+        QCOMPARE(framesFrom(f.fx.a(), AttachmentFrameType::Cancel), 0);
+    }
+
     void aLinkThatDropsPausesTheTransferAndItResumes()
     {
         Fixture f;

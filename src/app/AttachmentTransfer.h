@@ -179,6 +179,10 @@ private:
     [[nodiscard]] bool sendAnswerFrame();
     [[nodiscard]] QByteArray partFrame(const StoredAttachment &stored, int index) const;
     [[nodiscard]] QList<DeviceId> currentRecipients(const StoredAttachment &stored) const;
+    // Those of `recipients` the relay has not given up on (see m_unreachable).
+    [[nodiscard]] QList<DeviceId> reachable(const ConversationId &conversation,
+                                            const QList<DeviceId> &recipients) const;
+    void onRecipientUnreachable(const ConversationId &conversation, const DeviceId &recipient);
     void finishOutgoing(const StoredAttachment &stored, AttachmentState state, AttachmentFailure reason);
 
     // Receiving.
@@ -230,6 +234,10 @@ private:
     QHash<QByteArray, qint64> m_lastAnswerMs; // message id ‖ requester → when
     // Attachments being assembled or adopted on a worker (message id bytes).
     QSet<QByteArray> m_validating;
+    // Devices the relay would not take envelopes for in this run (conversation
+    // id ‖ device id bytes): a group member's retired device, typically. No
+    // more frames are pushed to them; one that asks for parts is back.
+    QSet<QByteArray> m_unreachable;
     // When the message of each incoming attachment still under way arrived
     // in this run (message id bytes → ms).
     QHash<QByteArray, qint64> m_arrivedAtMs;

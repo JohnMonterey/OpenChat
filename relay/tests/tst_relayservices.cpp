@@ -156,6 +156,7 @@ private slots:
     void expiredEnvelopeRejectedAtSubmit();
     void acknowledgePrunesDeliveredInbox();
     void revokedDeviceIsRejectedEverywhere();
+    void envelopeToARetiredDeviceIsRefusedAtOnce();
     void directoryResolvesHandleToActiveDevices();
     void directoryExcludesRevokedDevices();
     void directoryResolvesAccountToHandle();
@@ -982,6 +983,41 @@ void RelayServicesTest::revokedDeviceIsRejectedEverywhere()
     QCOMPARE(packages.publish(reg.account, reg.device, QByteArray("kp")).error(),
              RelayError::Revoked);
     QCOMPARE(packages.claim(reg.device, reg.device).error(), RelayError::Revoked);
+}
+
+void RelayServicesTest::envelopeToARetiredDeviceIsRefusedAtOnce()
+{
+    const auto sender = registerDevice(QStringLiteral("nack_sender"));
+    const auto retired = registerDevice(QStringLiteral("nack_retired"));
+    AuthService auth(*m_store);
+    EnvelopeService envelopes(*m_store);
+    KeyPackageService packages(*m_store);
+    DirectoryService directory(*m_store);
+    QVERIFY(auth.revokeDevice(retired.device).hasValue());
+    RelayServer server(*m_store, auth, envelopes, packages, directory, RelayServer::Limits{}, nullptr);
+    const auto port = server.start(QHostAddress::LocalHost, 0);
+    QVERIFY(port);
+    QNetworkRequest request(QUrl(QStringLiteral("ws://127.0.0.1:%1/v1/live?since=0").arg(port)));
+    request.setRawHeader("Authorization", "Bearer " + sender.tokens.accessToken);
+    QWebSocket socket;
+    QSignalSpy replies(&socket, &QWebSocket::binaryMessageReceived);
+    socket.open(request);
+    QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+
+    // A retired device and one that never existed will never take it: the
+    // sender hears so at once instead of retrying for minutes.
+    for (const DeviceId &recipient : {retired.device, DeviceId::generate()}) {
+        replies.clear();
+        const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device, recipient,
+                                             "to nobody", m_now);
+        socket.sendBinaryMessage(encodeCanonical(envelope));
+        QTRY_COMPARE(replies.size(), 1);
+        const auto reply = QCborValue::fromCbor(replies.first().first().toByteArray()).toArray();
+        QCOMPARE(reply.at(0).toInteger(), 9); // RecipientUnavailable
+        QCOMPARE(reply.at(1).toByteArray(), envelope.envelopeId.bytes());
+    }
+    socket.close();
+    QTRY_COMPARE(socket.state(), QAbstractSocket::UnconnectedState);
 }
 
 void RelayServicesTest::directoryResolvesHandleToActiveDevices()

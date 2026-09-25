@@ -30,8 +30,12 @@ its own link was down. Both refusals are gone:
 
 - `EnvelopeService::submit` no longer takes or checks whether the recipient
   is connected, and the relay no longer sends the type-9 *RecipientUnavailable*
-  frame. The client still handles that frame, so a message sent through a relay
-  that has not been redeployed fails visibly instead of hanging.
+  frame for an offline device. It sends it only for a recipient device that
+  does not exist or was retired (a login elsewhere retires an account's other
+  devices), which will never take the envelope; the sender then gives up on it
+  at once instead of retrying for minutes. The client handles that frame, so a
+  message sent through a relay that has not been redeployed fails visibly
+  instead of hanging.
 - `SyncEngine` commits every outgoing text as *Queued* with a pending outbox
   row. The outbox is drained when the link comes up, on the one-second retry
   timer, and when the engine starts after a restart.

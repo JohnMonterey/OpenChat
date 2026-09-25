@@ -157,6 +157,7 @@ private slots:
     void acknowledgePrunesDeliveredInbox();
     void revokedDeviceIsRejectedEverywhere();
     void envelopeToARetiredDeviceIsRefusedAtOnce();
+    void longDeliveriesTravelInSmallFrames();
     void directoryResolvesHandleToActiveDevices();
     void directoryExcludesRevokedDevices();
     void directoryResolvesAccountToHandle();
@@ -1016,6 +1017,35 @@ void RelayServicesTest::envelopeToARetiredDeviceIsRefusedAtOnce()
         QCOMPARE(reply.at(0).toInteger(), 9); // RecipientUnavailable
         QCOMPARE(reply.at(1).toByteArray(), envelope.envelopeId.bytes());
     }
+    socket.close();
+    QTRY_COMPARE(socket.state(), QAbstractSocket::UnconnectedState);
+}
+
+void RelayServicesTest::longDeliveriesTravelInSmallFrames()
+{
+    // The client counts every frame as a sign of life, so a long catch-up on
+    // a slow downlink must not arrive as one frame per envelope.
+    const auto sender = registerDevice(QStringLiteral("frames_sender"));
+    const auto recipient = registerDevice(QStringLiteral("frames_recipient"));
+    AuthService auth(*m_store);
+    EnvelopeService envelopes(*m_store);
+    KeyPackageService packages(*m_store);
+    DirectoryService directory(*m_store);
+    const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device, recipient.device,
+                                         QByteArray(200 * 1024, 'p'), m_now);
+    QVERIFY(envelopes.submit({sender.account, sender.device}, encodeCanonical(envelope)).hasValue());
+    RelayServer server(*m_store, auth, envelopes, packages, directory, RelayServer::Limits{}, nullptr);
+    const auto port = server.start(QHostAddress::LocalHost, 0);
+    QVERIFY(port);
+    QNetworkRequest request(QUrl(QStringLiteral("ws://127.0.0.1:%1/v1/live?since=0").arg(port)));
+    request.setRawHeader("Authorization", "Bearer " + recipient.tokens.accessToken);
+    QWebSocket socket;
+    int frames = 0;
+    connect(&socket, &QWebSocket::binaryFrameReceived, &socket, [&frames](const QByteArray &, bool) { ++frames; });
+    QSignalSpy messages(&socket, &QWebSocket::binaryMessageReceived);
+    socket.open(request);
+    QTRY_COMPARE(messages.size(), 1);
+    QVERIFY2(frames >= 12, qPrintable(QString::number(frames)));
     socket.close();
     QTRY_COMPARE(socket.state(), QAbstractSocket::UnconnectedState);
 }

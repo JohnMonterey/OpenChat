@@ -214,6 +214,7 @@ private slots:
     void validCiphertextIsDelivered();
     void connectLiveResumesFromWatermark();
     void sendEnvelopeIsAcknowledged();
+    void largeEnvelopesTravelInSmallFrames();
     void sendEnvelopeBeforeConnectFails();
     void sendDatagramUsesTheUnreliableFrame();
     void aCongestedTlsLinkShowsItsBacklogAndDropsMedia();
@@ -597,6 +598,36 @@ void RelayClientTest::sendEnvelopeIsAcknowledged()
     QTRY_COMPARE(observer.acceptedIds.count(), 1);
     QCOMPARE(observer.acceptedIds.first(), envelope.envelopeId.bytes());
     QCOMPARE(observer.acceptedSequences.first(), quint64(77));
+}
+
+void RelayClientTest::largeEnvelopesTravelInSmallFrames()
+{
+    // Every frame tells the relay this device is there, so a long upload on
+    // a slow link never looks like a dead one.
+    RelayTest::CertAuthority ca;
+    RelayTest::FakeWssServer server(RelayTest::serverConfig(ca.localhostLeaf()),
+                                    {QString::fromLatin1(relaySubprotocol)});
+    int frames = 0;
+    QByteArray received;
+    server.onConnected = [&](QWebSocket *socket) {
+        QObject::connect(socket, &QWebSocket::binaryFrameReceived, socket,
+                         [&frames](const QByteArray &, bool) { ++frames; });
+        QObject::connect(socket, &QWebSocket::binaryMessageReceived, socket,
+                         [&received](const QByteArray &message) { received = message; });
+    };
+    QVERIFY(server.isListening());
+    RelayClient client(DeviceId::generate(), AccountId::generate(), wssOnly(server.liveUrl("localhost")),
+                       fixedCredentials("access", "refresh"), RelayLimits{}, slowBackoff());
+    client.setTlsConfiguration(RelayTest::clientConfigTrusting(ca.caCertPem()));
+    Observer observer(&client);
+    client.connectLive(0);
+    QTRY_COMPARE(observer.connects.count(), 1);
+
+    const CiphertextEnvelopeV1 envelope = makeEnvelope(DeviceId::generate(), QByteArray(200 * 1024, 'p'));
+    QVERIFY(client.sendEnvelope(envelope).hasValue());
+    QTRY_VERIFY(!received.isEmpty());
+    QCOMPARE(received, encodeCanonical(envelope));
+    QVERIFY2(frames >= 12, qPrintable(QString::number(frames)));
 }
 
 void RelayClientTest::sendEnvelopeBeforeConnectFails()

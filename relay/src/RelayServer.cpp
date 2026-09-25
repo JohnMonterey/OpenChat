@@ -588,6 +588,10 @@ void RelayServer::onWebSocketConnection()
         raw->setProperty("cosmetics", QUrlQuery(raw->requestUrl())
             .queryItemValue(QStringLiteral("cosmetics")) == QStringLiteral("1"));
         beginCosmeticSession(identity->accountId, raw);
+        // Long envelopes go in small frames: the client counts every frame
+        // as a sign of life, so a long catch-up on a slow downlink never
+        // looks like a dead link.
+        raw->setOutgoingFrameSize(16 * 1024);
         // Detect vanished clients even when TCP has not reported a disconnect.
         auto *heartbeat = new QTimer(raw);
         raw->setProperty("awaitingPong", false);

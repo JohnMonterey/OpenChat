@@ -122,6 +122,11 @@ constexpr qsizetype maxDirectoryDevices = 64;
 constexpr qsizetype directorySigningKeyBytes = 32;
 constexpr qsizetype maxInviteTokenBytes = 4096;
 
+// The largest WebSocket frame this client writes. A message longer than this
+// (an attachment part is ~230 KB) goes in several frames, and the relay counts
+// every frame as a sign of life, so a slow uplink never looks like a dead one.
+constexpr quint64 outgoingFrameBytes = 16 * 1024;
+
 // Bounds on the cosmetics the relay reports; anything outside is malformed.
 constexpr qsizetype maxCosmeticIdChars = 64;
 constexpr qsizetype maxCaseKeyChars = 80;
@@ -279,7 +284,15 @@ public:
         QObject::connect(heartbeat, &QTimer::timeout, q, [this] {
             if (!socket || !subprotocolVerified)
                 return;
+            const bool wrote = wroteSinceTick;
+            wroteSinceTick = false;
             if (awaitingPong) {
+                // The ping went out behind whatever was already queued (an
+                // attachment part on a slow uplink takes longer than a tick),
+                // and the relay's pong behind the ping: bytes still leaving
+                // are a live link.
+                if (wrote)
+                    return;
                 socket->abort();
                 return;
             }
@@ -404,8 +417,12 @@ public:
         socket->setSslConfiguration(hardenedTls());
         socket->setMaxAllowedIncomingFrameSize(limits.maxIncomingFrameBytes);
         socket->setMaxAllowedIncomingMessageSize(limits.maxIncomingMessageBytes);
+        // Large envelopes go in small frames, each of which tells the relay
+        // this device is there while the rest is still on its way.
+        socket->setOutgoingFrameSize(outgoingFrameBytes);
 
         QObject::connect(socket, &QWebSocket::pong, q, [this] { awaitingPong = false; });
+        QObject::connect(socket, &QWebSocket::bytesWritten, q, [this](qint64) { wroteSinceTick = true; });
         // Any frame from the relay proves the link is alive, not only a pong.
         // A long catch-up backlog (attachment parts, say) on a slow downlink
         // queues the relay's pong behind it; waiting for that pong alone would
@@ -471,6 +488,7 @@ public:
 
         subprotocolVerified = true;
         awaitingPong = false;
+        wroteSinceTick = false;
         heartbeat->start(10'000);
         reconnectAttempt = 0;
         refreshAttemptedThisCycle = false;
@@ -878,6 +896,7 @@ public:
     QTimer *reconnectTimer = nullptr;
     QTimer *heartbeat = nullptr;
     bool awaitingPong = false;
+    bool wroteSinceTick = false; // bytes left for the relay since the last tick
     QTimer *connectDeadline = nullptr;
 
     QSslConfiguration tlsConfig;

@@ -87,8 +87,18 @@ jobs:
 
       - name: Sign
         run: |
-          codesign --force --deep --sign - build/OpenChat.app
-          codesign --verify --deep --strict build/OpenChat.app
+          app=build/OpenChat.app
+          # Dangling symlinks (left by frameworks macdeployqt copied only in
+          # part) make codesign fail without naming them.
+          find "$app" -type l ! -exec test -e {} \; -print -delete
+          # Inside out: every library and framework, then the app.
+          find "$app/Contents/Frameworks" "$app/Contents/PlugIns" -type f -name '*.dylib' \
+            -exec codesign --force --sign - {} \;
+          for framework in "$app"/Contents/Frameworks/*.framework; do
+            codesign --force --sign - "$framework"
+          done
+          codesign --force --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Launch check
         run: |

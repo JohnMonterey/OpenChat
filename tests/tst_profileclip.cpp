@@ -258,6 +258,65 @@ private slots:
         QVERIFY(!encodeClipVideo(frames, 15, {300}, 100 * 1024)); // sizes differ
     }
 
+    void decoderRefusesFramesLargerThanAnyClip()
+    {
+        if (!clipCodecAvailable())
+            QSKIP("This build has no libvpx");
+        QVector<QImage> pictures;
+        for (int i = 0; i < 3; ++i)
+            pictures.push_back(movingFrame({160, 90}, i));
+        const auto encoded = encodeClipVideo(pictures, 15, {200}, 100 * 1024);
+        QVERIFY(encoded);
+        const QByteArray keyframe = encoded->first().data;
+        // A profile 0 keyframe codes its size from bit 36: 16 bits of
+        // width - 1, then 16 of height - 1. Claim 8192 px square, which libvpx
+        // would size its buffers for (hundreds of MiB) before failing.
+        QCOMPARE(quint8(keyframe[0]) >> 4, 0x8); // frame marker 2, profile 0, shown, key
+        const auto withSize = [](QByteArray frame, int width, int height) {
+            const auto setBits = [&frame](int offset, int count, quint32 value) {
+                for (int bit = 0; bit < count; ++bit) {
+                    const int at = offset + bit;
+                    const quint8 mask = quint8(0x80 >> (at % 8));
+                    const bool set = (value >> (count - 1 - bit)) & 1;
+                    frame[at / 8] = char(set ? quint8(frame[at / 8]) | mask : quint8(frame[at / 8]) & ~mask);
+                }
+            };
+            setBits(36, 16, quint32(width - 1));
+            setBits(52, 16, quint32(height - 1));
+            return frame;
+        };
+        QCOMPARE(withSize(keyframe, 160, 90), keyframe); // the offsets are right
+
+        ClipVideoDecoder decoder;
+        QCOMPARE(decoder.decode({true, keyframe}, true).size(), QSize(160, 90));
+        decoder.reset();
+        QVERIFY(decoder.decode({true, withSize(keyframe, 8192, 8192)}, true).isNull());
+        QVERIFY(decoder.decode({true, withSize(keyframe, 160, ClipContainer::maxDimension + 2)}, true).isNull());
+        // Frames glued together without an index are decoded as one: the
+        // large one after it is never looked at.
+        decoder.reset();
+        QCOMPARE(decoder.decode({true, keyframe + withSize(keyframe, 8192, 8192)}, true).size(), QSize(160, 90));
+        // With an index, every frame it names is checked.
+        const auto superframe = [](const QList<QByteArray> &frames) {
+            const quint8 marker = quint8(0xC0 | (3 << 3) | (frames.size() - 1));
+            QByteArray packet = frames.join();
+            packet.append(char(marker));
+            for (const QByteArray &frame : frames) {
+                for (int byte = 0; byte < 4; ++byte)
+                    packet.append(char((quint32(frame.size()) >> (8 * byte)) & 0xFF));
+            }
+            packet.append(char(marker));
+            return packet;
+        };
+        decoder.reset();
+        QVERIFY(decoder.decode({true, superframe({keyframe, withSize(keyframe, 8192, 8192)})}, true).isNull());
+        decoder.reset();
+        QCOMPARE(decoder.decode({true, superframe({keyframe})}, true).size(), QSize(160, 90));
+        // The frames after the keyframe take its size and still decode.
+        for (qsizetype i = 1; i < encoded->size(); ++i)
+            QCOMPARE(decoder.decode(encoded->at(i), true).size(), QSize(160, 90));
+    }
+
     void decoderSurvivesGarbage()
     {
         if (!clipCodecAvailable())

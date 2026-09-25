@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <optional>
 #include <vector>
 
 #if OPENCHAT_HAVE_VPX
@@ -370,6 +372,138 @@ std::optional<SongContainer> clipSoundtrack(const QVector<ClipContainer> &segmen
 
 // ---------------------------------------------------------------------------
 
+#if OPENCHAT_HAVE_VPX
+namespace {
+
+// Reads a VP9 uncompressed header's bits, most significant first.
+class BitReader final
+{
+public:
+    explicit BitReader(QByteArrayView bytes) : m_bytes(bytes) {}
+
+    [[nodiscard]] bool ok() const noexcept { return m_ok; }
+    quint32 read(int bits)
+    {
+        quint32 value = 0;
+        for (int bit = 0; bit < bits; ++bit) {
+            if (m_position >= m_bytes.size() * 8) {
+                m_ok = false;
+                return 0;
+            }
+            const auto byte = quint8(m_bytes[m_position / 8]);
+            value = (value << 1) | ((byte >> (7 - m_position % 8)) & 1);
+            ++m_position;
+        }
+        return value;
+    }
+
+private:
+    QByteArrayView m_bytes;
+    qsizetype m_position = 0;
+    bool m_ok = true;
+};
+
+// Whether a VP9 frame's header parses (VP9 bitstream spec, 6.2) and every
+// size it codes itself fits `maxSide` a side. A frame that takes its size
+// from a reference is fine: every reference was such a frame. libvpx sizes
+// its buffers from the header before anything checks them against the
+// container, so this runs first.
+[[nodiscard]] bool vp9FrameFits(QByteArrayView frame, int maxSide)
+{
+    BitReader bits(frame);
+    if (bits.read(2) != 2) // frame_marker
+        return false;
+    int profile = int(bits.read(1));
+    profile |= int(bits.read(1)) << 1;
+    if (profile == 3 && bits.read(1) != 0)
+        return false;
+    if (bits.read(1) == 1) // show_existing_frame: no new picture
+        return bits.ok();
+    const bool keyFrame = bits.read(1) == 0;
+    const bool showFrame = bits.read(1) == 1;
+    const bool errorResilient = bits.read(1) == 1;
+    const auto syncCode = [&] { return bits.read(24) == 0x498342; };
+    const auto colorConfig = [&] {
+        if (profile >= 2)
+            (void)bits.read(1); // ten_or_twelve_bit
+        const quint32 colorSpace = bits.read(3);
+        if (colorSpace != 7) { // not RGB
+            (void)bits.read(1); // color_range
+            if (profile == 1 || profile == 3) {
+                (void)bits.read(2); // subsampling_x, subsampling_y
+                return bits.read(1) == 0; // reserved_zero
+            }
+        } else if (profile == 1 || profile == 3) {
+            return bits.read(1) == 0; // reserved_zero
+        }
+        return true;
+    };
+    const auto sizeFits = [&] {
+        const quint32 width = bits.read(16) + 1;
+        const quint32 height = bits.read(16) + 1;
+        return bits.ok() && width <= quint32(maxSide) && height <= quint32(maxSide);
+    };
+    if (keyFrame)
+        return syncCode() && colorConfig() && sizeFits();
+    const bool intraOnly = !showFrame && bits.read(1) == 1;
+    if (!errorResilient)
+        (void)bits.read(2); // reset_frame_context
+    if (intraOnly) {
+        if (!syncCode() || (profile > 0 && !colorConfig()))
+            return false;
+        (void)bits.read(8); // refresh_frame_flags
+        return sizeFits();
+    }
+    (void)bits.read(8);  // refresh_frame_flags
+    (void)bits.read(12); // three ref_frame_idx and sign_bias
+    for (int reference = 0; reference < 3; ++reference) {
+        if (bits.read(1) == 1) // found_ref: that reference's size
+            return bits.ok();
+    }
+    return sizeFits();
+}
+
+// The packet as libvpx should decode it, or nothing when any frame in it
+// does not fit. Without a superframe index libvpx decodes one frame after
+// another until the data ends, and where one ends only the decoder knows;
+// such a packet gets an index naming it as one frame, so the frame checked
+// here is the only one decoded.
+[[nodiscard]] std::optional<QByteArray> vp9PacketToDecode(const QByteArray &packet, int maxSide)
+{
+    const qsizetype size = packet.size();
+    const auto marker = quint8(packet.back());
+    if ((marker & 0xE0) == 0xC0) {
+        const int frames = (marker & 0x07) + 1;
+        const int magnitude = ((marker >> 3) & 0x03) + 1;
+        const qsizetype indexBytes = 2 + qsizetype(magnitude) * frames;
+        if (size >= indexBytes && quint8(packet[size - indexBytes]) == marker) {
+            qsizetype start = 0;
+            for (int frame = 0; frame < frames; ++frame) {
+                qint64 frameBytes = 0;
+                for (int byte = 0; byte < magnitude; ++byte)
+                    frameBytes |= qint64(quint8(packet[size - indexBytes + 1 + frame * magnitude + byte])) << (8 * byte);
+                if (frameBytes < 1 || frameBytes > size - indexBytes - start
+                    || !vp9FrameFits(QByteArrayView(packet).sliced(start, frameBytes), maxSide))
+                    return std::nullopt;
+                start += frameBytes;
+            }
+            return packet;
+        }
+    }
+    if (!vp9FrameFits(packet, maxSide) || size > qsizetype(std::numeric_limits<quint32>::max()))
+        return std::nullopt;
+    QByteArray indexed = packet;
+    constexpr quint8 oneFrameOfFourByteSize = 0xC0 | (3 << 3);
+    indexed.append(char(oneFrameOfFourByteSize));
+    for (int byte = 0; byte < 4; ++byte)
+        indexed.append(char((quint32(size) >> (8 * byte)) & 0xFF));
+    indexed.append(char(oneFrameOfFourByteSize));
+    return indexed;
+}
+
+} // namespace
+#endif
+
 struct ClipVideoDecoder::State final {
 #if OPENCHAT_HAVE_VPX
     vpx_codec_ctx_t codec{};
@@ -412,8 +546,13 @@ QImage ClipVideoDecoder::decode(const ClipContainer::Frame &frame, bool wantPict
 #if OPENCHAT_HAVE_VPX
     if (!m_state->valid || frame.data.isEmpty())
         return {};
-    if (vpx_codec_decode(&m_state->codec, reinterpret_cast<const uint8_t *>(frame.data.constData()),
-                         unsigned(frame.data.size()), nullptr, 0)
+    // A frame may code a size far past its container's (8192 px square
+    // costs hundreds of MiB inside libvpx), so the header is read first.
+    const auto packet = vp9PacketToDecode(frame.data, ClipContainer::maxDimension);
+    if (!packet)
+        return {};
+    if (vpx_codec_decode(&m_state->codec, reinterpret_cast<const uint8_t *>(packet->constData()),
+                         unsigned(packet->size()), nullptr, 0)
         != VPX_CODEC_OK)
         return {};
     vpx_codec_iter_t iterator = nullptr;

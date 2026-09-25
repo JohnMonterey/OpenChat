@@ -445,6 +445,13 @@ bool attachmentBlobIsValid(const AttachmentDescriptor &descriptor, QByteArrayVie
         if (!size || size->first > AttachmentLimits::maxImageDimension
             || size->second > AttachmentLimits::maxImageDimension)
             return false;
+        // A frame the decoder must hold whole costs memory for its full size
+        // however small it is drawn (8192 px square progressive: ~400 MiB);
+        // this version only sends single-scan baseline, so it is taken only
+        // as large as that.
+        if (jpegIsBuffered(blob)
+            && std::max(size->first, size->second) > AttachmentLimits::maxBufferedImageSide)
+            return false;
         const bool described = descriptor.width != 0 || descriptor.height != 0;
         return !described || (size->first == descriptor.width && size->second == descriptor.height);
     }
@@ -470,6 +477,24 @@ bool previewIsAcceptable(QByteArrayView jpeg)
 }
 
 std::optional<std::pair<int, int>> jpegFrameSize(QByteArrayView jpeg)
+{
+    const auto frame = jpegFrame(jpeg);
+    if (!frame)
+        return std::nullopt;
+    return std::pair{frame->width, frame->height};
+}
+
+bool jpegIsBuffered(QByteArrayView jpeg)
+{
+    const auto frame = jpegFrame(jpeg);
+    // Baseline (C0) and extended sequential (C1) Huffman frames in one scan
+    // stream through the decoder a few rows at a time; everything else
+    // (progressive, a scan per component, arithmetic, lossless) keeps the
+    // whole frame's coefficients.
+    return !frame || (frame->marker != 0xC0 && frame->marker != 0xC1) || jpegScanCount(jpeg) != 1;
+}
+
+std::optional<JpegFrame> jpegFrame(QByteArrayView jpeg)
 {
     const auto byteAt = [&](qsizetype index) { return static_cast<quint8>(jpeg[index]); };
     const qsizetype size = jpeg.size();
@@ -509,7 +534,7 @@ std::optional<std::pair<int, int>> jpegFrameSize(QByteArrayView jpeg)
             // encoder this side makes one, and nothing here trusts it.
             if (width < 1 || height < 1)
                 return std::nullopt;
-            return std::pair{width, height};
+            return JpegFrame{marker, width, height};
         }
         pos += length;
     }

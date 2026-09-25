@@ -42,9 +42,13 @@ public:
     // large); an honest panel picture is never larger than 1280 anyway.
     static constexpr int maxPanelDecodedSide = 1280;
     static constexpr int maxDecodedSide = 2048;
-    // What a picture's header may claim, whatever size it is drawn at; the
-    // decoder scales down while it reads, so this bounds time, not memory.
+    // What a picture's header may claim, whatever size it is drawn at. A
+    // single-scan baseline frame is scaled down while it is read, so this
+    // bounds time rather than memory; a progressive or multi-scan frame is
+    // held whole while it decodes (8192 px square: ~400 MiB), so it is taken
+    // only up to maxBufferedHeaderSide (~25 MiB).
     static constexpr int maxHeaderSide = 8192;
+    static constexpr int maxBufferedHeaderSide = AttachmentLimits::maxBufferedImageSide;
     static constexpr qsizetype maxPictureBytes = qsizetype(AttachmentLimits::maxImageBytes);
     static constexpr int decodeAllocationLimitMb = 32;
 

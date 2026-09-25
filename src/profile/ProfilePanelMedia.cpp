@@ -26,8 +26,10 @@ namespace {
 // Decodes a picture no larger than `side` on its long edge. The bytes passed
 // their arrival checks (a JPEG with 1 to 32 scans), but they are checked
 // again here, since panels and chats both put bytes in: a progressive "scan
-// bomb" re-reads the whole picture per scan. The header may still claim
-// anything, so its size is bounded and the reader's allocation is capped too.
+// bomb" re-reads the whole picture per scan, and a progressive or multi-scan
+// frame is held whole while it decodes, however small it is drawn. The header
+// may still claim anything, so its size is bounded and the reader's
+// allocation is capped too.
 [[nodiscard]] QImage decodePicture(const QByteArray &bytes, int side)
 {
     if (bytes.size() > PanelMediaLibrary::maxPictureBytes)
@@ -45,6 +47,8 @@ namespace {
         || size.height() > PanelMediaLibrary::maxHeaderSide)
         return {};
     const int longSide = std::max(size.width(), size.height());
+    if (longSide > PanelMediaLibrary::maxBufferedHeaderSide && jpegIsBuffered(bytes))
+        return {};
     if (longSide > side)
         reader.setScaledSize(size.scaled(side, side, Qt::KeepAspectRatio));
     QImage image = reader.read();

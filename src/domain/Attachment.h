@@ -43,6 +43,9 @@ inline constexpr qsizetype maxFrameBytes = 240 * 1024;
 inline constexpr qint64 maxImageBytes = 2LL * 1024 * 1024;
 inline constexpr int maxImageLongSide = 2048;   // what this version encodes
 inline constexpr int maxImageDimension = 8192;  // what it accepts
+// …when it streams through the decoder; a progressive or multi-scan frame is
+// held whole while it decodes, so it is taken only this large.
+inline constexpr int maxBufferedImageSide = maxImageLongSide;
 inline constexpr qint64 maxVideoMs = 60 * 1000; // longer sources are trimmed
 inline constexpr int maxVideoSegments = 16;
 inline constexpr qint64 maxVideoBytes = maxVideoSegments * (224LL * 1024 + 64) + 64;
@@ -177,7 +180,8 @@ splitAttachmentFrame(QByteArrayView frame);
 // What a receiver checks once every part is in: the size and SHA-256 the
 // descriptor names, then per kind: Image a JPEG with 1 … maxJpegScans scans
 // whose frame size matches the descriptor and stays within
-// maxImageDimension; Video decodeVideoSequence; Audio
+// maxImageDimension (maxBufferedImageSide if jpegIsBuffered); Video
+// decodeVideoSequence; Audio
 // decodeSongContainer(blob, chatSongLimits()); File nothing more.
 [[nodiscard]] bool attachmentBlobIsValid(const AttachmentDescriptor &descriptor,
                                          QByteArrayView blob);
@@ -186,5 +190,17 @@ splitAttachmentFrame(QByteArrayView frame);
 [[nodiscard]] bool previewIsAcceptable(QByteArrayView jpeg);
 // The width and height a JPEG's first frame header declares, or nothing.
 [[nodiscard]] std::optional<std::pair<int, int>> jpegFrameSize(QByteArrayView jpeg);
+// The first frame header: its SOF marker (C0 baseline, C2 progressive, …) and
+// size, under the same rules as jpegFrameSize.
+struct JpegFrame final {
+    quint8 marker = 0;
+    int width = 0;
+    int height = 0;
+};
+[[nodiscard]] std::optional<JpegFrame> jpegFrame(QByteArrayView jpeg);
+// Whether decoding needs the whole frame in memory at once, whatever size it
+// is drawn at: anything but a single-scan baseline or extended sequential
+// Huffman frame (true, too, for bytes that are no JPEG).
+[[nodiscard]] bool jpegIsBuffered(QByteArrayView jpeg);
 
 } // namespace OpenChat

@@ -746,6 +746,21 @@ private slots:
         QVERIFY(attachmentBlobIsValid(describing(manyScans, 200, 100), manyScans));
         const QByteArray huge = structuralJpeg(AttachmentLimits::maxImageDimension + 1, 100, 1);
         QVERIFY(!attachmentBlobIsValid(describing(huge, 0, 0), huge));
+        // A frame the decoder holds whole is taken only as large as this
+        // version sends: an 8192 px progressive picture costs ~400 MiB to
+        // draw even as a thumbnail. A single-scan baseline one streams.
+        const int side = AttachmentLimits::maxBufferedImageSide;
+        const QByteArray largeBaseline = structuralJpeg(AttachmentLimits::maxImageDimension, 100, 1, 0xC0);
+        QVERIFY(attachmentBlobIsValid(describing(largeBaseline, 0, 0), largeBaseline));
+        for (const quint8 marker : {quint8(0xC2), quint8(0xC3), quint8(0xC9), quint8(0xCA)}) {
+            const QByteArray fits = structuralJpeg(side, 100, 1, marker);
+            QVERIFY(attachmentBlobIsValid(describing(fits, 0, 0), fits));
+            const QByteArray tooLarge = structuralJpeg(100, side + 1, 1, marker);
+            QVERIFY(!attachmentBlobIsValid(describing(tooLarge, 0, 0), tooLarge));
+        }
+        // A baseline frame coded as a scan per component is held whole too.
+        const QByteArray multiScan = structuralJpeg(side + 1, 100, 3, 0xC0);
+        QVERIFY(!attachmentBlobIsValid(describing(multiScan, 0, 0), multiScan));
         const QByteArray png("\x89PNG\r\n\x1a\n rest", 14);
         QVERIFY(!attachmentBlobIsValid(describing(png, 0, 0), png));
     }
@@ -803,6 +818,15 @@ private slots:
         QCOMPARE(jpegFrameSize(realJpeg(64, 640, true)), std::optional(std::pair{64, 640}));
         QCOMPARE(jpegFrameSize(structuralJpeg(8192, 2, 1, 0xC0)), std::optional(std::pair{8192, 2}));
         QCOMPARE(jpegFrameSize(structuralJpeg(10, 20, 1, 0xC1)), std::optional(std::pair{10, 20}));
+        QCOMPARE(jpegFrame(structuralJpeg(10, 20, 1, 0xC2))->marker, quint8(0xC2));
+        // Which frames stream through the decoder.
+        QVERIFY(!jpegIsBuffered(realJpeg(123, 45)));
+        QVERIFY(jpegIsBuffered(realJpeg(123, 45, true)));
+        QVERIFY(!jpegIsBuffered(structuralJpeg(10, 20, 1, 0xC0)));
+        QVERIFY(!jpegIsBuffered(structuralJpeg(10, 20, 1, 0xC1)));
+        QVERIFY(jpegIsBuffered(structuralJpeg(10, 20, 1, 0xC2)));
+        QVERIFY(jpegIsBuffered(structuralJpeg(10, 20, 2, 0xC0)));
+        QVERIFY(jpegIsBuffered(QByteArray("GIF89a")));
         // DHT shares the marker range but is no frame header.
         QVERIFY(!jpegFrameSize(structuralJpeg(10, 20, 1, 0xC4)));
         // Height deferred to a DNL marker, a zero width.

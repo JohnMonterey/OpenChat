@@ -531,6 +531,19 @@ private slots:
         const QByteArray bomb = withRepeatedScan(progressive, maxJpegScans + 1 - scans);
         QCOMPARE(jpegScanCount(bomb), maxJpegScans + 1);
         QVERIFY(decodes(bomb, 320).isNull());
+
+        // A progressive frame is held whole while it decodes, however small
+        // it is drawn, so one larger than a chat photo is refused; the same
+        // picture as a single-scan baseline frame streams, and is taken.
+        QImage large(3'000, 200, QImage::Format_RGB32);
+        large.fill(Qt::darkCyan);
+        const QByteArray largeProgressive = progressiveJpeg(large);
+        QVERIFY(jpegIsBuffered(largeProgressive));
+        QVERIFY(decodes(largeProgressive, 320).isNull());
+        QCOMPARE(decodes(encodeBaselineJpeg(large, 70), 320).size(), QSize(320, 21));
+        QImage fits(PanelMediaLibrary::maxBufferedHeaderSide, 200, QImage::Format_RGB32);
+        fits.fill(Qt::darkCyan);
+        QCOMPARE(decodes(progressiveJpeg(fits), 320).size(), QSize(320, 31));
     }
 
     void init()

@@ -342,6 +342,11 @@ QVector<QByteArray> packClip(const QVector<QVector<ClipContainer::Frame>> &video
 
 std::optional<SongContainer> clipSoundtrack(const QVector<ClipContainer> &segments)
 {
+    return clipSoundtrack(segments, SongContainerLimits{});
+}
+
+std::optional<SongContainer> clipSoundtrack(const QVector<ClipContainer> &segments, const SongContainerLimits &limits)
+{
     if (segments.isEmpty() || segments.first().audioChannels == 0)
         return std::nullopt;
     SongContainer song;
@@ -357,7 +362,7 @@ std::optional<SongContainer> clipSoundtrack(const QVector<ClipContainer> &segmen
         song.packets += segment.audioPackets;
     }
     const qint64 minimum = (song.totalSamples + song.preSkip + packetSamples - 1) / packetSamples;
-    if (song.totalSamples > SongContainer::maxTotalSamples || song.packets.size() < minimum
+    if (song.totalSamples > limits.maxTotalSamples || song.packets.size() < minimum
         || song.packets.size() > minimum + 1)
         return std::nullopt;
     return song;

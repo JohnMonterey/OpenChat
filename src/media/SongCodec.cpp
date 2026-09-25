@@ -1,5 +1,6 @@
 #include "media/SongCodec.h"
 
+#include "domain/Attachment.h"
 #include "media/AudioConvert.h"
 
 #include <opus.h>
@@ -191,11 +192,36 @@ struct PowerHops final {
     return powerToDb(sum / double(count));
 }
 
+// How far an encode got, reported in steps of at least a hundredth and never
+// backwards: a rung given up part way leaves the figure where it was until
+// the next rung passes that point.
+class EncodeProgress final
+{
+public:
+    explicit EncodeProgress(const std::function<void(qreal)> &report)
+        : m_report(report)
+    {
+    }
+
+    void update(qreal fraction)
+    {
+        if (!m_report || fraction < m_reported + 0.01)
+            return;
+        m_reported = std::min<qreal>(fraction, 1.0);
+        m_report(m_reported);
+    }
+
+private:
+    const std::function<void(qreal)> &m_report;
+    qreal m_reported = 0.0;
+};
+
 // Encodes the conditioned audio at each rung of `ladder` until one fits
-// options.maxBytes.
+// `maxBytes`.
 [[nodiscard]] EncodeResult encodeLadder(const std::vector<float> &audio, int channels, qint64 totalSamples,
-                                        const QVector<int> &ladder, const SongEncodeOptions &options,
-                                        const std::function<bool()> &isCancelled)
+                                        const QVector<int> &ladder, qsizetype maxBytes,
+                                        const SongContainerLimits &limits, const std::function<bool()> &isCancelled,
+                                        EncodeProgress &progress)
 {
     int error = OPUS_OK;
     EncoderPtr encoder(opus_encoder_create(songRate, channels, OPUS_APPLICATION_AUDIO, &error));
@@ -244,37 +270,65 @@ struct PowerHops final {
             if (written < 1)
                 return EncodeResult::failure(SongEncodeError::EncoderUnavailable);
             bytes += packetLengthBytes + written;
-            if (bytes > options.maxBytes) {
+            if (bytes > maxBytes) {
                 fits = false; // this rung cannot fit: no point finishing it
                 break;
             }
             song.packets.push_back(QByteArray(reinterpret_cast<const char *>(packet.data()), written));
+            progress.update(qreal(index + 1) / qreal(packetCount));
         }
         if (!fits)
             continue;
-        QByteArray encoded = encodeSongContainer(song);
+        QByteArray encoded = encodeSongContainer(song, limits);
         if (encoded.isEmpty())
             return EncodeResult::failure(SongEncodeError::EncoderUnavailable);
-        if (encoded.size() <= options.maxBytes)
+        if (encoded.size() <= maxBytes)
             return EncodeResult::success(std::move(encoded));
     }
     return EncodeResult::failure(SongEncodeError::TooLarge);
 }
 
+// Stereo folded to its mid signal, the one the loudness was measured on, so
+// the level stays where the gain put it and no peak can grow.
+[[nodiscard]] std::vector<float> foldToMono(const std::vector<float> &stereo)
+{
+    std::vector<float> mono(stereo.size() / 2);
+    for (std::size_t frame = 0; frame < mono.size(); ++frame)
+        mono[frame] = 0.5F * (stereo[frame * 2] + stereo[frame * 2 + 1]);
+    return mono;
+}
+
 } // namespace
 
+SongEncodeOptions chatSongEncodeOptions()
+{
+    SongEncodeOptions options;
+    options.limits = chatSongLimits();
+    options.maxDurationMs = int(AttachmentLimits::maxAudioMs);
+    options.maxBytes = qsizetype(AttachmentLimits::maxAudioBytes);
+    // Five minutes at 64 kbit/s is about 2.4 MB: the top rung fits all but
+    // the densest material, and the ladder ends where a profile song's does.
+    options.stereoBitrates = {64'000, 48'000, 40'000, 32'000, 24'000};
+    options.monoBitrates = {48'000, 32'000, 24'000};
+    options.monoFallback = true;
+    options.maxGainDb = 6.0;
+    options.silenceThresholdDb = -70.0;
+    options.minDurationMs = 300;
+    return options;
+}
+
 EncodeResult encodeSong(const SongClip &clip, const SongEncodeOptions &options,
-                        const std::function<bool()> &cancelled)
+                        const std::function<bool()> &cancelled, const std::function<void(qreal)> &progress)
 {
     const auto isCancelled = [&cancelled] { return cancelled && cancelled(); };
     const WavAudio &pcm = clip.pcm;
     if (pcm.channels <= 0 || pcm.sampleRate <= 0 || pcm.frameCount() == 0)
         return EncodeResult::failure(SongEncodeError::TooShort);
 
-    // The container cannot hold more than SongContainer::maxDurationMs, so a
-    // larger option is capped. Cutting the clip here cuts through the song,
-    // so its end gets the long fade.
-    const qint64 maxDurationMs = std::clamp<qint64>(options.maxDurationMs, 0, SongContainer::maxDurationMs);
+    // The container cannot hold more than its limits allow, so a larger
+    // option is capped. Cutting the clip here cuts through the song, so its
+    // end gets the long fade.
+    const qint64 maxDurationMs = std::clamp<qint64>(options.maxDurationMs, 0, options.limits.maxDurationMs);
     const qint64 maxSourceFrames = qint64(pcm.sampleRate) * maxDurationMs / 1000;
     qsizetype frames = pcm.frameCount();
     bool trimmedEnd = clip.trimmedEnd;
@@ -289,7 +343,7 @@ EncodeResult encodeSong(const SongClip &clip, const SongEncodeOptions &options,
     for (QVector<qint16> &plane : planes)
         plane = AudioConvert::resampleMono(plane, pcm.sampleRate, songRate);
     const int channels = int(planes.size());
-    qint64 total = qint64(SongContainer::maxDurationMs) * songRate / 1000;
+    qint64 total = std::min(options.limits.maxDurationMs * songRate / 1000, options.limits.maxTotalSamples);
     for (const QVector<qint16> &plane : planes)
         total = std::min<qint64>(total, plane.size());
     if (total < 1)
@@ -346,10 +400,19 @@ EncodeResult encodeSong(const SongClip &clip, const SongEncodeOptions &options,
     if (isCancelled())
         return EncodeResult::failure(SongEncodeError::Cancelled);
 
+    const qsizetype maxBytes = std::min(options.maxBytes, options.limits.maxBytes);
+    EncodeProgress encodeProgress(progress);
     const QVector<int> &ladder = channels == 1 ? options.monoBitrates : options.stereoBitrates;
-    if (ladder.isEmpty())
-        return EncodeResult::failure(SongEncodeError::TooLarge);
-    return encodeLadder(audio, channels, total, ladder, options, isCancelled);
+    EncodeResult encoded =
+        ladder.isEmpty()
+        ? EncodeResult::failure(SongEncodeError::TooLarge)
+        : encodeLadder(audio, channels, total, ladder, maxBytes, options.limits, isCancelled, encodeProgress);
+    if (encoded || encoded.error() != SongEncodeError::TooLarge || channels == 1 || !options.monoFallback
+        || options.monoBitrates.isEmpty())
+        return encoded;
+    // Too much for any stereo rung: the same song in one channel.
+    return encodeLadder(foldToMono(audio), 1, total, options.monoBitrates, maxBytes, options.limits, isCancelled,
+                        encodeProgress);
 }
 
 std::optional<qint64> findAudibleMs(const WavAudio &pcm, double silenceThresholdDb, qsizetype fromFrame,
@@ -386,7 +449,7 @@ void SongDecoder::OpusDecoderDeleter::operator()(OpusDecoder *decoder) const noe
     opus_decoder_destroy(decoder);
 }
 
-SongDecoder::SongDecoder(SongContainer song)
+SongDecoder::SongDecoder(SongContainer song, const SongContainerLimits &limits)
     : m_song(std::move(song))
 {
     // decodeSongContainer() checked the container's own rules, but a
@@ -395,7 +458,7 @@ SongDecoder::SongDecoder(SongContainer song)
     const bool shapeOk = (m_song.channels == 1 || m_song.channels == 2)
         && (m_song.frameSamples == 960 || m_song.frameSamples == 1920 || m_song.frameSamples == 2880)
         && m_song.preSkip >= 0 && m_song.preSkip <= SongContainer::maxPreSkip && m_song.totalSamples >= 1
-        && m_song.totalSamples <= SongContainer::maxTotalSamples && !m_song.packets.isEmpty();
+        && m_song.totalSamples <= limits.maxTotalSamples && !m_song.packets.isEmpty();
     if (!shapeOk)
         return;
 

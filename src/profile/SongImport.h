@@ -7,6 +7,7 @@
 #include <QMetaType>
 #include <QObject>
 #include <QString>
+#include <QThread>
 #include <QThreadPool>
 #include <QVector>
 
@@ -53,6 +54,18 @@ struct SongSourceInfo final {
     friend bool operator==(const SongSourceInfo &, const SongSourceInfo &) = default;
 };
 
+// A whole file as one song (encodeWhole): a chat's audio attachment.
+struct EncodedSong final {
+    QByteArray container; // within the options' limits
+    qint64 durationMs = 0;
+    // The waveform of what was encoded: |max| of the mid signal per bar,
+    // lifted (by at most 24 dB) so the loudest bar is 255.
+    QVector<quint8> peaks;
+    bool trimmed = false; // the source ran on past SongEncodeOptions::maxDurationMs
+
+    friend bool operator==(const EncodedSong &, const EncodedSong &) = default;
+};
+
 // Imports a profile song in two passes (SPEC §14.11: pick a file, then drag
 // a 45 s window over its waveform):
 //   analyse()      streams the whole file once and keeps only its peaks and
@@ -65,6 +78,10 @@ struct SongSourceInfo final {
 // platform and never loads Qt Multimedia. Anything else goes through
 // QAudioDecoder, which needs a Multimedia backend: Linux's FFmpeg reads MP3,
 // OGG, FLAC and M4A; Windows' Media Foundation MP3, M4A and WMA.
+//
+// A chat's audio attachment takes a third way, encodeWhole(): no analysis
+// and no window, just the file from its start, up to the options' length, in
+// one pass (a WAV is read no further than that needs).
 class SongImporter final : public QObject
 {
     Q_OBJECT
@@ -76,8 +93,15 @@ public:
     // The window is clamped so it fits the source; `encoded` reports where it
     // really starts.
     void encodeWindow(const QString &path, qint64 startMs);
+    // Encodes the file from its start, up to options.maxDurationMs, as one
+    // song within options.limits, with a waveform of `peakBuckets` bars
+    // taken from the same PCM; `encodedWhole` reports it. Progress runs
+    // through the decode and then the encode.
+    void encodeWhole(const QString &path, const SongEncodeOptions &options, int peakBuckets);
     void cancel();
     [[nodiscard]] bool busy() const;
+    // The worker's thread priority (a chat import runs low, beside the UI).
+    void setWorkerPriority(QThread::Priority priority);
 
     // Creates a QAudioDecoder, which loads the Multimedia backend: call it only
     // once the user has picked a file that is not WAV (Low memory mode
@@ -96,6 +120,7 @@ public:
 signals:
     void analysed(const OpenChat::SongSourceInfo &info);
     void encoded(const QByteArray &container, qint64 durationMs, qint64 windowStartMs);
+    void encodedWhole(const OpenChat::EncodedSong &song);
     void failed(OpenChat::SongImportError error, const QString &message);
     void progressChanged(qreal progress);
 
@@ -108,18 +133,29 @@ private:
     void deliverFailure(quint64 generation, SongImportError error);
     void deliverAnalysis(quint64 generation, const QString &path, const SongSourceInfo &info);
     void deliverEncoded(quint64 generation, const QByteArray &container, qint64 durationMs, qint64 windowStartMs);
+    void deliverWhole(quint64 generation, const EncodedSong &song);
+    void postProgress(quint64 generation, qreal progress);
     void startEncode(quint64 generation, SongClip clip, qint64 windowStartMs);
+    void startWholeEncode(quint64 generation, SongClip clip, bool trimmed);
     // Runs `job` on the worker unless a newer call came first. A job that
     // throws fails with `error` instead of taking the process down.
     void runOnWorker(quint64 generation, SongImportError error, std::function<void()> job);
     // On the worker: encodes the clip and posts the outcome.
     void encodeAndPost(quint64 generation, const SongClip &clip, qint64 windowStartMs,
                        const std::function<void()> &hook);
+    // On the worker: encodes a whole file's clip and posts the outcome;
+    // progress continues from `progressFrom`.
+    void encodeWholeAndPost(quint64 generation, const SongClip &clip, bool trimmed, const SongEncodeOptions &options,
+                            int peakBuckets, qreal progressFrom, const std::function<void()> &hook);
     void startDecodeRun(quint64 generation, const QString &path, bool analyse, qint64 startMs, bool retry = false);
+    void startWholeDecodeRun(quint64 generation, const QString &path);
     void endDecodeRun();
     [[nodiscard]] std::optional<SongImportError> checkFile(const QString &path) const;
 
     SongImportLimits m_limits;
+    // What the current encodeWhole() asked for.
+    SongEncodeOptions m_wholeOptions;
+    int m_wholePeakBuckets = 0;
     bool m_forceDecoder = false;
     std::function<void()> m_encodeHook; // copied into each job as it starts
     bool m_busy = false;
@@ -136,3 +172,4 @@ private:
 } // namespace OpenChat
 
 Q_DECLARE_METATYPE(OpenChat::SongSourceInfo)
+Q_DECLARE_METATYPE(OpenChat::EncodedSong)

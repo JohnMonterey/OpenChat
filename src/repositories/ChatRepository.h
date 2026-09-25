@@ -19,6 +19,10 @@ public:
         conversations() = 0;
     [[nodiscard]] virtual Result<void, RepositoryError>
         upsertConversation(const ConversationRecord &conversation) = 0;
+    // An attachment's row comes with its descriptor and how far its bytes
+    // have come (MessageRecord::attachment and the three fields after it). A
+    // descriptor that is missing or cannot be read leaves `attachment` empty;
+    // it never fails the page.
     [[nodiscard]] virtual Result<QVector<MessageRecord>, RepositoryError>
         messages(const ConversationId &conversationId, int limit,
                  const std::optional<MessageId> &before) = 0;

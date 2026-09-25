@@ -469,7 +469,7 @@ void ProfilePageStoreTest::migrationFromVersion15AddsPageTablesAndHandle()
 
     RawDatabase raw(path);
     QVERIFY(raw.isOpen());
-    QCOMPARE(raw.integer("PRAGMA user_version"), qint64(17));
+    QCOMPARE(raw.integer("PRAGMA user_version"), qint64(18));
     QVERIFY(raw.columns(QStringLiteral("local_profiles")).contains(QStringLiteral("handle")));
     // The exact 016 schema, column by column.
     QCOMPARE(raw.columns(QStringLiteral("profile_media")),
@@ -511,7 +511,7 @@ void ProfilePageStoreTest::migrationFromVersion13StillWorks()
         QVERIFY(!raw.columns(QStringLiteral("messages")).contains(QStringLiteral("locally_read")));
     }
 
-    // 014, 015 and 016 run together, in one transaction.
+    // 014 to 018 run together, in one transaction.
     {
         auto opened = SqlCipherDatabase::open(path, databaseKey());
         QVERIFY(opened.hasValue());
@@ -524,7 +524,8 @@ void ProfilePageStoreTest::migrationFromVersion13StillWorks()
 
     RawDatabase raw(path);
     QVERIFY(raw.isOpen());
-    QCOMPARE(raw.integer("PRAGMA user_version"), qint64(17));
+    QCOMPARE(raw.integer("PRAGMA user_version"), qint64(18));
+    QVERIFY(raw.columns(QStringLiteral("outbox")).contains(QStringLiteral("priority"))); // 018
     const QStringList messageColumns = raw.columns(QStringLiteral("messages"));
     QVERIFY(messageColumns.contains(QStringLiteral("locally_read"))); // 014
     QVERIFY(messageColumns.contains(QStringLiteral("quoted_body"))); // 015

@@ -1,5 +1,6 @@
 #include "storage/SqlCipherSyncStore.h"
 
+#include "storage/AttachmentRows.h"
 #include "storage/RepositorySql.h"
 #include "storage/SqlCipherDatabase.h"
 
@@ -147,13 +148,14 @@ bool applyEdit(sqlite3 *database, const ConversationId &conversation, const Mess
     return true;
 }
 
-// Same schema and binds as SqlCipherChatRepository::saveOutgoing's outbox insert.
+// Same schema and binds as SqlCipherChatRepository::saveOutgoing's outbox
+// insert, plus the priority (migration 018) that one leaves at 0.
 bool insertOutbox(sqlite3 *database, const OutboxRecord &outbox)
 {
     Statement statement(database,
                         "INSERT INTO outbox(envelope_id, message_id, ciphertext, attempt_count, "
-                        "next_attempt_at_ms, state, conversation_id, lease_until_ms) "
-                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
+                        "next_attempt_at_ms, state, conversation_id, lease_until_ms, priority) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
     return statement.isValid()
            && statement.bindBlob(1, outbox.envelopeId.bytes())
            && statement.bindBlob(2, outbox.messageId.bytes())
@@ -163,6 +165,7 @@ bool insertOutbox(sqlite3 *database, const OutboxRecord &outbox)
            && statement.bindInt(6, static_cast<int>(outbox.state))
            && statement.bindBlob(7, outbox.conversationId.bytes())
            && statement.bindInt64(8, outbox.leaseUntilMs)
+           && statement.bindInt(9, outbox.priority)
            && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
 
@@ -313,7 +316,8 @@ std::optional<OutboxRecord> decodeOutbox(sqlite3_stmt *statement)
                         sqlite3_column_int(statement, 4),
                         sqlite3_column_int64(statement, 5),
                         sqlite3_column_int64(statement, 6),
-                        static_cast<OutboxState>(state)};
+                        static_cast<OutboxState>(state),
+                        sqlite3_column_int(statement, 8)};
 }
 
 } // namespace
@@ -594,6 +598,104 @@ Result<bool, RepositoryError> SqlCipherSyncStore::canEditSent(const Conversation
     });
 }
 
+Result<void, RepositoryError>
+SqlCipherSyncStore::commitAttachmentSend(const MessageRecord &message,
+                                         const QVector<OutboxRecord> &outboxes,
+                                         const QByteArray &recipients, QByteArrayView mlsState)
+{
+    if (message.flow != MessageFlow::Outgoing || message.kind != ContentKind::Attachment
+        || !message.attachment || !isValidDescriptor(*message.attachment) || message.serverSequence
+        || outboxes.isEmpty() || !AttachmentRows::decodeRecipients(recipients)
+        || recipients.isEmpty() || mlsState.size() > maximumMlsStateSize)
+        return Result<void, RepositoryError>::failure(
+            error(RepositoryErrorCode::InvalidInput, QStringLiteral("commitAttachmentSend.invalid")));
+    for (const OutboxRecord &outbox : outboxes) {
+        if (outbox.messageId != message.id || outbox.conversationId != message.conversationId
+            || outbox.envelope.isEmpty())
+            return Result<void, RepositoryError>::failure(
+                error(RepositoryErrorCode::InvalidInput,
+                      QStringLiteral("commitAttachmentSend.outbox")));
+    }
+
+    const qint64 nowMs = m_clock();
+    return m_database.withConnection([&](sqlite3 *database) {
+        if (!begin(database))
+            return Result<void, RepositoryError>::failure(
+                internalError(QStringLiteral("commitAttachmentSend.begin")));
+        if (!insertMessage(database, message)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitAttachmentSend.message"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!AttachmentRows::insertDescriptor(database, message, recipients, nowMs, false)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitAttachmentSend.attachment"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        for (const OutboxRecord &outbox : outboxes) {
+            if (!insertOutbox(database, outbox)) {
+                auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                        QStringLiteral("commitAttachmentSend.outbox"));
+                rollback(database);
+                return Result<void, RepositoryError>::failure(e);
+            }
+        }
+        if (!upsertMlsState(database, m_profileId, mlsState)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitAttachmentSend.mls"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        if (!commit(database)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Internal,
+                                    QStringLiteral("commitAttachmentSend.commit"));
+            rollback(database);
+            return Result<void, RepositoryError>::failure(e);
+        }
+        return Result<void, RepositoryError>::success();
+    });
+}
+
+Result<bool, RepositoryError>
+SqlCipherSyncStore::canEnqueueAttachment(const ConversationId &conversation,
+                                         const AttachmentId &attachmentId)
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        // Stricter than the UNIQUE key commitAttachmentSend meets (which also
+        // names the sender): no attachment of the conversation, from anyone,
+        // may use the id. A fresh random id never collides; a reused one is
+        // refused before the ratchet moves.
+        Statement statement(database,
+                            "SELECT 1 FROM message_attachments "
+                            "WHERE conversation_id=?1 AND attachment_id=?2");
+        if (!statement.isValid() || !statement.bindBlob(1, conversation.bytes())
+            || !statement.bindBlob(2, attachmentId.bytes()))
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("canEnqueueAttachment.prepare")));
+        const int step = sqlite3_step(statement.get());
+        if (step != SQLITE_ROW && step != SQLITE_DONE)
+            return Result<bool, RepositoryError>::failure(
+                internalError(QStringLiteral("canEnqueueAttachment.read")));
+        return Result<bool, RepositoryError>::success(step == SQLITE_DONE);
+    });
+}
+
+Result<int, RepositoryError> SqlCipherSyncStore::pendingLowPriorityCount()
+{
+    return m_database.withConnection([&](sqlite3 *database) {
+        // state 0 Pending, 1 Leased: the outbox_due index narrows it to the
+        // few rows still waiting.
+        Statement statement(database,
+                            "SELECT COUNT(*) FROM outbox WHERE state IN (0,1) AND priority=1");
+        if (!statement.isValid() || sqlite3_step(statement.get()) != SQLITE_ROW)
+            return Result<int, RepositoryError>::failure(
+                internalError(QStringLiteral("pendingLowPriorityCount.read")));
+        return Result<int, RepositoryError>::success(sqlite3_column_int(statement.get(), 0));
+    });
+}
+
 Result<void, RepositoryError> SqlCipherSyncStore::failEnvelope(const EnvelopeId &envelopeId)
 {
     return m_database.withConnection([&](sqlite3 *database) {
@@ -751,6 +853,17 @@ Result<bool, RepositoryError> SqlCipherSyncStore::commitReceive(const MessageRec
         if (!insertMessage(database, message)) {
             auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
                                     QStringLiteral("commitReceive.message"));
+            rollback(database);
+            return Result<bool, RepositoryError>::failure(e);
+        }
+        // An attachment's descriptor, unless the sender already used its id
+        // in this conversation: that message then shows as unavailable
+        // rather than borrowing another attachment's bytes.
+        if (message.kind == ContentKind::Attachment && message.attachment
+            && isValidDescriptor(*message.attachment)
+            && !AttachmentRows::insertDescriptor(database, message, {}, m_clock(), true)) {
+            auto e = mapSqliteError(database, RepositoryErrorCode::Conflict,
+                                    QStringLiteral("commitReceive.attachment"));
             rollback(database);
             return Result<bool, RepositoryError>::failure(e);
         }
@@ -1132,14 +1245,16 @@ SqlCipherSyncStore::claimDue(qint64 nowMs, int limit, qint64 leaseUntilMs)
 
         Statement select(database,
                          "SELECT envelope_id, message_id, conversation_id, ciphertext, "
-                         "attempt_count, next_attempt_at_ms, lease_until_ms, state "
+                         "attempt_count, next_attempt_at_ms, lease_until_ms, state, priority "
                          "FROM outbox WHERE "
                          "(state=?1 AND next_attempt_at_ms<=?2) OR "
                          "(state=?3 AND lease_until_ms<=?2) "
-                         // rowid, not envelope_id: envelopes queued in the same
-                         // instant (a group's Welcome and the roster that must
-                         // follow it) leave in the order they were queued.
-                         "ORDER BY next_attempt_at_ms, rowid LIMIT ?4");
+                         // Priority first: an attachment frame (1) leaves only
+                         // when no text, receipt or call signal (0) is due.
+                         // Then rowid, not envelope_id: envelopes queued in the
+                         // same instant (a group's Welcome and the roster that
+                         // must follow it) leave in the order they were queued.
+                         "ORDER BY priority, next_attempt_at_ms, rowid LIMIT ?4");
         if (!select.isValid() || !select.bindInt(1, static_cast<int>(OutboxState::Pending))
             || !select.bindInt64(2, nowMs)
             || !select.bindInt(3, static_cast<int>(OutboxState::Leased))

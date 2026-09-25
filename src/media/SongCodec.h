@@ -20,12 +20,17 @@ namespace OpenChat {
 // Turns a clip of PCM into a profile song (an Opus container, SongContainer.h)
 // and plays one back. A profile song crosses the wire as one media blob of at
 // most maxSongBytes, so the encoder owns the budget: it measures and sets the
-// loudness itself, then walks a bitrate ladder until the song fits.
+// loudness itself, then walks a bitrate ladder until the song fits. A chat's
+// audio attachment is the same container held to longer bounds
+// (chatSongEncodeOptions).
 
 struct SongEncodeOptions final {
     int maxDurationMs = SongContainer::maxDurationMs;         // longer clips are cut (and faded) here
     QVector<int> stereoBitrates{40'000, 36'000, 32'000, 24'000}; // first result that fits wins
     QVector<int> monoBitrates{32'000, 24'000};
+    // A stereo clip that fits at no stereo rung is folded to mono and tried
+    // on the mono ladder before the encode gives up as TooLarge.
+    bool monoFallback = false;
     double targetLoudnessDb = -16.0; // gated RMS of the mid signal, dBFS
     double peakCeilingDb = -1.0;     // no sample above this after the gain
     double maxGainDb = 12.0;
@@ -37,7 +42,17 @@ struct SongEncodeOptions final {
     int edgeFadeMs = 10;  // where the clip is the song's own start or end: just enough to avoid a click
     int trimFadeMs = 500; // where the chosen window cuts through the song
     qsizetype maxBytes = maxSongBytes;
+    // What the container may hold: maxDurationMs is capped to its length and
+    // maxBytes to its size, and the result must decode under the same limits.
+    SongContainerLimits limits;
 };
+
+// A chat's audio attachment (AttachmentLimits): up to five minutes within
+// maxAudioBytes, at higher rungs than a profile song can afford (down to the
+// same 24 kbit/s, then mono). Voice notes are short and quiet, so 300 ms
+// passes, only true silence (-70 dB) is refused, and a quiet recording is
+// lifted by at most 6 dB rather than a song's 12.
+[[nodiscard]] SongEncodeOptions chatSongEncodeOptions();
 
 struct SongClip final {
     WavAudio pcm;              // any rate, any channel count
@@ -58,10 +73,13 @@ enum class SongEncodeError {
 // centre would). The gain is applied here, so the container's gainQ8 is 0.
 //
 // CPU-bound (up to a few seconds for 45 s of stereo): call it on a worker
-// thread. `cancelled` is polled between Opus packets.
+// thread. `cancelled` is polled between Opus packets; `progress` (0…1, on
+// the calling thread) hears how much of the song is encoded, in steps of at
+// least a hundredth and never going back when a rung is abandoned for the
+// next.
 [[nodiscard]] Result<QByteArray, SongEncodeError>
 encodeSong(const SongClip &clip, const SongEncodeOptions &options = {},
-           const std::function<bool()> &cancelled = {});
+           const std::function<bool()> &cancelled = {}, const std::function<void(qreal)> &progress = {});
 
 // The time, in ms from the start of `pcm`, of the first 10 ms block within
 // frames [fromFrame, toFrame) whose RMS over every channel reaches
@@ -87,7 +105,9 @@ public:
     // Opus's longest packet (120 ms at 48 kHz); the decode buffer's size.
     static constexpr int maxPacketSamples = 5760;
 
-    explicit SongDecoder(SongContainer song);
+    // `limits` bounds the song's length: a profile song's by default, a
+    // chat attachment's when the caller says so (chatSongLimits).
+    explicit SongDecoder(SongContainer song, const SongContainerLimits &limits = {});
     ~SongDecoder();
 
     SongDecoder(const SongDecoder &) = delete;

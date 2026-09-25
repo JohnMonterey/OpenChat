@@ -37,6 +37,18 @@ constexpr int tagProbeMs = 3'000;
 constexpr int lookAfterWindowMs = 2'000;
 constexpr int peakBlockMs = 10;
 constexpr int songWindowMs = SongContainer::maxDurationMs;
+// A whole file's WAV is read no further than its kept part and the look past
+// it, and never more than this in all (a 5-minute 96 kHz 24-bit stereo
+// recording is about 170 MB).
+constexpr qint64 maxWholeWavBytes = 192LL * 1024 * 1024;
+constexpr qsizetype fmtFieldBytes = 16;
+// Reading a whole file's WAV is quick beside encoding it: this much of the
+// progress, the encode the rest. A compressed file's decode takes half.
+constexpr qreal wavReadProgress = 0.1;
+constexpr qreal decodeProgress = 0.5;
+// A whole song's waveform is lifted by at most this much (24 dB), so a quiet
+// voice note still shows its shape and hiss never fills the bars.
+constexpr double maxPeakLift = 16.0;
 
 // What counts as music when choosing and cutting a window: the encoder's own
 // silence threshold, so "audible" means the same on both sides.
@@ -79,12 +91,22 @@ public:
         }
     }
 
-    [[nodiscard]] QVector<quint8> buckets(int count) const
+    [[nodiscard]] QVector<quint8> buckets(int count, double lift = 1.0) const
+    {
+        const QVector<quint16> peaks = rawBuckets(count);
+        QVector<quint8> out(peaks.size(), 0);
+        for (qsizetype bucket = 0; bucket < peaks.size(); ++bucket)
+            out[bucket] = quint8(std::min<long>(255, std::lround(peaks.at(bucket) * lift * 255.0 / 32768.0)));
+        return out;
+    }
+
+    // Each bucket's peak on the sample scale (0…32768).
+    [[nodiscard]] QVector<quint16> rawBuckets(int count) const
     {
         QVector<quint16> blocks = m_blocks;
         if (m_inBlock > 0)
             blocks.append(quint16(m_current));
-        QVector<quint8> out(std::max(count, 0), 0);
+        QVector<quint16> out(std::max(count, 0), 0);
         const qsizetype total = blocks.size();
         if (total == 0)
             return out;
@@ -94,7 +116,7 @@ public:
             quint16 peak = 0;
             for (qsizetype block = first; block < last; ++block)
                 peak = std::max(peak, blocks.at(block));
-            out[bucket] = quint8(std::min<long>(255, std::lround(peak * 255.0 / 32768.0)));
+            out[bucket] = peak;
         }
         return out;
     }
@@ -328,6 +350,95 @@ struct WindowClip final {
     return window;
 }
 
+// The start of a WAV, as far as `keepMs` and the look past it reach. The
+// chunk headers are walked on disk to find where the samples begin and how
+// wide a frame is, so a long recording (or one with cover art in front) is
+// never read to its end; one whose data the walk does not reach is read
+// whole, if it is small enough. WavFile clamps the cut-off data chunk.
+[[nodiscard]] Result<WavAudio, SongImportError> readWavHead(const QString &path, qint64 keepMs)
+{
+    using Outcome = Result<WavAudio, SongImportError>;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return Outcome::failure(SongImportError::FileMissing);
+    const qint64 size = file.size();
+    qint64 dataOffset = -1;
+    qint64 frameBytes = 0;
+    qint64 rate = 0;
+    qint64 cursor = riffHeaderBytes;
+    for (int visited = 0; visited < maxTagChunks && cursor + chunkHeaderBytes <= size; ++visited) {
+        if (!file.seek(cursor))
+            break;
+        const QByteArray header = file.read(chunkHeaderBytes);
+        if (header.size() < chunkHeaderBytes)
+            break;
+        const quint32 chunkBytes = qFromLittleEndian<quint32>(header.constData() + 4);
+        if (header.startsWith("fmt ")) {
+            const QByteArray fields = file.read(fmtFieldBytes);
+            if (fields.size() == fmtFieldBytes) {
+                const quint16 channels = qFromLittleEndian<quint16>(fields.constData() + 2);
+                rate = qFromLittleEndian<quint32>(fields.constData() + 4);
+                frameBytes = qint64(channels) * (qFromLittleEndian<quint16>(fields.constData() + 14) / 8);
+            }
+        } else if (header.startsWith("data")) {
+            dataOffset = cursor + chunkHeaderBytes;
+            break;
+        }
+        cursor += chunkHeaderBytes + qint64(chunkBytes) + (chunkBytes & 1);
+    }
+    qint64 wanted = size;
+    if (dataOffset >= 0 && frameBytes > 0 && rate > 0 && rate <= WavFile::maxSampleRate) {
+        const qint64 frames = (std::max<qint64>(keepMs, 0) + lookAfterWindowMs) * rate / 1000;
+        wanted = std::min(size, dataOffset + frames * frameBytes);
+    }
+    if (wanted > maxWholeWavBytes)
+        return Outcome::failure(SongImportError::FileTooLarge);
+    if (!file.seek(0))
+        return Outcome::failure(SongImportError::FileMissing);
+    const QByteArray bytes = file.read(wanted);
+    file.close();
+    auto decoded = WavFile::decode(bytes);
+    if (!decoded)
+        return Outcome::failure(wavError(decoded.error()));
+    WavAudio audio = std::move(decoded).value();
+    if (audio.sampleRate < 1 || audio.sampleRate > WavFile::maxSampleRate)
+        return Outcome::failure(SongImportError::UnsupportedFormat);
+    return Outcome::success(std::move(audio));
+}
+
+// The first `keepMs` of a whole file as an encoder clip. Music running on
+// past the cut fades out as a trimmed window's does; `trimmed` says the
+// source ran on at all.
+struct WholeClip final {
+    SongClip clip;
+    bool trimmed = false;
+};
+
+[[nodiscard]] WholeClip sliceWhole(WavAudio audio, qint64 keepMs, double thresholdDb)
+{
+    WholeClip whole;
+    const qsizetype frames = audio.frameCount();
+    const qsizetype keep = std::min<qsizetype>(frames, std::max<qint64>(keepMs, 0) * audio.sampleRate / 1000);
+    whole.trimmed = frames > keep;
+    whole.clip.trimmedEnd = findAudibleMs(audio, thresholdDb, keep).has_value();
+    audio.samples.resize(keep * audio.channels);
+    audio.samples.squeeze();
+    whole.clip.pcm = std::move(audio);
+    return whole;
+}
+
+// A whole song's waveform: the bars of what is encoded, lifted so the loudest
+// reaches the top (by at most maxPeakLift).
+[[nodiscard]] QVector<quint8> wholePeaks(const WavAudio &pcm, int buckets)
+{
+    PeakAccumulator accumulator;
+    accumulator.feed(pcm.samples.constData(), pcm.frameCount(), pcm.channels, pcm.sampleRate);
+    const QVector<quint16> raw = accumulator.rawBuckets(buckets);
+    const quint16 loudest = raw.isEmpty() ? quint16(0) : *std::max_element(raw.cbegin(), raw.cend());
+    const double lift = loudest == 0 ? 1.0 : std::min(32768.0 / loudest, maxPeakLift);
+    return accumulator.buckets(buckets, lift);
+}
+
 // Any QAudioBuffer as interleaved S16.
 [[nodiscard]] std::optional<QVector<qint16>> toS16(const QAudioBuffer &buffer)
 {
@@ -418,13 +529,15 @@ QString songImportErrorText(SongImportError error)
 class SongImporter::DecodeRun final : public QObject
 {
 public:
-    DecodeRun(SongImporter &owner, quint64 generation, QString path, bool analyse, qint64 startMs, bool retry)
+    DecodeRun(SongImporter &owner, quint64 generation, QString path, bool analyse, qint64 startMs, bool retry,
+              bool whole = false)
         : QObject(&owner)
         , m_owner(owner)
         , m_generation(generation)
         , m_path(std::move(path))
         , m_analyse(analyse)
         , m_retry(retry)
+        , m_whole(whole)
         , m_startMs(startMs)
         , m_decoder(this)
         , m_timeout(this)
@@ -450,8 +563,13 @@ public:
             format.setChannelCount(2);
             format.setSampleFormat(QAudioFormat::Int16);
             m_decoder.setAudioFormat(format);
-            if (const auto known = m_owner.m_knownDurations.constFind(m_path);
-                known != m_owner.m_knownDurations.cend()) {
+            if (m_whole) {
+                // The file from its start, as far as the options reach.
+                m_startMs = 0;
+                m_windowMs = std::max<qint64>(0, m_owner.m_wholeOptions.maxDurationMs);
+                m_threshold = m_owner.m_wholeOptions.silenceThresholdDb;
+            } else if (const auto known = m_owner.m_knownDurations.constFind(m_path);
+                       known != m_owner.m_knownDurations.cend()) {
                 m_windowMs = std::min<qint64>(songWindowMs, *known);
                 m_startMs = std::clamp<qint64>(m_startMs, 0, *known - m_windowMs);
             } else {
@@ -578,7 +696,7 @@ private:
         };
         // Before the window: is there music the window cuts off?
         if (!m_audibleBefore && chunkStart < startFrame)
-            m_audibleBefore = findAudibleMs(chunk, silenceThresholdDb(), 0, relative(startFrame, frames)).has_value();
+            m_audibleBefore = findAudibleMs(chunk, m_threshold, 0, relative(startFrame, frames)).has_value();
         // The window itself.
         const qsizetype from = relative(startFrame, frames);
         const qsizetype to = relative(endFrame, frames);
@@ -587,13 +705,18 @@ private:
         // After it: more music, or the song's own end?
         if (chunkStart + frames > endFrame)
             m_audibleAfter = m_audibleAfter
-                || findAudibleMs(chunk, silenceThresholdDb(), relative(endFrame, frames), relative(lookEnd, frames))
+                || findAudibleMs(chunk, m_threshold, relative(endFrame, frames), relative(lookEnd, frames))
                        .has_value();
         m_frames += frames;
         // Decoding is the first half of the work; the encode is the second.
+        // A whole file may be far shorter than the most it can keep.
+        qint64 spanMs = m_windowMs;
+        if (const qint64 duration = m_decoder.duration(); m_whole && duration > 0)
+            spanMs = std::min(spanMs, duration);
         const double intoWindowMs = double(m_frames) * 1000.0 / m_rate - double(m_startMs);
-        const double windowMs = double(std::max<qint64>(m_windowMs, 1));
-        emit m_owner.progressChanged(std::clamp(0.5 * intoWindowMs / windowMs, 0.0, 0.5));
+        const double windowMs = double(std::max<qint64>(spanMs, 1));
+        emit m_owner.progressChanged(
+            std::clamp(decodeProgress * intoWindowMs / windowMs, 0.0, decodeProgress));
         if (m_audibleAfter || m_frames >= lookEnd) {
             m_decoder.stop();
             decodeFinished();
@@ -651,8 +774,14 @@ private:
         SongImporter &owner = m_owner;
         const quint64 generation = m_generation;
         const qint64 startMs = m_startMs;
+        const bool whole = m_whole;
+        // A whole file was cut when anything was decoded past the part kept.
+        const bool trimmed = m_frames > m_windowMs * m_rate / 1000;
         owner.endDecodeRun(); // deletes this later; nothing of it is used below
-        owner.startEncode(generation, std::move(clip), startMs);
+        if (whole)
+            owner.startWholeEncode(generation, std::move(clip), trimmed);
+        else
+            owner.startEncode(generation, std::move(clip), startMs);
     }
 
     void finishAnalysisIfReady()
@@ -729,8 +858,10 @@ private:
     const QString m_path;
     const bool m_analyse;
     const bool m_retry; // the second pass of a window placed past the end
+    const bool m_whole; // encodeWhole(): the file from its start, no analysis
     qint64 m_startMs = 0;
     qint64 m_windowMs = songWindowMs;
+    double m_threshold = silenceThresholdDb();
     QAudioDecoder m_decoder;
     QTimer m_timeout;
     QTimer m_tagTimeout;
@@ -759,6 +890,7 @@ SongImporter::SongImporter(SongImportLimits limits, QObject *parent)
     : QObject(parent)
     , m_limits(limits)
 {
+    qRegisterMetaType<OpenChat::EncodedSong>();
     m_pool.setMaxThreadCount(1);
 }
 
@@ -772,6 +904,11 @@ bool SongImporter::canDecodeCompressed()
 {
     const QAudioDecoder probe;
     return probe.isSupported();
+}
+
+void SongImporter::setWorkerPriority(QThread::Priority priority)
+{
+    m_pool.setThreadPriority(priority);
 }
 
 void SongImporter::setForceDecoderForTesting(bool force)
@@ -875,11 +1012,53 @@ void SongImporter::encodeWindow(const QString &path, qint64 startMs)
     startDecodeRun(generation, path, false, startMs);
 }
 
+void SongImporter::encodeWhole(const QString &path, const SongEncodeOptions &options, int peakBuckets)
+{
+    const quint64 generation = begin();
+    m_wholeOptions = options;
+    m_wholePeakBuckets = std::max(peakBuckets, 0);
+    if (const auto refused = checkFile(path)) {
+        postFailure(generation, *refused);
+        return;
+    }
+    if (!m_forceDecoder && isRiffWave(path)) {
+        runOnWorker(generation, SongImportError::EncodeFailed,
+                    [this, generation, path, options, buckets = m_wholePeakBuckets, hook = m_encodeHook] {
+                        WholeClip whole;
+                        {
+                            auto read = readWavHead(path, options.maxDurationMs);
+                            if (!read) {
+                                postFailure(generation, read.error());
+                                return;
+                            }
+                            whole = sliceWhole(std::move(read).value(), options.maxDurationMs,
+                                               options.silenceThresholdDb);
+                        }
+                        postProgress(generation, wavReadProgress);
+                        encodeWholeAndPost(generation, whole.clip, whole.trimmed, options, buckets, wavReadProgress,
+                                           hook);
+                    });
+        return;
+    }
+    if (!canDecodeCompressed()) {
+        postFailure(generation, SongImportError::DecoderUnavailable);
+        return;
+    }
+    startWholeDecodeRun(generation, path);
+}
+
 void SongImporter::startDecodeRun(quint64 generation, const QString &path, bool analyse, qint64 startMs,
                                   bool retry)
 {
     endDecodeRun();
     m_run = new DecodeRun(*this, generation, path, analyse, startMs, retry);
+    m_run->start();
+}
+
+void SongImporter::startWholeDecodeRun(quint64 generation, const QString &path)
+{
+    endDecodeRun();
+    m_run = new DecodeRun(*this, generation, path, false, 0, false, true);
     m_run->start();
 }
 
@@ -901,6 +1080,18 @@ void SongImporter::startEncode(quint64 generation, SongClip clip, qint64 windowS
     runOnWorker(generation, SongImportError::EncodeFailed,
                 [this, generation, shared, windowStartMs, hook = m_encodeHook] {
                     encodeAndPost(generation, *shared, windowStartMs, hook);
+                });
+}
+
+void SongImporter::startWholeEncode(quint64 generation, SongClip clip, bool trimmed)
+{
+    if (!isCurrent(generation))
+        return;
+    auto shared = std::make_shared<SongClip>(std::move(clip));
+    runOnWorker(generation, SongImportError::EncodeFailed,
+                [this, generation, shared, trimmed, options = m_wholeOptions, buckets = m_wholePeakBuckets,
+                 hook = m_encodeHook] {
+                    encodeWholeAndPost(generation, *shared, trimmed, options, buckets, decodeProgress, hook);
                 });
 }
 
@@ -941,6 +1132,31 @@ void SongImporter::encodeAndPost(quint64 generation, const SongClip &clip, qint6
         Qt::QueuedConnection);
 }
 
+void SongImporter::encodeWholeAndPost(quint64 generation, const SongClip &clip, bool trimmed,
+                                      const SongEncodeOptions &options, int peakBuckets, qreal progressFrom,
+                                      const std::function<void()> &hook)
+{
+    if (hook)
+        hook();
+    EncodedSong song;
+    song.peaks = wholePeaks(clip.pcm, peakBuckets);
+    song.trimmed = trimmed;
+    auto encoded = encodeSong(
+        clip, options, [this, generation] { return !isCurrent(generation); },
+        [this, generation, progressFrom](qreal done) {
+            postProgress(generation, progressFrom + (1.0 - progressFrom) * done);
+        });
+    if (!encoded) {
+        if (const auto error = encodeError(encoded.error()))
+            postFailure(generation, *error);
+        return;
+    }
+    song.container = std::move(encoded).value();
+    song.durationMs = decodeSongContainer(song.container, options.limits).value_or(SongContainer{}).durationMs();
+    QMetaObject::invokeMethod(
+        this, [this, generation, song] { deliverWhole(generation, song); }, Qt::QueuedConnection);
+}
+
 void SongImporter::setEncodeHookForTesting(std::function<void()> hook)
 {
     m_encodeHook = std::move(hook);
@@ -949,6 +1165,17 @@ void SongImporter::setEncodeHookForTesting(std::function<void()> hook)
 void SongImporter::waitForIdleForTesting()
 {
     m_pool.waitForDone();
+}
+
+void SongImporter::postProgress(quint64 generation, qreal progress)
+{
+    QMetaObject::invokeMethod(
+        this,
+        [this, generation, progress] {
+            if (isCurrent(generation))
+                emit progressChanged(progress);
+        },
+        Qt::QueuedConnection);
 }
 
 void SongImporter::postFailure(quint64 generation, SongImportError error)
@@ -975,6 +1202,15 @@ void SongImporter::deliverAnalysis(quint64 generation, const QString &path, cons
     m_knownDurations.insert(path, info.durationMs);
     emit progressChanged(1.0);
     emit analysed(info);
+}
+
+void SongImporter::deliverWhole(quint64 generation, const EncodedSong &song)
+{
+    if (!isCurrent(generation))
+        return;
+    m_busy = false;
+    emit progressChanged(1.0);
+    emit encodedWhole(song);
 }
 
 void SongImporter::deliverEncoded(quint64 generation, const QByteArray &container, qint64 durationMs,

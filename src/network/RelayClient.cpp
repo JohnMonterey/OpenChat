@@ -406,6 +406,13 @@ public:
         socket->setMaxAllowedIncomingMessageSize(limits.maxIncomingMessageBytes);
 
         QObject::connect(socket, &QWebSocket::pong, q, [this] { awaitingPong = false; });
+        // Any frame from the relay proves the link is alive, not only a pong.
+        // A long catch-up backlog (attachment parts, say) on a slow downlink
+        // queues the relay's pong behind it; waiting for that pong alone would
+        // abort a healthy connection every ten seconds and start the backlog
+        // over.
+        QObject::connect(socket, &QWebSocket::binaryFrameReceived, q,
+                         [this](const QByteArray &, bool) { awaitingPong = false; });
         QObject::connect(socket, &QWebSocket::connected, q, [this] { onSocketConnected(); });
         QObject::connect(socket, &QWebSocket::disconnected, q, [this] { onSocketDisconnected(); });
         QObject::connect(socket, &QWebSocket::binaryMessageReceived, q,

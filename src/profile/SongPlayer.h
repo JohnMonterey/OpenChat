@@ -75,6 +75,10 @@ public:
     static constexpr int resumeFadeInMs = 5;
 
     SongStream(SongContainer song, QAudioFormat sinkFormat, qint64 startSample = 0, QObject *parent = nullptr);
+    // A song held to other bounds than a profile song's (a chat attachment's,
+    // chatSongLimits); the stream refuses one longer than `limits`.
+    SongStream(SongContainer song, QAudioFormat sinkFormat, qint64 startSample, const SongContainerLimits &limits,
+               QObject *parent = nullptr);
     ~SongStream() override;
 
     [[nodiscard]] bool isValid() const;
@@ -165,10 +169,15 @@ using SongOutputFactory = std::function<std::unique_ptr<SongOutput>(int channels
 // starts) fades out and keeps the position, and refuses play() until the
 // call is over. Qt Multimedia is first touched by play(), so a page that is
 // only looked at never loads it.
+//
+// `longForm` plays a chat's audio attachment instead of a profile song: the
+// same container, allowed to run for minutes (chatSongLimits) rather than
+// 45 seconds. Changing it reloads the song as a new key would.
 class SongPlayer : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QString songKey READ songKey WRITE setSongKey NOTIFY sourceChanged)
+    Q_PROPERTY(bool longForm READ longForm WRITE setLongForm NOTIFY sourceChanged)
     Q_PROPERTY(bool valid READ valid NOTIFY sourceChanged)
     Q_PROPERTY(qint64 durationMs READ durationMs NOTIFY sourceChanged)
     Q_PROPERTY(qint64 positionMs READ positionMs NOTIFY positionChanged)
@@ -189,6 +198,8 @@ public:
     // The same key does nothing (a page refresh never interrupts the song);
     // a new key stops, rewinds and loads it from SongLibrary.
     void setSongKey(const QString &key);
+    [[nodiscard]] bool longForm() const;
+    void setLongForm(bool longForm);
     [[nodiscard]] bool valid() const;
     [[nodiscard]] qint64 durationMs() const;
     [[nodiscard]] qint64 positionMs() const;
@@ -240,6 +251,9 @@ private:
     };
 
     static void songArrived(const QString &key);
+    [[nodiscard]] SongContainerLimits limits() const;
+    // Stops (fading the voice out), rewinds and loads m_key again.
+    void reload();
     void load();
     void unload();
     // Fades the playing voice out (or lets it play out its buffer when
@@ -252,6 +266,7 @@ private:
     void outputFailed(const SongOutput *output, const QString &message);
 
     QString m_key;
+    bool m_longForm = false;
     std::optional<SongContainer> m_song; // loaded and validated
     bool m_loaded = false;               // the library had bytes for m_key
     qint64 m_durationMs = 0;

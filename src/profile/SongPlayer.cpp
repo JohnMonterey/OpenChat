@@ -169,8 +169,14 @@ void SongLibrary::clear()
 // ---------------------------------------------------------------------------
 
 SongStream::SongStream(SongContainer song, QAudioFormat sinkFormat, qint64 startSample, QObject *parent)
+    : SongStream(std::move(song), sinkFormat, startSample, SongContainerLimits{}, parent)
+{
+}
+
+SongStream::SongStream(SongContainer song, QAudioFormat sinkFormat, qint64 startSample,
+                       const SongContainerLimits &limits, QObject *parent)
     : QIODevice(parent)
-    , m_decoder(std::move(song))
+    , m_decoder(std::move(song), limits)
     , m_format(sinkFormat)
 {
     m_songChannels = std::clamp(m_decoder.channels(), 1, 2);
@@ -455,13 +461,36 @@ void SongPlayer::setSongKey(const QString &key)
 {
     if (key == m_key)
         return;
+    m_key = key;
+    reload();
+}
+
+bool SongPlayer::longForm() const
+{
+    return m_longForm;
+}
+
+void SongPlayer::setLongForm(bool longForm)
+{
+    if (longForm == m_longForm)
+        return;
+    m_longForm = longForm;
+    reload();
+}
+
+SongContainerLimits SongPlayer::limits() const
+{
+    return m_longForm ? chatSongLimits() : SongContainerLimits{};
+}
+
+void SongPlayer::reload()
+{
     const bool wasPlaying = m_playing;
     const bool hadError = !m_error.isEmpty();
     if (m_voice)
         retireVoice(fadeOutMs);
     m_playing = false;
     m_error.clear();
-    m_key = key;
     load();
     setPositionMs(0);
     emit sourceChanged();
@@ -551,7 +580,7 @@ void SongPlayer::play()
     }
 
     const qint64 startMs = m_positionMs >= m_durationMs ? 0 : m_positionMs;
-    auto stream = std::make_unique<SongStream>(*m_song, output->format(), startMs * songRate / 1000);
+    auto stream = std::make_unique<SongStream>(*m_song, output->format(), startMs * songRate / 1000, limits());
     if (!stream->isValid() || !output->start(stream.get())) {
         output->stop();
         output.reset();
@@ -701,12 +730,13 @@ void SongPlayer::load()
     if (bytes.isEmpty())
         return; // not arrived yet: SongLibrary::put() calls back
     m_loaded = true;
-    std::optional<SongContainer> song = decodeSongContainer(bytes);
+    const SongContainerLimits bounds = limits();
+    std::optional<SongContainer> song = decodeSongContainer(bytes, bounds);
     if (!song)
         return;
     // A decoder checks every packet's TOC; a song it refuses is "Can't play
     // this song on this computer.", never a stream that stops half way.
-    if (!SongDecoder(*song).isValid())
+    if (!SongDecoder(*song, bounds).isValid())
         return;
     m_durationMs = song->durationMs();
     m_song = std::move(song);

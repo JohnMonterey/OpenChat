@@ -126,6 +126,16 @@ public:
     [[nodiscard]] Result<void, RepositoryError>
     advanceDeliveryState(const MessageId &messageId, DeliveryState state) override;
 
+    // Chat attachments. commitReceive also stores an incoming attachment's
+    // descriptor; claimDue takes attachment frames (priority 1) only when
+    // nothing else is due.
+    [[nodiscard]] Result<void, RepositoryError>
+    commitAttachmentSend(const MessageRecord &message, const QVector<OutboxRecord> &outboxes,
+                         const QByteArray &recipients, QByteArrayView mlsState) override;
+    [[nodiscard]] Result<bool, RepositoryError>
+    canEnqueueAttachment(const ConversationId &conversation, const AttachmentId &attachmentId) override;
+    [[nodiscard]] Result<int, RepositoryError> pendingLowPriorityCount() override;
+
 private:
     SqlCipherDatabase &m_database;
     ProfileId m_profileId;

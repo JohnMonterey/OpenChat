@@ -1,3 +1,4 @@
+#include "domain/Attachment.h"
 #include "domain/ProfilePageCodec.h"
 #include "domain/SongContainer.h"
 #include "media/SongCodec.h"
@@ -369,6 +370,19 @@ QByteArray readAll(QIODevice &stream)
     }
 }
 
+// How many frames a stream gives to its end, read a mebibyte at a time
+// (five minutes of stereo is too much to keep).
+qint64 countFrames(QIODevice &stream, int channels)
+{
+    qint64 bytes = 0;
+    for (;;) {
+        const QByteArray chunk = stream.read(1024 * 1024);
+        if (chunk.isEmpty())
+            return bytes / (2 * channels);
+        bytes += chunk.size();
+    }
+}
+
 QVector<qint16> asS16(const QByteArray &bytes)
 {
     QVector<qint16> samples(bytes.size() / 2);
@@ -403,6 +417,10 @@ private slots:
     void decoderRejectsWrongPacketDurations();
     void decoderConcealsACorruptPacket();
     void channelCountsAreKept();
+    void chatOptionsKeepFiveMinutesWithinTheirLimits();
+    void chatOptionsTakeShortQuietClips();
+    void monoFallbackFitsWhatNoStereoRungCan();
+    void encodeProgressNeverGoesBack();
 
     // Import
     void analyseReadsWavPeaksDurationAndInfoTags_data();
@@ -413,6 +431,11 @@ private slots:
     void importRefusesUnreadableAndOversizedFiles();
     void importCompressedWhenDecoderAvailable();
     void analyseKeepsOnlyTheSourceLimit();
+    void encodeWholeKeepsTheFirstFiveMinutesOfAWav();
+    void encodeWholeTakesAShortQuietVoiceNote();
+    void encodeWholeFindsTheSamplesBehindOtherChunks();
+    void encodeWholeRefusesSilence();
+    void encodeWholeThroughTheDecoder();
 
     // Playback
     void songStreamProducesDecodedPcmAndEnds();
@@ -427,14 +450,21 @@ private slots:
     void outputFailureStopsThePlayerAndSaysSo();
     void outputFailureAfterTheSongEndedIsHarmless();
     void songLibraryKeepsTheThreeLatestSongs();
+    void fiveMinuteSongPlaysToTheEndAndSeeks();
+    void longFormPlayerPlaysAChatSong();
 
 private:
     QString writeFile(const QString &name, const QByteArray &bytes);
     void installFakeOutput();
+    const QByteArray &chatSong();
 
     QTemporaryDir m_dir;
     QByteArray m_monoSong;   // 3 s of 440 Hz, mono
     QByteArray m_stereoSong; // 2 s, 440 Hz left and 660 Hz right
+    // A chat's audio attachment, made once when a test first asks: 5:10 of
+    // stereo in, the first five minutes out. 440 Hz left (880 Hz from 4:30),
+    // 660 Hz right.
+    QByteArray m_chatSong;
     std::vector<std::shared_ptr<FakeOutputState>> m_outputs;
     int m_factoryCalls = 0;
 };
@@ -473,6 +503,17 @@ QString ProfileSongTest::writeFile(const QString &name, const QByteArray &bytes)
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(bytes) != bytes.size())
         qFatal("cannot write %s", qPrintable(path));
     return path;
+}
+
+const QByteArray &ProfileSongTest::chatSong()
+{
+    if (m_chatSong.isEmpty()) {
+        const WavAudio pcm = synth(songRate, 2, 310.0, [](int channel, double t) {
+            return 0.3 * sine(channel == 1 ? 660.0 : t < 270.0 ? 440.0 : 880.0, t);
+        });
+        m_chatSong = encodeOrFail(pcm, false, false, chatSongEncodeOptions());
+    }
+    return m_chatSong;
 }
 
 void ProfileSongTest::installFakeOutput()
@@ -842,6 +883,125 @@ void ProfileSongTest::channelCountsAreKept()
     const double right = rmsMs(sixOut, 2, 1, 500, 1'300);
     QVERIFY(left > 0.01);
     QVERIFY2(std::abs(amplitudeToDb(left / right)) < 1.0, qPrintable(u"%1 %2"_s.arg(left).arg(right)));
+}
+
+void ProfileSongTest::chatOptionsKeepFiveMinutesWithinTheirLimits()
+{
+    // 5:10 in: a chat's limits cut at 5:00 (a profile song's at 0:45), and
+    // five minutes of stereo fit a chat attachment's 4 MiB at the top rung.
+    const QByteArray bytes = chatSong();
+    QVERIFY(!bytes.isEmpty());
+    QVERIFY2(bytes.size() <= AttachmentLimits::maxAudioBytes, qPrintable(QString::number(bytes.size())));
+    QVERIFY(bytes.size() > maxSongBytes);
+
+    // Every piece held to a profile song's limits refuses it; to a chat's,
+    // takes it. The two never disagree about the same song.
+    QVERIFY(!decodeSongContainer(bytes));
+    const std::optional<SongContainer> song = decodeSongContainer(bytes, chatSongLimits());
+    QVERIFY(song);
+    QCOMPARE(song->channels, 2);
+    QCOMPARE(song->totalSamples, qint64(300) * songRate);
+    QCOMPARE(song->durationMs(), AttachmentLimits::maxAudioMs);
+    QVERIFY(!SongDecoder(*song).isValid());
+    QVERIFY(SongDecoder(*song, chatSongLimits()).isValid());
+    const double rate = bitrateOf(*song);
+    QVERIFY2(rate > 54'000 && rate < 74'000, qPrintable(QString::number(rate)));
+
+    // The cut goes through the music, so it fades over half a second.
+    SongDecoder decoder(*song, chatSongLimits());
+    decoder.seekToSample(qint64(298) * songRate);
+    QVector<qint16> tail;
+    while (!decoder.atEnd())
+        tail += decoder.next();
+    QCOMPARE(tail.size(), qsizetype(2) * songRate * 2);
+    const double steady = rmsMs(tail, 2, 0, 500, 1'000);
+    QVERIFY(steady > 0.05);
+    QVERIFY(rmsMs(tail, 2, 0, 2'000 - 50, 2'000) < 0.1 * steady);
+
+    // Profile options are untouched by all this: the same source, 45 s.
+    const std::optional<SongContainer> profile =
+        decodeSongContainer(encodeOrFail(tone(440.0, 50.0, songRate, 2, 0.3)));
+    QVERIFY(profile);
+    QCOMPARE(profile->durationMs(), qint64(SongContainer::maxDurationMs));
+}
+
+void ProfileSongTest::chatOptionsTakeShortQuietClips()
+{
+    const SongEncodeOptions chat = chatSongEncodeOptions();
+    const auto errorOf = [](const WavAudio &pcm, const SongEncodeOptions &options) {
+        auto result = encodeSong(SongClip{pcm, false, false}, options);
+        return result ? std::optional<SongEncodeError>() : std::optional<SongEncodeError>(result.error());
+    };
+    // 400 ms: too short for a profile song, a voice note in a chat; under
+    // 300 ms is too short for both.
+    QCOMPARE(errorOf(tone(440.0, 0.4), {}), SongEncodeError::TooShort);
+    QCOMPARE(errorOf(tone(440.0, 0.4), chat), std::optional<SongEncodeError>());
+    QCOMPARE(errorOf(tone(440.0, 0.25), chat), SongEncodeError::TooShort);
+    // Hiss at -60 dBFS is silence to a profile song and sound to a chat;
+    // only under -70 dBFS is a chat's clip silent.
+    QCOMPARE(errorOf(noise(3.0, songRate, 1, dbToAmplitude(-60.0)), {}), SongEncodeError::Silent);
+    QCOMPARE(errorOf(noise(3.0, songRate, 1, dbToAmplitude(-60.0)), chat), std::optional<SongEncodeError>());
+    QCOMPARE(errorOf(noise(3.0, songRate, 1, dbToAmplitude(-80.0)), chat), SongEncodeError::Silent);
+
+    // A quiet recording (RMS -30 dBFS) is lifted by at most 6 dB, where a
+    // profile song gets 12.
+    const WavAudio quiet = tone(440.0, 3.0, songRate, 1, dbToAmplitude(-30.0 + 3.0103));
+    const QVector<qint16> lifted = decodeAll(encodeOrFail(quiet, false, false, chat));
+    const double level = amplitudeToDb(rmsMs(lifted, 1, 0, 500, 2'500));
+    QVERIFY2(std::abs(level - -24.0) < 0.7, qPrintable(QString::number(level)));
+}
+
+void ProfileSongTest::monoFallbackFitsWhatNoStereoRungCan()
+{
+    // 10 s of stereo noise in 25 000 bytes: 24 kbit/s stereo needs about
+    // 30 000; the same song in one channel at 16 kbit/s fits.
+    const WavAudio stereo = noise(10.0, songRate, 2, 0.5);
+    SongEncodeOptions options;
+    options.maxBytes = 25'000;
+    options.stereoBitrates = {24'000};
+    options.monoBitrates = {16'000};
+    auto refused = encodeSong(SongClip{stereo, false, false}, options);
+    QVERIFY(!refused);
+    QCOMPARE(refused.error(), SongEncodeError::TooLarge);
+
+    options.monoFallback = true;
+    const QByteArray bytes = encodeOrFail(stereo, false, false, options);
+    QVERIFY(!bytes.isEmpty());
+    QVERIFY(bytes.size() <= options.maxBytes);
+    const std::optional<SongContainer> song = decodeSongContainer(bytes);
+    QVERIFY(song);
+    QCOMPARE(song->channels, 1);
+    QCOMPARE(song->totalSamples, qint64(10) * songRate);
+
+    // Both sides end up in the one channel: 440 Hz left and 660 Hz right
+    // come out together. (No stereo rung at all goes straight to mono.)
+    SongEncodeOptions monoOnly = options;
+    monoOnly.maxBytes = maxSongBytes;
+    monoOnly.stereoBitrates.clear();
+    monoOnly.monoBitrates = {32'000};
+    const QVector<qint16> both = decodeAll(encodeOrFail(synth(songRate, 2, 3.0, [](int channel, double t) {
+        return 0.3 * sine(channel == 0 ? 440.0 : 660.0, t);
+    }), false, false, monoOnly));
+    QCOMPARE(both.size(), qsizetype(3) * songRate);
+    QVERIFY(dominates(both, 1, 0, 1.0, 1.0, songRate, 440.0, {415.3, 550.0}));
+    QVERIFY(dominates(both, 1, 0, 1.0, 1.0, songRate, 660.0, {622.3, 550.0}));
+}
+
+void ProfileSongTest::encodeProgressNeverGoesBack()
+{
+    // The budget that steps down past three rungs (see above): each is given
+    // up part way, and the figure waits for the next to pass it.
+    SongEncodeOptions tight;
+    tight.maxBytes = 35'000;
+    QVector<qreal> steps;
+    auto result = encodeSong(SongClip{noise(10.0, songRate, 2, 0.5), false, false}, tight, {},
+                             [&steps](qreal done) { steps.push_back(done); });
+    QVERIFY(result);
+    QVERIFY2(steps.size() >= 50 && steps.size() <= 100, qPrintable(QString::number(steps.size())));
+    for (qsizetype i = 1; i < steps.size(); ++i)
+        QVERIFY2(steps.at(i) >= steps.at(i - 1) + 0.01 - 1e-9, qPrintable(QString::number(steps.at(i))));
+    QVERIFY(steps.first() > 0.0);
+    QVERIFY2(steps.last() > 0.99 && steps.last() <= 1.0, qPrintable(QString::number(steps.last())));
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1428,183 @@ void ProfileSongTest::analyseKeepsOnlyTheSourceLimit()
     QCOMPARE(encoded.at(0).at(2).toLongLong(), qint64(0));
 }
 
+void ProfileSongTest::encodeWholeKeepsTheFirstFiveMinutesOfAWav()
+{
+    // 5:20 at 8 kHz: 440 Hz, then 880 Hz from 4:30.
+    const QString path = writeFile(u"long-note.wav"_s, makeWav(synth(8'000, 1, 320.0, [](int, double t) {
+        return 0.3 * sine(t < 270.0 ? 440.0 : 880.0, t);
+    })));
+    SongImporter importer;
+    QSignalSpy whole(&importer, &SongImporter::encodedWhole);
+    QSignalSpy failed(&importer, &SongImporter::failed);
+    QVector<qreal> progress;
+    connect(&importer, &SongImporter::progressChanged, this, [&progress](qreal done) { progress.push_back(done); });
+    importer.encodeWhole(path, chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
+    QVERIFY(importer.busy());
+    QVERIFY(whole.wait(120'000));
+    QCOMPARE(failed.count(), 0);
+    QVERIFY(!importer.busy());
+
+    const auto song = whole.at(0).at(0).value<EncodedSong>();
+    QVERIFY(song.trimmed);
+    QCOMPARE(song.durationMs, AttachmentLimits::maxAudioMs);
+    QVERIFY(song.container.size() <= AttachmentLimits::maxAudioBytes);
+    const std::optional<SongContainer> container = decodeSongContainer(song.container, chatSongLimits());
+    QVERIFY(container);
+    QCOMPARE(container->channels, 1);
+    QCOMPARE(container->totalSamples, qint64(300) * songRate);
+    // Four and a half minutes in, the note has changed.
+    SongDecoder decoder(*container, chatSongLimits());
+    decoder.seekToSample(qint64(280) * songRate);
+    QVector<qint16> later;
+    while (later.size() < songRate && !decoder.atEnd())
+        later += decoder.next();
+    QVERIFY(dominates(later, 1, 0, 0.0, 1.0, songRate, 880.0, {440.0, 830.6, 932.3}));
+
+    // An even tone draws as even bars, lifted to the top.
+    QCOMPARE(song.peaks.size(), AttachmentLimits::maxPeaks);
+    for (const quint8 peak : song.peaks)
+        QVERIFY2(peak >= 250, qPrintable(QString::number(peak)));
+
+    // From 0 to 1, never back, and moving during the encode, not only at
+    // its end.
+    QVERIFY(progress.size() >= 10);
+    QCOMPARE(progress.first(), 0.0);
+    QCOMPARE(progress.last(), 1.0);
+    for (qsizetype i = 1; i < progress.size(); ++i)
+        QVERIFY(progress.at(i) >= progress.at(i - 1));
+    QVERIFY(std::count_if(progress.cbegin(), progress.cend(), [](qreal done) { return done > 0.2 && done < 0.9; })
+            >= 5);
+
+    // A file shorter than the limit is kept whole, and says it was not cut.
+    const QString shortPath = writeFile(u"short-note.wav"_s, makeWav(tone(440.0, 20.0, 22'050, 2, 0.3)));
+    importer.encodeWhole(shortPath, chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
+    QVERIFY(whole.wait(60'000));
+    const auto shortSong = whole.at(1).at(0).value<EncodedSong>();
+    QVERIFY(!shortSong.trimmed);
+    QCOMPARE(shortSong.durationMs, qint64(20'000));
+    QCOMPARE(decodeSongContainer(shortSong.container, chatSongLimits())->channels, 2);
+}
+
+void ProfileSongTest::encodeWholeTakesAShortQuietVoiceNote()
+{
+    // 300 ms of voice at -20 dBFS, then 300 ms of room: too short for a
+    // profile song, a voice note in a chat.
+    const QString path = writeFile(u"note.wav"_s, makeWav(synth(16'000, 1, 0.6, [](int, double t) {
+        return t < 0.3 ? dbToAmplitude(-20.0) * sine(300.0, t) : 0.0;
+    })));
+    SongImporter importer;
+    QSignalSpy whole(&importer, &SongImporter::encodedWhole);
+    QSignalSpy failed(&importer, &SongImporter::failed);
+    importer.encodeWhole(path, chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
+    QVERIFY(whole.wait(30'000));
+    QCOMPARE(failed.count(), 0);
+    const auto song = whole.at(0).at(0).value<EncodedSong>();
+    QVERIFY(!song.trimmed);
+    QCOMPARE(song.durationMs, qint64(600));
+    // The voice reaches the top of the waveform; the room stays flat.
+    QCOMPARE(song.peaks.size(), AttachmentLimits::maxPeaks);
+    QVERIFY(song.peaks.at(10) >= 250);
+    QCOMPARE(song.peaks.last(), quint8(0));
+
+    // At -40 dBFS the waveform is lifted by at most 24 dB, so hiss can never
+    // pass for sound: its bars stop at about a sixth of the height.
+    const QString faint = writeFile(u"faint.wav"_s, makeWav(synth(16'000, 1, 1.0, [](int, double t) {
+        return dbToAmplitude(-40.0) * sine(300.0, t);
+    })));
+    importer.encodeWhole(faint, chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
+    QVERIFY(whole.wait(30'000));
+    const auto faintSong = whole.at(1).at(0).value<EncodedSong>();
+    const int expected = int(std::lround(dbToAmplitude(-40.0) * 16.0 * 255.0));
+    QVERIFY2(std::abs(int(faintSong.peaks.at(48)) - expected) <= 2,
+             qPrintable(QString::number(faintSong.peaks.at(48))));
+}
+
+void ProfileSongTest::encodeWholeFindsTheSamplesBehindOtherChunks()
+{
+    // 300 KB of other chunks between the format and the samples (cover art
+    // does this): the head is found by walking the chunks, not by reading.
+    QByteArray bytes = makeWav(tone(440.0, 12.0, 22'050, 1, 0.3));
+    QByteArray padding;
+    appendChunk(padding, "junk", QByteArray(300'000, 'j'));
+    bytes.insert(bytes.indexOf("data"), padding);
+    const QString path = writeFile(u"padded.wav"_s, bytes);
+    SongEncodeOptions options = chatSongEncodeOptions();
+    options.maxDurationMs = 10'000;
+    SongImporter importer;
+    QSignalSpy whole(&importer, &SongImporter::encodedWhole);
+    QSignalSpy failed(&importer, &SongImporter::failed);
+    importer.encodeWhole(path, options, 24);
+    QVERIFY(whole.wait(30'000));
+    QCOMPARE(failed.count(), 0);
+    const auto song = whole.at(0).at(0).value<EncodedSong>();
+    QVERIFY(song.trimmed);
+    QCOMPARE(song.durationMs, qint64(10'000));
+    QCOMPARE(song.peaks.size(), 24);
+    const QVector<qint16> out = decodeAll(song.container);
+    QVERIFY(dominates(out, 1, 0, 2.0, 1.0, songRate, 440.0, {415.3, 466.2}));
+}
+
+void ProfileSongTest::encodeWholeRefusesSilence()
+{
+    SongImporter importer;
+    QSignalSpy failed(&importer, &SongImporter::failed);
+    QSignalSpy whole(&importer, &SongImporter::encodedWhole);
+    const QString silent = writeFile(u"whole-silent.wav"_s, makeWav(synth(songRate, 2, 3.0, [](int, double) {
+        return 0.0;
+    })));
+    importer.encodeWhole(silent, chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
+    QCOMPARE(failed.count(), 0); // never inside the call
+    QVERIFY(failed.wait(30'000));
+    QCOMPARE(failed.at(0).at(0).value<SongImportError>(), SongImportError::Silent);
+    QCOMPARE(whole.count(), 0);
+    QVERIFY(!importer.busy());
+
+    importer.encodeWhole(m_dir.filePath(u"not-there.wav"_s), chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
+    QVERIFY(failed.wait(30'000));
+    QCOMPARE(failed.at(1).at(0).value<SongImportError>(), SongImportError::FileMissing);
+}
+
+void ProfileSongTest::encodeWholeThroughTheDecoder()
+{
+    if (!SongImporter::canDecodeCompressed())
+        QSKIP("No Qt Multimedia decoder backend on this machine");
+
+    // The decoder's path: 50 s in, at most 30 s kept.
+    const QString path = writeFile(u"whole-through-decoder.wav"_s,
+                                   makeWav(tone(440.0, 50.0, 44'100, 1, 0.3)));
+    SongEncodeOptions options = chatSongEncodeOptions();
+    options.maxDurationMs = 30'000;
+    SongImporter importer;
+    importer.setForceDecoderForTesting(true);
+    QSignalSpy whole(&importer, &SongImporter::encodedWhole);
+    QSignalSpy failed(&importer, &SongImporter::failed);
+    QVector<qreal> progress;
+    connect(&importer, &SongImporter::progressChanged, this, [&progress](qreal done) { progress.push_back(done); });
+    importer.encodeWhole(path, options, AttachmentLimits::maxPeaks);
+    QVERIFY(whole.wait(60'000));
+    QCOMPARE(failed.count(), 0);
+    const auto song = whole.at(0).at(0).value<EncodedSong>();
+    QVERIFY(song.trimmed);
+    QCOMPARE(song.durationMs, qint64(30'000));
+    const std::optional<SongContainer> container = decodeSongContainer(song.container, chatSongLimits());
+    QVERIFY(container);
+    QCOMPARE(container->channels, 1); // asked for stereo, folded back to the file's mono
+    QCOMPARE(song.peaks.size(), AttachmentLimits::maxPeaks);
+    for (qsizetype i = 1; i < progress.size(); ++i)
+        QVERIFY(progress.at(i) >= progress.at(i - 1));
+    QCOMPARE(progress.last(), 1.0);
+
+    // A file that fits is not cut.
+    const QString shortPath = writeFile(u"whole-short-through-decoder.wav"_s,
+                                        makeWav(tone(440.0, 8.0, 44'100, 2, 0.3)));
+    importer.encodeWhole(shortPath, options, AttachmentLimits::maxPeaks);
+    QVERIFY(whole.wait(60'000));
+    const auto shortSong = whole.at(1).at(0).value<EncodedSong>();
+    QVERIFY(!shortSong.trimmed);
+    QVERIFY2(std::abs(shortSong.durationMs - 8'000) <= 30, qPrintable(QString::number(shortSong.durationMs)));
+}
+
 // ---------------------------------------------------------------------------
 // Playback
 // ---------------------------------------------------------------------------
@@ -1689,6 +2026,86 @@ void ProfileSongTest::songLibraryKeepsTheThreeLatestSongs()
     QCOMPARE(pull(*m_outputs.at(0), 200).size(), qsizetype(songRate / 5));
     library.clear();
     QVERIFY(library.get(keyA).isEmpty());
+}
+
+void ProfileSongTest::fiveMinuteSongPlaysToTheEndAndSeeks()
+{
+    const std::optional<SongContainer> song = decodeSongContainer(chatSong(), chatSongLimits());
+    QVERIFY(song);
+    // A stream held to a profile song's limits refuses it outright, rather
+    // than playing 45 s of it and stopping.
+    {
+        SongStream refused(*song, pcmFormat(songRate, 2));
+        QVERIFY(!refused.isValid());
+        QVERIFY(refused.finished());
+    }
+    // Held to a chat's, every frame of the five minutes plays.
+    {
+        SongStream stream(*song, pcmFormat(songRate, 2), 0, chatSongLimits());
+        QVERIFY(stream.isValid());
+        QCOMPARE(countFrames(stream, 2), qint64(300) * songRate);
+        QVERIFY(stream.finished());
+        QCOMPARE(stream.framesPlayed(), qint64(300) * songRate);
+    }
+    // From 4:30: the last half minute, where the left note is 880 Hz.
+    {
+        SongStream stream(*song, pcmFormat(songRate, 2), qint64(270) * songRate, chatSongLimits());
+        QCOMPARE(stream.framesPlayed(), qint64(270) * songRate);
+        const QVector<qint16> rest = asS16(readAll(stream));
+        QCOMPARE(rest.size(), qsizetype(30) * songRate * 2);
+        QVERIFY(dominates(rest, 2, 0, 1.0, 1.0, songRate, 880.0, {440.0, 660.0}));
+        QVERIFY(dominates(rest, 2, 1, 1.0, 1.0, songRate, 660.0, {440.0, 880.0}));
+    }
+    // And a seek back into the first part mid-stream.
+    {
+        SongStream stream(*song, pcmFormat(44'100, 2), 0, chatSongLimits());
+        (void)stream.read(44'100 * 4); // a second
+        stream.seekToSample(qint64(60) * songRate);
+        const QVector<qint16> minute = asS16(stream.read(44'100 * 4 * 2));
+        QCOMPARE(minute.size(), qsizetype(44'100) * 2 * 2);
+        QVERIFY(dominates(minute, 2, 0, 0.5, 1.0, 44'100, 440.0, {880.0, 660.0}));
+    }
+}
+
+void ProfileSongTest::longFormPlayerPlaysAChatSong()
+{
+    SongLibrary::instance().put(keyA, chatSong());
+    SongPlayer player;
+    player.setSongKey(keyA);
+    // A profile's player refuses a five-minute song.
+    QVERIFY(!player.valid());
+    QCOMPARE(player.durationMs(), 0);
+
+    QSignalSpy sources(&player, &SongPlayer::sourceChanged);
+    player.setLongForm(true);
+    QVERIFY(player.longForm());
+    QCOMPARE(sources.count(), 1);
+    QVERIFY(player.valid());
+    QCOMPARE(player.durationMs(), AttachmentLimits::maxAudioMs);
+    player.setLongForm(true);
+    QCOMPARE(sources.count(), 1);
+
+    player.play();
+    QVERIFY(player.playing());
+    player.seek(270'000);
+    QCOMPARE(player.positionMs(), qint64(270'000));
+    FakeOutputState &output = *m_outputs.at(0);
+    QCOMPARE(output.format.channelCount(), 2);
+    QCOMPARE(pullToTheEnd(output), qsizetype(30) * songRate);
+    QTRY_VERIFY(!player.playing());
+    QCOMPARE(player.positionMs(), 0);
+    QVERIFY(player.error().isEmpty());
+
+    // Playing again, then going back to a profile's limits: the song stops
+    // (as a new key would stop it) and is refused.
+    player.play();
+    QVERIFY(player.playing());
+    player.setLongForm(false);
+    QVERIFY(!player.playing());
+    QVERIFY(!player.valid());
+    QCOMPARE(sources.count(), 2);
+    player.play();
+    QVERIFY(!player.playing());
 }
 
 QTEST_MAIN(ProfileSongTest)

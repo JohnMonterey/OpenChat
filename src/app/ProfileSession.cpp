@@ -11,6 +11,7 @@
 #include "repositories/SyncRepository.h"
 #include "security/KeyVault.h"
 #include "storage/CapturingMlsStateStore.h"
+#include "storage/SqlCipherAttachmentRepository.h"
 #include "storage/SqlCipherChatRepository.h"
 #include "storage/SqlCipherContactRepository.h"
 #include "storage/SqlCipherDatabase.h"
@@ -276,6 +277,7 @@ Result<void, ProfileSessionError> ProfileSession::activate(
   m_contacts = std::make_unique<SqlCipherContactRepository>(*m_database);
   m_profilePages =
       std::make_unique<SqlCipherProfilePageRepository>(*m_database, m_profileId);
+  m_attachments = std::make_unique<SqlCipherAttachmentRepository>(*m_database);
   m_outbox = std::make_unique<SqlCipherOutboxRepository>(*m_database);
   m_sync = std::make_unique<SqlCipherSyncRepository>(*m_database);
   // MLS state is captured in memory, not written through. load() still returns
@@ -328,6 +330,7 @@ void ProfileSession::lock() noexcept {
   m_chats.reset();
   m_contacts.reset();
   m_profilePages.reset();
+  m_attachments.reset();
   m_outbox.reset();
   m_sync.reset();
   m_mls.reset();
@@ -527,6 +530,10 @@ SqlCipherOutboxRepository *ProfileSession::outbox() const noexcept {
 
 SqlCipherProfilePageRepository *ProfileSession::profilePages() const noexcept {
   return m_profilePages.get();
+}
+
+SqlCipherAttachmentRepository *ProfileSession::attachments() const noexcept {
+  return m_attachments.get();
 }
 
 SqlCipherSyncRepository *ProfileSession::sync() const noexcept {

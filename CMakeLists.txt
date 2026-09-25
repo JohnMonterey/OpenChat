@@ -73,6 +73,7 @@ endif()
 # animation ticker, song import and the page's mini player, and the QML
 # registration. QPainter artwork like the cosmetics; Qt Multimedia is reached
 # only on demand (a WAV import never loads it, a player on its first play()).
+# The chat's attachment import reuses the same pipelines, so it lives here too.
 add_library(openchat_profile STATIC
     src/profile/ProfileRenderPolicy.cpp
     src/profile/ProfileTicker.cpp
@@ -94,6 +95,7 @@ add_library(openchat_profile STATIC
     src/profile/ClipCodec.cpp
     src/profile/ProfileClipPlayer.cpp
     src/profile/ClipImport.cpp
+    src/profile/ChatAttachmentImport.cpp
 )
 target_include_directories(openchat_profile PUBLIC src)
 target_link_libraries(openchat_profile
@@ -449,6 +451,7 @@ add_library(openchat_domain STATIC
     src/domain/ClipContainer.cpp
     src/domain/GroupUpdate.cpp
     src/domain/MessageContent.cpp
+    src/domain/Attachment.cpp
 )
 target_include_directories(openchat_domain PUBLIC src)
 target_link_libraries(openchat_domain PUBLIC Qt6::Core)
@@ -677,6 +680,7 @@ add_library(openchat_security STATIC
     src/security/RecoveryCode.cpp
     src/security/PasswordKey.cpp
     src/security/SafetyNumber.cpp
+    src/security/AttachmentSeal.cpp
 )
 
 add_library(openchat_storage STATIC
@@ -687,6 +691,7 @@ add_library(openchat_storage STATIC
     src/storage/SqlCipherSyncRepository.cpp
     src/storage/SqlCipherSyncStore.cpp
     src/storage/SqlCipherProfilePageRepository.cpp
+    src/storage/SqlCipherAttachmentRepository.cpp
     src/storage/CapturingMlsStateStore.cpp
 )
 target_include_directories(openchat_storage PUBLIC src)
@@ -715,6 +720,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/015_message_edits_and_replies.sql
         src/storage/migrations/016_profile_pages.sql
         src/storage/migrations/017_profile_panels.sql
+        src/storage/migrations/018_chat_attachments.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -866,6 +872,14 @@ add_executable(tst_messagecontent tests/tst_messagecontent.cpp)
 target_include_directories(tst_messagecontent PRIVATE src)
 target_link_libraries(tst_messagecontent PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_messagecontent COMMAND tst_messagecontent)
+
+# Chat attachments below the app (docs/chat-attachments.md): descriptor bounds,
+# file-name cleaning, the frame codec and its AES-GCM seal, and the blob and
+# preview checks. Qt6::Gui only makes real JPEGs to check.
+add_executable(tst_attachment tests/tst_attachment.cpp)
+target_include_directories(tst_attachment PRIVATE src)
+target_link_libraries(tst_attachment PRIVATE openchat_security openchat_domain Qt6::Core Qt6::Gui Qt6::Test)
+add_test(NAME tst_attachment COMMAND tst_attachment)
 
 add_executable(tst_keyvault tests/tst_keyvault.cpp)
 target_include_directories(tst_keyvault PRIVATE src tests)
@@ -1483,6 +1497,15 @@ target_link_libraries(tst_profileclip PRIVATE
     openchat_profile openchat_media openchat_domain Qt6::Multimedia Qt6::Test)
 add_test(NAME tst_profileclip COMMAND tst_profileclip)
 set_tests_properties(tst_profileclip PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 240)
+
+# Chat attachments' import, from real files: photos, audio, plain files and,
+# where ffmpeg can write one and libvpx is built in, videos.
+add_executable(tst_chatattachmentimport tests/tst_chatattachmentimport.cpp)
+target_include_directories(tst_chatattachmentimport PRIVATE src)
+target_link_libraries(tst_chatattachmentimport PRIVATE
+    openchat_profile openchat_media openchat_domain Qt6::Multimedia Qt6::Test)
+add_test(NAME tst_chatattachmentimport COMMAND tst_chatattachmentimport)
+set_tests_properties(tst_chatattachmentimport PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 300)
 
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp

@@ -233,6 +233,18 @@ public:
     {
         return Result<void, RepositoryError>::success();
     }
+    Result<void, RepositoryError> commitAttachmentSend(const MessageRecord &, const QVector<OutboxRecord> &, const QByteArray &, QByteArrayView) override
+    {
+        return Result<void, RepositoryError>::success();
+    }
+    Result<bool, RepositoryError> canEnqueueAttachment(const ConversationId &, const AttachmentId &) override
+    {
+        return Result<bool, RepositoryError>::success(true);
+    }
+    Result<int, RepositoryError> pendingLowPriorityCount() override
+    {
+        return Result<int, RepositoryError>::success(0);
+    }
 };
 
 class MinimalSyncMls final : public SyncMlsSession

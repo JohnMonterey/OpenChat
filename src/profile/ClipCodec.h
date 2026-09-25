@@ -71,8 +71,12 @@ encodeClipVideo(const QVector<QImage> &frames, int fps, const QVector<int> &kbps
                                            const ClipAudio &audio, qsizetype maxBytes);
 
 // The clip's whole sound as one song for SongStream, or nullopt for a
-// silent clip (or segments whose sound does not line up).
+// silent clip (or segments whose sound does not line up). A profile clip's
+// sound is held to a profile song's length; a chat video's may run longer
+// (chatSongLimits), so its caller passes those limits.
 [[nodiscard]] std::optional<SongContainer> clipSoundtrack(const QVector<ClipContainer> &segments);
+[[nodiscard]] std::optional<SongContainer> clipSoundtrack(const QVector<ClipContainer> &segments,
+                                                          const SongContainerLimits &limits);
 
 // Decodes a clip's pictures in order, one segment after another. A
 // contact's clip is hostile input: every segment passed decodeClipContainer

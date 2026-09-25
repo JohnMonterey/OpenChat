@@ -257,7 +257,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
                                  ? sqlite3_column_int(versionStatement, 0)
                                  : -1;
   sqlite3_finalize(versionStatement);
-  constexpr int latestVersion = 17;
+  constexpr int latestVersion = 18;
   if (currentVersion < 0 || currentVersion > latestVersion)
     return Result<void, StorageError>::failure(StorageError::MigrationFailed);
 
@@ -283,6 +283,7 @@ Result<void, StorageError> SqlCipherDatabase::migrate() {
       {15, ":/openchat/015_message_edits_and_replies.sql"},
       {16, ":/openchat/016_profile_pages.sql"},
       {17, ":/openchat/017_profile_panels.sql"},
+      {18, ":/openchat/018_chat_attachments.sql"},
   };
 
   // Every pending migration runs in this one transaction with foreign_keys=ON

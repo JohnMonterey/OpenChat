@@ -6,7 +6,6 @@
 #include <QBuffer>
 #include <QFileInfo>
 #include <QImageWriter>
-#include <QThreadPool>
 #include <QUrl>
 #include <QVideoFrame>
 
@@ -189,6 +188,8 @@ private:
             return;
         }
         const qint64 duration = m_player.duration();
+        m_durationKnown = duration > 0;
+        m_trimmed = duration > options().maxDurationMs;
         m_clipMs = std::min<qint64>(duration > 0 ? duration : options().maxDurationMs, options().maxDurationMs);
         m_clipMs -= m_clipMs % packetMs;
         if (m_clipMs < minimumClipMs) {
@@ -238,8 +239,13 @@ private:
             }
             addPicture(picture);
         }
-        m_stall.start();
+        if (!m_heldBack)
+            m_stall.start();
         emit m_owner.progressChanged(progress());
+        // A source that never said how long it is shows it was cut by
+        // running on past the clip.
+        if (!m_durationKnown && atMs >= m_clipMs)
+            m_trimmed = true;
         if (atMs >= m_clipMs || m_nextFrame >= totalFrames())
             finishPictures();
     }
@@ -313,11 +319,20 @@ private:
                                   + (length / packetMs + 2) * 2;
         const qsizetype videoCap = options().maxSegmentBytes - soundBytes - frames.size() * 5 - 256;
         ++m_encodesRunning;
+        const int queueLimit = m_owner.m_limits.maxQueuedSegments;
+        if (queueLimit > 0 && m_encodesRunning > queueLimit && !m_heldBack
+            && m_player.playbackState() == QMediaPlayer::PlayingState) {
+            // The encoder is behind: hold the reading until it catches up.
+            // Waiting for it is no stall, so the stall timer waits too.
+            m_heldBack = true;
+            m_stall.stop();
+            m_player.pause();
+        }
         QPointer<Run> self(this);
         const std::shared_ptr<std::atomic_bool> cancelled = m_cancelled;
         const int fps = options().fps;
         const QVector<int> kbps = options().videoKbps;
-        QThreadPool::globalInstance()->start([self, cancelled, index, frames, fps, kbps, videoCap] {
+        m_owner.pool()->start([self, cancelled, index, frames, fps, kbps, videoCap] {
             auto encoded = encodeClipVideo(frames, fps, kbps, videoCap, [cancelled] { return cancelled->load(); });
             if (cancelled->load())
                 return;
@@ -342,6 +357,13 @@ private:
         }
         m_encoded[index] = *encoded;
         ++m_encodesDone;
+        if (m_heldBack && m_encodesRunning <= m_owner.m_limits.maxQueuedSegments) {
+            m_heldBack = false;
+            if (!m_picturesDone) {
+                m_stall.start();
+                m_player.play();
+            }
+        }
         emit m_owner.progressChanged(progress());
         finishIfReady();
     }
@@ -413,11 +435,11 @@ private:
         const int bitrate = pcm.channels == 1 ? options().monoAudioBps : options().stereoAudioBps;
         QPointer<Run> self(this);
         const std::shared_ptr<std::atomic_bool> cancelled = m_cancelled;
-        QThreadPool::globalInstance()->start([self, cancelled, pcm = std::move(pcm), bitrate, clipMs = m_clipMs,
-                                              video = m_encoded, durations = m_durations, size = m_size,
-                                              fps = options().fps, maxBytes = options().maxSegmentBytes,
-                                              poster = m_poster] {
+        m_owner.pool()->start([self, cancelled, pcm = std::move(pcm), bitrate, clipMs = m_clipMs, video = m_encoded,
+                               durations = m_durations, size = m_size, fps = options().fps,
+                               maxBytes = options().maxSegmentBytes, poster = m_poster, trimmed = m_trimmed] {
             ImportedClip clip;
+            clip.trimmed = trimmed;
             const std::optional<ClipAudio> audio = encodeClipAudio(pcm, clipMs, bitrate);
             if (audio)
                 clip.segments = packClip(video, durations, size, fps, *audio, maxBytes);
@@ -479,6 +501,9 @@ private:
     std::shared_ptr<std::atomic_bool> m_cancelled;
 
     bool m_loaded = false;
+    bool m_durationKnown = false;
+    bool m_trimmed = false;
+    bool m_heldBack = false; // the player is paused for the encoder to catch up
     bool m_done = false;
     bool m_picturesDone = false;
     bool m_audioDone = false;

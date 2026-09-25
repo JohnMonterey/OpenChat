@@ -1,5 +1,6 @@
 #include "network/SyncEngine.h"
 
+#include "domain/Attachment.h"
 #include "domain/MessageContent.h"
 #include "network/RelayClient.h"
 #include "protocol/CanonicalCborCodec.h"
@@ -204,27 +205,31 @@ public:
 
     Result<bool, RepositoryError> hasSeen(const EnvelopeId &envelopeId) override
     {
-        return Result<bool, RepositoryError>::success(seen.contains(envelopeId.bytes()));
+        return Result<bool, RepositoryError>::success(!hideSeen && seen.contains(envelopeId.bytes()));
     }
 
+    // Priority first, as the SQL store orders it: an attachment frame (1)
+    // leaves only when nothing else (0) is due.
     Result<QVector<OutboxRecord>, RepositoryError> claimDue(qint64 nowMs, int limit,
                                                             qint64 leaseUntilMs) override
     {
         QVector<OutboxRecord> due;
-        for (StoredOutbox &item : outboxes) {
-            if (item.record.state == OutboxState::Accepted)
-                continue;
-            const bool leaseExpired =
-                item.record.state == OutboxState::Leased && item.record.leaseUntilMs <= nowMs;
-            const bool claimable =
-                item.record.state == OutboxState::Pending || leaseExpired;
-            if (!claimable || item.record.nextAttemptMs > nowMs)
-                continue;
-            item.record.state = OutboxState::Leased;
-            item.record.leaseUntilMs = leaseUntilMs;
-            due.append(item.record);
-            if (due.size() >= limit)
-                break;
+        for (int priority = 0; priority <= 1 && due.size() < limit; ++priority) {
+            for (StoredOutbox &item : outboxes) {
+                if (item.record.state == OutboxState::Accepted || item.record.priority != priority)
+                    continue;
+                const bool leaseExpired =
+                    item.record.state == OutboxState::Leased && item.record.leaseUntilMs <= nowMs;
+                const bool claimable =
+                    item.record.state == OutboxState::Pending || leaseExpired;
+                if (!claimable || item.record.nextAttemptMs > nowMs)
+                    continue;
+                item.record.state = OutboxState::Leased;
+                item.record.leaseUntilMs = leaseUntilMs;
+                due.append(item.record);
+                if (due.size() >= limit)
+                    break;
+            }
         }
         return Result<QVector<OutboxRecord>, RepositoryError>::success(due);
     }
@@ -401,6 +406,53 @@ public:
         return Result<bool, RepositoryError>::success(true);
     }
 
+    // Attachments: the message row, its outbox rows and the descriptor, in
+    // one step, as commitGroupSend does; the ids used so far per conversation.
+    Result<void, RepositoryError> commitAttachmentSend(const MessageRecord &message,
+                                                       const QVector<OutboxRecord> &records,
+                                                       const QByteArray &recipients,
+                                                       QByteArrayView mlsState) override
+    {
+        if (failSendCommit || !message.attachment)
+            return err();
+        messages.append(message);
+        for (const OutboxRecord &outbox : records)
+            outboxes.append(StoredOutbox{outbox});
+        attachmentIds.insert(message.conversationId.bytes() + message.attachment->attachmentId.bytes());
+        lastAttachmentRecipients = recipients;
+        lastMlsState = mlsState.toByteArray();
+        ++commitAttachmentSendCount;
+        return ok();
+    }
+
+    Result<bool, RepositoryError> canEnqueueAttachment(const ConversationId &conversation,
+                                                       const AttachmentId &attachmentId) override
+    {
+        ++canEnqueueAttachmentCount;
+        if (failCanEnqueueAttachment)
+            return Result<bool, RepositoryError>::failure(error());
+        return Result<bool, RepositoryError>::success(
+            !attachmentIds.contains(conversation.bytes() + attachmentId.bytes()));
+    }
+
+    Result<int, RepositoryError> pendingLowPriorityCount() override
+    {
+        int pending = 0;
+        for (const StoredOutbox &item : outboxes)
+            pending += item.record.priority == 1
+                       && (item.record.state == OutboxState::Pending
+                           || item.record.state == OutboxState::Leased);
+        return Result<int, RepositoryError>::success(pending);
+    }
+
+    // hasSeen answers no, so a redelivery reaches the commit's replay guard.
+    bool hideSeen = false;
+    int commitAttachmentSendCount = 0;
+    int canEnqueueAttachmentCount = 0;
+    bool failCanEnqueueAttachment = false;
+    QSet<QByteArray> attachmentIds;
+    QByteArray lastAttachmentRecipients;
+
     int commitGroupSendCount = 0;
     int commitControlSendManyCount = 0;
     int failEnvelopeCount = 0;
@@ -558,6 +610,57 @@ struct EditLog final {
     QVector<Entry> entries;
 };
 
+// A photo's descriptor as the sender stages it.
+AttachmentDescriptor photoDescriptor()
+{
+    AttachmentDescriptor descriptor;
+    descriptor.key = QByteArray(AttachmentLimits::keyBytes, 'k');
+    descriptor.kind = AttachmentKind::Image;
+    descriptor.byteCount = 300'000;
+    descriptor.sha256 = QByteArray(32, 's');
+    descriptor.partCount = attachmentPartCount(descriptor.byteCount);
+    descriptor.mimeType = QStringLiteral("image/jpeg");
+    descriptor.fileName = QStringLiteral("Harbour.jpg");
+    descriptor.width = 1600;
+    descriptor.height = 1200;
+    descriptor.hasPreview = true;
+    return descriptor;
+}
+
+// A frame as the attachment layer seals it; the engine only ever looks at
+// its clear header.
+QByteArray partFrame(const AttachmentId &attachment = AttachmentId::generate(), quint32 index = 0)
+{
+    return attachmentFrameHeader(AttachmentFrameType::Part, attachment, index) + QByteArray(64, 'p');
+}
+
+CiphertextEnvelopeV1 incomingFrame(const ConversationId &conversation, const DeviceId &sender,
+                                   const QByteArray &frame)
+{
+    CiphertextEnvelopeV1 envelope = incomingEnvelope(conversation, sender, frame);
+    envelope.messageKind = EnvelopeMessageKind::AttachmentControl;
+    return envelope;
+}
+
+// Every attachmentFrameReceived the engine emits (ids have no default value,
+// so QSignalSpy cannot hand them back through QVariant).
+struct FrameLog final {
+    struct Entry final {
+        ConversationId conversation;
+        DeviceId sender;
+        QByteArray frame;
+    };
+    explicit FrameLog(SyncEngine &engine)
+    {
+        QObject::connect(&engine, &SyncEngine::attachmentFrameReceived, &engine,
+                         [this](const ConversationId &conversation, const DeviceId &sender,
+                                const QByteArray &frame) {
+                             entries.append(Entry{conversation, sender, frame});
+                         });
+    }
+    QVector<Entry> entries;
+};
+
 SyncEngine::Config makeConfig(int maxAttempts = 8)
 {
     return SyncEngine::Config{AccountId::generate(), DeviceId::generate(), maxAttempts, 32, 30'000};
@@ -658,6 +761,18 @@ private slots:
     void unknownBacklogNeverGates();
     void retryOfALargeEnvelopeWaitsForItsUpload();
     void linkUpIsSignalled();
+    void attachmentIsEncryptedOnceAndStoredWithItsDescriptor();
+    void groupAttachmentFansOutUnderOneMessage();
+    void attachmentRefusalsNeverEncryptAndNeverFailClosed();
+    void attachmentFramesBypassTheRatchet();
+    void attachmentFrameRefusalsQueueNothing();
+    void conversationTrafficLeavesBeforeWaitingFrames();
+    void inboundFramesBypassMlsStateAndAreSignalledOnce();
+    void replayedFramesAreNotReSignalled();
+    void malformedFramesAreConsumedSilently();
+    void aFrameTheStoreCannotTakeNeverFailsClosed();
+    void attachmentMessageArrivesWithItsDescriptorAndQuote();
+    void attachmentFromAnUnexpectedCredentialIsDroppedLikeText();
 
 private:
     qint64 m_now = 1'700'000'000'000;
@@ -2507,6 +2622,495 @@ void SyncEngineTest::linkUpIsSignalled()
     engine.stop();
     QVERIFY(!transport.onConnected);
     QCOMPARE(linkUp.count(), 2);
+}
+
+void SyncEngineTest::attachmentIsEncryptedOnceAndStoredWithItsDescriptor()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy queued(&engine, &SyncEngine::messageQueued);
+    QSignalSpy stateSpy(&engine, &SyncEngine::messageStateChanged);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    const AttachmentDescriptor photo = photoDescriptor();
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QStringLiteral("The harbour"), photo),
+             AttachmentSendRefusal::None);
+
+    // One ratchet step, one row of kind Attachment whose body is the caption,
+    // and the descriptor with the recipient committed beside it.
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.commitAttachmentSendCount, 1);
+    QCOMPARE(store.messages.size(), 1);
+    const MessageRecord &row = store.messages.first();
+    QCOMPARE(row.kind, ContentKind::Attachment);
+    QCOMPARE(row.flow, MessageFlow::Outgoing);
+    QCOMPARE(row.body, QStringLiteral("The harbour"));
+    QCOMPARE(*row.attachment, photo);
+    QVERIFY(row.sharedId);
+    QVERIFY(!row.replyToId);
+    QCOMPARE(store.lastAttachmentRecipients, peer.bytes());
+    QCOMPARE(store.lastMlsState, QByteArray("state-1"));
+    QCOMPARE(queued.count(), 1);
+    QCOMPARE(stateSpy.first().at(1).value<DeliveryState>(), DeliveryState::Queued);
+
+    // The envelope is an ordinary conversation message the peer decodes as
+    // an attachment, filed under the id its ciphertext names.
+    QCOMPARE(transport.sent.size(), 1);
+    const CiphertextEnvelopeV1 &sent = transport.sent.first();
+    QCOMPARE(sent.messageKind, EnvelopeMessageKind::MlsPrivateMessage);
+    QCOMPARE(sent.recipientDeviceId, peer);
+    QCOMPARE(row.id, messageIdForCiphertext(sent.ciphertext));
+    const auto content = decodeMessageContent(sent.ciphertext.mid(4));
+    QVERIFY(content.has_value());
+    QCOMPARE(content->type, MessageContent::Type::Attachment);
+    QCOMPARE(content->body, QStringLiteral("The harbour"));
+    QCOMPARE(*content->attachment, photo);
+
+    // Its delivery is a text's: Sent on acceptance.
+    transport.onRelayAccepted(sent.envelopeId, 4);
+    QCOMPARE(store.deliveryStates.value(row.id.bytes()), DeliveryState::Sent);
+
+    // A reply carries its quote in the message and on the row.
+    const MessageQuote quote{MessageId::generate(), DeviceId::generate(), QStringLiteral("Where?")};
+    AttachmentDescriptor second = photoDescriptor();
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QString(), second, quote),
+             AttachmentSendRefusal::None);
+    const MessageRecord &reply = store.messages.at(1);
+    QVERIFY(reply.body.isEmpty());
+    QCOMPARE(*reply.replyToId, quote.target);
+    QCOMPARE(*reply.quotedSenderDeviceId, quote.sender);
+    QCOMPARE(reply.quotedBody, quote.body);
+    const auto quoted = decodeMessageContent(transport.sent.at(1).ciphertext.mid(4));
+    QVERIFY(quoted.has_value());
+    QCOMPARE(*quoted->target, quote.target);
+
+    // A one-to-one attachment nobody takes fails as its text would.
+    transport.onRecipientUnavailable(transport.sent.at(1).envelopeId);
+    QCOMPARE(store.deliveryStates.value(reply.id.bytes()), DeliveryState::Failed);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::groupAttachmentFansOutUnderOneMessage()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    const ConversationId group = ConversationId::generate();
+    const QList<DeviceId> members{DeviceId::generate(), DeviceId::generate(), DeviceId::generate()};
+    QCOMPARE(engine.enqueueAttachment(group, members, true, QStringLiteral("for everyone"),
+                                      photoDescriptor()),
+             AttachmentSendRefusal::None);
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.messages.size(), 1);
+    QCOMPARE(store.outboxes.size(), 3);
+    QCOMPARE(transport.sent.size(), 3);
+    QByteArray expected;
+    for (const DeviceId &member : members)
+        expected.append(member.bytes());
+    QCOMPARE(store.lastAttachmentRecipients, expected);
+    for (const StoredOutbox &outbox : std::as_const(store.outboxes)) {
+        QCOMPARE(outbox.record.messageId, store.messages.first().id);
+        QCOMPARE(outbox.record.priority, 0);
+    }
+
+    // One member offline does not fail it; the first acceptance sends it.
+    const MessageId id = store.messages.first().id;
+    transport.onRecipientUnavailable(transport.sent.at(0).envelopeId);
+    QVERIFY(store.deliveryStates.value(id.bytes()) != DeliveryState::Failed);
+    transport.onRelayAccepted(transport.sent.at(1).envelopeId, 9);
+    QCOMPARE(store.deliveryStates.value(id.bytes()), DeliveryState::Sent);
+}
+
+void SyncEngineTest::attachmentRefusalsNeverEncryptAndNeverFailClosed()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy failedSpy(&engine, &SyncEngine::failedClosed);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    AttachmentDescriptor invalid = photoDescriptor();
+    invalid.partCount += 1;
+    AttachmentDescriptor keyless = photoDescriptor();
+    keyless.key.clear();
+
+    QCOMPARE(engine.enqueueAttachment(conversation, {}, true, QString(), photoDescriptor()),
+             AttachmentSendRefusal::NoRecipients);
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QString(), invalid),
+             AttachmentSendRefusal::Invalid);
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QString(), keyless),
+             AttachmentSendRefusal::Invalid);
+    // A caption no receiver would take: longer than any composer allows.
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QString(65537, u'x'), photoDescriptor()),
+             AttachmentSendRefusal::TooLarge);
+    store.failCanEnqueueAttachment = true;
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QString(), photoDescriptor()),
+             AttachmentSendRefusal::StoreError);
+    store.failCanEnqueueAttachment = false;
+    QCOMPARE(mls.encryptCount, 0);
+    QVERIFY(store.messages.isEmpty());
+    QVERIFY(transport.sent.isEmpty());
+
+    // An id already used in the conversation (a retry that forgot to mint a
+    // new one) is refused before encrypting, where a commit refused after
+    // encrypting would have stopped the engine.
+    const AttachmentDescriptor photo = photoDescriptor();
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QString(), photo),
+             AttachmentSendRefusal::None);
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QStringLiteral("again"), photo),
+             AttachmentSendRefusal::Duplicate);
+    QCOMPARE(mls.encryptCount, 1);
+    QCOMPARE(store.messages.size(), 1);
+    // The same id in another conversation is another attachment.
+    QCOMPARE(engine.enqueueAttachment(ConversationId::generate(), {peer}, false, QString(), photo),
+             AttachmentSendRefusal::None);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(!engine.isFailedClosed());
+
+    // Once the engine has stopped, nothing is attempted.
+    store.failSendCommit = true;
+    engine.enqueueText(conversation, peer, QStringLiteral("boom"));
+    QVERIFY(engine.isFailedClosed());
+    const int encrypted = mls.encryptCount;
+    QCOMPARE(engine.enqueueAttachment(conversation, {peer}, false, QString(), photoDescriptor()),
+             AttachmentSendRefusal::FailedClosed);
+    QCOMPARE(mls.encryptCount, encrypted);
+}
+
+void SyncEngineTest::attachmentFramesBypassTheRatchet()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy stateSpy(&engine, &SyncEngine::messageStateChanged);
+    engine.start();
+
+    const ConversationId group = ConversationId::generate();
+    const QList<DeviceId> members{DeviceId::generate(), DeviceId::generate()};
+    const QByteArray frame = partFrame();
+    QVERIFY(engine.sendAttachmentFrame(group, members, frame));
+
+    // Nothing encrypted, no state written (an empty blob keeps the stored
+    // one), no row: one envelope per member at the lowest priority, carrying
+    // the caller's bytes as they are.
+    QCOMPARE(mls.encryptCount, 0);
+    QCOMPARE(store.commitControlSendManyCount, 1);
+    QVERIFY(store.lastMlsState.isEmpty());
+    QVERIFY(store.messages.isEmpty());
+    QCOMPARE(store.outboxes.size(), 2);
+    QCOMPARE(store.outboxes.at(0).record.messageId, store.outboxes.at(1).record.messageId);
+    for (const StoredOutbox &outbox : std::as_const(store.outboxes))
+        QCOMPARE(outbox.record.priority, 1);
+    QCOMPARE(transport.sent.size(), 2);
+    QSet<QByteArray> recipients;
+    for (const CiphertextEnvelopeV1 &sent : std::as_const(transport.sent)) {
+        QCOMPARE(sent.messageKind, EnvelopeMessageKind::AttachmentControl);
+        QCOMPARE(sent.ciphertext, frame);
+        QCOMPARE(sent.conversationId, group);
+        recipients.insert(sent.recipientDeviceId.bytes());
+    }
+    QCOMPARE(recipients.size(), 2);
+    // Sending a frame reports no delivery state (it has no row).
+    QCOMPARE(stateSpy.count(), 0);
+
+    // Waiting until the relay takes them, then gone.
+    QCOMPARE(engine.pendingAttachmentFrames(), 2);
+    transport.onRelayAccepted(transport.sent.at(0).envelopeId, 1);
+    QCOMPARE(engine.pendingAttachmentFrames(), 1);
+    transport.onRelayAccepted(transport.sent.at(1).envelopeId, 2);
+    QCOMPARE(engine.pendingAttachmentFrames(), 0);
+
+    // A part is sent again byte for byte, under new envelopes.
+    QVERIFY(engine.sendAttachmentFrame(group, {members.first()}, frame));
+    QCOMPARE(transport.sent.size(), 3);
+    QCOMPARE(transport.sent.last().ciphertext, frame);
+    QVERIFY(transport.sent.last().envelopeId != transport.sent.first().envelopeId);
+    QCOMPARE(mls.encryptCount, 0);
+}
+
+void SyncEngineTest::attachmentFrameRefusalsQueueNothing()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy failedSpy(&engine, &SyncEngine::failedClosed);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    const QByteArray header = attachmentFrameHeader(AttachmentFrameType::Part, AttachmentId::generate(), 0);
+    QVERIFY(!engine.sendAttachmentFrame(conversation, {}, partFrame()));
+    QVERIFY(!engine.sendAttachmentFrame(
+        conversation, {peer},
+        header + QByteArray(AttachmentLimits::maxFrameBytes - header.size() + 1, 'x')));
+    QVERIFY(!engine.sendAttachmentFrame(conversation, {peer}, QByteArray("not a frame at all, no")));
+    QVERIFY(!engine.sendAttachmentFrame(conversation, {peer}, QByteArray()));
+    QVERIFY(store.outboxes.isEmpty());
+    QVERIFY(transport.sent.isEmpty());
+    QCOMPARE(engine.pendingAttachmentFrames(), 0);
+    // A frame the store could not take is not sent, and stops nothing.
+    store.failSendCommit = true;
+    QVERIFY(!engine.sendAttachmentFrame(conversation, {peer}, partFrame()));
+    QVERIFY(transport.sent.isEmpty());
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(!engine.isFailedClosed());
+    // Nor does the largest frame the attachment layer makes get refused.
+    store.failSendCommit = false;
+    QVERIFY(engine.sendAttachmentFrame(
+        conversation, {peer},
+        header + QByteArray(AttachmentLimits::partBytes + AttachmentLimits::sealOverhead, 'x')));
+    QCOMPARE(transport.sent.size(), 1);
+    QCOMPARE(mls.encryptCount, 0);
+}
+
+void SyncEngineTest::conversationTrafficLeavesBeforeWaitingFrames()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    transport.connected = false;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId peer = DeviceId::generate();
+    QVERIFY(engine.sendAttachmentFrame(conversation, {peer}, partFrame()));
+    QVERIFY(engine.sendAttachmentFrame(conversation, {peer}, partFrame()));
+    engine.enqueueText(conversation, peer, QStringLiteral("queued after the frames"));
+    engine.sendCallSignal(conversation, peer, QByteArray("OFFER"));
+
+    // Whatever was queued first, the text and the call signal leave before
+    // any frame.
+    transport.connected = true;
+    transport.onConnected();
+    QCOMPARE(transport.sent.size(), 4);
+    QCOMPARE(transport.sent.at(0).messageKind, EnvelopeMessageKind::MlsPrivateMessage);
+    QCOMPARE(transport.sent.at(1).messageKind, EnvelopeMessageKind::CallSignal);
+    QCOMPARE(transport.sent.at(2).messageKind, EnvelopeMessageKind::AttachmentControl);
+    QCOMPARE(transport.sent.at(3).messageKind, EnvelopeMessageKind::AttachmentControl);
+}
+
+void SyncEngineTest::inboundFramesBypassMlsStateAndAreSignalledOnce()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    FrameLog frames(engine);
+    QSignalSpy received(&engine, &SyncEngine::messageReceived);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const DeviceId sender = DeviceId::generate();
+    const QByteArray frame = partFrame(AttachmentId::generate(), 7);
+    const CiphertextEnvelopeV1 envelope = incomingFrame(conversation, sender, frame);
+    engine.handleEnvelope(envelope, 11);
+
+    // Never near the ratchet: no process, no state, and the relay's
+    // sender (there is no MLS credential to name one) scopes it.
+    QCOMPARE(mls.processCount, 0);
+    QVERIFY(store.lastMlsState.isEmpty());
+    QCOMPARE(store.watermarkValue, quint64(11));
+    QCOMPARE(transport.acks.size(), 1);
+    QCOMPARE(transport.acks.first().first, envelope.envelopeId);
+    QCOMPARE(frames.entries.size(), 1);
+    QCOMPARE(frames.entries.first().conversation, conversation);
+    QCOMPARE(frames.entries.first().sender, sender);
+    QCOMPARE(frames.entries.first().frame, frame);
+    QCOMPARE(received.count(), 0);
+    QVERIFY(store.received.isEmpty());
+
+    // A part sent again arrives in a new envelope, and is surfaced again: the
+    // attachment layer knows it already holds it.
+    engine.handleEnvelope(incomingFrame(conversation, sender, frame), 12);
+    QCOMPARE(frames.entries.size(), 2);
+    QCOMPARE(mls.processCount, 0);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::replayedFramesAreNotReSignalled()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    FrameLog frames(engine);
+    engine.start();
+
+    const CiphertextEnvelopeV1 envelope =
+        incomingFrame(ConversationId::generate(), DeviceId::generate(), partFrame());
+    engine.handleEnvelope(envelope, 3);
+    QCOMPARE(frames.entries.size(), 1);
+
+    // Redelivered after a reconnect: acknowledged again, surfaced never.
+    engine.handleEnvelope(envelope, 3);
+    QCOMPARE(frames.entries.size(), 1);
+    QCOMPARE(transport.acks.size(), 2);
+
+    // Past the early check (a redelivery racing its first commit), the
+    // store's replay guard still decides: consumed and acknowledged, not
+    // surfaced twice.
+    store.hideSeen = true;
+    engine.handleEnvelope(envelope, 3);
+    QCOMPARE(frames.entries.size(), 1);
+    QCOMPARE(transport.acks.size(), 3);
+    QCOMPARE(mls.processCount, 0);
+    store.hideSeen = false;
+
+    // An expired frame is acknowledged without being surfaced.
+    const CiphertextEnvelopeV1 stale =
+        incomingFrame(ConversationId::generate(), DeviceId::generate(), partFrame());
+    m_now = stale.expiresAtMs + 1;
+    engine.handleEnvelope(stale, 4);
+    QCOMPARE(frames.entries.size(), 1);
+}
+
+void SyncEngineTest::malformedFramesAreConsumedSilently()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    FrameLog frames(engine);
+    QSignalSpy failedSpy(&engine, &SyncEngine::failedClosed);
+    engine.start();
+
+    const QByteArray good = partFrame();
+    const QList<QByteArray> malformed{
+        QByteArray(),
+        QByteArray("ENC:an MLS message in the wrong kind"),
+        QByteArray(1, '\xAC') + good.mid(1, 22), // a header and no body
+        QByteArray(1, '\xAD') + good.mid(1),     // another magic
+        good.left(2) + QByteArray(1, '\x09') + good.mid(3), // an unknown type
+        attachmentFrameHeader(AttachmentFrameType::Part, AttachmentId::generate(),
+                              quint32(AttachmentLimits::maxParts))
+            + QByteArray(64, 'p'),
+        attachmentFrameHeader(AttachmentFrameType::Cancel, AttachmentId::generate(), 1)
+            + QByteArray(16, 't'),
+        good + QByteArray(AttachmentLimits::maxFrameBytes, 'x'),
+    };
+    quint64 sequence = 20;
+    for (const QByteArray &frame : malformed)
+        engine.handleEnvelope(incomingFrame(ConversationId::generate(), DeviceId::generate(), frame),
+                              ++sequence);
+
+    // Every one consumed and acknowledged, so the relay stops redelivering
+    // it; none surfaced; the ratchet never asked.
+    QCOMPARE(transport.acks.size(), malformed.size());
+    QCOMPARE(store.watermarkValue, sequence);
+    QVERIFY(frames.entries.isEmpty());
+    QCOMPARE(mls.processCount, 0);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(!engine.isFailedClosed());
+}
+
+void SyncEngineTest::aFrameTheStoreCannotTakeNeverFailsClosed()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    FrameLog frames(engine);
+    QSignalSpy failedSpy(&engine, &SyncEngine::failedClosed);
+    engine.start();
+
+    const CiphertextEnvelopeV1 envelope =
+        incomingFrame(ConversationId::generate(), DeviceId::generate(), partFrame());
+    store.failReceive = true;
+    engine.handleEnvelope(envelope, 5);
+    // Not consumed, so not acknowledged: the relay delivers it again.
+    QVERIFY(transport.acks.isEmpty());
+    QVERIFY(frames.entries.isEmpty());
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(!engine.isFailedClosed());
+
+    store.failReceive = false;
+    engine.handleEnvelope(envelope, 5);
+    QCOMPARE(transport.acks.size(), 1);
+    QCOMPARE(frames.entries.size(), 1);
+
+    // Conversation traffic still flows.
+    engine.handleEnvelope(incomingEnvelope(envelope.conversationId, mls.senderDevice, "ENC:still here"), 6);
+    QCOMPARE(store.received.size(), 1);
+}
+
+void SyncEngineTest::attachmentMessageArrivesWithItsDescriptorAndQuote()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy received(&engine, &SyncEngine::messageReceived);
+    engine.start();
+
+    const ConversationId conversation = ConversationId::generate();
+    const AttachmentDescriptor photo = photoDescriptor();
+    const QByteArray payload =
+        encodeMessageContent(MessageContent::attachmentMessage(QStringLiteral("Look"), photo));
+    const auto envelope = incomingEnvelope(conversation, mls.senderDevice, "ENC:" + payload);
+    engine.handleEnvelope(envelope, 8);
+
+    QCOMPARE(received.count(), 1);
+    QCOMPARE(store.received.size(), 1);
+    const MessageRecord &row = store.received.first();
+    QCOMPARE(row.kind, ContentKind::Attachment);
+    QCOMPARE(row.flow, MessageFlow::Incoming);
+    QCOMPARE(row.body, QStringLiteral("Look"));
+    QCOMPARE(row.senderDeviceId, mls.senderDevice);
+    QCOMPARE(row.id, messageIdForCiphertext(envelope.ciphertext));
+    QVERIFY(row.sharedId);
+    QVERIFY(row.attachment.has_value());
+    QCOMPARE(*row.attachment, photo);
+    QVERIFY(!row.replyToId);
+    QCOMPARE(transport.acks.size(), 1);
+
+    // One that answers another message keeps the quote.
+    const MessageQuote quote{MessageId::generate(), DeviceId::generate(), QStringLiteral("Which one?")};
+    const QByteArray reply = encodeMessageContent(
+        MessageContent::attachmentMessage(QString(), photoDescriptor(), quote));
+    engine.handleEnvelope(incomingEnvelope(conversation, mls.senderDevice, "ENC:" + reply), 9);
+    QCOMPARE(store.received.size(), 2);
+    const MessageRecord &answer = store.received.at(1);
+    QCOMPARE(answer.kind, ContentKind::Attachment);
+    QVERIFY(answer.body.isEmpty());
+    QCOMPARE(*answer.replyToId, quote.target);
+    QCOMPARE(*answer.quotedSenderDeviceId, quote.sender);
+    QCOMPARE(answer.quotedBody, quote.body);
+}
+
+void SyncEngineTest::attachmentFromAnUnexpectedCredentialIsDroppedLikeText()
+{
+    FakeStore store;
+    FakeMls mls;
+    FakeTransport transport;
+    SyncEngine engine(makeConfig(), store, mls, transport, okSigner(), clock());
+    QSignalSpy received(&engine, &SyncEngine::messageReceived);
+    engine.start();
+
+    // The relay names a device the MLS credential does not.
+    const QByteArray payload =
+        encodeMessageContent(MessageContent::attachmentMessage(QString(), photoDescriptor()));
+    const auto envelope =
+        incomingEnvelope(ConversationId::generate(), DeviceId::generate(), "ENC:" + payload);
+    QVERIFY(envelope.senderDeviceId != mls.senderDevice);
+    engine.handleEnvelope(envelope, 7);
+    QCOMPARE(received.count(), 0);
+    QVERIFY(store.received.isEmpty());
+    QVERIFY(transport.acks.isEmpty());
+    QVERIFY(!engine.isFailedClosed());
 }
 
 QTEST_MAIN(SyncEngineTest)

@@ -592,6 +592,11 @@ void RelayServer::onWebSocketConnection()
         auto *heartbeat = new QTimer(raw);
         raw->setProperty("awaitingPong", false);
         connect(raw, &QWebSocket::pong, raw, [raw] { raw->setProperty("awaitingPong", false); });
+        // Any frame from the client proves it is there, not only a pong: a
+        // client catching up on a long backlog over a slow downlink acks every
+        // envelope as it goes, while its pong may wait behind that backlog.
+        connect(raw, &QWebSocket::binaryFrameReceived, raw,
+                [raw](const QByteArray &, bool) { raw->setProperty("awaitingPong", false); });
         connect(heartbeat, &QTimer::timeout, raw, [raw] {
             if (raw->property("awaitingPong").toBool()) {
                 raw->abort();

@@ -41,14 +41,32 @@ struct SongContainer final {
     friend bool operator==(const SongContainer &, const SongContainer &) = default;
 };
 
+// The bounds a container is held to. The defaults are a profile song's (45 s,
+// maxSongBytes); a chat's audio attachment is allowed more (chatSongLimits).
+// Every encoder, decoder and player that enforces a length takes one, so the
+// two never disagree about a song.
+struct SongContainerLimits final {
+    qsizetype maxBytes = 224 * 1024;                              // maxSongBytes
+    qint64 maxTotalSamples = SongContainer::maxTotalSamples;
+    qint64 maxDurationMs = SongContainer::maxDurationMs;
+
+    friend bool operator==(const SongContainerLimits &, const SongContainerLimits &) = default;
+};
+// Up to five minutes within 4 MiB (AttachmentLimits::maxAudioMs, maxAudioBytes).
+[[nodiscard]] SongContainerLimits chatSongLimits();
+
 // Serialises `song`, clamping gainQ8 to attenuation as the decoder does. A
 // song that breaks any other rule above encodes to an empty array, so a
 // malformed container never leaves this process. The whole-size cap
 // (maxSongBytes) is the caller's budget to check.
 [[nodiscard]] QByteArray encodeSongContainer(const SongContainer &song);
+[[nodiscard]] QByteArray encodeSongContainer(const SongContainer &song,
+                                             const SongContainerLimits &limits);
 // Rejects anything malformed or larger than maxSongBytes; gainQ8 is clamped
 // to [−24 dB, 0], never rejected.
 [[nodiscard]] std::optional<SongContainer> decodeSongContainer(QByteArrayView bytes);
+[[nodiscard]] std::optional<SongContainer> decodeSongContainer(QByteArrayView bytes,
+                                                               const SongContainerLimits &limits);
 // Checks the magic only: enough to tell a song from other bytes, not to trust it.
 [[nodiscard]] bool looksLikeSongContainer(QByteArrayView bytes);
 

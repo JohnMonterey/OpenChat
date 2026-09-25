@@ -18,6 +18,7 @@ class CapturingMlsStateStore;
 class KeyVault;
 class MlsClient;
 class MlsSyncSession;
+class SqlCipherAttachmentRepository;
 class SqlCipherChatRepository;
 class SqlCipherContactRepository;
 class SqlCipherDatabase;
@@ -130,6 +131,8 @@ public:
   // The profile page store (own page, contacts' pages, delivery records).
   // Null while locked.
   [[nodiscard]] SqlCipherProfilePageRepository *profilePages() const noexcept;
+  // Chat attachments' descriptors and transfer bookkeeping. Null while locked.
+  [[nodiscard]] SqlCipherAttachmentRepository *attachments() const noexcept;
   [[nodiscard]] SqlCipherSyncRepository *sync() const noexcept;
   // The durable SyncStore as its concrete type, so callers can reach the
   // non-virtual pending-handshake reads/deletes as well as the SyncStore surface.
@@ -170,6 +173,7 @@ private:
   std::unique_ptr<SqlCipherContactRepository> m_contacts;
   std::unique_ptr<SqlCipherOutboxRepository> m_outbox;
   std::unique_ptr<SqlCipherProfilePageRepository> m_profilePages;
+  std::unique_ptr<SqlCipherAttachmentRepository> m_attachments;
   std::unique_ptr<SqlCipherSyncRepository> m_sync;
   std::unique_ptr<CapturingMlsStateStore> m_mlsStateStore;
   std::unique_ptr<MlsClient> m_mls;

@@ -1,9 +1,12 @@
 #include "profile/ProfileBackgroundImage.h"
 
+#include "domain/Attachment.h"
+
 #include <QBuffer>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QImageWriter>
+#include <QLocale>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPainter>
@@ -25,6 +28,8 @@ constexpr int decodeAllocationLimitMb = 512;
 constexpr int ladderSides[] = {1600, 1280, 1024, 800, 640};
 constexpr int ladderQualities[] = {82, 74, 66, 58, 50, 42};
 
+} // namespace
+
 // Baseline (sequential) JPEG: every decoder reads it in one pass, and it
 // cannot carry the scan count a progressive "scan bomb" would. The image
 // written is always a fresh one, so no text, colour profile or EXIF from the
@@ -43,8 +48,6 @@ QByteArray encodeBaselineJpeg(const QImage &image, int quality)
         return {};
     return bytes;
 }
-
-} // namespace
 
 Result<ProcessedBackground, ProfileImageError> processProfileBackground(const QImage &source, const QColor &matte,
                                                                         const ProfileBackgroundLimits &limits,
@@ -124,10 +127,10 @@ Result<ProcessedBackground, ProfileImageError> processProfileBackgroundFile(cons
             return Ret::failure(ProfileImageError::TooSmall);
         if (size.width() > limits.maxSide || size.height() > limits.maxSide)
             return Ret::failure(ProfileImageError::TooLarge);
-        // A photo far beyond the output is decoded straight down to four
+        // A photo far beyond the output is decoded straight down to a few
         // times the target where the format can (JPEG's DCT scaling).
         const int longest = std::max(size.width(), size.height());
-        const int decodeLong = limits.maxLongSide * 4;
+        const int decodeLong = limits.maxLongSide * std::max(1, limits.decodeScale);
         if (longest > decodeLong) {
             const qreal factor = qreal(decodeLong) / longest;
             reader.setScaledSize(QSize(std::max(1, int(size.width() * factor)),
@@ -165,6 +168,39 @@ QString profileBackgroundErrorText(ProfileImageError error)
         return QStringLiteral("That picture could not be made small enough to share.");
     }
     return QStringLiteral("That picture could not be used.");
+}
+
+ProfileBackgroundLimits chatPhotoLimits()
+{
+    ProfileBackgroundLimits limits;
+    limits.maxFileBytes = 50LL * 1024 * 1024;
+    limits.minSide = 1;
+    limits.maxSide = 12'000;
+    limits.maxLongSide = AttachmentLimits::maxImageLongSide;
+    limits.maxOutputBytes = qsizetype(AttachmentLimits::maxImageBytes);
+    limits.decodeScale = 2;
+    return limits;
+}
+
+QString chatPhotoErrorText(ProfileImageError error, const ProfileBackgroundLimits &limits)
+{
+    switch (error) {
+    case ProfileImageError::FileMissing:
+        return QStringLiteral("That file can't be opened.");
+    case ProfileImageError::FileTooLarge:
+        return QStringLiteral("That photo is too large to send (%1 MB max).")
+            .arg(limits.maxFileBytes / (1024 * 1024));
+    case ProfileImageError::Unreadable:
+        return QStringLiteral("That file is not a picture OpenChat can read.");
+    case ProfileImageError::TooSmall:
+        return QStringLiteral("That picture is too small to send.");
+    case ProfileImageError::TooLarge:
+        return QStringLiteral("That picture is too large to send (at most %1 pixels a side).")
+            .arg(QLocale(QLocale::English).toString(limits.maxSide));
+    case ProfileImageError::EncodeFailed:
+        return QStringLiteral("That photo couldn't be made small enough to send.");
+    }
+    return QStringLiteral("That photo couldn't be prepared.");
 }
 
 // Shared by the importer and its worker. The worker reaches the importer only

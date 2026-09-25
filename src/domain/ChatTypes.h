@@ -5,6 +5,7 @@
 
 #include <optional>
 
+#include "domain/Attachment.h"
 #include "domain/Identifiers.h"
 
 namespace OpenChat {
@@ -118,6 +119,33 @@ struct MessageRecord final {
     qint64 editedAtMs = 0;
     std::optional<DeviceId> quotedSenderDeviceId;
     QString quotedBody;
+    // ContentKind::Attachment: what the sender described (body is the
+    // caption). Empty for any other kind, and for an attachment row whose
+    // description could not be stored or read back (shown as unavailable).
+    std::optional<AttachmentDescriptor> attachment;
+    // Filled when history is read, for the bubble: the transfer's state
+    // (AttachmentState), why it stopped (AttachmentFailure), and how many
+    // parts are sent (outgoing) or held (incoming).
+    int attachmentState = 0;
+    int attachmentReason = 0;
+    int attachmentDone = 0;
+};
+
+// The life of an attachment's bytes, as message_attachments.state stores it.
+enum class AttachmentState : int {
+    Transferring = 0,
+    Complete = 1,
+    Failed = 2,
+    Cancelled = 3,
+};
+
+// Why an attachment stopped (message_attachments.reason).
+enum class AttachmentFailure : int {
+    None = 0,
+    Invalid = 1,        // the bytes did not match what the descriptor promised
+    NoSpace = 2,        // this device would not store more
+    SenderCancelled = 3,
+    SendFailed = 4,     // nobody left to send to, or the message itself failed
 };
 
 // The message a reply answers, as the reply sends it along.
@@ -136,6 +164,9 @@ struct OutboxRecord final {
     qint64 nextAttemptMs = 0;
     qint64 leaseUntilMs = 0;
     OutboxState state = OutboxState::Pending;
+    // 0 for conversation traffic; 1 for attachment frames, which the drain
+    // only takes when nothing else is due.
+    int priority = 0;
 };
 
 struct SyncCursor final {

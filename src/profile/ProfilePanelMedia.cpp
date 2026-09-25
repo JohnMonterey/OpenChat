@@ -23,12 +23,17 @@ namespace {
     return key + u'/' + QString::number(side);
 }
 
-// Decodes a panel picture no larger than `side` on its long edge. The bytes
-// passed the arrival checks (a JPEG with 1 to 32 scans), but the header may
-// still claim anything, so the reader's allocation is capped too.
+// Decodes a picture no larger than `side` on its long edge. The bytes passed
+// their arrival checks (a JPEG with 1 to 32 scans), but they are checked
+// again here, since panels and chats both put bytes in: a progressive "scan
+// bomb" re-reads the whole picture per scan. The header may still claim
+// anything, so its size is bounded and the reader's allocation is capped too.
 [[nodiscard]] QImage decodePicture(const QByteArray &bytes, int side)
 {
-    if (bytes.size() > maxPanelImageBytes || jpegScanCount(bytes) < 1)
+    if (bytes.size() > PanelMediaLibrary::maxPictureBytes)
+        return {};
+    const int scans = jpegScanCount(bytes);
+    if (scans < 1 || scans > maxJpegScans)
         return {};
     QBuffer buffer;
     buffer.setData(bytes);
@@ -36,8 +41,8 @@ namespace {
     QImageReader reader(&buffer, "jpeg");
     reader.setAllocationLimit(PanelMediaLibrary::decodeAllocationLimitMb);
     const QSize size = reader.size();
-    if (!size.isValid() || size.isEmpty() || size.width() > 4 * PanelMediaLibrary::maxDecodedSide
-        || size.height() > 4 * PanelMediaLibrary::maxDecodedSide)
+    if (!size.isValid() || size.isEmpty() || size.width() > PanelMediaLibrary::maxHeaderSide
+        || size.height() > PanelMediaLibrary::maxHeaderSide)
         return {};
     const int longSide = std::max(size.width(), size.height());
     if (longSide > side)
@@ -62,6 +67,8 @@ int PanelMediaLibrary::bucketFor(int longSide)
         return 320;
     if (longSide <= 640)
         return 640;
+    if (longSide <= maxPanelDecodedSide)
+        return maxPanelDecodedSide;
     return maxDecodedSide;
 }
 

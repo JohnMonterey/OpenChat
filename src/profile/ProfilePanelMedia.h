@@ -1,5 +1,7 @@
 #pragma once
 
+#include "domain/Attachment.h"
+
 #include <QByteArray>
 #include <QHash>
 #include <QImage>
@@ -18,7 +20,10 @@ namespace OpenChat {
 // holds and releases them when no page shows them; items read them here. A
 // contact's picture is hostile input, so it is decoded off the GUI thread,
 // only at the size it is drawn, within a budget of decoded pixels (least
-// recently used first out).
+// recently used first out). Chat photos and their previews (docs/chat-
+// attachments.md) are held here the same way: larger (up to
+// AttachmentLimits::maxImageBytes), from anyone in a group, and checked
+// again here for what every picture must be before a decoder sees it.
 //
 // Bytes are counted: put() twice needs release() twice. get() is safe from
 // any thread (a video decoder reads segments on its own).
@@ -32,7 +37,15 @@ public:
     // The decoded-picture budget in bytes; Low memory mode lowers it.
     static constexpr qint64 defaultDecodedBudget = 64LL * 1024 * 1024;
     static constexpr qint64 lowMemoryDecodedBudget = 16LL * 1024 * 1024;
-    static constexpr int maxDecodedSide = 1280;
+    // Decodes are made at 320, 640 or 1280 px on the long side, and at
+    // maxDecodedSide only for a request beyond 1280 (a chat photo shown
+    // large); an honest panel picture is never larger than 1280 anyway.
+    static constexpr int maxPanelDecodedSide = 1280;
+    static constexpr int maxDecodedSide = 2048;
+    // What a picture's header may claim, whatever size it is drawn at; the
+    // decoder scales down while it reads, so this bounds time, not memory.
+    static constexpr int maxHeaderSide = 8192;
+    static constexpr qsizetype maxPictureBytes = qsizetype(AttachmentLimits::maxImageBytes);
     static constexpr int decodeAllocationLimitMb = 32;
 
     void put(const QString &key, const QByteArray &bytes);
@@ -41,8 +54,8 @@ public:
     [[nodiscard]] bool contains(const QString &key) const;
     void clear();
 
-    // The picture decoded to fit `longSide` (rounded up to 320, 640 or
-    // 1280), or a null image while it is still being decoded (decoded(key)
+    // The picture decoded to fit `longSide` (rounded up to 320, 640, 1280
+    // or 2048), or a null image while it is still being decoded (decoded(key)
     // follows) or when the bytes are missing or not a picture.
     [[nodiscard]] QImage image(const QString &key, int longSide);
     void setDecodedBudget(qint64 bytes);

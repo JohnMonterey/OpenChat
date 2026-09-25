@@ -169,6 +169,34 @@ public:
     scheduleRetry(const EnvelopeId &envelopeId, int attemptCount, qint64 nextAttemptMs) = 0;
     [[nodiscard]] virtual Result<void, RepositoryError>
     advanceDeliveryState(const MessageId &messageId, DeliveryState state) = 0;
+
+    // Chat attachments (docs/chat-attachments.md).
+    //
+    // commitSend / commitGroupSend for an attachment message: the one message
+    // row, its outbox rows and the message_attachments row (the descriptor,
+    // its key and `recipients`, the 16-byte device ids it went to, back to
+    // back) with the ratchet state, in one transaction.
+    [[nodiscard]] virtual Result<void, RepositoryError>
+    commitAttachmentSend(const MessageRecord &message, const QVector<OutboxRecord> &outboxes,
+                         const QByteArray &recipients, QByteArrayView mlsState) = 0;
+    // True iff no attachment of `conversation` sent from this device already
+    // uses `attachmentId`. Asked before anything is encrypted, so a send the
+    // store would refuse never moves the ratchet.
+    [[nodiscard]] virtual Result<bool, RepositoryError>
+    canEnqueueAttachment(const ConversationId &conversation, const AttachmentId &attachmentId) = 0;
+    // Outbox rows of priority 1 (attachment frames) still Pending or Leased.
+    [[nodiscard]] virtual Result<int, RepositoryError> pendingLowPriorityCount() = 0;
+};
+
+// Why SyncEngine::enqueueAttachment would not send; nothing was encrypted.
+enum class AttachmentSendRefusal {
+    None,         // queued
+    FailedClosed, // the engine has stopped for this session
+    NoRecipients,
+    TooLarge,     // the message would pass AttachmentLimits::maxMessageBytes
+    Invalid,      // the descriptor breaks isValidDescriptor
+    Duplicate,    // the attachment id is already used in this conversation
+    StoreError,
 };
 
 // Ciphertext transport the engine drives. The engine sets the callbacks; a real
@@ -321,6 +349,28 @@ public:
                          const QList<DeviceId> &existingRecipients, const QByteArray &commit,
                          const QList<DeviceId> &newRecipients, const QByteArray &welcome);
 
+    // Sends an attachment's visible message: MessageContent type Attachment
+    // (with a reply when `quote` is set), MLS-encrypted once, one row of kind
+    // Attachment, one envelope per recipient (the peer device, or every other
+    // member when `group`), committed with the descriptor row. Everything the
+    // store or a receiver would refuse is refused here, before encrypting,
+    // and the engine never fails closed for it. None means queued:
+    // messageQueued and messageStateChanged follow as for a text.
+    [[nodiscard]] AttachmentSendRefusal
+    enqueueAttachment(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                      bool group, const QString &caption, const AttachmentDescriptor &attachment,
+                      const std::optional<MessageQuote> &quote = std::nullopt);
+    // Sends one attachment frame (already sealed by the caller, see
+    // domain/Attachment.h) to each of `recipients` as an AttachmentControl
+    // envelope: no ratchet, no row, priority 1 in the outbox. False, with
+    // nothing queued, for a frame over AttachmentLimits::maxFrameBytes, no
+    // recipients, or a stopped engine.
+    bool sendAttachmentFrame(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                             const QByteArray &frame);
+    // Attachment frames still waiting in the outbox (0 when the store cannot
+    // say). The attachment pump hands over the next frame only at 0.
+    [[nodiscard]] int pendingAttachmentFrames() const;
+
     // Sends one sealed media frame on the unreliable datagram path. `payload` is
     // already encrypted under the call's media key, so this deliberately skips
     // the group ratchet: 50 frames a second through MLS would mean 50 durable
@@ -386,6 +436,12 @@ signals:
                               const OpenChat::AccountId &senderAccount,
                               const OpenChat::DeviceId &senderDevice,
                               const QList<QByteArray> &members);
+    // An AttachmentControl frame from `senderDevice` (as the relay
+    // authenticated it) was durably consumed. `frame` is the raw frame: it
+    // passed splitAttachmentFrame but has NOT been opened; only the holder of
+    // the descriptor's key can.
+    void attachmentFrameReceived(const OpenChat::ConversationId &conversation,
+                                 const OpenChat::DeviceId &senderDevice, const QByteArray &frame);
     void failedClosed();
     // The relay link (re)connected. Emitted after the engine has resumed its
     // own outbox, so anything a listener sends in response leaves behind the

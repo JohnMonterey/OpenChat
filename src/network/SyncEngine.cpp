@@ -1,5 +1,6 @@
 #include "network/SyncEngine.h"
 
+#include "domain/Attachment.h"
 #include "domain/MessageContent.h"
 #include "protocol/CanonicalCborCodec.h"
 #include "repositories/OutboxRepository.h" // for retryDelayMs
@@ -144,9 +145,10 @@ public:
                   : MessageContent::text(text));
     }
 
-    // The visible row of a text this device sends. It is named after its
-    // ciphertext, so every recipient files it under the same id and a later
-    // reply or edit can refer to it.
+    // The visible row of a text (or of an attachment's message, whose body is
+    // the caption) this device sends. It is named after its ciphertext, so
+    // every recipient files it under the same id and a later reply or edit can
+    // refer to it.
     [[nodiscard]] MessageRecord outgoingText(const ConversationId &conversation,
                                              const QByteArray &ciphertext, const QString &text,
                                              const std::optional<MessageQuote> &quote) const
@@ -399,6 +401,124 @@ public:
         emit q->messageQueued(message);
         emit q->messageStateChanged(message.id, DeliveryState::Queued);
         drainOutbox();
+    }
+
+    // Everything that would make an attachment message fail once encrypted,
+    // or reach nobody who could show it, found while nothing is encrypted yet.
+    [[nodiscard]] AttachmentSendRefusal attachmentRefusal(const ConversationId &conversation,
+                                                          const QList<DeviceId> &recipients,
+                                                          const MessageContent &content,
+                                                          const QByteArray &payload)
+    {
+        if (failed)
+            return AttachmentSendRefusal::FailedClosed;
+        if (recipients.isEmpty())
+            return AttachmentSendRefusal::NoRecipients;
+        if (!content.attachment || !isValidDescriptor(*content.attachment))
+            return AttachmentSendRefusal::Invalid;
+        // The encoder refuses exactly what every receiver's decoder would, and
+        // the cap keeps the plaintext well inside MLS's own.
+        if (payload.isEmpty() || payload.size() > AttachmentLimits::maxMessageBytes)
+            return AttachmentSendRefusal::TooLarge;
+        const auto unused =
+            store.canEnqueueAttachment(conversation, content.attachment->attachmentId);
+        if (!unused.hasValue())
+            return AttachmentSendRefusal::StoreError;
+        if (!unused.value())
+            return AttachmentSendRefusal::Duplicate;
+        return AttachmentSendRefusal::None;
+    }
+
+    void doEnqueueAttachment(const ConversationId &conversation, const QList<DeviceId> &recipients,
+                             bool group, const MessageContent &content,
+                             const std::optional<MessageQuote> &quote)
+    {
+        const QByteArray payload = encodeMessageContent(content);
+        // Asked again here: the lane may have run another send since the
+        // caller was told None, and a commit refused after encrypting would
+        // stop the engine.
+        if (attachmentRefusal(conversation, recipients, content, payload)
+            != AttachmentSendRefusal::None)
+            return;
+        const auto ciphertext = mls.encrypt(conversation, payload);
+        if (!ciphertext.hasValue()) {
+            failClosed();
+            return;
+        }
+        // One row and its descriptor, one envelope per recipient, as a group
+        // text is sent; queued with or without a relay link.
+        MessageRecord message = outgoingText(conversation, ciphertext.value(), content.body, quote);
+        message.kind = ContentKind::Attachment;
+        message.attachment = content.attachment;
+        const auto outboxes = buildFanOut(conversation, recipients, ciphertext.value(),
+                                          EnvelopeMessageKind::MlsPrivateMessage, message.id);
+        if (!outboxes) {
+            failClosed();
+            return;
+        }
+        // Who the message went to, so the bytes that follow go to them alone.
+        QByteArray recipientBytes;
+        for (const DeviceId &recipient : recipients)
+            recipientBytes.append(recipient.bytes());
+
+        const QByteArray mlsState = mls.takePendingState();
+        if (!store.commitAttachmentSend(message, *outboxes, recipientBytes, mlsState).hasValue()) {
+            failClosed(); // in-memory ratchet may be ahead of the store; stop.
+            return;
+        }
+        if (group || outboxes->size() > 1)
+            fanOut.insert(message.id.bytes(), FanOutProgress{outboxes->size(), false});
+        emit q->messageQueued(message);
+        emit q->messageStateChanged(message.id, DeliveryState::Queued);
+        drainOutbox();
+    }
+
+    // False when nothing was queued. Never fails the engine: nothing here
+    // touches the ratchet, so there is nothing a lost frame could leave
+    // inconsistent (a receiver asks for a missing part again).
+    [[nodiscard]] bool doSendAttachmentFrame(const ConversationId &conversation,
+                                             const QList<DeviceId> &recipients,
+                                             const QByteArray &frame)
+    {
+        if (failed)
+            return false;
+        // Deliberately NO mls.encrypt: the frame is already sealed under the
+        // attachment's own key (security/AttachmentSeal.h), which only the
+        // recipients of its MLS-encrypted descriptor hold. Outside the ratchet
+        // it uses no generation, so a part can be sent again byte for byte and
+        // parts may arrive in any order. Its envelopes carry a fresh id, as an
+        // edit's do, so they leave the outbox once settled.
+        auto outboxes = buildFanOut(conversation, recipients, frame,
+                                    EnvelopeMessageKind::AttachmentControl, MessageId::generate());
+        if (!outboxes)
+            return false;
+        for (OutboxRecord &outbox : *outboxes)
+            outbox.priority = 1;
+        // An EMPTY state: the store keeps the stored ratchet snapshot as it
+        // is, and anything an MLS operation in this lane captured stays
+        // pending for the send it belongs to.
+        if (!store.commitControlSendMany(*outboxes, QByteArrayView()).hasValue())
+            return false;
+        drainOutbox();
+        return true;
+    }
+
+    // An inbound attachment frame. Consumed (replay guard and cursor, no
+    // ratchet state) and acknowledged whatever it holds; only a well-formed
+    // one is surfaced, once, for the holder of the key to open. A frame can
+    // never stop the engine: one the store could not take is left
+    // unacknowledged and comes again.
+    void doHandleAttachmentFrame(const CiphertextEnvelopeV1 &envelope, quint64 serverSequence)
+    {
+        const bool wellFormed = splitAttachmentFrame(envelope.ciphertext).has_value();
+        const auto committed = store.commitControlReceive(
+            envelope.envelopeId, envelope.senderDeviceId, serverSequence, QByteArrayView());
+        if (!committed.hasValue())
+            return;
+        transport.acknowledge(envelope.envelopeId, serverSequence);
+        if (committed.value() && wellFormed)
+            emit q->attachmentFrameReceived(envelope.conversationId, envelope.senderDeviceId,
+                                            envelope.ciphertext);
     }
 
     void doEnqueueEdit(const ConversationId &conversation, const QList<DeviceId> &recipients,
@@ -671,6 +791,15 @@ public:
             doHandleGroupWelcome(envelope, serverSequence);
             return;
         }
+        // An attachment frame is no MLS message at all (see
+        // doSendAttachmentFrame), so it never reaches mls.process. Its sender
+        // is the device the relay authenticated; what it carries is only
+        // trusted once it opens under a descriptor's key and the assembled
+        // bytes match that descriptor's MLS-authenticated hash.
+        if (envelope.messageKind == EnvelopeMessageKind::AttachmentControl) {
+            doHandleAttachmentFrame(envelope, serverSequence);
+            return;
+        }
 
         const auto processed = mls.process(envelope.conversationId, envelope.ciphertext);
         if (!processed.hasValue()) {
@@ -753,23 +882,28 @@ public:
             }
 
             // Filed under the id the sender gave it: both derive it from the
-            // ciphertext they share.
+            // ciphertext they share. An attachment is a row like a text's,
+            // its body the caption, stored with its descriptor; its bytes
+            // follow as frames.
+            const bool isAttachment = content->type == MessageContent::Type::Attachment;
             MessageRecord message{messageIdForCiphertext(envelope.ciphertext),
                                   envelope.conversationId,
                                   envelope.senderDeviceId,
                                   MessageFlow::Incoming,
-                                  ContentKind::Text,
+                                  isAttachment ? ContentKind::Attachment : ContentKind::Text,
                                   content->body,
                                   envelope.createdAtMs,
                                   DeliveryState::Delivered,
                                   std::optional<quint64>(serverSequence),
                                   std::nullopt};
             message.sharedId = true;
-            if (content->type == MessageContent::Type::Reply) {
+            if (content->type == MessageContent::Type::Reply || (isAttachment && content->target)) {
                 message.replyToId = content->target;
                 message.quotedSenderDeviceId = content->quotedSender;
                 message.quotedBody = content->quotedBody;
             }
+            if (isAttachment)
+                message.attachment = content->attachment;
 
             const auto committed =
                 store.commitReceive(message, envelope.envelopeId, serverSequence, mlsState);
@@ -1090,6 +1224,48 @@ void SyncEngine::sendGroupChange(const ConversationId &conversation,
                                       newRecipients, welcome] {
         d->doSendGroupChange(conversation, existingRecipients, commit, newRecipients, welcome);
     });
+}
+
+AttachmentSendRefusal SyncEngine::enqueueAttachment(const ConversationId &conversation,
+                                                     const QList<DeviceId> &recipients, bool group,
+                                                     const QString &caption,
+                                                     const AttachmentDescriptor &attachment,
+                                                     const std::optional<MessageQuote> &quote)
+{
+    // Checked here, before the lane runs the send, so the caller learns of a
+    // refusal while it can still say so; the task checks again when it runs.
+    const MessageContent content = MessageContent::attachmentMessage(caption, attachment, quote);
+    const auto refusal =
+        d->attachmentRefusal(conversation, recipients, content, encodeMessageContent(content));
+    if (refusal != AttachmentSendRefusal::None)
+        return refusal;
+    d->coordinator.run(conversation, [this, conversation, recipients, group, content, quote] {
+        d->doEnqueueAttachment(conversation, recipients, group, content, quote);
+    });
+    return AttachmentSendRefusal::None;
+}
+
+bool SyncEngine::sendAttachmentFrame(const ConversationId &conversation,
+                                     const QList<DeviceId> &recipients, const QByteArray &frame)
+{
+    if (d->isFailed() || recipients.isEmpty() || frame.size() > AttachmentLimits::maxFrameBytes
+        || !splitAttachmentFrame(frame))
+        return false;
+    // Through the conversation's lane, like every send, so a frame never
+    // overtakes a send already under way there (the message it follows).
+    // When the lane is busy the frame is queued behind it and counts as sent;
+    // the pump sees the outbox either way.
+    const auto sent = std::make_shared<std::optional<bool>>();
+    d->coordinator.run(conversation, [this, conversation, recipients, frame, sent] {
+        *sent = d->doSendAttachmentFrame(conversation, recipients, frame);
+    });
+    return sent->value_or(true);
+}
+
+int SyncEngine::pendingAttachmentFrames() const
+{
+    const auto pending = d->store.pendingLowPriorityCount();
+    return pending.hasValue() ? pending.value() : 0;
 }
 
 qint64 SyncEngine::pendingSendBytes() const

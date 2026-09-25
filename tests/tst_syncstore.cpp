@@ -67,6 +67,39 @@ OutboxRecord outbox(const EnvelopeId &envelopeId, const MessageId &messageId,
                         dueAtMs,     0,         OutboxState::Pending};
 }
 
+// A photo's descriptor, with a fresh attachment id each time.
+AttachmentDescriptor photo()
+{
+    AttachmentDescriptor descriptor;
+    descriptor.key = QByteArray(AttachmentLimits::keyBytes, 'k');
+    descriptor.kind = AttachmentKind::Image;
+    descriptor.byteCount = 500'000;
+    descriptor.sha256 = QByteArray(32, 's');
+    descriptor.partCount = attachmentPartCount(descriptor.byteCount);
+    descriptor.mimeType = QStringLiteral("image/jpeg");
+    descriptor.fileName = QStringLiteral("Harbour.jpg");
+    descriptor.width = 1600;
+    descriptor.height = 1200;
+    descriptor.hasPreview = true;
+    return descriptor;
+}
+
+MessageRecord withAttachment(MessageRecord message, const AttachmentDescriptor &descriptor)
+{
+    message.kind = ContentKind::Attachment;
+    message.body = QStringLiteral("caption");
+    message.sharedId = true;
+    message.attachment = descriptor;
+    return message;
+}
+
+OutboxRecord frameOutbox(const ConversationId &conversationId, qint64 dueAtMs = 3'000)
+{
+    OutboxRecord record = outbox(EnvelopeId::generate(), MessageId::generate(), conversationId, dueAtMs);
+    record.priority = 1;
+    return record;
+}
+
 ContactRecord incomingContact(const AccountId &accountId, qint64 nowMs = 1'000)
 {
     return ContactRecord{accountId,      QStringLiteral("peer"), QStringLiteral("Peer"),
@@ -111,6 +144,12 @@ private slots:
     void editSendChangesOnlyASharedTextTheRelayTook();
     void editReceiveAppliesOnlyTheSendersNewerEdit();
     void replyQuoteAndEditStampSurviveAReread();
+    void attachmentSendCommitsTheRowItsDescriptorAndEnvelopesTogether();
+    void attachmentSendRefusesWhatItCannotStore();
+    void attachmentIdsAreCheckedBeforeEncrypting();
+    void framesAreClaimedOnlyWhenNothingElseIsDue();
+    void pendingFramesAreCountedUntilSettled();
+    void receivedAttachmentKeepsItsDescriptorUnlessTheIdIsTaken();
 };
 
 void SyncStoreTest::groupSendCommitsOneRowAndEveryEnvelopeOrNothing()
@@ -1276,6 +1315,282 @@ void SyncStoreTest::replyQuoteAndEditStampSurviveAReread()
     QCOMPARE(*read.replyToId, *reply.replyToId);
     QCOMPARE(*read.quotedSenderDeviceId, *reply.quotedSenderDeviceId);
     QCOMPARE(read.quotedBody, reply.quotedBody);
+}
+
+void SyncStoreTest::attachmentSendCommitsTheRowItsDescriptorAndEnvelopesTogether()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId, [] { return qint64(4'242); });
+
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto messageId = MessageId::generate();
+    const auto local = DeviceId::generate();
+    const QList<DeviceId> members{DeviceId::generate(), DeviceId::generate()};
+    const AttachmentDescriptor descriptor = photo();
+    const MessageRecord message =
+        withAttachment(outgoingMessage(messageId, conversationId, local), descriptor);
+    QVERIFY(store.commitAttachmentSend(message,
+                                       {outbox(EnvelopeId::generate(), messageId, conversationId),
+                                        outbox(EnvelopeId::generate(), messageId, conversationId)},
+                                       members.first().bytes() + members.last().bytes(),
+                                       QByteArray("attach-1"))
+                .hasValue());
+
+    // The row reads back with its descriptor, nothing sent yet.
+    const auto rows = chats.messages(conversationId, 50, std::nullopt);
+    QVERIFY(rows.hasValue());
+    QCOMPARE(rows.value().size(), 1);
+    const MessageRecord &read = rows.value().first();
+    QCOMPARE(read.kind, ContentKind::Attachment);
+    QCOMPARE(read.body, QStringLiteral("caption"));
+    QVERIFY(read.attachment.has_value());
+    QCOMPARE(*read.attachment, descriptor);
+    QCOMPARE(read.attachmentState, int(AttachmentState::Transferring));
+    QCOMPARE(read.attachmentReason, int(AttachmentFailure::None));
+    QCOMPARE(read.attachmentDone, 0);
+    // Both envelopes, at conversation priority, and the ratchet state.
+    const auto claimed = store.claimDue(3'000, 10, 8'000);
+    QCOMPARE(claimed.value().size(), 2);
+    for (const OutboxRecord &record : claimed.value()) {
+        QCOMPARE(record.messageId, messageId);
+        QCOMPARE(record.priority, 0);
+    }
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("attach-1"));
+    QCOMPARE(store.pendingLowPriorityCount().value(), 0);
+}
+
+void SyncStoreTest::attachmentSendRefusesWhatItCannotStore()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto local = DeviceId::generate();
+    const QByteArray peer = DeviceId::generate().bytes();
+
+    const auto attempt = [&](const MessageRecord &message, const QByteArray &recipients) {
+        return store.commitAttachmentSend(message,
+                                          {outbox(EnvelopeId::generate(), message.id, conversationId)},
+                                          recipients, QByteArray("state-x"));
+    };
+    const MessageId id = MessageId::generate();
+    const MessageRecord good = withAttachment(outgoingMessage(id, conversationId, local), photo());
+    // Not an attachment, no descriptor, an invalid descriptor.
+    MessageRecord text = good;
+    text.kind = ContentKind::Text;
+    QCOMPARE(attempt(text, peer).error().code, RepositoryErrorCode::InvalidInput);
+    MessageRecord bare = good;
+    bare.attachment.reset();
+    QCOMPARE(attempt(bare, peer).error().code, RepositoryErrorCode::InvalidInput);
+    MessageRecord broken = good;
+    broken.attachment->partCount = 99;
+    QCOMPARE(attempt(broken, peer).error().code, RepositoryErrorCode::InvalidInput);
+    // Recipients that are not whole ids, none at all, or a zero id.
+    QCOMPARE(attempt(good, peer.left(15)).error().code, RepositoryErrorCode::InvalidInput);
+    QCOMPARE(attempt(good, QByteArray()).error().code, RepositoryErrorCode::InvalidInput);
+    QCOMPARE(attempt(good, QByteArray(16, '\0')).error().code, RepositoryErrorCode::InvalidInput);
+    // An envelope that belongs to another message.
+    QCOMPARE(store
+                 .commitAttachmentSend(
+                     good, {outbox(EnvelopeId::generate(), MessageId::generate(), conversationId)}, peer,
+                     QByteArray("state-x"))
+                 .error()
+                 .code,
+             RepositoryErrorCode::InvalidInput);
+    QVERIFY(chats.messages(conversationId, 50, std::nullopt).value().isEmpty());
+
+    // A second message reusing the attachment id rolls back whole: no row,
+    // no envelope, and the ratchet state as the first send left it.
+    QVERIFY(attempt(good, peer).hasValue());
+    MessageRecord reused = good;
+    reused.id = MessageId::generate();
+    const auto conflict = attempt(reused, peer);
+    QVERIFY(!conflict.hasValue());
+    QCOMPARE(conflict.error().code, RepositoryErrorCode::Conflict);
+    QCOMPARE(chats.messages(conversationId, 50, std::nullopt).value().size(), 1);
+    QCOMPARE(store.claimDue(3'000, 10, 8'000).value().size(), 1);
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("state-x"));
+}
+
+void SyncStoreTest::attachmentIdsAreCheckedBeforeEncrypting()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    const auto conversationId = ConversationId::generate();
+    const auto otherConversation = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    QVERIFY(chats.upsertConversation(conversation(otherConversation)).hasValue());
+
+    const AttachmentDescriptor sent = photo();
+    QVERIFY(store.canEnqueueAttachment(conversationId, sent.attachmentId).value());
+    const auto id = MessageId::generate();
+    QVERIFY(store.commitAttachmentSend(
+                     withAttachment(outgoingMessage(id, conversationId, DeviceId::generate()), sent),
+                     {outbox(EnvelopeId::generate(), id, conversationId)}, DeviceId::generate().bytes(),
+                     QByteArray())
+                .hasValue());
+    QVERIFY(!store.canEnqueueAttachment(conversationId, sent.attachmentId).value());
+    QVERIFY(store.canEnqueueAttachment(conversationId, AttachmentId::generate()).value());
+    QVERIFY(store.canEnqueueAttachment(otherConversation, sent.attachmentId).value());
+
+    // An id a peer already used in the conversation is not reused either.
+    const AttachmentDescriptor theirs = photo();
+    QVERIFY(store.commitReceive(withAttachment(incomingMessage(MessageId::generate(), conversationId,
+                                                               DeviceId::generate(), 4),
+                                               theirs),
+                                EnvelopeId::generate(), 4, QByteArray())
+                .value());
+    QVERIFY(!store.canEnqueueAttachment(conversationId, theirs.attachmentId).value());
+}
+
+void SyncStoreTest::framesAreClaimedOnlyWhenNothingElseIsDue()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+
+    // Frames queued first and due first; a text and a control send after.
+    const OutboxRecord firstFrame = frameOutbox(conversationId, 1'000);
+    const OutboxRecord secondFrame = frameOutbox(conversationId, 1'000);
+    QVERIFY(store.commitControlSendMany({firstFrame, secondFrame}, QByteArrayView()).hasValue());
+    const auto textId = MessageId::generate();
+    const OutboxRecord text = outbox(EnvelopeId::generate(), textId, conversationId, 2'000);
+    QVERIFY(store.commitSend(outgoingMessage(textId, conversationId, DeviceId::generate()), text,
+                             QByteArray("s"))
+                .hasValue());
+    const OutboxRecord signal
+        = outbox(EnvelopeId::generate(), MessageId::generate(), conversationId, 2'500);
+    QVERIFY(store.commitControlSend(signal, QByteArray("s")).hasValue());
+
+    // One at a time, as the drain claims: conversation traffic first, in
+    // its own order, then the frames in theirs.
+    QVector<EnvelopeId> order;
+    for (int i = 0; i < 4; ++i) {
+        const auto claimed = store.claimDue(3'000, 1, 8'000);
+        QVERIFY(claimed.hasValue());
+        QCOMPARE(claimed.value().size(), 1);
+        order.append(claimed.value().first().envelopeId);
+    }
+    QCOMPARE(order, (QVector<EnvelopeId>{text.envelopeId, signal.envelopeId, firstFrame.envelopeId,
+                                         secondFrame.envelopeId}));
+    // A frame keeps its priority through a retry.
+    QVERIFY(store.scheduleRetry(firstFrame.envelopeId, 1, 3'000).hasValue());
+    const auto retried = store.claimDue(3'000, 10, 9'000);
+    QCOMPARE(retried.value().size(), 1);
+    QCOMPARE(retried.value().first().priority, 1);
+}
+
+void SyncStoreTest::pendingFramesAreCountedUntilSettled()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+
+    QCOMPARE(store.pendingLowPriorityCount().value(), 0);
+    const OutboxRecord accepted = frameOutbox(conversationId);
+    const OutboxRecord failed = frameOutbox(conversationId);
+    const OutboxRecord waiting = frameOutbox(conversationId);
+    QVERIFY(store.commitControlSendMany({accepted, failed, waiting}, QByteArrayView()).hasValue());
+    // Texts are never counted.
+    QVERIFY(store.commitControlSend(outbox(EnvelopeId::generate(), MessageId::generate(), conversationId),
+                                    QByteArray("s"))
+                .hasValue());
+    QCOMPARE(store.pendingLowPriorityCount().value(), 3);
+    // Leased still counts: the relay has not taken it yet.
+    QCOMPARE(store.claimDue(3'000, 10, 8'000).value().size(), 4);
+    QCOMPARE(store.pendingLowPriorityCount().value(), 3);
+    QVERIFY(store.markAccepted(accepted.envelopeId).hasValue());
+    QCOMPARE(store.pendingLowPriorityCount().value(), 2);
+    QVERIFY(store.failSend(failed.envelopeId, failed.messageId).hasValue());
+    QCOMPARE(store.pendingLowPriorityCount().value(), 1);
+    // Settled frames leave the outbox altogether: no message row stands behind them.
+    QVERIFY(!store.markAccepted(accepted.envelopeId).hasValue());
+}
+
+void SyncStoreTest::receivedAttachmentKeepsItsDescriptorUnlessTheIdIsTaken()
+{
+    QTemporaryDir directory;
+    auto key = SecureBuffer::random(32);
+    auto opened = SqlCipherDatabase::open(directory.filePath("profile.sqlite3"), key);
+    QVERIFY(opened.hasValue());
+    auto database = std::move(opened).value();
+    const auto profileId = ProfileId::generate();
+    QVERIFY(seedProfile(database, profileId));
+    SqlCipherChatRepository chats(database);
+    SqlCipherSyncStore store(database, profileId);
+    const auto conversationId = ConversationId::generate();
+    QVERIFY(chats.upsertConversation(conversation(conversationId)).hasValue());
+    const auto sender = DeviceId::generate();
+
+    const AttachmentDescriptor descriptor = photo();
+    const auto first = withAttachment(incomingMessage(MessageId::generate(), conversationId, sender, 1),
+                                      descriptor);
+    QVERIFY(store.commitReceive(first, EnvelopeId::generate(), 1, QByteArray("r1")).value());
+    // The same sender reusing the id: the message is stored and shown, but
+    // gets no descriptor, so it can never claim the first one's bytes.
+    AttachmentDescriptor reuse = photo();
+    reuse.attachmentId = descriptor.attachmentId;
+    reuse.byteCount = 12'345;
+    reuse.partCount = 1;
+    const auto second =
+        withAttachment(incomingMessage(MessageId::generate(), conversationId, sender, 2), reuse);
+    QVERIFY(store.commitReceive(second, EnvelopeId::generate(), 2, QByteArray("r2")).value());
+    // Another sender's attachment with the same id is its own.
+    const auto third = withAttachment(
+        incomingMessage(MessageId::generate(), conversationId, DeviceId::generate(), 3), reuse);
+    QVERIFY(store.commitReceive(third, EnvelopeId::generate(), 3, QByteArray("r3")).value());
+
+    const auto rows = chats.messages(conversationId, 50, std::nullopt);
+    QVERIFY(rows.hasValue());
+    QCOMPARE(rows.value().size(), 3);
+    for (const MessageRecord &row : rows.value()) {
+        QCOMPARE(row.kind, ContentKind::Attachment);
+        if (row.id == first.id)
+            QCOMPARE(*row.attachment, descriptor);
+        else if (row.id == second.id)
+            QVERIFY(!row.attachment.has_value());
+        else
+            QCOMPARE(*row.attachment, reuse);
+    }
+    QCOMPARE(database.loadMlsState(profileId).value(), QByteArray("r3"));
 }
 
 QTEST_GUILESS_MAIN(SyncStoreTest)

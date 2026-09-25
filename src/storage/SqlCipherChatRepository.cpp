@@ -1,7 +1,10 @@
 #include "storage/SqlCipherChatRepository.h"
 
+#include "storage/AttachmentRows.h"
 #include "storage/RepositorySql.h"
 #include "storage/SqlCipherDatabase.h"
+
+#include <QDateTime>
 
 #include <limits>
 
@@ -79,6 +82,36 @@ bool insertMessage(sqlite3 *database, const MessageRecord &message)
                        && (message.quotedSenderDeviceId ? statement.bindText(17, message.quotedBody)
                                                         : statement.bindNull(17));
     return bound && sqlite3_step(statement.get()) == SQLITE_DONE;
+}
+
+// An attachment message's descriptor row, as SqlCipherSyncStore stores it
+// beside the message: a clash on the attachment id leaves the message without
+// one (shown as unavailable).
+bool insertAttachment(sqlite3 *database, const MessageRecord &message)
+{
+    if (message.kind != ContentKind::Attachment || !message.attachment
+        || !isValidDescriptor(*message.attachment))
+        return true;
+    return AttachmentRows::insertDescriptor(database, message, {},
+                                            QDateTime::currentMSecsSinceEpoch(), true);
+}
+
+// The attachment columns messages() adds after the message's own 14: the
+// descriptor, its state and reason, and the parts done (sent from here, or
+// held from elsewhere).
+constexpr int attachmentColumn = 14;
+constexpr int attachmentStateColumn = attachmentColumn + AttachmentRows::descriptorColumnCount;
+
+void decodeAttachment(sqlite3_stmt *statement, MessageRecord &record)
+{
+    if (record.kind != ContentKind::Attachment)
+        return;
+    record.attachment = AttachmentRows::decodeDescriptor(statement, attachmentColumn);
+    if (!record.attachment)
+        return;
+    record.attachmentState = sqlite3_column_int(statement, attachmentStateColumn);
+    record.attachmentReason = sqlite3_column_int(statement, attachmentStateColumn + 1);
+    record.attachmentDone = sqlite3_column_int(statement, attachmentStateColumn + 2);
 }
 
 std::optional<MessageRecord> decodeMessage(sqlite3_stmt *statement)
@@ -277,19 +310,26 @@ SqlCipherChatRepository::messages(const ConversationId &conversationId, int limi
             anchorTime = sqlite3_column_int64(anchor.get(), 0);
         }
 
-        const char *sql = before
-                              ? "SELECT id, conversation_id, sender_device_id, flow, content_kind, "
-                                "body, server_sequence, delivery_state, reply_to_id, sent_at_ms, shared_id, "
-                                "edited_at_ms, quoted_sender_device_id, quoted_body "
-                                "FROM messages WHERE conversation_id=?1 AND "
-                                "(sent_at_ms < ?2 OR (sent_at_ms = ?2 AND id < ?3)) "
-                                "ORDER BY sent_at_ms DESC, id DESC LIMIT ?4"
-                              : "SELECT id, conversation_id, sender_device_id, flow, content_kind, "
-                                "body, server_sequence, delivery_state, reply_to_id, sent_at_ms, shared_id, "
-                                "edited_at_ms, quoted_sender_device_id, quoted_body "
-                                "FROM messages WHERE conversation_id=?1 "
-                                "ORDER BY sent_at_ms DESC, id DESC LIMIT ?2";
-        Statement statement(database, sql);
+        // Each message with its attachment, if it has one: the descriptor
+        // (never the preview) and how far its bytes have come. Both joins
+        // are on primary keys, and a missing or unreadable descriptor only
+        // leaves that message's attachment empty (decodeAttachment).
+        QByteArray sql = "SELECT m.id, m.conversation_id, m.sender_device_id, m.flow, m.content_kind, "
+                         "m.body, m.server_sequence, m.delivery_state, m.reply_to_id, m.sent_at_ms, "
+                         "m.shared_id, m.edited_at_ms, m.quoted_sender_device_id, m.quoted_body, ";
+        sql += AttachmentRows::descriptorColumns;
+        sql += ", a.state, a.reason, "
+               "CASE WHEN m.flow = 1 THEN a.parts_sent ELSE COALESCE(t.have_count, 0) END "
+               "FROM messages m "
+               "LEFT JOIN message_attachments a ON a.message_id = m.id "
+               "AND a.conversation_id = m.conversation_id "
+               "LEFT JOIN attachment_transfers t ON t.conversation_id = a.conversation_id "
+               "AND t.sender_device_id = a.sender_device_id AND t.attachment_id = a.attachment_id "
+               "WHERE m.conversation_id=?1 ";
+        sql += before ? "AND (m.sent_at_ms < ?2 OR (m.sent_at_ms = ?2 AND m.id < ?3)) "
+                        "ORDER BY m.sent_at_ms DESC, m.id DESC LIMIT ?4"
+                      : "ORDER BY m.sent_at_ms DESC, m.id DESC LIMIT ?2";
+        Statement statement(database, sql.constData());
         bool bound = statement.isValid() && statement.bindBlob(1, conversationId.bytes());
         if (before)
             bound = bound && statement.bindInt64(2, anchorTime)
@@ -308,6 +348,7 @@ SqlCipherChatRepository::messages(const ConversationId &conversationId, int limi
                 return Result<QVector<MessageRecord>, RepositoryError>::failure(
                     RepositorySql::error(RepositoryErrorCode::IntegrityFailure,
                                          QStringLiteral("message.decode")));
+            decodeAttachment(statement.get(), *record);
             records.append(std::move(*record));
         }
         if (step != SQLITE_DONE)
@@ -331,7 +372,7 @@ SqlCipherChatRepository::saveOutgoing(const MessageRecord &message, const Outbox
         if (!begin(database))
             return Result<void, RepositoryError>::failure(
                 internalError(QStringLiteral("outgoing.begin")));
-        if (!insertMessage(database, message)) {
+        if (!insertMessage(database, message) || !insertAttachment(database, message)) {
             rollback(database);
             return Result<void, RepositoryError>::failure(
                 conflictError(QStringLiteral("outgoing.message")));
@@ -395,7 +436,7 @@ SqlCipherChatRepository::applyIncoming(const MessageRecord &message,
             return Result<void, RepositoryError>::success();
         }
 
-        if (!insertMessage(database, message)) {
+        if (!insertMessage(database, message) || !insertAttachment(database, message)) {
             rollback(database);
             return Result<void, RepositoryError>::failure(
                 conflictError(QStringLiteral("incoming.message")));

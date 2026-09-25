@@ -16,6 +16,7 @@ struct sqlite3;
 
 namespace OpenChat {
 
+class SqlCipherAttachmentRepository;
 class SqlCipherChatRepository;
 class SqlCipherContactRepository;
 class SqlCipherOutboxRepository;
@@ -101,6 +102,7 @@ public:
   void close() noexcept;
 
 private:
+  friend class SqlCipherAttachmentRepository;
   friend class SqlCipherChatRepository;
   friend class SqlCipherContactRepository;
   friend class SqlCipherOutboxRepository;

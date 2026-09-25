@@ -5,6 +5,7 @@
 #include "profile/SongPlayer.h"
 
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointer>
 
 #include <algorithm>
@@ -54,8 +55,12 @@ void ProfileClipPlayer::setSegmentKeys(const QStringList &keys)
     m_segmentStartMs.clear();
     m_durationMs = 0;
     m_hasSound = false;
+    m_nextStartMs = 0;
+    const bool hadPicture = hasPicture();
     m_picture = {};
     emit segmentKeysChanged();
+    if (hadPicture)
+        emit hasPictureChanged();
     update();
 }
 
@@ -84,8 +89,75 @@ void ProfileClipPlayer::setPlaying(bool playing)
         m_playing = false;
         m_timer.stop();
         stopSound();
+        m_nextStartMs = 0;
     }
     emit playingChanged();
+}
+
+void ProfileClipPlayer::setPaused(bool paused)
+{
+    if (paused == m_paused)
+        return;
+    m_paused = paused;
+    if (m_playing && !m_segments.isEmpty()) {
+        if (paused) {
+            // The picture stays and the decoder keeps its place; only the
+            // clock and the sound stop, at the moment the listener heard.
+            const qint64 now = std::clamp<qint64>(clockMs(), 0, m_durationMs);
+            m_timer.stop();
+            stopSound();
+            m_runStartMs = now;
+            setPosition(now);
+        } else {
+            run(m_runStartMs, false);
+        }
+    }
+    emit pausedChanged();
+}
+
+void ProfileClipPlayer::setRadius(qreal radius)
+{
+    if (qFuzzyCompare(radius, m_radius))
+        return;
+    m_radius = radius;
+    emit radiusChanged();
+    update();
+}
+
+void ProfileClipPlayer::setLongForm(bool longForm)
+{
+    if (longForm == m_longForm)
+        return;
+    const bool running = m_playing && !m_paused && !m_segments.isEmpty();
+    const qint64 now = running ? std::clamp<qint64>(clockMs(), 0, m_durationMs) : 0;
+    m_longForm = longForm;
+    if (!m_segments.isEmpty()) {
+        m_hasSound = clipSoundtrack(m_segments, soundLimits()).has_value();
+        emit segmentKeysChanged();
+    }
+    // A sound held to the other bounds: picked up again where it was.
+    if (running)
+        run(now, false);
+    emit longFormChanged();
+}
+
+void ProfileClipPlayer::seek(qint64 positionMs)
+{
+    if (!load())
+        return;
+    const qint64 target = std::clamp<qint64>(positionMs, 0, m_durationMs);
+    const qint64 at = m_segmentStartMs.at(segmentAt(target));
+    if (m_playing) {
+        run(at, true);
+        return;
+    }
+    // Stopped: the next play starts here, and its first picture shows now.
+    m_nextStartMs = at;
+    m_decoder = std::make_unique<ClipVideoDecoder>();
+    m_segment = segmentAt(at);
+    m_frame = 0;
+    setPosition(at);
+    decodeTo(at);
 }
 
 bool ProfileClipPlayer::load()
@@ -111,23 +183,38 @@ bool ProfileClipPlayer::load()
     m_segments = std::move(segments);
     m_segmentStartMs = std::move(starts);
     m_durationMs = total;
-    m_hasSound = clipSoundtrack(m_segments).has_value();
+    m_hasSound = clipSoundtrack(m_segments, soundLimits()).has_value();
     emit segmentKeysChanged();
     return true;
 }
 
 void ProfileClipPlayer::start()
 {
+    run(std::exchange(m_nextStartMs, 0), true);
+}
+
+void ProfileClipPlayer::run(qint64 atMs, bool resetPictures)
+{
     stopSound();
-    m_decoder = std::make_unique<ClipVideoDecoder>();
-    m_segment = 0;
-    m_frame = 0;
-    m_positionMs = 0;
-    if (const auto song = clipSoundtrack(m_segments)) {
+    m_timer.stop();
+    if (resetPictures || !m_decoder) {
+        m_decoder = std::make_unique<ClipVideoDecoder>();
+        m_segment = segmentAt(atMs);
+        m_frame = 0;
+    }
+    m_runStartMs = atMs;
+    setPosition(atMs);
+    if (m_paused) {
+        decodeTo(atMs);
+        return;
+    }
+    const SongContainerLimits limits = soundLimits();
+    if (const auto song = clipSoundtrack(m_segments, limits)) {
         QString error;
         std::unique_ptr<SongOutput> output = SongPlayer::openOutput(song->channels, error);
         if (output) {
-            auto stream = std::make_unique<SongStream>(*song, output->format());
+            auto stream = std::make_unique<SongStream>(*song, output->format(),
+                                                       atMs * ClipContainer::audioSampleRate / 1000, limits);
             if (stream->isValid() && output->start(stream.get())) {
                 m_stream = std::move(stream);
                 m_output = std::move(output);
@@ -165,14 +252,27 @@ qint64 ProfileClipPlayer::clockMs() const
         if (m_stream->finished())
             return m_durationMs;
         const qint64 heard = m_stream->framesPlayed() * 1000 / ClipContainer::audioSampleRate - m_output->bufferMs();
-        return std::max<qint64>(0, heard);
+        return std::max<qint64>(m_runStartMs, heard);
     }
-    return m_clock.elapsed();
+    return m_runStartMs + m_clock.elapsed();
+}
+
+SongContainerLimits ProfileClipPlayer::soundLimits() const
+{
+    return m_longForm ? chatSongLimits() : SongContainerLimits{};
+}
+
+qsizetype ProfileClipPlayer::segmentAt(qint64 atMs) const
+{
+    qsizetype segment = 0;
+    while (segment + 1 < m_segments.size() && m_segmentStartMs.at(segment + 1) <= atMs)
+        ++segment;
+    return segment;
 }
 
 void ProfileClipPlayer::tick()
 {
-    if (!m_playing || m_segments.isEmpty() || !m_decoder)
+    if (!m_playing || m_paused || m_segments.isEmpty() || !m_decoder)
         return;
     const qint64 now = clockMs();
     if (now >= m_durationMs) {
@@ -184,13 +284,22 @@ void ProfileClipPlayer::tick()
         emit finished();
         return;
     }
-    // The frame that should be on screen now.
-    qsizetype segment = 0;
-    while (segment + 1 < m_segments.size() && m_segmentStartMs.at(segment + 1) <= now)
-        ++segment;
+    decodeTo(now);
+    if (now / 250 != m_positionMs / 250) {
+        m_positionMs = now;
+        emit positionChanged();
+    }
+}
+
+void ProfileClipPlayer::decodeTo(qint64 atMs)
+{
+    if (m_segments.isEmpty() || !m_decoder)
+        return;
+    // The frame that should be on screen at `atMs`.
+    const qsizetype segment = segmentAt(atMs);
     const ClipContainer &clip = m_segments.at(segment);
     const qsizetype frame = std::min<qsizetype>(
-        (now - m_segmentStartMs.at(segment)) * clip.fps / 1000, clip.frames.size() - 1);
+        (atMs - m_segmentStartMs.at(segment)) * clip.fps / 1000, clip.frames.size() - 1);
 
     // Decode forward to it; only the last one is turned into a picture.
     while (m_segment < segment || (m_segment == segment && m_frame <= frame)) {
@@ -202,16 +311,27 @@ void ProfileClipPlayer::tick()
         }
         const bool last = m_segment == segment && m_frame == frame;
         QImage picture = m_decoder->decode(current.frames.at(m_frame), last);
-        if (last && !picture.isNull()) {
-            m_picture = std::move(picture);
-            update();
-        }
+        if (last && !picture.isNull())
+            setPicture(std::move(picture));
         ++m_frame;
     }
-    if (now / 250 != m_positionMs / 250) {
-        m_positionMs = now;
-        emit positionChanged();
-    }
+}
+
+void ProfileClipPlayer::setPicture(QImage picture)
+{
+    const bool hadPicture = hasPicture();
+    m_picture = std::move(picture);
+    update();
+    if (hadPicture != hasPicture())
+        emit hasPictureChanged();
+}
+
+void ProfileClipPlayer::setPosition(qint64 positionMs)
+{
+    if (positionMs == m_positionMs)
+        return;
+    m_positionMs = positionMs;
+    emit positionChanged();
 }
 
 void ProfileClipPlayer::paint(QPainter *painter)
@@ -221,6 +341,13 @@ void ProfileClipPlayer::paint(QPainter *painter)
     const QSizeF shown = QSizeF(m_picture.size()).scaled(QSizeF(width(), height()), Qt::KeepAspectRatio);
     const QRectF target(QPointF((width() - shown.width()) / 2, (height() - shown.height()) / 2), shown);
     painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+    if (m_radius > 0) {
+        // The corners of the picture itself, wherever the fit puts it.
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        QPainterPath path;
+        path.addRoundedRect(target, m_radius, m_radius);
+        painter->setClipPath(path);
+    }
     painter->drawImage(target, m_picture);
 }
 

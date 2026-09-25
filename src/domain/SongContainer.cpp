@@ -1,10 +1,12 @@
 #include "domain/SongContainer.h"
 
+#include "domain/Attachment.h"
 #include "domain/ProfilePageCodec.h"
 
 #include <QtEndian>
 
 #include <algorithm>
+#include <limits>
 
 namespace OpenChat {
 
@@ -59,11 +61,34 @@ template<typename T>
 
 } // namespace
 
+static_assert(SongContainerLimits{}.maxBytes == maxSongBytes);
+
+SongContainerLimits chatSongLimits()
+{
+    // Five minutes and the same half-second of slack a profile song gets for
+    // the encoder's last frame.
+    constexpr qint64 slackSamples = SongContainer::maxTotalSamples
+        - qint64(SongContainer::maxDurationMs) * SongContainer::sampleRate / 1000;
+    return SongContainerLimits{
+        qsizetype(AttachmentLimits::maxAudioBytes),
+        AttachmentLimits::maxAudioMs * SongContainer::sampleRate / 1000 + slackSamples,
+        AttachmentLimits::maxAudioMs,
+    };
+}
+
 QByteArray encodeSongContainer(const SongContainer &song)
 {
+    return encodeSongContainer(song, SongContainerLimits{});
+}
+
+QByteArray encodeSongContainer(const SongContainer &song, const SongContainerLimits &limits)
+{
+    // totalSamples is a u32 on the wire, whatever the limits allow.
+    const qint64 maxTotalSamples =
+        std::min<qint64>(limits.maxTotalSamples, std::numeric_limits<quint32>::max());
     const bool valid = (song.channels == 1 || song.channels == 2) && isFrameSize(song.frameSamples)
         && song.preSkip >= 0 && song.preSkip <= SongContainer::maxPreSkip && song.totalSamples >= 1
-        && song.totalSamples <= SongContainer::maxTotalSamples
+        && song.totalSamples <= maxTotalSamples
         && packetCountFits(song.packets.size(), song.totalSamples, song.preSkip, song.frameSamples)
         && std::all_of(song.packets.cbegin(), song.packets.cend(), [](const QByteArray &packet) {
                return !packet.isEmpty() && packet.size() <= SongContainer::maxPacketBytes;
@@ -95,7 +120,12 @@ QByteArray encodeSongContainer(const SongContainer &song)
 
 std::optional<SongContainer> decodeSongContainer(QByteArrayView bytes)
 {
-    if (bytes.size() < headerBytes || bytes.size() > maxSongBytes || !looksLikeSongContainer(bytes))
+    return decodeSongContainer(bytes, SongContainerLimits{});
+}
+
+std::optional<SongContainer> decodeSongContainer(QByteArrayView bytes, const SongContainerLimits &limits)
+{
+    if (bytes.size() < headerBytes || bytes.size() > limits.maxBytes || !looksLikeSongContainer(bytes))
         return std::nullopt;
     if (readLittleEndian<quint8>(bytes, 4) != containerVersion)
         return std::nullopt;
@@ -112,7 +142,7 @@ std::optional<SongContainer> decodeSongContainer(QByteArrayView bytes)
     const qint16 gainQ8 = readLittleEndian<qint16>(bytes, 20);
     const quint32 packetCount = readLittleEndian<quint32>(bytes, 22);
     if (!isFrameSize(frameSamples) || preSkip > SongContainer::maxPreSkip || totalSamples < 1
-        || totalSamples > SongContainer::maxTotalSamples)
+        || totalSamples > limits.maxTotalSamples)
         return std::nullopt;
     // Checked before reading any packet, so a forged count cannot make the
     // loop below allocate or walk more than the duration allows.

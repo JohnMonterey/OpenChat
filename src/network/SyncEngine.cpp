@@ -22,6 +22,11 @@ namespace {
 // stays short: an offer is meaningless long after the call, and must not reach
 // a device that only reappears days later.
 constexpr qint64 callEnvelopeLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
+// Attachment frames are short-lived too: a device away longer asks for what
+// it lacks (the sender keeps every part), and a device that cannot read them
+// (0.2.x and older never acknowledge one) is not handed a month of them on
+// every reconnect.
+constexpr qint64 attachmentFrameLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
 
 [[nodiscard]] constexpr qint64 envelopeLifetimeMs(EnvelopeMessageKind kind) noexcept
 {
@@ -29,6 +34,8 @@ constexpr qint64 callEnvelopeLifetimeMs = 24LL * 60 * 60 * 1000; // 24h
     case EnvelopeMessageKind::CallSignal:
     case EnvelopeMessageKind::CallMedia:
         return callEnvelopeLifetimeMs;
+    case EnvelopeMessageKind::AttachmentControl:
+        return attachmentFrameLifetimeMs;
     default:
         return maxEnvelopeLifetimeMs;
     }

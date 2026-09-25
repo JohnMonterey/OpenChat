@@ -930,7 +930,12 @@ void SyncEngineTest::conversationEnvelopesOutliveCallSignals()
     };
     QCOMPARE(lifetime(transport.sent.at(0)), maxEnvelopeLifetimeMs);
     QCOMPARE(lifetime(transport.sent.at(1)), 24LL * 60 * 60 * 1000);
-    // Both are still valid wire envelopes.
+    // So is an attachment frame: a device away longer asks for what it
+    // lacks, and one that cannot read frames is not handed a month of them.
+    QVERIFY(engine.sendAttachmentFrame(conversation, {DeviceId::generate()}, partFrame()));
+    QCOMPARE(transport.sent.size(), 3);
+    QCOMPARE(lifetime(transport.sent.at(2)), 24LL * 60 * 60 * 1000);
+    // All are still valid wire envelopes.
     for (const CiphertextEnvelopeV1 &envelope : std::as_const(transport.sent))
         QVERIFY(decodeEnvelope(encodeCanonical(envelope)).hasValue());
 }

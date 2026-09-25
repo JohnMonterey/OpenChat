@@ -38,6 +38,12 @@ public:
         qint64 maxRequestBytes = 1 * 1024 * 1024;   // per HTTP request body
         quint64 maxFrameBytes = 1 * 1024 * 1024;    // per WebSocket message
         int syncLimit = 256;                        // catch-up page size
+        // How much of a connecting device's backlog may wait in its socket
+        // at once. Whatever the socket sends next (its pong, too) goes out
+        // behind what waits there, and a client that counts only a pong as
+        // a sign of life (0.2.x and older) must hear one within its
+        // 10-second heartbeat however long the backlog is.
+        qint64 replayBacklogBytes = 256 * 1024;
     };
 
     RelayServer(PostgresStore &store, AuthService &auth, EnvelopeService &envelopes,
@@ -83,6 +89,10 @@ private:
     void onWebSocketConnection();
     void handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice &device,
                           const QByteArray &message);
+    // Sends the next stretch of a connecting device's unacknowledged inbox,
+    // until limits.replayBacklogBytes wait in its socket; the socket's
+    // bytesWritten brings the rest. Live deliveries wait for the end.
+    void continueReplay(QWebSocket *socket, const DeviceId &device);
 
     PostgresStore &m_store;
     AuthService &m_auth;

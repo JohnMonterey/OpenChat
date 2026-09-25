@@ -611,24 +611,15 @@ void RelayServer::onWebSocketConnection()
         });
         heartbeat->start(10'000);
 
-        // Replay the unacknowledged inbox before handling newer live traffic.
-        // A client may resume from zero safely because received rows are pruned.
-        quint64 cursor = QUrlQuery(raw->requestUrl()).queryItemValue(QStringLiteral("since")).toULongLong();
-        while (true) {
-            const auto page = m_envelopes.fetchSince(identity->deviceId, cursor, m_limits.syncLimit);
-            if (!page.hasValue() || page.value().items.isEmpty())
-                break;
-            for (const auto &item : page.value().items) {
-                QCborArray delivery;
-                delivery.append(4);
-                delivery.append(static_cast<qint64>(item.serverSequence));
-                delivery.append(item.envelope);
-                raw->sendBinaryMessage(delivery.toCborValue().toCbor());
-            }
-            if (page.value().newWatermark <= cursor)
-                break;
-            cursor = page.value().newWatermark;
-        }
+        // Replay the unacknowledged inbox before any newer live traffic, a
+        // stretch at a time (continueReplay). A client may resume from zero
+        // safely because received rows are pruned.
+        raw->setProperty("replaying", true);
+        raw->setProperty("replayCursor",
+                         QUrlQuery(raw->requestUrl()).queryItemValue(QStringLiteral("since")).toULongLong());
+        connect(raw, &QWebSocket::bytesWritten, this,
+                [this, raw, device = identity->deviceId](qint64) { continueReplay(raw, device); });
+        continueReplay(raw, identity->deviceId);
 
         connect(raw, &QWebSocket::binaryMessageReceived, this,
                 [this, raw, id = *identity](const QByteArray &message) {
@@ -873,6 +864,32 @@ void RelayServer::sendKeyPackageSupply(const DeviceId &device)
         socket->sendBinaryMessage(QCborArray{10, count}.toCborValue().toCbor());
 }
 
+void RelayServer::continueReplay(QWebSocket *socket, const DeviceId &device)
+{
+    if (!socket->property("replaying").toBool())
+        return;
+    quint64 cursor = socket->property("replayCursor").toULongLong();
+    while (socket->bytesToWrite() < m_limits.replayBacklogBytes) {
+        const auto page = m_envelopes.fetchSince(device, cursor, m_limits.syncLimit);
+        if (!page.hasValue() || page.value().items.isEmpty()) {
+            // Caught up: from here on new envelopes are delivered live.
+            socket->setProperty("replaying", false);
+            return;
+        }
+        for (const auto &item : page.value().items) {
+            QCborArray delivery;
+            delivery.append(4);
+            delivery.append(static_cast<qint64>(item.serverSequence));
+            delivery.append(item.envelope);
+            socket->sendBinaryMessage(delivery.toCborValue().toCbor());
+            cursor = item.serverSequence;
+            if (socket->bytesToWrite() >= m_limits.replayBacklogBytes)
+                break;
+        }
+        socket->setProperty("replayCursor", qulonglong(cursor));
+    }
+}
+
 void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice &device,
                                    const QByteArray &message)
 {
@@ -913,7 +930,9 @@ void RelayServer::handleLiveBinary(QWebSocket *socket, const AuthenticatedDevice
         // inbox sequence: [4 (Delivery), seq, envelope]. Best-effort only; the
         // stored row is the delivery guarantee.
         const QByteArray recipientKey = decoded.value().recipientDeviceId.bytes().toHex();
-        if (QWebSocket *recipient = m_liveByDevice.value(recipientKey)) {
+        QWebSocket *recipient = m_liveByDevice.value(recipientKey);
+        // A recipient still catching up gets it from its inbox, in order.
+        if (recipient && !recipient->property("replaying").toBool()) {
             QCborArray delivery;
             delivery.append(4);
             delivery.append(static_cast<qint64>(submitted.value().serverSequence));

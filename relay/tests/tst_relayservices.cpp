@@ -158,6 +158,7 @@ private slots:
     void revokedDeviceIsRejectedEverywhere();
     void envelopeToARetiredDeviceIsRefusedAtOnce();
     void longDeliveriesTravelInSmallFrames();
+    void aLongBacklogStillLetsThePongThrough();
     void directoryResolvesHandleToActiveDevices();
     void directoryExcludesRevokedDevices();
     void directoryResolvesAccountToHandle();
@@ -1046,6 +1047,55 @@ void RelayServicesTest::longDeliveriesTravelInSmallFrames()
     socket.open(request);
     QTRY_COMPARE(messages.size(), 1);
     QVERIFY2(frames >= 12, qPrintable(QString::number(frames)));
+    socket.close();
+    QTRY_COMPARE(socket.state(), QAbstractSocket::UnconnectedState);
+}
+
+void RelayServicesTest::aLongBacklogStillLetsThePongThrough()
+{
+    // A client that counts only a pong as a sign of life (0.2.x and older)
+    // must hear one within its heartbeat, however long the backlog it is
+    // catching up on: the relay never queues the whole backlog ahead of it.
+    const auto sender = registerDevice(QStringLiteral("backlog_sender"));
+    const auto recipient = registerDevice(QStringLiteral("backlog_recipient"));
+    AuthService auth(*m_store);
+    EnvelopeService envelopes(*m_store);
+    KeyPackageService packages(*m_store);
+    DirectoryService directory(*m_store);
+    constexpr int backlog = 20;
+    for (int i = 0; i < backlog; ++i) {
+        const auto envelope = signedEnvelope(sender.key.pkey, sender.account, sender.device, recipient.device,
+                                             QByteArray(200 * 1024, char('a' + i)), m_now);
+        QVERIFY(envelopes.submit({sender.account, sender.device}, encodeCanonical(envelope)).hasValue());
+    }
+    RelayServer server(*m_store, auth, envelopes, packages, directory, RelayServer::Limits{}, nullptr);
+    const auto port = server.start(QHostAddress::LocalHost, 0);
+    QVERIFY(port);
+    QNetworkRequest request(QUrl(QStringLiteral("ws://127.0.0.1:%1/v1/live?since=0").arg(port)));
+    request.setRawHeader("Authorization", "Bearer " + recipient.tokens.accessToken);
+    QWebSocket socket;
+    int deliveries = 0;
+    int deliveriesAtPong = -1;
+    quint64 lastSequence = 0;
+    bool inOrder = true;
+    connect(&socket, &QWebSocket::connected, &socket, [&socket] { socket.ping(); });
+    connect(&socket, &QWebSocket::pong, &socket, [&](quint64, const QByteArray &) {
+        if (deliveriesAtPong < 0)
+            deliveriesAtPong = deliveries;
+    });
+    connect(&socket, &QWebSocket::binaryMessageReceived, &socket, [&](const QByteArray &message) {
+        const auto delivery = QCborValue::fromCbor(message).toArray();
+        if (delivery.at(0).toInteger() != 4)
+            return;
+        const auto sequence = quint64(delivery.at(1).toInteger());
+        inOrder = inOrder && sequence > lastSequence;
+        lastSequence = sequence;
+        ++deliveries;
+    });
+    socket.open(request);
+    QTRY_COMPARE_WITH_TIMEOUT(deliveries, backlog, 20'000);
+    QVERIFY(inOrder);
+    QVERIFY2(deliveriesAtPong >= 0 && deliveriesAtPong < backlog, qPrintable(QString::number(deliveriesAtPong)));
     socket.close();
     QTRY_COMPARE(socket.state(), QAbstractSocket::UnconnectedState);
 }

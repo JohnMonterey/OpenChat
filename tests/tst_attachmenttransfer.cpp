@@ -826,6 +826,32 @@ private slots:
         QVERIFY(!f.anyFailedClosed());
     }
 
+    void aTransferWhoseSenderLeftIsGivenUpAndFreed()
+    {
+        Fixture f;
+        QVERIFY(f.setUp());
+        Side &alice = f.start(f.fx.a());
+        Side &bob = f.start(f.fx.b());
+        const auto id = f.send(alice, f.direct, {f.fx.b().device}, false,
+                               fileAttachment(randomBytes(4 * AttachmentLimits::partBytes, 24)));
+        QVERIFY(id);
+        // Two parts reach bob, then alice's device is no longer the one bob's
+        // chat knows (she logged in on another computer).
+        QVERIFY(f.settleUntil([&] { return Fixture::heldParts(bob, Fixture::stored(alice, *id)->ref) >= 2; }));
+        alice.transfer.reset();
+        f.members.insert(f.direct.bytes(), {f.fx.b().device});
+        const AttachmentRef ref = *std::optional(Fixture::stored(bob, *id)->ref);
+        QVERIFY(Fixture::filesOf(bob).contains(ref));
+        Fixture::idle(50);
+        QCOMPARE(Fixture::stateOf(bob, *id), AttachmentState::Transferring);
+
+        // A day on it is given up, and its bytes go.
+        f.fx.clock.advance(AttachmentTransferLimits{}.strandedIncomingMs + 60'000);
+        QVERIFY(QTest::qWaitFor([&] { return Fixture::stateOf(bob, *id) == AttachmentState::Failed; }, 5'000));
+        QVERIFY(!Fixture::filesOf(bob).contains(ref));
+        QVERIFY(!f.anyFailedClosed());
+    }
+
     void whatNeverGetsAMessageIsCollected()
     {
         Fixture f;

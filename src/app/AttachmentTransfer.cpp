@@ -1079,13 +1079,27 @@ void AttachmentTransfer::runRecovery()
         const ConversationId &conversation = stored.ref.conversationId;
         if (m_validating.contains(stored.messageId.bytes()))
             continue;
-        // Only a sender still in the conversation is asked.
-        if (!m_roster || !m_roster(conversation).contains(stored.ref.senderDeviceId))
-            continue;
         const auto found = attachments->transfer(stored.ref);
         if (!found.hasValue())
             continue;
         const std::optional<AttachmentTransferRecord> &transfer = found.value();
+        // Nothing more can come for a chat that was left, and nobody is asked
+        // who is no longer in it (they left, or the contact's device
+        // changed): once that has lasted a while, the transfer is given up
+        // and its bytes freed rather than kept waiting for good.
+        const auto live = attachments->conversationIsLive(conversation);
+        if (live.hasValue() && !live.value()) {
+            failIncoming(stored, AttachmentFailure::SendFailed);
+            continue;
+        }
+        if (!m_roster || !m_roster(conversation).contains(stored.ref.senderDeviceId)) {
+            // Idle since the last part came, or since the message did.
+            const qint64 lastActivity = transfer ? std::max(transfer->firstSeenMs, transfer->updatedAtMs)
+                                                 : stored.createdAtMs;
+            if (m_roster && nowMs - lastActivity >= m_limits.strandedIncomingMs)
+                failIncoming(stored, AttachmentFailure::SendFailed);
+            continue;
+        }
         const int asked = transfer ? transfer->requestsSent : 0;
         if (asked >= m_limits.maxRequests)
             continue;

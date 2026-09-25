@@ -38,6 +38,9 @@ struct AttachmentTransferLimits final {
     qint64 requestGraceMs = 2LL * 60 * 1000;          // no progress this long, link up: ask for what is missing
     qint64 requestMaxIntervalMs = 6LL * 60 * 60 * 1000; // the back-off doubles up to this (under 12 a day)
     int maxRequests = 48;                             // per attachment, then it is left as it is
+    // An incoming transfer whose sender is no longer in the chat, idle this
+    // long, is given up (its bytes freed): nobody is left to ask.
+    qint64 strandedIncomingMs = 24LL * 60 * 60 * 1000;
     // --- Answers (sender side)
     qint64 answerIntervalMs = 10LL * 60 * 1000;       // per attachment and requester
     // --- Storage

@@ -121,6 +121,9 @@ class ChatController final : public QObject
     Q_PROPERTY(bool stagingBusy READ stagingBusy NOTIFY stagedAttachmentsChanged)
     Q_PROPERTY(bool sendWhenReady READ sendWhenReady NOTIFY stagedAttachmentsChanged)
     Q_PROPERTY(bool videoAttachmentsSupported READ videoAttachmentsSupported CONSTANT)
+    // The photo types this computer can read (suffixes), and how the menu names them.
+    Q_PROPERTY(QStringList photoSuffixes READ photoSuffixes CONSTANT)
+    Q_PROPERTY(QString photoFormatsHint READ photoFormatsHint CONSTANT)
     Q_PROPERTY(QString attachmentNotice READ attachmentNotice NOTIFY attachmentNoticeChanged)
 
 public:
@@ -254,6 +257,8 @@ public:
     [[nodiscard]] bool stagingBusy() const;
     [[nodiscard]] bool sendWhenReady() const;
     [[nodiscard]] static bool videoAttachmentsSupported();
+    [[nodiscard]] static QStringList photoSuffixes();
+    [[nodiscard]] static QString photoFormatsHint();
     [[nodiscard]] QString attachmentNotice() const;
     // Stages local files for the open chat, each prepared as what its name
     // says it is (a photo, video, audio file or any other file), at most

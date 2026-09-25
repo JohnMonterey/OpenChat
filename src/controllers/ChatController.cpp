@@ -1143,6 +1143,16 @@ bool ChatController::videoAttachmentsSupported()
     return ChatAttachmentImporter::videoSupported();
 }
 
+QStringList ChatController::photoSuffixes()
+{
+    return OpenChat::photoSuffixes();
+}
+
+QString ChatController::photoFormatsHint()
+{
+    return OpenChat::photoFormatsHint();
+}
+
 QString ChatController::attachmentNotice() const
 {
     return m_attachments->notice();

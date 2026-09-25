@@ -14,6 +14,8 @@ Menu {
     objectName: "attachmentMenu"
     // Video needs libvpx; without it the row stays, greyed, and says why.
     property bool videoSupported: true
+    // The photo types this computer can read, as the Photo row names them.
+    property string photoHint: "JPG, PNG, WebP"
     // A row was picked: 1 photo, 2 video, 3 audio, 4 file.
     signal picked(int kind)
 
@@ -116,7 +118,7 @@ Menu {
         order: 0
         kind: 1
         text: "Photo"
-        hint: "JPG, PNG, WebP"
+        hint: menu.photoHint
         onTriggered: menu.picked(1)
     }
     KindRow {

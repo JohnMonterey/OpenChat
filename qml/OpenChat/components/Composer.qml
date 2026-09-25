@@ -336,6 +336,7 @@ Item {
         x: 0
         y: -height - 6
         videoSupported: composer.controller.videoAttachmentsSupported !== false
+        photoHint: composer.controller.photoFormatsHint || "JPG, PNG"
         onPicked: kind => {
             const dialog = kind === 1 ? photoDialog : kind === 2 ? videoDialog
                          : kind === 3 ? audioDialog : fileDialog;
@@ -358,7 +359,10 @@ Item {
         objectName: "attachPhotoDialog"
         title: "Send photos"
         fileMode: FileDialog.OpenFiles
-        nameFilters: ["Photos (*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff)", "All files (*)"]
+        // Only what this computer can read: a WebP or TIFF where Qt has no
+        // plugin for it would only be sent as a file.
+        nameFilters: ["Photos (" + (composer.controller.photoSuffixes || ["jpg", "jpeg", "png"])
+                          .map(suffix => "*." + suffix).join(" ") + ")", "All files (*)"]
         onAccepted: composer.pickedFrom(photoDialog)
         onRejected: input.forceActiveFocus()
     }

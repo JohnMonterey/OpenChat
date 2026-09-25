@@ -8,6 +8,7 @@
 
 #include <QFile>
 #include <QImage>
+#include <QImageReader>
 #include <QPainter>
 #include <QProcess>
 #include <QRandomGenerator>
@@ -145,6 +146,7 @@ private slots:
 
     void guessesTheKindFromTheNameAlone_data();
     void guessesTheKindFromTheNameAlone();
+    void photosAreOnlyWhatThisComputerCanRead();
     void photoBecomesABaselineJpegWithAPreview();
     void smallPhotoKeepsItsSizeOnWhite();
     void pastedPictureBecomesAPhoto();
@@ -226,9 +228,7 @@ void ChatAttachmentImportTest::guessesTheKindFromTheNameAlone_data()
     QTest::addColumn<int>("kind");
     const QList<std::pair<QString, AttachmentKind>> rows{
         {u"photo.jpg"_s, AttachmentKind::Image},     {u"PHOTO.JPEG"_s, AttachmentKind::Image},
-        {u"shot.png"_s, AttachmentKind::Image},      {u"old.bmp"_s, AttachmentKind::Image},
-        {u"web.webp"_s, AttachmentKind::Image},      {u"scan.tif"_s, AttachmentKind::Image},
-        {u"scan.tiff"_s, AttachmentKind::Image},     {u"clip.mp4"_s, AttachmentKind::Video},
+        {u"shot.png"_s, AttachmentKind::Image},      {u"clip.mp4"_s, AttachmentKind::Video},
         {u"clip.m4v"_s, AttachmentKind::Video},      {u"clip.MOV"_s, AttachmentKind::Video},
         {u"clip.webm"_s, AttachmentKind::Video},     {u"clip.mkv"_s, AttachmentKind::Video},
         {u"clip.avi"_s, AttachmentKind::Video},      {u"clip.wmv"_s, AttachmentKind::Video},
@@ -251,6 +251,23 @@ void ChatAttachmentImportTest::guessesTheKindFromTheNameAlone()
     QFETCH(QString, path);
     QFETCH(int, kind);
     QCOMPARE(int(guessAttachmentKind(path)), kind);
+}
+
+void ChatAttachmentImportTest::photosAreOnlyWhatThisComputerCanRead()
+{
+    // JPEG and PNG always; WebP, BMP and TIFF only with a plugin to read them,
+    // or they go as files rather than failing as photos.
+    const QList<QByteArray> readable = QImageReader::supportedImageFormats();
+    const QStringList suffixes = photoSuffixes();
+    QVERIFY(suffixes.startsWith(QStringLiteral("jpg")));
+    QVERIFY(suffixes.contains(QStringLiteral("png")));
+    for (const QString &suffix : {u"webp"_s, u"bmp"_s, u"tif"_s, u"tiff"_s}) {
+        QCOMPARE(suffixes.contains(suffix), readable.contains(suffix.toLatin1()));
+        QCOMPARE(guessAttachmentKind(u"picture."_s + suffix),
+                 readable.contains(suffix.toLatin1()) ? AttachmentKind::Image : AttachmentKind::File);
+    }
+    QCOMPARE(photoFormatsHint().startsWith(u"JPG, PNG"_s), true);
+    QCOMPARE(photoFormatsHint().contains(u"WebP"_s), readable.contains("webp"));
 }
 
 void ChatAttachmentImportTest::photoBecomesABaselineJpegWithAPreview()

@@ -217,11 +217,32 @@ Q_GLOBAL_STATIC(ImportPool, importPool)
 
 } // namespace
 
+QStringList photoSuffixes()
+{
+    static const QStringList suffixes = [] {
+        const QList<QByteArray> readable = QImageReader::supportedImageFormats();
+        QStringList offered;
+        for (const char *suffix : {"jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"}) {
+            if (readable.contains(QByteArray(suffix)))
+                offered.append(QString::fromLatin1(suffix));
+        }
+        return offered;
+    }();
+    return suffixes;
+}
+
+QString photoFormatsHint()
+{
+    const QStringList suffixes = photoSuffixes();
+    QStringList names{QStringLiteral("JPG"), QStringLiteral("PNG")};
+    if (suffixes.contains(QStringLiteral("webp")))
+        names.append(QStringLiteral("WebP"));
+    return names.join(QStringLiteral(", "));
+}
+
 AttachmentKind guessAttachmentKind(const QString &path)
 {
-    static const QStringList images{QStringLiteral("jpg"), QStringLiteral("jpeg"), QStringLiteral("png"),
-                                    QStringLiteral("bmp"), QStringLiteral("webp"), QStringLiteral("tif"),
-                                    QStringLiteral("tiff")};
+    const QStringList images = photoSuffixes();
     static const QStringList videos{QStringLiteral("mp4"), QStringLiteral("m4v"), QStringLiteral("mov"),
                                     QStringLiteral("webm"), QStringLiteral("mkv"), QStringLiteral("avi"),
                                     QStringLiteral("wmv")};

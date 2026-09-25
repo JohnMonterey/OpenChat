@@ -6,6 +6,7 @@
 #include <QImage>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 
@@ -25,10 +26,17 @@ struct PreparedAttachment final {
     QString notice;
 };
 
-// What an attachment is taken for, from its name alone: jpg, jpeg, png, bmp,
-// webp, tif, tiff → Image; mp4, m4v, mov, webm, mkv, avi, wmv → Video; wav,
-// mp3, m4a, aac, ogg, oga, opus, flac → Audio; anything else (GIF and HEIC
-// included) → File.
+// The photo file types this computer can read, as lower-case suffixes in the
+// order they are offered: jpg, jpeg, png, then webp, bmp, tif and tiff where
+// Qt has an image plugin for them (WebP and TIFF need qtimageformats).
+[[nodiscard]] QStringList photoSuffixes();
+// The same for a person: "JPG, PNG" and ", WebP" where it can be read.
+[[nodiscard]] QString photoFormatsHint();
+
+// What an attachment is taken for, from its name alone: photoSuffixes() →
+// Image; mp4, m4v, mov, webm, mkv, avi, wmv → Video; wav, mp3, m4a, aac, ogg,
+// oga, opus, flac → Audio; anything else (GIF and HEIC included, and a WebP
+// or TIFF this computer cannot read) → File.
 [[nodiscard]] AttachmentKind guessAttachmentKind(const QString &path);
 
 // Turns one local file (or a pasted picture) into a PreparedAttachment, off

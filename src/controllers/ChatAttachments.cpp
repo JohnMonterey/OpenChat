@@ -315,7 +315,10 @@ bool ChatAttachments::attachClipboard()
             return true;
         }
     }
-    if (!mime->hasImage())
+    // Text wins: copied cells, slides and documents often carry a picture of
+    // themselves beside their text, and the text is what was meant. A
+    // picture alone (a screenshot, "Copy image") is attached.
+    if (!mime->hasImage() || (mime->hasText() && !mime->text().trimmed().isEmpty()))
         return false;
     const QImage picture = qvariant_cast<QImage>(mime->imageData());
     if (picture.isNull())

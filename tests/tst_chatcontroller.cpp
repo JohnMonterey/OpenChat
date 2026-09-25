@@ -43,6 +43,7 @@
 
 #include <QBuffer>
 #include <QClipboard>
+#include <QMimeData>
 #include <QCryptographicHash>
 #include <QFile>
 #include <QGuiApplication>
@@ -2248,6 +2249,42 @@ private slots:
         controller.clearStagedAttachments();
         QCOMPARE(tray->rowCount(), 0);
         QVERIFY(!controller.hasStagedAttachments());
+    }
+
+    void pastingAttachesAPictureButNeverTakesText()
+    {
+        using namespace OpenChat;
+        ChatController controller;
+        auto *tray = qobject_cast<StagedAttachmentModel *>(controller.stagedAttachments());
+        QClipboard *clipboard = QGuiApplication::clipboard();
+        QImage picture(120, 80, QImage::Format_RGB32);
+        picture.fill(Qt::darkCyan);
+
+        // Copied spreadsheet cells: their text, and a picture of them. The
+        // text is what was meant, so the paste is left to the field.
+        auto *cells = new QMimeData;
+        cells->setText(QStringLiteral("Qty\tItem\n3\tTickets"));
+        cells->setHtml(QStringLiteral("<table><tr><td>3</td><td>Tickets</td></tr></table>"));
+        cells->setImageData(picture);
+        clipboard->setMimeData(cells);
+        QVERIFY(!controller.attachClipboard());
+        QCOMPARE(tray->rowCount(), 0);
+
+        // A screenshot, or "Copy image" in a browser (a picture and markup,
+        // no text), is attached.
+        auto *copied = new QMimeData;
+        copied->setHtml(QStringLiteral("<img src=\"https://example.com/cat.jpg\">"));
+        copied->setImageData(picture);
+        clipboard->setMimeData(copied);
+        QVERIFY(controller.attachClipboard());
+        QCOMPARE(tray->rowCount(), 1);
+        controller.clearStagedAttachments();
+
+        // Plain text is nothing to attach.
+        clipboard->setText(QStringLiteral("just words"));
+        QVERIFY(!controller.attachClipboard());
+        QCOMPARE(tray->rowCount(), 0);
+        clipboard->clear();
     }
 
     void attachRefusalsSayWhy()

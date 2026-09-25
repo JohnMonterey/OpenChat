@@ -110,8 +110,8 @@ Item {
         const alt = (event.modifiers & Qt.AltModifier) !== 0;
         const start = input.selectionStart;
         const end = input.selectionEnd;
-        // A picture, or files copied in a file manager, on the clipboard is
-        // attached; anything else pastes as ever.
+        // Files copied in a file manager, or a picture with no text beside
+        // it, on the clipboard are attached; anything else pastes as ever.
         if (event.matches(StandardKey.Paste))
             return composer.canAttach && typeof controller.attachClipboard === "function"
                 && controller.attachClipboard() === true;

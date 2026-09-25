@@ -1,0 +1,43 @@
+# Builds OpenChat.app on macOS (Apple silicon) and uploads it zipped.
+# Run it from the Actions tab (workflow_dispatch) or by pushing to ci/macos.
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/macos]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: brew install qt openssl@3 opus libvpx ninja pkg-config
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix openssl@3)" \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+
+      - name: Build
+        run: cmake --build build --target OpenChat
+
+      - name: Bundle
+        run: |
+          "$(brew --prefix qt)/bin/macdeployqt" build/OpenChat.app -qmldir=qml -always-overwrite
+          codesign --force --deep --sign - build/OpenChat.app
+          ditto -c -k --keepParent build/OpenChat.app "OpenChat-$(git rev-parse --short HEAD)-macos-arm64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenChat-macos-arm64
+          path: OpenChat-*-macos-arm64.zip

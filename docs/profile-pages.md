@@ -5,6 +5,9 @@ MySpace's 2005-2008 "Profile 1.0" pages: a two-column stack of boxes with
 coloured header strips over a wallpaper, restyled however its owner likes.
 Clicking a person's picture anywhere in OpenChat opens their page.
 
+Owners can also add panels of their own: text, pictures, a video, lists
+such as favorite games, and dividers. See [profile-panels.md](profile-panels.md).
+
 ## What the user sees
 
 ### Opening a profile

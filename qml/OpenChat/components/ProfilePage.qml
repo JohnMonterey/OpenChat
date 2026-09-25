@@ -32,6 +32,7 @@ FocusScope {
     readonly property bool popupOpen: topBar.popupOpen
                                       || (bodyStub.item !== null && bodyStub.item.popupOpen === true)
                                       || (bodyEditor.item !== null && bodyEditor.item.popupOpen === true)
+                                      || (bodyView.item !== null && bodyView.item.popupOpen === true)
                                       || avatarDialog.visible
     // The open fade (SPEC §17) has finished; at once without animations.
     readonly property bool settled: d.settled

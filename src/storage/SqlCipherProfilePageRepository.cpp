@@ -5,6 +5,7 @@
 
 #include <QCryptographicHash>
 
+#include <algorithm>
 #include <utility>
 
 namespace OpenChat {
@@ -18,8 +19,12 @@ constexpr qsizetype hashBytes = 32;
 constexpr qsizetype maxMediaBytes = 224 * 1024;
 constexpr int backgroundKind = 1;
 constexpr int songKind = 2;
-// Bounds forgetSentMediaExcept's statement; a page names at most two blobs.
+constexpr int lastKind = 4; // VideoSegmentMedia (Profile::MediaKind)
+// Bounds forgetSentMediaExcept's statement and the panel ref lists; a page
+// names at most 2 + 24 blobs.
 constexpr qsizetype maxKeptHashes = 64;
+constexpr int draftStage = 0;
+constexpr int publishedStage = 1;
 
 RepositoryError error(RepositoryErrorCode code, const QString &diagnostic)
 {
@@ -126,7 +131,79 @@ bool isOptionalHash(const std::optional<QByteArray> &hash)
 
 bool isKind(int kind)
 {
-    return kind == backgroundKind || kind == songKind;
+    return kind >= backgroundKind && kind <= lastKind;
+}
+
+bool isHashList(const QVector<QByteArray> &hashes)
+{
+    return hashes.size() <= maxKeptHashes && std::all_of(hashes.cbegin(), hashes.cend(), isHash);
+}
+
+// Replaces the local page's panel refs of one stage. The caller owns the
+// transaction.
+bool writeLocalPanelMedia(sqlite3 *database, QByteArrayView profileId, int stage,
+                          const QVector<QByteArray> &hashes)
+{
+    Statement clear(database, "DELETE FROM local_page_panel_media WHERE profile_id = ?1 AND stage = ?2");
+    if (!clear.isValid() || !clear.bindBlob(1, profileId) || !clear.bindInt(2, stage)
+        || sqlite3_step(clear.get()) != SQLITE_DONE)
+        return false;
+    for (const QByteArray &hash : hashes) {
+        Statement insert(database, "INSERT OR IGNORE INTO local_page_panel_media(profile_id, stage, sha256) "
+                                   "VALUES(?1, ?2, ?3)");
+        if (!insert.isValid() || !insert.bindBlob(1, profileId) || !insert.bindInt(2, stage)
+            || !insert.bindBlob(3, hash) || sqlite3_step(insert.get()) != SQLITE_DONE)
+            return false;
+    }
+    return true;
+}
+
+bool readLocalPanelMedia(sqlite3 *database, QByteArrayView profileId, int stage, QVector<QByteArray> &hashes)
+{
+    Statement statement(database, "SELECT sha256 FROM local_page_panel_media WHERE profile_id = ?1 "
+                                  "AND stage = ?2 ORDER BY sha256");
+    if (!statement.isValid() || !statement.bindBlob(1, profileId) || !statement.bindInt(2, stage))
+        return false;
+    int step = SQLITE_ROW;
+    while ((step = sqlite3_step(statement.get())) == SQLITE_ROW)
+        hashes.push_back(RepositorySql::blob(statement.get(), 0));
+    return step == SQLITE_DONE;
+}
+
+// Replaces what a contact's stored core names in its panels. The caller owns
+// the transaction.
+bool writeContactPanelMedia(sqlite3 *database, const AccountId &account, const QVector<PanelMediaRef> &refs)
+{
+    Statement clear(database, "DELETE FROM contact_page_panel_media WHERE account_id = ?1");
+    if (!clear.isValid() || !clear.bindBlob(1, account.bytes()) || sqlite3_step(clear.get()) != SQLITE_DONE)
+        return false;
+    for (const PanelMediaRef &ref : refs) {
+        Statement insert(database, "INSERT OR IGNORE INTO contact_page_panel_media(account_id, sha256, kind) "
+                                   "VALUES(?1, ?2, ?3)");
+        if (!insert.isValid() || !insert.bindBlob(1, account.bytes()) || !insert.bindBlob(2, ref.sha256)
+            || !insert.bindInt(3, ref.kind) || sqlite3_step(insert.get()) != SQLITE_DONE)
+            return false;
+    }
+    return true;
+}
+
+bool isPanelRefList(const QVector<PanelMediaRef> &refs)
+{
+    return refs.size() <= maxKeptHashes && std::all_of(refs.cbegin(), refs.cend(), [](const PanelMediaRef &ref) {
+               return isHash(ref.sha256) && isKind(ref.kind);
+           });
+}
+
+// Every hash a contact's stored core names (slots and panels).
+bool readContactNamed(sqlite3 *database, const AccountId &account, QVector<QByteArray> &hashes)
+{
+    Statement statement(database, "SELECT sha256 FROM contact_page_named_media WHERE account_id = ?1");
+    if (!statement.isValid() || !statement.bindBlob(1, account.bytes()))
+        return false;
+    int step = SQLITE_ROW;
+    while ((step = sqlite3_step(statement.get())) == SQLITE_ROW)
+        hashes.push_back(RepositorySql::blob(statement.get(), 0));
+    return step == SQLITE_DONE;
 }
 
 // A storable blob: within the size bounds and really the content `sha256`
@@ -182,24 +259,16 @@ bool run(sqlite3 *database, const char *sql)
 // inside a write that may stop naming some of them.
 bool readLocalSlots(sqlite3 *database, QByteArrayView profileId, QVector<QByteArray> &hashes)
 {
-    Statement statement(database,
-                        "SELECT draft_background, draft_song, published_background, "
-                        "published_song FROM local_profile_page WHERE profile_id = ?1");
+    Statement statement(database, "SELECT sha256 FROM local_page_named_media WHERE profile_id = ?1");
     if (!statement.isValid() || !statement.bindBlob(1, profileId))
         return false;
-    const int step = sqlite3_step(statement.get());
-    if (step == SQLITE_DONE)
-        return true;
-    if (step != SQLITE_ROW)
-        return false;
-    for (int column = 0; column < 4; ++column) {
-        if (sqlite3_column_type(statement.get(), column) == SQLITE_NULL)
-            continue;
-        QByteArray hash = RepositorySql::blob(statement.get(), column);
+    int step = SQLITE_ROW;
+    while ((step = sqlite3_step(statement.get())) == SQLITE_ROW) {
+        QByteArray hash = RepositorySql::blob(statement.get(), 0);
         if (!hashes.contains(hash))
             hashes.push_back(std::move(hash));
     }
-    return true;
+    return step == SQLITE_DONE;
 }
 
 // Starts the collection's grace, at `nowMs`, for each of `hashes` the local
@@ -214,9 +283,7 @@ bool startGraceOfReleased(sqlite3 *database, const QVector<QByteArray> &hashes, 
         Statement statement(database,
                             "UPDATE profile_media SET created_at_ms = ?2 "
                             "WHERE sha256 = ?1 AND created_at_ms < ?2 "
-                            "AND NOT EXISTS (SELECT 1 FROM local_profile_page l "
-                            "WHERE l.draft_background = ?1 OR l.draft_song = ?1 "
-                            "OR l.published_background = ?1 OR l.published_song = ?1)");
+                            "AND NOT EXISTS (SELECT 1 FROM local_page_named_media l WHERE l.sha256 = ?1)");
         if (!statement.isValid() || !statement.bindBlob(1, hash) || !statement.bindInt64(2, nowMs)
             || sqlite3_step(statement.get()) != SQLITE_DONE)
             return false;
@@ -233,9 +300,7 @@ bool deleteBlobIfUnreferenced(sqlite3 *database, QByteArrayView sha256)
                         "DELETE FROM profile_media WHERE sha256 = ?1 "
                         "AND NOT EXISTS (SELECT 1 FROM contact_page_media c "
                         "WHERE c.sha256 = ?1) "
-                        "AND NOT EXISTS (SELECT 1 FROM local_profile_page l "
-                        "WHERE l.draft_background = ?1 OR l.draft_song = ?1 "
-                        "OR l.published_background = ?1 OR l.published_song = ?1)");
+                        "AND NOT EXISTS (SELECT 1 FROM local_page_named_media l WHERE l.sha256 = ?1)");
     return statement.isValid() && statement.bindBlob(1, sha256)
            && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
@@ -250,6 +315,9 @@ bool deleteRowsOfNonContacts(sqlite3 *database)
                "(SELECT account_id FROM contacts WHERE state = 2)")
            && run(database,
                   "DELETE FROM contact_page_media  WHERE account_id NOT IN "
+                  "(SELECT account_id FROM contacts WHERE state = 2)")
+           && run(database,
+                  "DELETE FROM contact_page_panel_media WHERE account_id NOT IN "
                   "(SELECT account_id FROM contacts WHERE state = 2)")
            && run(database,
                   "DELETE FROM page_deliveries     WHERE account_id NOT IN "
@@ -286,6 +354,21 @@ SqlCipherProfilePageRepository::putLocalDraftMedia(int kind, QByteArrayView sha2
             return failVoid(sqliteError(database, QStringLiteral("page.localmedia.slots")));
         if (!insertBlob(database, kind, sha256, data, nowMs))
             return failVoid(sqliteError(database, QStringLiteral("page.localmedia.blob")));
+        if (kind != backgroundKind && kind != songKind) {
+            // A panel's blob has no slot; the draft names it among its panel
+            // media until the next saveDraft replaces that list.
+            Statement row(database, "INSERT INTO local_profile_page(profile_id) VALUES(?1) "
+                                    "ON CONFLICT(profile_id) DO NOTHING");
+            Statement ref(database, "INSERT OR IGNORE INTO local_page_panel_media(profile_id, stage, sha256) "
+                                    "VALUES(?1, 0, ?2)");
+            if (!row.isValid() || !row.bindBlob(1, m_profileId.bytes()) || sqlite3_step(row.get()) != SQLITE_DONE
+                || !ref.isValid() || !ref.bindBlob(1, m_profileId.bytes()) || !ref.bindBlob(2, sha256)
+                || sqlite3_step(ref.get()) != SQLITE_DONE)
+                return failVoid(sqliteError(database, QStringLiteral("page.localmedia.panel")));
+            if (!transaction.commit())
+                return failVoid(sqliteError(database, QStringLiteral("page.localmedia.commit")));
+            return okVoid();
+        }
         Statement statement(database,
                             kind == backgroundKind
                                 ? "INSERT INTO local_profile_page(profile_id, draft_background) "
@@ -314,9 +397,7 @@ SqlCipherProfilePageRepository::localMedia(QByteArrayView sha256)
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
                             "SELECT m.data FROM profile_media m WHERE m.sha256 = ?1 AND EXISTS ("
-                            "SELECT 1 FROM local_profile_page l WHERE l.profile_id = ?2 AND ("
-                            "l.draft_background = ?1 OR l.draft_song = ?1 OR "
-                            "l.published_background = ?1 OR l.published_song = ?1))");
+                            "SELECT 1 FROM local_page_named_media l WHERE l.profile_id = ?2 AND l.sha256 = ?1)");
         if (!statement.isValid() || !statement.bindBlob(1, sha256)
             || !statement.bindBlob(2, m_profileId.bytes()))
             return Ret::failure(sqliteError(database, QStringLiteral("page.localmedia.prepare")));
@@ -416,9 +497,8 @@ SqlCipherProfilePageRepository::pendingContactMediaCount(const AccountId &accoun
         // expiry, so what is counted here is exactly what would expire.
         Statement statement(database,
                             "SELECT count(*) FROM contact_page_media c WHERE c.account_id = ?1 "
-                            "AND NOT EXISTS (SELECT 1 FROM contact_pages p "
-                            "WHERE p.account_id = c.account_id "
-                            "AND (p.background_sha256 = c.sha256 OR p.song_sha256 = c.sha256))");
+                            "AND NOT EXISTS (SELECT 1 FROM contact_page_named_media p "
+                            "WHERE p.account_id = c.account_id AND p.sha256 = c.sha256)");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
             || sqlite3_step(statement.get()) != SQLITE_ROW)
             return Ret::failure(sqliteError(database, QStringLiteral("page.pending.read")));
@@ -441,10 +521,9 @@ SqlCipherProfilePageRepository::collectGarbage(qint64 pendingOlderThanMs,
         // Pending rows (not named by that account's core) older than the TTL.
         Statement pending(database,
                           "DELETE FROM contact_page_media WHERE received_at_ms < ?1 "
-                          "AND NOT EXISTS (SELECT 1 FROM contact_pages p "
+                          "AND NOT EXISTS (SELECT 1 FROM contact_page_named_media p "
                           "WHERE p.account_id = contact_page_media.account_id "
-                          "AND (p.background_sha256 = contact_page_media.sha256 "
-                          "OR p.song_sha256 = contact_page_media.sha256))");
+                          "AND p.sha256 = contact_page_media.sha256)");
         if (!pending.isValid() || !pending.bindInt64(1, pendingOlderThanMs)
             || sqlite3_step(pending.get()) != SQLITE_DONE)
             return Ret::failure(sqliteError(database, QStringLiteral("page.gc.pending")));
@@ -454,14 +533,7 @@ SqlCipherProfilePageRepository::collectGarbage(qint64 pendingOlderThanMs,
         // NULL is never true, which would keep every blob forever.
         Statement blobs(database,
                         "DELETE FROM profile_media WHERE created_at_ms < ?2 AND sha256 NOT IN ("
-                        "SELECT draft_background FROM local_profile_page "
-                        "WHERE draft_background IS NOT NULL "
-                        "UNION SELECT draft_song FROM local_profile_page "
-                        "WHERE draft_song IS NOT NULL "
-                        "UNION SELECT published_background FROM local_profile_page "
-                        "WHERE published_background IS NOT NULL "
-                        "UNION SELECT published_song FROM local_profile_page "
-                        "WHERE published_song IS NOT NULL "
+                        "SELECT sha256 FROM local_page_named_media "
                         "UNION SELECT sha256 FROM contact_page_media)");
         if (!blobs.isValid() || !blobs.bindInt64(2, localBlobOlderThanMs)
             || sqlite3_step(blobs.get()) != SQLITE_DONE)
@@ -485,9 +557,7 @@ Result<qint64, RepositoryError> SqlCipherProfilePageRepository::receivedMediaByt
                             "SELECT COALESCE(SUM(length(m.data)), 0) FROM profile_media m "
                             "WHERE EXISTS (SELECT 1 FROM contact_page_media c "
                             "WHERE c.sha256 = m.sha256) "
-                            "AND NOT EXISTS (SELECT 1 FROM local_profile_page l "
-                            "WHERE l.draft_background = m.sha256 OR l.draft_song = m.sha256 "
-                            "OR l.published_background = m.sha256 OR l.published_song = m.sha256)");
+                            "AND NOT EXISTS (SELECT 1 FROM local_page_named_media l WHERE l.sha256 = m.sha256)");
         if (!statement.isValid() || sqlite3_step(statement.get()) != SQLITE_ROW)
             return Ret::failure(sqliteError(database, QStringLiteral("page.received.read")));
         return Ret::success(sqlite3_column_int64(statement.get(), 0));
@@ -607,6 +677,9 @@ Result<StoredLocalPage, RepositoryError> SqlCipherProfilePageRepository::localPa
             || !readOptionalHash(row, 7, page.publishedBackground)
             || !readOptionalHash(row, 8, page.publishedSong))
             return Ret::failure(integrityFailure(QStringLiteral("page.local.hash")));
+        if (!readLocalPanelMedia(database, m_profileId.bytes(), draftStage, page.draftPanelMedia)
+            || !readLocalPanelMedia(database, m_profileId.bytes(), publishedStage, page.publishedPanelMedia))
+            return Ret::failure(sqliteError(database, QStringLiteral("page.local.panels")));
         return Ret::success(std::move(page));
     });
 }
@@ -615,9 +688,10 @@ Result<void, RepositoryError>
 SqlCipherProfilePageRepository::saveDraft(QByteArrayView core,
                                           const std::optional<QByteArray> &background,
                                           const std::optional<QByteArray> &song,
-                                          const QString &songSource, qint64 nowMs)
+                                          const QString &songSource, qint64 nowMs,
+                                          const QVector<QByteArray> &panelMedia)
 {
-    if (core.isEmpty() || !isOptionalHash(background) || !isOptionalHash(song))
+    if (core.isEmpty() || !isOptionalHash(background) || !isOptionalHash(song) || !isHashList(panelMedia))
         return failVoid(invalidInput(QStringLiteral("page.draft.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
@@ -642,6 +716,8 @@ SqlCipherProfilePageRepository::saveDraft(QByteArrayView core,
             || !(songSource.isEmpty() ? statement.bindNull(5) : statement.bindText(5, songSource))
             || !statement.bindInt64(6, nowMs) || sqlite3_step(statement.get()) != SQLITE_DONE)
             return failVoid(sqliteError(database, QStringLiteral("page.draft.save")));
+        if (!writeLocalPanelMedia(database, m_profileId.bytes(), draftStage, panelMedia))
+            return failVoid(sqliteError(database, QStringLiteral("page.draft.panels")));
         if (!startGraceOfReleased(database, named, nowMs))
             return failVoid(sqliteError(database, QStringLiteral("page.draft.release")));
         if (!transaction.commit())
@@ -666,6 +742,8 @@ Result<void, RepositoryError> SqlCipherProfilePageRepository::clearDraft(qint64 
         if (!statement.isValid() || !statement.bindBlob(1, m_profileId.bytes())
             || sqlite3_step(statement.get()) != SQLITE_DONE)
             return failVoid(sqliteError(database, QStringLiteral("page.draft.clear")));
+        if (!writeLocalPanelMedia(database, m_profileId.bytes(), draftStage, {}))
+            return failVoid(sqliteError(database, QStringLiteral("page.draft.panels")));
         if (!startGraceOfReleased(database, named, nowMs))
             return failVoid(sqliteError(database, QStringLiteral("page.draft.release")));
         if (!transaction.commit())
@@ -677,11 +755,13 @@ Result<void, RepositoryError> SqlCipherProfilePageRepository::clearDraft(qint64 
 Result<void, RepositoryError>
 SqlCipherProfilePageRepository::savePublished(QByteArrayView core, qint64 revision,
                                               const std::optional<QByteArray> &background,
-                                              const std::optional<QByteArray> &song, qint64 nowMs)
+                                              const std::optional<QByteArray> &song, qint64 nowMs,
+                                              const QVector<QByteArray> &panelMedia)
 {
     // Revision 0 means "never published" on the wire, so a stored page is at
     // least revision 1.
-    if (core.isEmpty() || revision < 1 || !isOptionalHash(background) || !isOptionalHash(song))
+    if (core.isEmpty() || revision < 1 || !isOptionalHash(background) || !isOptionalHash(song)
+        || !isHashList(panelMedia))
         return failVoid(invalidInput(QStringLiteral("page.publish.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
@@ -714,6 +794,9 @@ SqlCipherProfilePageRepository::savePublished(QByteArrayView core, qint64 revisi
         if (sqlite3_changes(database) == 0)
             return failVoid(error(RepositoryErrorCode::Conflict,
                                   QStringLiteral("page.publish.revision")));
+        if (!writeLocalPanelMedia(database, m_profileId.bytes(), publishedStage, panelMedia)
+            || !writeLocalPanelMedia(database, m_profileId.bytes(), draftStage, {}))
+            return failVoid(sqliteError(database, QStringLiteral("page.publish.panels")));
         if (!startGraceOfReleased(database, named, nowMs))
             return failVoid(sqliteError(database, QStringLiteral("page.publish.release")));
         if (!transaction.commit())
@@ -729,7 +812,7 @@ SqlCipherProfilePageRepository::contactPage(const AccountId &account)
     return m_database.withConnection([&](sqlite3 *database) {
         Statement statement(database,
                             "SELECT revision, core, background_sha256, song_sha256, "
-                            "received_at_ms, viewed_at_ms FROM contact_pages "
+                            "received_at_ms, viewed_at_ms, format FROM contact_pages "
                             "WHERE account_id = ?1");
         if (!statement.isValid() || !statement.bindBlob(1, account.bytes()))
             return Ret::failure(sqliteError(database, QStringLiteral("page.contact.prepare")));
@@ -744,8 +827,18 @@ SqlCipherProfilePageRepository::contactPage(const AccountId &account)
         page.core = RepositorySql::blob(row, 1);
         page.receivedAtMs = sqlite3_column_int64(row, 4);
         page.viewedAtMs = sqlite3_column_int64(row, 5);
+        page.format = sqlite3_column_int(row, 6);
         if (!readOptionalHash(row, 2, page.background) || !readOptionalHash(row, 3, page.song))
             return Ret::failure(integrityFailure(QStringLiteral("page.contact.hash")));
+        Statement panels(database, "SELECT kind, sha256 FROM contact_page_panel_media WHERE account_id = ?1 "
+                                   "ORDER BY sha256");
+        if (!panels.isValid() || !panels.bindBlob(1, account.bytes()))
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contact.panels")));
+        int panelStep = SQLITE_ROW;
+        while ((panelStep = sqlite3_step(panels.get())) == SQLITE_ROW)
+            page.panelMedia.push_back({sqlite3_column_int(panels.get(), 0), RepositorySql::blob(panels.get(), 1)});
+        if (panelStep != SQLITE_DONE)
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contact.panels")));
         return Ret::success(std::move(page));
     });
 }
@@ -755,48 +848,36 @@ SqlCipherProfilePageRepository::storeContactPage(const StoredContactPage &page)
 {
     using Ret = Result<bool, RepositoryError>;
     if (page.revision < 0 || page.core.isEmpty() || !isOptionalHash(page.background)
-        || !isOptionalHash(page.song))
+        || !isOptionalHash(page.song) || !isPanelRefList(page.panelMedia)
+        || (page.format != StoredContactPage::legacyFormat && page.format != StoredContactPage::currentFormat))
         return Ret::failure(invalidInput(QStringLiteral("page.contact.input")));
     return m_database.withConnection([&](sqlite3 *database) {
         Transaction transaction(database);
         if (!transaction.isOpen())
             return Ret::failure(sqliteError(database, QStringLiteral("page.contact.begin")));
         // The refs of the core this one may replace.
-        std::optional<QByteArray> replacedBackground;
-        std::optional<QByteArray> replacedSong;
-        {
-            Statement stored(database,
-                             "SELECT background_sha256, song_sha256 FROM contact_pages "
-                             "WHERE account_id = ?1");
-            if (!stored.isValid() || !stored.bindBlob(1, page.account.bytes()))
-                return Ret::failure(sqliteError(database, QStringLiteral("page.contact.old")));
-            const int step = sqlite3_step(stored.get());
-            if (step != SQLITE_ROW && step != SQLITE_DONE)
-                return Ret::failure(sqliteError(database, QStringLiteral("page.contact.old")));
-            if (step == SQLITE_ROW
-                && (!readOptionalHash(stored.get(), 0, replacedBackground)
-                    || !readOptionalHash(stored.get(), 1, replacedSong)))
-                return Ret::failure(integrityFailure(QStringLiteral("page.contact.hash")));
-        }
+        QVector<QByteArray> replaced;
+        if (!readContactNamed(database, page.account, replaced))
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contact.old")));
 
         // The WHERE makes "only newer revisions" part of the write itself, so
         // no read-then-write window exists between two arrivals.
         Statement statement(database,
                             "INSERT INTO contact_pages(account_id, revision, core, "
-                            "background_sha256, song_sha256, received_at_ms, viewed_at_ms) "
-                            "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) "
+                            "background_sha256, song_sha256, received_at_ms, viewed_at_ms, format) "
+                            "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) "
                             "ON CONFLICT(account_id) DO UPDATE SET "
                             "revision = excluded.revision, core = excluded.core, "
                             "background_sha256 = excluded.background_sha256, "
                             "song_sha256 = excluded.song_sha256, "
-                            "received_at_ms = excluded.received_at_ms "
+                            "received_at_ms = excluded.received_at_ms, format = excluded.format "
                             "WHERE excluded.revision > contact_pages.revision");
         if (!statement.isValid() || !statement.bindBlob(1, page.account.bytes())
             || !statement.bindInt64(2, page.revision) || !statement.bindBlob(3, page.core)
             || !bindOptionalBlob(statement, 4, page.background)
             || !bindOptionalBlob(statement, 5, page.song)
             || !statement.bindInt64(6, page.receivedAtMs)
-            || !statement.bindInt64(7, page.viewedAtMs)
+            || !statement.bindInt64(7, page.viewedAtMs) || !statement.bindInt(8, page.format)
             || sqlite3_step(statement.get()) != SQLITE_DONE)
             return Ret::failure(sqliteError(database, QStringLiteral("page.contact.store")));
         if (sqlite3_changes(database) == 0)
@@ -807,20 +888,74 @@ SqlCipherProfilePageRepository::storeContactPage(const StoredContactPage &page)
         // revision, hold far more than two blobs per contact and fill the
         // pending slots that media overtaking its core needs. Rows the old
         // core did not name (media for a core still in transit) stay.
-        for (const std::optional<QByteArray> &replaced : {replacedBackground, replacedSong}) {
-            if (!replaced || replaced == page.background || replaced == page.song)
+        if (!writeContactPanelMedia(database, page.account, page.panelMedia))
+            return Ret::failure(sqliteError(database, QStringLiteral("page.contact.panels")));
+        const auto stillNamed = [&](const QByteArray &hash) {
+            return hash == page.background || hash == page.song
+                   || std::any_of(page.panelMedia.cbegin(), page.panelMedia.cend(),
+                                  [&](const PanelMediaRef &ref) { return ref.sha256 == hash; });
+        };
+        for (const QByteArray &hash : std::as_const(replaced)) {
+            if (stillNamed(hash))
                 continue;
             Statement row(database,
                           "DELETE FROM contact_page_media WHERE account_id = ?1 AND sha256 = ?2");
             if (!row.isValid() || !row.bindBlob(1, page.account.bytes())
-                || !row.bindBlob(2, *replaced) || sqlite3_step(row.get()) != SQLITE_DONE)
+                || !row.bindBlob(2, hash) || sqlite3_step(row.get()) != SQLITE_DONE)
                 return Ret::failure(sqliteError(database, QStringLiteral("page.contact.media")));
-            if (!deleteBlobIfUnreferenced(database, *replaced))
+            if (!deleteBlobIfUnreferenced(database, hash))
                 return Ret::failure(sqliteError(database, QStringLiteral("page.contact.blob")));
         }
         if (!transaction.commit())
             return Ret::failure(sqliteError(database, QStringLiteral("page.contact.commit")));
         return Ret::success(true);
+    });
+}
+
+Result<QVector<AccountId>, RepositoryError> SqlCipherProfilePageRepository::legacyContactPages()
+{
+    using Ret = Result<QVector<AccountId>, RepositoryError>;
+    return m_database.withConnection([&](sqlite3 *database) {
+        Statement statement(database, "SELECT account_id FROM contact_pages WHERE format = ?1 "
+                                      "ORDER BY account_id");
+        if (!statement.isValid() || !statement.bindInt(1, StoredContactPage::legacyFormat))
+            return Ret::failure(sqliteError(database, QStringLiteral("page.legacy.prepare")));
+        QVector<AccountId> accounts;
+        int step = SQLITE_ROW;
+        while ((step = sqlite3_step(statement.get())) == SQLITE_ROW) {
+            const auto account = AccountId::fromBytes(RepositorySql::blob(statement.get(), 0));
+            if (!account)
+                return Ret::failure(integrityFailure(QStringLiteral("page.legacy.account")));
+            accounts.push_back(*account);
+        }
+        if (step != SQLITE_DONE)
+            return Ret::failure(sqliteError(database, QStringLiteral("page.legacy.read")));
+        return Ret::success(std::move(accounts));
+    });
+}
+
+Result<void, RepositoryError>
+SqlCipherProfilePageRepository::upgradeContactPage(const AccountId &account,
+                                                   const QVector<PanelMediaRef> &panelMedia)
+{
+    if (!isPanelRefList(panelMedia))
+        return failVoid(invalidInput(QStringLiteral("page.upgrade.input")));
+    return m_database.withConnection([&](sqlite3 *database) {
+        Transaction transaction(database);
+        if (!transaction.isOpen())
+            return failVoid(sqliteError(database, QStringLiteral("page.upgrade.begin")));
+        Statement statement(database, "UPDATE contact_pages SET format = ?2 WHERE account_id = ?1");
+        if (!statement.isValid() || !statement.bindBlob(1, account.bytes())
+            || !statement.bindInt(2, StoredContactPage::currentFormat)
+            || sqlite3_step(statement.get()) != SQLITE_DONE)
+            return failVoid(sqliteError(database, QStringLiteral("page.upgrade.format")));
+        if (sqlite3_changes(database) == 0)
+            return okVoid(); // no page (any more): nothing to name
+        if (!writeContactPanelMedia(database, account, panelMedia))
+            return failVoid(sqliteError(database, QStringLiteral("page.upgrade.panels")));
+        if (!transaction.commit())
+            return failVoid(sqliteError(database, QStringLiteral("page.upgrade.commit")));
+        return okVoid();
     });
 }
 

@@ -46,7 +46,8 @@ FocusScope {
     property bool previewOnly: false
     readonly property bool popupOpen: leaveDialog.opened || colorPicker.opened || panel.popupOpen || barPopupOpen
     readonly property Item colorPickerWell: colorPicker.opened ? colorPicker.well : null
-    readonly property var tabNames: ["themes", "background", "boxes", "text", "name", "about", "friends", "song", "layout"]
+    readonly property var tabNames: ["themes", "background", "boxes", "text", "name", "about", "friends", "song", "layout",
+                                     "panels"]
     readonly property string currentTab: profiles ? tabNames[profiles.lastTab] || "themes" : "themes"
     readonly property bool animated: ProfileRenderPolicy.animationsAllowed
     readonly property bool shortcutsEnabled: visible && profiles !== null && profiles.editing && !popupOpen
@@ -91,6 +92,11 @@ FocusScope {
             panel.focusField(field);
     }
     function handleEditRequest(target) {
+        // A panel ("panel:<id>") or the preview's "Add new panel" tile.
+        if (target === "addPanel" || target.indexOf("panel:") === 0) {
+            openTab("panels", target);
+            return;
+        }
         const entry = editTargets[target];
         if (entry)
             openTab(entry[0], entry[1]);

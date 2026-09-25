@@ -25,6 +25,8 @@ Item {
     property real highlightInset: 2
     property string title: ""
     property string suffix: ""
+    // A ProfileGlyph kind drawn before the title in its colour ("" for none).
+    property string glyph: ""
     property color titleColor: "#133a61"
     property string titleFamily: ""
     property int titlePixelSize: 14
@@ -87,11 +89,21 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         anchors.verticalCenterOffset: strip.titleLift
         spacing: 5
+        ProfileGlyph {
+            id: titleGlyph
+            visible: strip.glyph.length > 0
+            anchors.verticalCenter: parent.verticalCenter
+            width: visible ? Math.round(strip.titlePixelSize * 1.15) : 0
+            height: width
+            kind: strip.glyph
+            ink: strip.titleColor
+        }
         Text {
             id: titleText
             objectName: strip.titleObjectName
             anchors.verticalCenter: parent.verticalCenter
-            width: Math.min(implicitWidth, parent.width - (suffixText.visible ? suffixText.implicitWidth + 5 : 0))
+            width: Math.min(implicitWidth, parent.width - (suffixText.visible ? suffixText.implicitWidth + 5 : 0)
+                                           - (titleGlyph.visible ? titleGlyph.width + 5 : 0))
             elide: Text.ElideRight
             text: strip.title
             textFormat: Text.PlainText

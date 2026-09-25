@@ -220,18 +220,18 @@ void ProfileBackgroundImporter::setProgress(qreal progress)
     emit progressChanged(progress);
 }
 
-void ProfileBackgroundImporter::start(const QString &path, const QColor &matte)
+void ProfileBackgroundImporter::start(const QString &path, const QColor &matte, const ProfileBackgroundLimits &limits)
 {
     detach();
     auto job = std::make_shared<Job>();
     job->owner = this;
     m_job = job;
     setProgress(0);
-    QThreadPool::globalInstance()->start([job, path, matte, hook = m_workHook] {
+    QThreadPool::globalInstance()->start([job, path, matte, limits, hook = m_workHook] {
         if (hook)
             hook();
         const auto result = processProfileBackgroundFile(
-            path, matte, {},
+            path, matte, limits,
             [job](qreal value) { Job::post(job, [value](ProfileBackgroundImporter *owner) { owner->setProgress(value); }); },
             [job] { return job->cancelled.load(); });
         if (result) {

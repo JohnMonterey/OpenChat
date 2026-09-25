@@ -27,7 +27,7 @@ Rectangle {
                                             ? tabItem.editingTarget : ""
     readonly property var components: ({
         themes: themesTab, background: backgroundTab, boxes: boxesTab, text: textTab, name: nameTab,
-        about: aboutTab, friends: friendsTab, song: songTab, layout: layoutTab
+        about: aboutTab, friends: friendsTab, song: songTab, layout: layoutTab, panels: panelsTab
     })
     // A field the preview asked for, focused once its tab has loaded.
     property string pendingField: ""
@@ -224,4 +224,5 @@ Rectangle {
     Component { id: friendsTab; ProfileFriendsTab { profiles: panel.profiles; editor: panel.editor } }
     Component { id: songTab; ProfileSongTab { profiles: panel.profiles; editor: panel.editor } }
     Component { id: layoutTab; ProfileLayoutTab { profiles: panel.profiles; editor: panel.editor } }
+    Component { id: panelsTab; ProfilePanelsTab { profiles: panel.profiles; editor: panel.editor } }
 }

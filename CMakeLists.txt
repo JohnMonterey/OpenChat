@@ -90,12 +90,16 @@ add_library(openchat_profile STATIC
     src/profile/ProfileQmlTypes.cpp
     src/profile/SongImport.cpp
     src/profile/SongPlayer.cpp
+    src/profile/ProfilePanelMedia.cpp
+    src/profile/ClipCodec.cpp
+    src/profile/ProfileClipPlayer.cpp
+    src/profile/ClipImport.cpp
 )
 target_include_directories(openchat_profile PUBLIC src)
 target_link_libraries(openchat_profile
     PUBLIC openchat_domain openchat_media openchat_avatar openchat_cosmetics
            Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Multimedia
-    PRIVATE openchat_opus
+    PRIVATE openchat_opus openchat_vpx
 )
 # The eight bundled content faces (docs/profile-pages.md), with their
 # licences. Registered lazily by ProfileFonts::ensureRegistered(), never at
@@ -291,6 +295,15 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/ProfileFriendsTab.qml
         qml/OpenChat/components/ProfileSongTab.qml
         qml/OpenChat/components/ProfileLayoutTab.qml
+        qml/OpenChat/components/ProfileAddPanelTile.qml
+        qml/OpenChat/components/ProfileBlockEditor.qml
+        qml/OpenChat/components/ProfilePanelBlock.qml
+        qml/OpenChat/components/ProfilePanelEditor.qml
+        qml/OpenChat/components/ProfilePanelLightbox.qml
+        qml/OpenChat/components/ProfilePanelModule.qml
+        qml/OpenChat/components/ProfilePanelPicture.qml
+        qml/OpenChat/components/ProfilePanelsTab.qml
+        qml/OpenChat/components/ProfilePanelVideo.qml
         qml/OpenChat/components/ProfileColorWell.qml
         qml/OpenChat/components/ProfileColorPicker.qml
         qml/OpenChat/components/ProfileSegmented.qml
@@ -433,6 +446,7 @@ add_library(openchat_domain STATIC
     src/domain/ProfilePage.cpp
     src/domain/ProfilePageCodec.cpp
     src/domain/SongContainer.cpp
+    src/domain/ClipContainer.cpp
     src/domain/GroupUpdate.cpp
     src/domain/MessageContent.cpp
 )
@@ -700,6 +714,7 @@ qt_add_resources(openchat_storage "openchat_migrations"
         src/storage/migrations/014_chat_read_state.sql
         src/storage/migrations/015_message_edits_and_replies.sql
         src/storage/migrations/016_profile_pages.sql
+        src/storage/migrations/017_profile_panels.sql
 )
 target_include_directories(openchat_security PUBLIC src)
 target_link_libraries(openchat_security
@@ -836,6 +851,11 @@ add_executable(tst_profilepage tests/tst_profilepage.cpp)
 target_include_directories(tst_profilepage PRIVATE src)
 target_link_libraries(tst_profilepage PRIVATE openchat_domain Qt6::Core Qt6::Test)
 add_test(NAME tst_profilepage COMMAND tst_profilepage)
+
+add_executable(tst_profilepanels tests/tst_profilepanels.cpp)
+target_include_directories(tst_profilepanels PRIVATE src)
+target_link_libraries(tst_profilepanels PRIVATE openchat_domain Qt6::Core Qt6::Test)
+add_test(NAME tst_profilepanels COMMAND tst_profilepanels)
 
 add_executable(tst_groupupdate tests/tst_groupupdate.cpp)
 target_include_directories(tst_groupupdate PRIVATE src)
@@ -1455,6 +1475,14 @@ target_link_libraries(tst_profilesong PRIVATE
     openchat_profile openchat_media openchat_domain openchat_opus Qt6::Multimedia Qt6::Test)
 add_test(NAME tst_profilesong COMMAND tst_profilesong)
 set_tests_properties(tst_profilesong PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Panel videos: the clip codec and, where ffmpeg can write a file, the import.
+add_executable(tst_profileclip tests/tst_profileclip.cpp)
+target_include_directories(tst_profileclip PRIVATE src)
+target_link_libraries(tst_profileclip PRIVATE
+    openchat_profile openchat_media openchat_domain Qt6::Multimedia Qt6::Test)
+add_test(NAME tst_profileclip COMMAND tst_profileclip)
+set_tests_properties(tst_profileclip PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 240)
 
 add_executable(tst_qmlload
     tests/tst_qmlload.cpp

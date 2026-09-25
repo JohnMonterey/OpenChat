@@ -6,6 +6,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include <utility>
+
 namespace OpenChat {
 
 // A MySpace-style profile page: a typed theme (colours, motifs, fonts, name
@@ -82,8 +84,10 @@ Q_ENUM_NS(Layout)
 
 // The movable modules. The identity card, the Contacting box and the "is in
 // your contacts" banner are app-owned and fixed, so they are not listed.
+// CustomPanelModule places one of the owner's own panels (ModulePlacement::
+// panel names which); a client from before panels drops it as unknown.
 enum class Module : quint8 { HandleModule = 1, SongModule = 2, InterestsModule = 3, DetailsModule = 4,
-                             BlurbsModule = 5, TopFriendsModule = 6 };
+                             BlurbsModule = 5, TopFriendsModule = 6, CustomPanelModule = 7 };
 Q_ENUM_NS(Module)
 
 enum class Column : quint8 { NarrowColumn = 0, WideColumn = 1 };
@@ -124,7 +128,11 @@ enum class Preset : quint8 { AeroSkyPreset = 0, Classic06Preset = 1, SceneQueenP
                              ChromeY2KPreset = 9, CustomPreset = 255 };
 Q_ENUM_NS(Preset)
 
-enum class MediaKind : quint8 { BackgroundImageMedia = 1, SongMedia = 2 };
+// PanelImageMedia: a JPEG a panel shows (a picture, a list item's cover or a
+// video's poster). VideoSegmentMedia: one self-contained piece of a panel
+// video (domain/ClipContainer.h).
+enum class MediaKind : quint8 { BackgroundImageMedia = 1, SongMedia = 2, PanelImageMedia = 3,
+                                VideoSegmentMedia = 4 };
 Q_ENUM_NS(MediaKind)
 
 // Viewer-side only; never on the wire.
@@ -145,8 +153,49 @@ enum class InkRole : quint8 { BodyInk = 0, LabelInk = 1, LinkInk = 2, NameInk = 
 Q_ENUM_NS(InkRole)
 
 enum class EditorTab : quint8 { ThemesTab = 0, BackgroundTab = 1, BoxesTab = 2, TextTab = 3, NameTab = 4,
-                                AboutTab = 5, FriendsTab = 6, SongTab = 7, LayoutTab = 8 };
+                                AboutTab = 5, FriendsTab = 6, SongTab = 7, LayoutTab = 8, PanelsTab = 9 };
 Q_ENUM_NS(EditorTab)
+
+// --- Custom panels (docs/profile-panels.md)
+
+enum class BlockKind : quint8 { TextBlock = 1, ImageBlock = 2, VideoBlock = 3, ListBlock = 4, DividerBlock = 5 };
+Q_ENUM_NS(BlockKind)
+
+enum class TextStyle : quint8 { ParagraphText = 0, HeadingText = 1, QuoteText = 2, CalloutText = 3 };
+Q_ENUM_NS(TextStyle)
+
+enum class TextAlign : quint8 { StartAlign = 0, CenterAlign = 1, EndAlign = 2 };
+Q_ENUM_NS(TextAlign)
+
+// Grid: tiles in rows. Stack: one under another at full width. Strip: one
+// row the viewer scrolls sideways.
+enum class GalleryStyle : quint8 { GridGallery = 0, StackGallery = 1, StripGallery = 2 };
+Q_ENUM_NS(GalleryStyle)
+
+enum class ImageFrame : quint8 { PlainFrame = 0, RoundedFrame = 1, PolaroidFrame = 2, CircleFrame = 3 };
+Q_ENUM_NS(ImageFrame)
+
+enum class ListStyle : quint8 { BulletList = 0, NumberedList = 1, GameList = 2, HeartList = 3 };
+Q_ENUM_NS(ListStyle)
+
+// Shown on a game list's items only.
+enum class GameStatus : quint8 { NoGameStatus = 0, PlayingNow = 1, AllTimeFavorite = 2, Completed = 3,
+                                 WantToPlay = 4, PlayingWithFriends = 5 };
+Q_ENUM_NS(GameStatus)
+
+enum class DividerStyle : quint8 { LineDivider = 0, DotsDivider = 1, StarsDivider = 2, HeartsDivider = 3,
+                                   SpaceDivider = 4 };
+Q_ENUM_NS(DividerStyle)
+
+// Drawn before a panel's title (ProfileGlyph kinds, panelIconGlyph).
+enum class PanelIcon : quint8 { NoPanelIcon = 0, GamepadIcon, CameraIcon, FilmIcon, MusicIcon, HeartIcon,
+                                StarIcon, BookIcon, ChatIcon, SparkleIcon, TrophyIcon, PaletteIcon };
+Q_ENUM_NS(PanelIcon)
+
+// What "Add new panel" starts from.
+enum class PanelTemplate : quint8 { BlankPanel = 0, TextPanel = 1, PhotoPanel = 2, GamesPanel = 3,
+                                    VideoPanel = 4, TopListPanel = 5 };
+Q_ENUM_NS(PanelTemplate)
 
 // The style knobs. Defaults are the adaptive Aero Sky light look, which is
 // also what a page decodes to when its theme map is absent.
@@ -192,6 +241,7 @@ struct ModulePlacement final {
     Module module = Module::HandleModule;
     Column column = Column::NarrowColumn;
     bool visible = true;
+    quint8 panel = 0; // CustomPanelModule: the Panel::id it places; 0 for every other module
 
     friend bool operator==(const ModulePlacement &, const ModulePlacement &) = default;
 };
@@ -246,6 +296,89 @@ struct MediaRef final {
     friend bool operator==(const MediaRef &, const MediaRef &) = default;
 };
 
+// A picture in a panel: a PanelImageMedia JPEG (width/height set).
+struct PanelImage final {
+    MediaRef ref;
+    QString caption;
+
+    friend bool operator==(const PanelImage &, const PanelImage &) = default;
+};
+
+struct ListItem final {
+    QString title, detail;
+    quint8 rating = 0; // stars, 0…5; 0 shows none
+    GameStatus status = GameStatus::NoGameStatus;
+    MediaRef cover; // optional PanelImageMedia (a game's box art)
+
+    friend bool operator==(const ListItem &, const ListItem &) = default;
+};
+
+// A panel video: its VideoSegmentMedia pieces in playing order (each ref's
+// durationMs, width and height set) and an optional poster frame.
+struct VideoClip final {
+    QVector<MediaRef> segments;
+    MediaRef poster; // PanelImageMedia
+
+    [[nodiscard]] bool isSet() const { return !segments.isEmpty(); }
+    [[nodiscard]] quint32 durationMs() const;
+    friend bool operator==(const VideoClip &, const VideoClip &) = default;
+};
+
+// One piece of a panel. normalized() keeps only the fields of its kind and
+// resets the rest, so a block never carries hidden data.
+struct Block final {
+    quint16 id = 0; // unique within the page, 1…65535; normalized() repairs
+    BlockKind kind = BlockKind::TextBlock;
+    // TextBlock
+    QString text;
+    TextStyle textStyle = TextStyle::ParagraphText;
+    TextAlign align = TextAlign::StartAlign;
+    // ImageBlock
+    QVector<PanelImage> images;
+    GalleryStyle gallery = GalleryStyle::GridGallery;
+    ImageFrame frame = ImageFrame::RoundedFrame;
+    // VideoBlock
+    VideoClip video;
+    bool loop = false;
+    QString caption;
+    // ListBlock
+    ListStyle listStyle = ListStyle::BulletList;
+    QVector<ListItem> items;
+    // DividerBlock
+    DividerStyle divider = DividerStyle::LineDivider;
+
+    friend bool operator==(const Block &, const Block &) = default;
+};
+
+// A panel's own colours. With ownColours off the panel wears the page's box
+// theme like every other box and these are ignored (but kept, so switching
+// back restores them).
+struct PanelLook final {
+    bool ownColours = false;
+    quint32 headerFill = 0x9FCDEF, headerText = 0x133A61, boxFill = 0xFFFFFF, bodyInk = 0x2B3B53;
+    bool showTitle = true;
+
+    friend bool operator==(const PanelLook &, const PanelLook &) = default;
+};
+
+struct Panel final {
+    quint8 id = 0; // unique within the page, 1…255; normalized() repairs
+    QString title;
+    PanelIcon icon = PanelIcon::NoPanelIcon;
+    PanelLook look;
+    QVector<Block> blocks;
+
+    friend bool operator==(const Panel &, const Panel &) = default;
+};
+
+// A media blob a page names, with the kind it travels as.
+struct NamedMedia final {
+    MediaKind kind = MediaKind::BackgroundImageMedia;
+    MediaRef ref;
+
+    friend bool operator==(const NamedMedia &, const NamedMedia &) = default;
+};
+
 struct Page final {
     qint64 revision = 0; // 0 = the default page, never published
     qint64 publishedAtMs = 0;
@@ -257,6 +390,7 @@ struct Page final {
     QVector<TopFriend> topFriends;
     MediaRef background;
     MediaRef song;
+    QVector<Panel> panels; // docs/profile-panels.md; placed by CustomPanelModule entries
 
     friend bool operator==(const Page &, const Page &) = default;
 };
@@ -274,7 +408,20 @@ inline constexpr quint32 maxSongRefDurationMs = 45'500;
 struct TextBounds {
     static constexpr int displayName = 48, headline = 80, infoLine = 40, infoLines = 3, interest = 300,
                          detail = 60, aboutMe = 2000, meet = 1000, songTitle = 60, songArtist = 60,
-                         friendName = 48;
+                         friendName = 48, panelTitle = 60, blockText = 2000, caption = 120,
+                         itemTitle = 80, itemDetail = 80;
+};
+
+// Panel bounds (docs/profile-panels.md). maxPanels keeps the six built-in
+// modules plus every panel within the sixteen layout entries a 0.2.9 client
+// reads. The budgets apply across the whole page in document order.
+struct PanelBounds {
+    static constexpr int maxPanels = 10, maxBlocksPerPanel = 12, maxBlocks = 40, maxImagesPerBlock = 6,
+                         maxItemsPerList = 20, maxItems = 120, maxSegments = 6, maxRating = 5,
+                         textBudget = 16'000, maxMedia = 24, maxImageDimension = 1280,
+                         maxVideoDimension = 640;
+    static constexpr quint32 maxSegmentDurationMs = 8'000;
+    static constexpr qint64 maxMediaBytes = 4LL * 1024 * 1024;
 };
 
 [[nodiscard]] Theme defaultTheme();                 // == Theme{}: Aero Sky light values, adaptive
@@ -312,6 +459,24 @@ struct TextBounds {
 [[nodiscard]] MoodFace moodFace(Mood mood);
 [[nodiscard]] QString hereForText(quint8 bits);   // "Friends, Networking"
 [[nodiscard]] QString moduleName(Module module);  // "OpenChat handle", "Profile song", …
+// Every media ref the page names: the background, the song, then each
+// panel's in document order (pictures, covers, posters, segments). A blob
+// named twice is listed once, as the kind it is first named as.
+[[nodiscard]] QVector<NamedMedia> mediaRefs(const Page &page);
+// The panel "Add new panel" makes from a template: its id and block ids free
+// in `page`, the template's title, icon and starter blocks, no media.
+[[nodiscard]] Panel panelFromTemplate(const Page &page, PanelTemplate panelTemplate);
+// An empty block of `kind` with an id free in `page`.
+[[nodiscard]] Block newBlock(const Page &page, BlockKind kind);
+[[nodiscard]] quint8 freePanelId(const Page &page);   // 0 when all 255 are taken
+[[nodiscard]] quint16 freeBlockId(const Page &page);  // 0 when all are taken
+[[nodiscard]] qsizetype panelIndex(const Page &page, quint8 id); // -1 when absent
+// {panel index, block index} of the block with this id; {-1, -1} when absent.
+[[nodiscard]] std::pair<qsizetype, qsizetype> blockIndex(const Page &page, quint16 id);
+[[nodiscard]] QString panelTemplateName(PanelTemplate panelTemplate); // "Blank", "Favorite games", …
+[[nodiscard]] QString panelIconGlyph(PanelIcon icon);                 // a ProfileGlyph kind, "" for none
+[[nodiscard]] QString gameStatusName(GameStatus status);              // "Playing now", …; "" for none
+[[nodiscard]] QString blockKindName(BlockKind kind);                  // "Text", "Pictures", …
 [[nodiscard]] QString flourishPrefix(Flourish flourish); // "★ "
 [[nodiscard]] QString flourishSuffix(Flourish flourish); // " ★"
 

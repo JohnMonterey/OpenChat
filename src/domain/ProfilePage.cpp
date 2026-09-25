@@ -33,6 +33,7 @@ template<typename Enum>
     return static_cast<int>(preset) <= static_cast<int>(Preset::ChromeY2KPreset);
 }
 
+// The built-in modules; CustomPanelModule entries are placed by panel id.
 [[nodiscard]] bool isKnownModule(Module module) noexcept
 {
     const int id = static_cast<int>(module);
@@ -41,8 +42,10 @@ template<typename Enum>
 
 [[nodiscard]] Column defaultColumn(Module module) noexcept
 {
-    return module == Module::BlurbsModule || module == Module::TopFriendsModule ? Column::WideColumn
-                                                                                 : Column::NarrowColumn;
+    return module == Module::BlurbsModule || module == Module::TopFriendsModule
+                   || module == Module::CustomPanelModule
+               ? Column::WideColumn
+               : Column::NarrowColumn;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +369,219 @@ enum class CharClass {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Panels (docs/profile-panels.md)
+// ---------------------------------------------------------------------------
+
+// What is left of the page-wide panel budgets while normalized() walks the
+// panels in document order. Each decision depends only on the text and refs
+// before it, which are already in their final form on a second pass, so the
+// walk is idempotent.
+struct PanelBudget final {
+    int text = PanelBounds::textBudget;
+    int media = PanelBounds::maxMedia;
+    qint64 mediaBytes = PanelBounds::maxMediaBytes;
+    int blocks = PanelBounds::maxBlocks;
+    int items = PanelBounds::maxItems;
+
+    QString line(const QString &value, int bound)
+    {
+        QString clean = sanitizeLine(value, std::min(bound, text));
+        text -= int(clean.size());
+        return clean;
+    }
+
+    QString paragraphs(const QString &value, int bound)
+    {
+        QString clean = sanitizeParagraphs(value, std::min(bound, text));
+        text -= int(clean.size());
+        return clean;
+    }
+
+    // Takes one ref from the media budgets; false (and nothing taken) when
+    // either is spent.
+    bool take(const MediaRef &ref)
+    {
+        if (media == 0 || qint64(ref.bytes) > mediaBytes)
+            return false;
+        media -= 1;
+        mediaBytes -= ref.bytes;
+        return true;
+    }
+};
+
+[[nodiscard]] MediaRef normalizedPanelImage(const MediaRef &ref)
+{
+    if (!ref.isSet() || ref.bytes == 0 || ref.bytes > quint32(maxBackgroundImageBytes) || ref.width == 0
+        || ref.height == 0 || ref.width > PanelBounds::maxImageDimension
+        || ref.height > PanelBounds::maxImageDimension)
+        return {};
+    MediaRef result = ref;
+    result.durationMs = 0;
+    return result;
+}
+
+[[nodiscard]] bool isValidSegment(const MediaRef &ref)
+{
+    return ref.isSet() && ref.bytes > 0 && ref.bytes <= quint32(maxClipSegmentBytes) && ref.durationMs > 0
+        && ref.durationMs <= PanelBounds::maxSegmentDurationMs && ref.width > 0 && ref.height > 0
+        && ref.width <= PanelBounds::maxVideoDimension && ref.height <= PanelBounds::maxVideoDimension;
+}
+
+// A picture ref kept only when it is valid and the budgets still allow it.
+[[nodiscard]] MediaRef budgetedImage(const MediaRef &ref, PanelBudget &budget)
+{
+    const MediaRef clean = normalizedPanelImage(ref);
+    return clean.isSet() && budget.take(clean) ? clean : MediaRef{};
+}
+
+// A clip stands or falls whole: its segments play back to back, so a gap
+// would cut the video short without saying so.
+[[nodiscard]] VideoClip normalizedClip(const VideoClip &clip, PanelBudget &budget)
+{
+    VideoClip result;
+    result.poster = budgetedImage(clip.poster, budget);
+    if (clip.segments.isEmpty() || clip.segments.size() > PanelBounds::maxSegments)
+        return result;
+    qint64 bytes = 0;
+    for (const MediaRef &segment : clip.segments) {
+        if (!isValidSegment(segment))
+            return result;
+        bytes += segment.bytes;
+    }
+    if (clip.segments.size() > budget.media || bytes > budget.mediaBytes)
+        return result;
+    for (const MediaRef &segment : clip.segments) {
+        MediaRef kept = segment;
+        (void)budget.take(kept);
+        result.segments.push_back(kept);
+    }
+    return result;
+}
+
+[[nodiscard]] Block normalizedBlock(const Block &block, PanelBudget &budget)
+{
+    Block result;
+    result.id = block.id;
+    result.kind = block.kind;
+    switch (block.kind) {
+    case BlockKind::TextBlock:
+        result.textStyle = validOr(block.textStyle, TextStyle::CalloutText, TextStyle::ParagraphText);
+        result.align = validOr(block.align, TextAlign::EndAlign, TextAlign::StartAlign);
+        // A heading is one line; the other styles keep their paragraphs.
+        result.text = result.textStyle == TextStyle::HeadingText
+                          ? budget.line(block.text, TextBounds::panelTitle)
+                          : budget.paragraphs(block.text, TextBounds::blockText);
+        break;
+    case BlockKind::ImageBlock:
+        result.gallery = validOr(block.gallery, GalleryStyle::StripGallery, GalleryStyle::GridGallery);
+        result.frame = validOr(block.frame, ImageFrame::CircleFrame, ImageFrame::RoundedFrame);
+        for (const PanelImage &image : block.images) {
+            if (result.images.size() == PanelBounds::maxImagesPerBlock)
+                break;
+            const MediaRef ref = budgetedImage(image.ref, budget);
+            if (!ref.isSet())
+                continue; // a caption without its picture has nothing to caption
+            result.images.push_back({ref, budget.line(image.caption, TextBounds::caption)});
+        }
+        break;
+    case BlockKind::VideoBlock:
+        result.video = normalizedClip(block.video, budget);
+        result.loop = block.loop;
+        result.caption = budget.line(block.caption, TextBounds::caption);
+        break;
+    case BlockKind::ListBlock:
+        result.listStyle = validOr(block.listStyle, ListStyle::HeartList, ListStyle::BulletList);
+        for (const ListItem &item : block.items) {
+            if (result.items.size() == PanelBounds::maxItemsPerList || budget.items == 0)
+                break;
+            budget.items -= 1;
+            ListItem kept;
+            kept.title = budget.line(item.title, TextBounds::itemTitle);
+            kept.detail = budget.line(item.detail, TextBounds::itemDetail);
+            kept.rating = std::min<quint8>(item.rating, PanelBounds::maxRating);
+            if (result.listStyle == ListStyle::GameList)
+                kept.status = validOr(item.status, GameStatus::PlayingWithFriends, GameStatus::NoGameStatus);
+            kept.cover = budgetedImage(item.cover, budget);
+            result.items.push_back(kept);
+        }
+        break;
+    case BlockKind::DividerBlock:
+        result.divider = validOr(block.divider, DividerStyle::SpaceDivider, DividerStyle::LineDivider);
+        break;
+    }
+    return result;
+}
+
+[[nodiscard]] bool isKnownBlockKind(BlockKind kind) noexcept
+{
+    const int id = static_cast<int>(kind);
+    return id >= static_cast<int>(BlockKind::TextBlock) && id <= static_cast<int>(BlockKind::DividerBlock);
+}
+
+// Caps the panels and their blocks, drops blocks of kinds this version does
+// not know (a newer sender's), applies the page-wide budgets, and gives every
+// panel and block an id unique on the page: the first holder of an id keeps
+// it, and a zero or repeated id becomes the lowest free one, in order.
+[[nodiscard]] QVector<Panel> normalizedPanels(const QVector<Panel> &panels)
+{
+    PanelBudget budget;
+    QVector<Panel> result;
+    for (const Panel &panel : panels) {
+        if (result.size() == PanelBounds::maxPanels)
+            break;
+        Panel kept;
+        kept.id = panel.id;
+        kept.title = budget.line(panel.title, TextBounds::panelTitle);
+        kept.icon = validOr(panel.icon, PanelIcon::PaletteIcon, PanelIcon::NoPanelIcon);
+        kept.look = panel.look;
+        for (quint32 *colour : {&kept.look.headerFill, &kept.look.headerText, &kept.look.boxFill,
+                                &kept.look.bodyInk})
+            *colour &= colourMask;
+        for (const Block &block : panel.blocks) {
+            if (kept.blocks.size() == PanelBounds::maxBlocksPerPanel || budget.blocks == 0)
+                break;
+            if (!isKnownBlockKind(block.kind))
+                continue;
+            budget.blocks -= 1;
+            kept.blocks.push_back(normalizedBlock(block, budget));
+        }
+        result.push_back(std::move(kept));
+    }
+
+    std::array<bool, 256> panelTaken{};
+    QVector<bool> blockTaken(65536, false);
+    QVector<Panel *> panelsToNumber;
+    QVector<Block *> blocksToNumber;
+    for (Panel &panel : result) {
+        if (panel.id == 0 || panelTaken[panel.id])
+            panelsToNumber.push_back(&panel);
+        else
+            panelTaken[panel.id] = true;
+        for (Block &block : panel.blocks) {
+            if (block.id == 0 || blockTaken[block.id])
+                blocksToNumber.push_back(&block);
+            else
+                blockTaken[block.id] = true;
+        }
+    }
+    int nextPanel = 1;
+    for (Panel *panel : panelsToNumber) {
+        while (panelTaken[nextPanel])
+            ++nextPanel;
+        panel->id = quint8(nextPanel);
+        panelTaken[nextPanel] = true;
+    }
+    int nextBlock = 1;
+    for (Block *block : blocksToNumber) {
+        while (blockTaken[nextBlock])
+            ++nextBlock;
+        block->id = quint16(nextBlock);
+        blockTaken[nextBlock] = true;
+    }
+    return result;
+}
+
 [[nodiscard]] Theme normalizedTheme(Theme theme, bool hasBackgroundImage)
 {
     const Theme defaults;
@@ -405,19 +621,32 @@ enum class CharClass {
 
 // Unknown and repeated modules go (the first placement wins), a column out of
 // range falls back to the module's default one, and every module missing is
-// appended to its default column, visible. The result lists the narrow
-// column first, so two arrangements that look the same compare equal and
-// encode to the same bytes.
-[[nodiscard]] QVector<ModulePlacement> normalizedModules(const QVector<ModulePlacement> &modules)
+// appended to its default column, visible. Panels work the same way by id: a
+// placement naming no panel goes, and an unplaced panel is appended to the
+// wide column. The result lists the narrow column first, so two
+// arrangements that look the same compare equal and encode to the same bytes.
+[[nodiscard]] QVector<ModulePlacement> normalizedModules(const QVector<ModulePlacement> &modules,
+                                                         const QVector<Panel> &panels)
 {
     QVector<ModulePlacement> result;
-    result.reserve(moduleCount);
+    result.reserve(moduleCount + panels.size());
     std::array<bool, moduleCount + 1> seen{};
+    std::array<bool, 256> seenPanel{};
+    std::array<bool, 256> isPanel{};
+    for (const Panel &panel : panels)
+        isPanel[panel.id] = true;
     for (const ModulePlacement &placement : modules) {
-        if (!isKnownModule(placement.module) || seen[static_cast<int>(placement.module)])
-            continue;
-        seen[static_cast<int>(placement.module)] = true;
         ModulePlacement kept = placement;
+        if (placement.module == Module::CustomPanelModule) {
+            if (placement.panel == 0 || !isPanel[placement.panel] || seenPanel[placement.panel])
+                continue;
+            seenPanel[placement.panel] = true;
+        } else {
+            if (!isKnownModule(placement.module) || seen[static_cast<int>(placement.module)])
+                continue;
+            seen[static_cast<int>(placement.module)] = true;
+            kept.panel = 0;
+        }
         if (static_cast<int>(kept.column) > static_cast<int>(Column::WideColumn))
             kept.column = defaultColumn(kept.module);
         result.push_back(kept);
@@ -425,6 +654,10 @@ enum class CharClass {
     for (const ModulePlacement &placement : defaultModules()) {
         if (!seen[static_cast<int>(placement.module)])
             result.push_back(placement);
+    }
+    for (const Panel &panel : panels) {
+        if (!seenPanel[panel.id])
+            result.push_back({Module::CustomPanelModule, Column::WideColumn, true, panel.id});
     }
     std::stable_partition(result.begin(), result.end(), [](const ModulePlacement &placement) {
         return placement.column == Column::NarrowColumn;
@@ -742,7 +975,7 @@ Page applyPreset(Page page, Preset preset)
     if (preset == Preset::HeadlinerPreset) {
         // The band-page look: the song leads the wide column (after the fixed
         // banner). Its visibility stays whatever the owner chose.
-        QVector<ModulePlacement> modules = normalizedModules(page.modules);
+        QVector<ModulePlacement> modules = normalizedModules(page.modules, normalizedPanels(page.panels));
         const auto song = std::find_if(modules.begin(), modules.end(), [](const ModulePlacement &placement) {
             return placement.module == Module::SongModule;
         });
@@ -822,7 +1055,8 @@ Page normalized(Page page)
     page.song = normalizedSong(page.song);
     page.theme = normalizedTheme(page.theme, page.background.isSet());
     page.layout = validOr(page.layout, Layout::SingleLayout, Layout::ClassicLayout);
-    page.modules = normalizedModules(page.modules);
+    page.panels = normalizedPanels(page.panels);
+    page.modules = normalizedModules(page.modules, page.panels);
     page.content = normalizedContent(page.content);
     page.topFriends = normalizedTopFriends(page.topFriends);
     return page;
@@ -1138,6 +1372,243 @@ QString flourishSuffix(Flourish flourish)
         return QStringLiteral(" ♫");
     case Flourish::FlowerFlourish:
         return QStringLiteral(" ✿");
+    }
+    return {};
+}
+
+quint32 VideoClip::durationMs() const
+{
+    quint32 total = 0;
+    for (const MediaRef &segment : segments)
+        total += segment.durationMs;
+    return total;
+}
+
+QVector<NamedMedia> mediaRefs(const Page &page)
+{
+    QVector<NamedMedia> refs;
+    const auto add = [&](MediaKind kind, const MediaRef &ref) {
+        if (!ref.isSet())
+            return;
+        const bool named = std::any_of(refs.cbegin(), refs.cend(), [&](const NamedMedia &entry) {
+            return entry.ref.sha256 == ref.sha256;
+        });
+        if (!named)
+            refs.push_back({kind, ref});
+    };
+    add(MediaKind::BackgroundImageMedia, page.background);
+    add(MediaKind::SongMedia, page.song);
+    for (const Panel &panel : page.panels) {
+        for (const Block &block : panel.blocks) {
+            for (const PanelImage &image : block.images)
+                add(MediaKind::PanelImageMedia, image.ref);
+            for (const ListItem &item : block.items)
+                add(MediaKind::PanelImageMedia, item.cover);
+            add(MediaKind::PanelImageMedia, block.video.poster);
+            for (const MediaRef &segment : block.video.segments)
+                add(MediaKind::VideoSegmentMedia, segment);
+        }
+    }
+    return refs;
+}
+
+quint8 freePanelId(const Page &page)
+{
+    for (int id = 1; id <= 255; ++id) {
+        if (panelIndex(page, quint8(id)) < 0)
+            return quint8(id);
+    }
+    return 0;
+}
+
+quint16 freeBlockId(const Page &page)
+{
+    QVector<bool> taken(65536, false);
+    for (const Panel &panel : page.panels) {
+        for (const Block &block : panel.blocks)
+            taken[block.id] = true;
+    }
+    for (int id = 1; id <= 65535; ++id) {
+        if (!taken[id])
+            return quint16(id);
+    }
+    return 0;
+}
+
+qsizetype panelIndex(const Page &page, quint8 id)
+{
+    if (id == 0)
+        return -1;
+    for (qsizetype index = 0; index < page.panels.size(); ++index) {
+        if (page.panels.at(index).id == id)
+            return index;
+    }
+    return -1;
+}
+
+std::pair<qsizetype, qsizetype> blockIndex(const Page &page, quint16 id)
+{
+    if (id != 0) {
+        for (qsizetype p = 0; p < page.panels.size(); ++p) {
+            const QVector<Block> &blocks = page.panels.at(p).blocks;
+            for (qsizetype b = 0; b < blocks.size(); ++b) {
+                if (blocks.at(b).id == id)
+                    return {p, b};
+            }
+        }
+    }
+    return {-1, -1};
+}
+
+Block newBlock(const Page &page, BlockKind kind)
+{
+    Block block;
+    block.id = freeBlockId(page);
+    block.kind = isKnownBlockKind(kind) ? kind : BlockKind::TextBlock;
+    if (block.kind == BlockKind::ImageBlock)
+        block.frame = ImageFrame::PolaroidFrame;
+    if (block.kind == BlockKind::ListBlock)
+        block.items.push_back({});
+    return block;
+}
+
+Panel panelFromTemplate(const Page &page, PanelTemplate panelTemplate)
+{
+    Page scratch = page; // new blocks take their ids from it one by one
+    Panel panel;
+    panel.id = freePanelId(page);
+    const auto add = [&](Block block) {
+        scratch.panels.push_back({});
+        scratch.panels.last().blocks.push_back(block);
+        panel.blocks.push_back(std::move(block));
+    };
+    const auto block = [&](BlockKind kind) { return newBlock(scratch, kind); };
+    switch (panelTemplate) {
+    case PanelTemplate::BlankPanel:
+        panel.title = QStringLiteral("My panel");
+        add(block(BlockKind::TextBlock));
+        break;
+    case PanelTemplate::TextPanel: {
+        panel.title = QStringLiteral("A few words");
+        panel.icon = PanelIcon::ChatIcon;
+        add(block(BlockKind::TextBlock));
+        break;
+    }
+    case PanelTemplate::PhotoPanel: {
+        panel.title = QStringLiteral("Photos");
+        panel.icon = PanelIcon::CameraIcon;
+        add(block(BlockKind::ImageBlock));
+        break;
+    }
+    case PanelTemplate::GamesPanel: {
+        panel.title = QStringLiteral("Favorite games");
+        panel.icon = PanelIcon::GamepadIcon;
+        Block games = block(BlockKind::ListBlock);
+        games.listStyle = ListStyle::GameList;
+        add(std::move(games));
+        break;
+    }
+    case PanelTemplate::VideoPanel: {
+        panel.title = QStringLiteral("Videos");
+        panel.icon = PanelIcon::FilmIcon;
+        add(block(BlockKind::VideoBlock));
+        break;
+    }
+    case PanelTemplate::TopListPanel: {
+        panel.title = QStringLiteral("My top 5");
+        panel.icon = PanelIcon::StarIcon;
+        Block list = block(BlockKind::ListBlock);
+        list.listStyle = ListStyle::NumberedList;
+        list.items = QVector<ListItem>(5);
+        add(std::move(list));
+        break;
+    }
+    }
+    return panel;
+}
+
+QString panelTemplateName(PanelTemplate panelTemplate)
+{
+    switch (panelTemplate) {
+    case PanelTemplate::BlankPanel:
+        return QStringLiteral("Blank panel");
+    case PanelTemplate::TextPanel:
+        return QStringLiteral("Text");
+    case PanelTemplate::PhotoPanel:
+        return QStringLiteral("Photo album");
+    case PanelTemplate::GamesPanel:
+        return QStringLiteral("Favorite games");
+    case PanelTemplate::VideoPanel:
+        return QStringLiteral("Videos");
+    case PanelTemplate::TopListPanel:
+        return QStringLiteral("Top 5 list");
+    }
+    return {};
+}
+
+QString panelIconGlyph(PanelIcon icon)
+{
+    switch (icon) {
+    case PanelIcon::NoPanelIcon:
+        break;
+    case PanelIcon::GamepadIcon:
+        return QStringLiteral("gamepad");
+    case PanelIcon::CameraIcon:
+        return QStringLiteral("camera");
+    case PanelIcon::FilmIcon:
+        return QStringLiteral("film");
+    case PanelIcon::MusicIcon:
+        return QStringLiteral("music");
+    case PanelIcon::HeartIcon:
+        return QStringLiteral("heart");
+    case PanelIcon::StarIcon:
+        return QStringLiteral("star");
+    case PanelIcon::BookIcon:
+        return QStringLiteral("book");
+    case PanelIcon::ChatIcon:
+        return QStringLiteral("chat");
+    case PanelIcon::SparkleIcon:
+        return QStringLiteral("sparkle");
+    case PanelIcon::TrophyIcon:
+        return QStringLiteral("trophy");
+    case PanelIcon::PaletteIcon:
+        return QStringLiteral("palette");
+    }
+    return {};
+}
+
+QString gameStatusName(GameStatus status)
+{
+    switch (status) {
+    case GameStatus::NoGameStatus:
+        break;
+    case GameStatus::PlayingNow:
+        return QStringLiteral("Playing now");
+    case GameStatus::AllTimeFavorite:
+        return QStringLiteral("All-time favorite");
+    case GameStatus::Completed:
+        return QStringLiteral("Beaten it");
+    case GameStatus::WantToPlay:
+        return QStringLiteral("Want to play");
+    case GameStatus::PlayingWithFriends:
+        return QStringLiteral("Plays with friends");
+    }
+    return {};
+}
+
+QString blockKindName(BlockKind kind)
+{
+    switch (kind) {
+    case BlockKind::TextBlock:
+        return QStringLiteral("Text");
+    case BlockKind::ImageBlock:
+        return QStringLiteral("Pictures");
+    case BlockKind::VideoBlock:
+        return QStringLiteral("Video");
+    case BlockKind::ListBlock:
+        return QStringLiteral("List");
+    case BlockKind::DividerBlock:
+        return QStringLiteral("Divider");
     }
     return {};
 }

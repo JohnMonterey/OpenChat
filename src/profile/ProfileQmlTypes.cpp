@@ -6,6 +6,8 @@
 #include "profile/ProfileImageLayerItem.h"
 #include "profile/ProfileMoodFaceItem.h"
 #include "profile/ProfileNameTextItem.h"
+#include "profile/ProfileClipPlayer.h"
+#include "profile/ProfilePanelMedia.h"
 #include "profile/ProfilePresetThumbItem.h"
 #include "profile/ProfileRenderPolicy.h"
 #include "profile/ProfileTicker.h"
@@ -38,6 +40,8 @@ void registerProfileQmlTypes()
     qmlRegisterType<ProfileAmbient>("OpenChat.Native", 1, 0, "ProfileAmbient");
     qmlRegisterType<ProfilePresetThumb>("OpenChat.Native", 1, 0, "ProfilePresetThumb");
     qmlRegisterType<ProfileMoodFace>("OpenChat.Native", 1, 0, "ProfileMoodFace");
+    qmlRegisterType<ProfilePanelImage>("OpenChat.Native", 1, 0, "ProfilePanelImage");
+    qmlRegisterType<ProfileClipPlayer>("OpenChat.Native", 1, 0, "ProfileClipPlayer");
     qmlRegisterType<ProfileTickerClient>("OpenChat.Native", 1, 0, "ProfileTickerClient");
     qmlRegisterType<SongPlayer>("OpenChat.Native", 1, 0, "SongPlayer");
     qmlRegisterSingletonType<ProfileRenderPolicy>(

@@ -7,6 +7,8 @@
 #include <QString>
 #include <QVariantList>
 #include <QVariantMap>
+#include <QHash>
+#include <QSet>
 
 #include <functional>
 
@@ -407,6 +409,18 @@ class ProfilePageObject final : public QObject
     Q_PROPERTY(bool hasBlurbs READ hasBlurbs NOTIFY listsChanged)
     // "From your page": base, fade, pattern, box, border, strip, body, link.
     Q_PROPERTY(QVariantList paletteSwatches READ paletteSwatches NOTIFY listsChanged)
+    // --- panels [panels] (docs/profile-panels.md). The ids of the owner's
+    // panels, in page order; the layout lists (narrowModules, wideModules)
+    // name a panel as panelModuleBase + its id. Read one with panel(id) and
+    // its blocks with block(id): panelsChanged() says the set or order of
+    // panels or blocks changed, panelChanged(id) and blockChanged(id) that
+    // one's contents did, so typing in a block never rebuilds the others.
+    Q_PROPERTY(QVariantList panelIds READ panelIds NOTIFY panelsChanged)
+    Q_PROPERTY(bool canAddPanel READ canAddPanel NOTIFY panelsChanged)
+    // How much of the page-wide panel budgets is used, 0…1 each.
+    Q_PROPERTY(qreal panelTextUsed READ panelTextUsed NOTIFY panelBudgetChanged)
+    Q_PROPERTY(qreal panelMediaUsed READ panelMediaUsed NOTIFY panelBudgetChanged)
+    Q_PROPERTY(int panelMediaCount READ panelMediaCount NOTIFY panelBudgetChanged)
     // --- render
     Q_PROPERTY(OpenChat::ProfileRenderStyle *render READ render CONSTANT)
 
@@ -419,8 +433,13 @@ public:
         bool backgroundPresent = false;
         QString imageKey; // registered with ProfileMediaStore; "" when not shown
         bool songPresent = false;
+        // The panel blobs held and registered with PanelMediaLibrary.
+        QSet<QByteArray> panelPresent;
         friend bool operator==(const MediaState &, const MediaState &) = default;
     };
+
+    // narrowModules and wideModules list a panel as this plus its id.
+    static constexpr int panelModuleBase = 100;
 
     // The Top Friend tiles for a list of friends, as this viewer sees them
     // (ARCH §7.2: the viewer's own names and pictures for their contacts).
@@ -605,6 +624,70 @@ public:
 
     [[nodiscard]] ProfileRenderStyle *render() noexcept { return &m_render; }
 
+    // --- Panels: reading
+    [[nodiscard]] QVariantList panelIds() const;
+    [[nodiscard]] bool canAddPanel() const;
+    [[nodiscard]] qreal panelTextUsed() const;
+    [[nodiscard]] qreal panelMediaUsed() const;
+    [[nodiscard]] int panelMediaCount() const;
+    // {id, title, shownTitle, icon, glyph, ownColours, headerFill, headerText,
+    // boxFill, bodyInk, showTitle, blockIds, hasContent, column}; {} for an
+    // unknown id.
+    Q_INVOKABLE QVariantMap panel(int id) const;
+    // {id, kind, kindName, panelId, hasContent, …the fields of its kind}:
+    // text {text, textStyle, align}; pictures {images: [{key, mediaKey, present,
+    // width, height, caption}], gallery, frame}; video {hasVideo, present,
+    // durationMs, segmentKeys, posterKey, loop, caption}; a mediaKey is "" until
+    // the blob is here (ProfilePanelImage.mediaKey);
+    // list {listStyle, items: [{title, detail, rating, status, statusName,
+    // coverKey, hasCover, filled}]}; divider {divider}.
+    Q_INVOKABLE QVariantMap block(int id) const;
+    // The look a panel's box wears: its own colours through the readability
+    // pass, or the page's render for a panel without them (and in Plain style).
+    Q_INVOKABLE OpenChat::ProfileRenderStyle *panelRender(int id);
+
+    // --- Panels: editing (the draft only; every call is one undo step)
+    Q_INVOKABLE int addPanel(int panelTemplate);         // the new panel's id, 0 at the limit
+    Q_INVOKABLE int duplicatePanel(int id);
+    Q_INVOKABLE void removePanel(int id);
+    Q_INVOKABLE void setPanelTitle(int id, const QString &text);
+    Q_INVOKABLE void setPanelIcon(int id, int icon);
+    Q_INVOKABLE void setPanelShowTitle(int id, bool show);
+    Q_INVOKABLE void setPanelOwnColours(int id, bool own);
+    // role: "headerFill", "headerText", "boxFill" or "bodyInk".
+    Q_INVOKABLE void setPanelColour(int id, const QString &role, const QColor &color);
+    Q_INVOKABLE int addBlock(int panelId, int kind, int afterBlockId = 0); // the new block's id, 0 when full
+    Q_INVOKABLE int duplicateBlock(int id);
+    Q_INVOKABLE void removeBlock(int id);
+    Q_INVOKABLE void moveBlock(int id, int delta);
+    Q_INVOKABLE void setBlockText(int id, const QString &text);
+    Q_INVOKABLE void setBlockTextStyle(int id, int style);
+    Q_INVOKABLE void setBlockAlign(int id, int align);
+    Q_INVOKABLE void setBlockGallery(int id, int gallery);
+    Q_INVOKABLE void setBlockFrame(int id, int frame);
+    Q_INVOKABLE void setImageCaption(int id, int index, const QString &text);
+    Q_INVOKABLE void removeImage(int id, int index);
+    Q_INVOKABLE void moveImage(int id, int index, int delta);
+    Q_INVOKABLE void setBlockCaption(int id, const QString &text);
+    Q_INVOKABLE void setBlockLoop(int id, bool loop);
+    Q_INVOKABLE void removeVideo(int id);
+    Q_INVOKABLE void setListStyle(int id, int style);
+    Q_INVOKABLE void addListItem(int id);
+    Q_INVOKABLE void removeListItem(int id, int index);
+    Q_INVOKABLE void moveListItem(int id, int index, int delta);
+    Q_INVOKABLE void setItemTitle(int id, int index, const QString &text);
+    Q_INVOKABLE void setItemDetail(int id, int index, const QString &text);
+    Q_INVOKABLE void setItemRating(int id, int index, int rating);
+    Q_INVOKABLE void setItemStatus(int id, int index, int status);
+    Q_INVOKABLE void removeItemCover(int id, int index);
+    Q_INVOKABLE void setDivider(int id, int style);
+    // The controller's imports land here: pictures appended to a block, a
+    // list item's cover, a block's video. False when the block is gone or
+    // full (the ref is then not added).
+    bool appendImage(int id, const Profile::MediaRef &ref);
+    bool setItemCover(int id, int index, const Profile::MediaRef &ref);
+    bool setVideo(int id, const Profile::VideoClip &clip);
+
     // Whether module `module` has anything to show on this page (the handle
     // box is the app's, so it always has).
     [[nodiscard]] static bool moduleHasContent(const Profile::Page &page, Profile::Module module);
@@ -619,6 +702,10 @@ signals:
     void contentChanged();
     void listsChanged();
     void mediaChanged();
+    void panelsChanged();
+    void panelChanged(int id);
+    void blockChanged(int id);
+    void panelBudgetChanged();
     // A write changed the page (never emitted by load()).
     void edited();
 
@@ -646,6 +733,14 @@ private:
     [[nodiscard]] QColor shownColour(quint32 Profile::Theme::*field) const;
     [[nodiscard]] QString infoLine(int index) const;
     void setInfoLine(int index, const QString &text);
+    // A panel or block write: `change` edits a copy of the draft's panel or
+    // block; nothing happens for an unknown id or when nothing changed.
+    void writePanel(int id, const std::function<void(Profile::Panel &)> &change);
+    void writeBlock(int id, const std::function<void(Profile::Block &)> &change);
+    // Emits the panel signals for what changed between two pages.
+    void announcePanels(const Profile::Page &old);
+    void updatePanelRenders();
+    [[nodiscard]] QVariantMap imageEntry(const Profile::MediaRef &ref) const;
 
     Kind m_kind;
     Profile::Page m_page;
@@ -654,6 +749,8 @@ private:
     TileResolver m_tiles;
     Lists m_lists;
     ProfileRenderStyle m_render;
+    // Panels with their own colours: their render, by panel id.
+    QHash<int, ProfileRenderStyle *> m_panelRenders;
 };
 
 } // namespace OpenChat

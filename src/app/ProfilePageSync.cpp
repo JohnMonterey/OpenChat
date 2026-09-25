@@ -38,11 +38,58 @@ constexpr int maxUnanswered = 1'000;
     return ref.isSet() ? std::optional<QByteArray>(ref.sha256) : std::nullopt;
 }
 
-// The hash `stored` names in the slot for `kind`.
-[[nodiscard]] const std::optional<QByteArray> &slotOf(const StoredContactPage &stored,
-                                                      Profile::MediaKind kind)
+// What a page's panels name, as the store records it: every ref of a panel
+// kind. A panel picture that is also the background is named once, as the
+// background (Profile::mediaRefs), and found there (namesAs).
+[[nodiscard]] QVector<PanelMediaRef> panelMediaOf(const Profile::Page &page)
 {
-    return kind == Profile::MediaKind::SongMedia ? stored.song : stored.background;
+    QVector<PanelMediaRef> refs;
+    for (const Profile::NamedMedia &named : Profile::mediaRefs(page)) {
+        if (named.kind != Profile::MediaKind::BackgroundImageMedia && named.kind != Profile::MediaKind::SongMedia)
+            refs.push_back({wireKind(named.kind), named.ref.sha256});
+    }
+    return refs;
+}
+
+[[nodiscard]] QVector<QByteArray> hashesOf(const QVector<PanelMediaRef> &refs)
+{
+    QVector<QByteArray> hashes;
+    hashes.reserve(refs.size());
+    for (const PanelMediaRef &ref : refs)
+        hashes.push_back(ref.sha256);
+    return hashes;
+}
+
+// Whether `stored` names `sha256` as `kind`. A panel picture may also be
+// named as the background: both are JPEGs with the same checks, and the
+// blob travels once, as the background.
+[[nodiscard]] bool namesAs(const StoredContactPage &stored, Profile::MediaKind kind, const QByteArray &sha256)
+{
+    switch (kind) {
+    case Profile::MediaKind::BackgroundImageMedia:
+        return stored.background == sha256;
+    case Profile::MediaKind::SongMedia:
+        return stored.song == sha256;
+    case Profile::MediaKind::PanelImageMedia:
+    case Profile::MediaKind::VideoSegmentMedia:
+        break;
+    }
+    return std::any_of(stored.panelMedia.cbegin(), stored.panelMedia.cend(), [&](const PanelMediaRef &ref) {
+        return ref.kind == wireKind(kind) && ref.sha256 == sha256;
+    });
+}
+
+// Every blob `stored` names, with the kind it names it as.
+[[nodiscard]] QVector<std::pair<Profile::MediaKind, QByteArray>> namedMedia(const StoredContactPage &stored)
+{
+    QVector<std::pair<Profile::MediaKind, QByteArray>> named;
+    if (stored.background)
+        named.push_back({Profile::MediaKind::BackgroundImageMedia, *stored.background});
+    if (stored.song)
+        named.push_back({Profile::MediaKind::SongMedia, *stored.song});
+    for (const PanelMediaRef &ref : stored.panelMedia)
+        named.push_back({static_cast<Profile::MediaKind>(ref.kind), ref.sha256});
+    return named;
 }
 
 [[nodiscard]] bool isDeliverable(const ContactRecord &contact)
@@ -110,6 +157,7 @@ ProfilePageSync::ProfilePageSync(ProfileSession &session, SyncEngine &engine, Cl
 
     reloadLocal();
     collectGarbage();
+    upgradeLegacyPages();
     scheduleStartupRequests();
     // Reconciliation: whatever a crash or an offline publish left owed goes
     // out now (the pump finds it and stops again if nothing is).
@@ -169,7 +217,9 @@ bool ProfilePageSync::saveDraft(const Profile::Page &draft, const QString &songS
         return false;
     }
     if (m_failDraftWritesForTesting
-        || !repository->saveDraft(core, hashOf(page.background), hashOf(page.song), songSource, now())
+        || !repository
+                ->saveDraft(core, hashOf(page.background), hashOf(page.song), songSource, now(),
+                            hashesOf(panelMediaOf(page)))
                 .hasValue()) {
         qCWarning(contactsLog) << "Could not save the profile page draft";
         return false;
@@ -232,16 +282,12 @@ qint64 ProfilePageSync::publish(const Profile::Page &input)
     page.revision = Profile::nextRevision(publishedRevision(), nowMs);
     page.publishedAtMs = nowMs;
 
-    // Every ref must name a local blob that passes its slot's arrival checks;
+    // Every ref must name a local blob that passes its kind's arrival checks;
     // a page naming media nobody can receive would show a hole forever.
-    const std::pair<Profile::MediaKind, const Profile::MediaRef *> refs[] = {
-        {Profile::MediaKind::BackgroundImageMedia, &page.background},
-        {Profile::MediaKind::SongMedia, &page.song}};
-    for (const auto &[kind, ref] : refs) {
-        if (!ref->isSet())
-            continue;
-        const QByteArray data = localMedia(ref->sha256);
-        if (data.isEmpty() || !passesArrivalChecks(kind, ref->sha256, data)) {
+    const QVector<Profile::NamedMedia> refs = Profile::mediaRefs(page);
+    for (const Profile::NamedMedia &named : refs) {
+        const QByteArray data = localMedia(named.ref.sha256);
+        if (data.isEmpty() || !passesArrivalChecks(named.kind, named.ref.sha256, data)) {
             qCWarning(contactsLog) << "Not publishing: a media ref names no usable local blob";
             return 0;
         }
@@ -254,7 +300,9 @@ qint64 ProfilePageSync::publish(const Profile::Page &input)
     }
     const auto background = hashOf(page.background);
     const auto song = hashOf(page.song);
-    if (!repository->savePublished(core, page.revision, background, song, nowMs).hasValue()) {
+    if (!repository
+             ->savePublished(core, page.revision, background, song, nowMs, hashesOf(panelMediaOf(page)))
+             .hasValue()) {
         qCWarning(contactsLog) << "Could not store the published profile page";
         return 0;
     }
@@ -264,10 +312,8 @@ qint64 ProfilePageSync::publish(const Profile::Page &input)
     // revision that brings one back sends it again; the kept ones make a
     // re-publish with unchanged media cost only the core.
     QVector<QByteArray> keep;
-    if (background)
-        keep.push_back(*background);
-    if (song && song != background)
-        keep.push_back(*song);
+    for (const Profile::NamedMedia &named : refs)
+        keep.push_back(named.ref.sha256);
     if (!repository->forgetSentMediaExcept(keep).hasValue())
         qCWarning(contactsLog) << "Could not update the profile media delivery records";
     collectGarbage();
@@ -310,6 +356,13 @@ ProfilePageSync::contactPage(const AccountId &contact) const
     received.page = *std::move(page);
     received.backgroundPresent = present(row.background, Profile::MediaKind::BackgroundImageMedia);
     received.songPresent = present(row.song, Profile::MediaKind::SongMedia);
+    for (const PanelMediaRef &ref : row.panelMedia) {
+        if (present(ref.sha256, static_cast<Profile::MediaKind>(ref.kind)))
+            received.panelMediaPresent.insert(ref.sha256);
+    }
+    // A panel picture named as the background too.
+    if (received.backgroundPresent)
+        received.panelMediaPresent.insert(*row.background);
     received.receivedAtMs = row.receivedAtMs;
     return received;
 }
@@ -320,12 +373,19 @@ QByteArray ProfilePageSync::contactMedia(const AccountId &contact, const QByteAr
     ProfilePageRepository *repository = pages();
     if (repository == nullptr || sha256.size() != 32)
         return {};
-    // Only in the slot their current core names it for: a pending blob, or
-    // one declared for the other slot, is never shown.
+    // Only as the kind their current core names it as: a pending blob, or
+    // one declared for another kind, is never shown.
     const auto stored = repository->contactPage(contact);
-    if (!stored.hasValue() || !stored.value() || slotOf(*stored.value(), kind) != sha256)
+    if (!stored.hasValue() || !stored.value())
         return {};
-    auto data = repository->contactMedia(contact, sha256, wireKind(kind));
+    const StoredContactPage &page = *stored.value();
+    // A panel picture that is also the background travelled once, as the
+    // background (Profile::mediaRefs), and is read from there.
+    const bool asBackground = kind == Profile::MediaKind::PanelImageMedia && page.background == sha256;
+    const Profile::MediaKind storedKind = asBackground ? Profile::MediaKind::BackgroundImageMedia : kind;
+    if (!namesAs(page, storedKind, sha256))
+        return {};
+    auto data = repository->contactMedia(contact, sha256, wireKind(storedKind));
     if (!data.hasValue() || !data.value())
         return {};
     return *std::move(data).value();
@@ -492,16 +552,20 @@ void ProfilePageSync::reloadLocal()
         return;
     }
     m_local = std::move(local).value();
+    // Every blob the published page names, with its kind, read once here
+    // rather than decoding the core on every pump tick.
+    m_publishedBlobs.clear();
+    if (!m_local.publishedCore.isEmpty()) {
+        if (const auto page = decodePageCore(m_local.publishedCore)) {
+            for (const Profile::NamedMedia &named : Profile::mediaRefs(*page))
+                m_publishedBlobs.push_back({named.kind, named.ref.sha256});
+        }
+    }
 }
 
 QVector<std::pair<Profile::MediaKind, QByteArray>> ProfilePageSync::publishedBlobs() const
 {
-    QVector<std::pair<Profile::MediaKind, QByteArray>> blobs;
-    if (m_local.publishedBackground)
-        blobs.push_back({Profile::MediaKind::BackgroundImageMedia, *m_local.publishedBackground});
-    if (m_local.publishedSong)
-        blobs.push_back({Profile::MediaKind::SongMedia, *m_local.publishedSong});
-    return blobs;
+    return m_publishedBlobs;
 }
 
 std::optional<Profile::MediaKind> ProfilePageSync::publishedKindOf(const QByteArray &sha256) const
@@ -612,16 +676,13 @@ QVector<QByteArray> ProfilePageSync::missingMedia(const StoredContactPage &store
     ProfilePageRepository *repository = pages();
     if (repository == nullptr)
         return missing;
-    const std::pair<const std::optional<QByteArray> *, Profile::MediaKind> named[] = {
-        {&stored.background, Profile::MediaKind::BackgroundImageMedia},
-        {&stored.song, Profile::MediaKind::SongMedia}};
-    for (const auto &[hash, kind] : named) {
-        if (!*hash)
+    for (const auto &[kind, hash] : namedMedia(stored)) {
+        if (missing.contains(hash))
             continue;
-        // Present only if THIS contact sent it, as the kind of its slot.
-        const auto has = repository->hasContactMedia(stored.account, **hash, wireKind(kind));
+        // Present only if THIS contact sent it, as the kind its core names.
+        const auto has = repository->hasContactMedia(stored.account, hash, wireKind(kind));
         if (has.hasValue() && !has.value())
-            missing.push_back(**hash);
+            missing.push_back(hash);
     }
     return missing;
 }
@@ -712,6 +773,7 @@ void ProfilePageSync::receiveCore(const ContactRecord &contact, const QByteArray
     stored.core = payload; // as received; it decoded, so it is within the core cap
     stored.background = hashOf(page->background);
     stored.song = hashOf(page->song);
+    stored.panelMedia = panelMediaOf(*page);
     stored.receivedAtMs = now();
     const auto newer = repository->storeContactPage(stored);
     if (!newer.hasValue()) {
@@ -725,7 +787,7 @@ void ProfilePageSync::receiveCore(const ContactRecord &contact, const QByteArray
 
     // Their page is here: every request for it, scheduled or queued, is moot.
     // Missing media of this revision gets its own request below.
-    for (const Trigger trigger : {Trigger::Acceptance, Trigger::Startup, Trigger::MissingMedia})
+    for (const Trigger trigger : {Trigger::Acceptance, Trigger::Startup, Trigger::MissingMedia, Trigger::Refresh})
         unschedule(account, trigger);
     m_requests.removeIf([&](const Request &request) { return request.contact == account; });
     // An eviction marker spoke of the replaced revision's media. This one's
@@ -770,7 +832,7 @@ void ProfilePageSync::receiveMedia(const ContactRecord &contact, const QByteArra
     }
     // Adopted only in the slot of its own kind; anything else waits as
     // "pending" (media can overtake its core), a bounded few per contact.
-    const bool named = stored.value() && slotOf(*stored.value(), media->kind) == media->sha256;
+    const bool named = stored.value() && namesAs(*stored.value(), media->kind, media->sha256);
     if (!named) {
         const auto already = repository->hasContactMedia(account, media->sha256, kind);
         if (!already.hasValue())
@@ -934,13 +996,18 @@ void ProfilePageSync::requestIfDue(const AccountId &account, Trigger trigger)
         return;
     const QVector<QByteArray> missing = stored.value() ? missingMedia(*stored.value())
                                                        : QVector<QByteArray>();
-    if (stored.value() && missing.isEmpty())
+    if (stored.value() && missing.isEmpty() && trigger != Trigger::Refresh)
         return; // nothing to ask for
     const auto state = repository->requestState(account);
     if (!state.hasValue())
         return;
     const PageRequestState &asked = state.value();
-    if (trigger == Trigger::MissingMedia) {
+    if (trigger == Trigger::Refresh) {
+        // Once after the update, never held back: the owner answers only if
+        // their revision differs from the one we kept.
+        if (!stored.value())
+            return;
+    } else if (trigger == Trigger::MissingMedia) {
         // Once per core revision, and never held back by the back-off.
         if (!stored.value() || !owesMissingMediaRequest(asked, stored.value()->revision))
             return;
@@ -956,8 +1023,13 @@ void ProfilePageSync::requestIfDue(const AccountId &account, Trigger trigger)
     }
 
     Request request{account, trigger, std::nullopt, missing};
-    if (stored.value())
+    // More blobs than one request can name: asking without a revision gets
+    // the whole page, every blob included (the core itself is not newer and
+    // is dropped on arrival).
+    if (stored.value() && missing.size() <= maxRequestedMedia)
         request.haveRevision = stored.value()->revision;
+    if (!request.haveRevision)
+        request.wantMedia.clear();
     // One queued request per contact. A missing-media one wins: it carries
     // the revision it answers for.
     const auto queued = std::find_if(m_requests.begin(), m_requests.end(),
@@ -983,14 +1055,53 @@ void ProfilePageSync::recordRequestSent(const Request &request)
     }
     PageRequestState asked = state.value();
     asked.lastRequestAtMs = now();
-    asked.unanswered = std::min(std::max(asked.unanswered, 0) + 1, maxUnanswered);
-    if (request.trigger == Trigger::MissingMedia && request.haveRevision)
-        asked.mediaRequestedRevision = *request.haveRevision;
+    // A refresh often has nothing to answer (the owner's page did not
+    // change), so its silence says nothing about their client.
+    if (request.trigger != Trigger::Refresh)
+        asked.unanswered = std::min(std::max(asked.unanswered, 0) + 1, maxUnanswered);
+    if (request.trigger == Trigger::MissingMedia) {
+        // The revision whose media this asked for, however it asked.
+        const auto stored = repository->contactPage(request.contact);
+        if (request.haveRevision)
+            asked.mediaRequestedRevision = *request.haveRevision;
+        else if (stored.hasValue() && stored.value())
+            asked.mediaRequestedRevision = stored.value()->revision;
+    }
     if (!repository->saveRequestState(asked).hasValue())
         qCWarning(contactsLog) << "Could not record a profile page request";
     // "Getting …'s page…" ends on its own after the loading window.
     schedule(request.contact, std::nullopt, asked.lastRequestAtMs + m_limits.pageLoadingWindowMs);
     emit awaitingChanged(request.contact);
+}
+
+void ProfilePageSync::upgradeLegacyPages()
+{
+    ProfilePageRepository *repository = pages();
+    if (repository == nullptr)
+        return;
+    const auto legacy = repository->legacyContactPages();
+    if (!legacy.hasValue()) {
+        qCWarning(contactsLog) << "Could not list profile pages stored before panels";
+        return;
+    }
+    const qint64 nowMs = now();
+    for (const AccountId &account : legacy.value()) {
+        const auto stored = repository->contactPage(account);
+        if (!stored.hasValue() || !stored.value())
+            continue;
+        // A client before panels stored the core whole, panels included, but
+        // recorded nothing of what they name: read it from the core now.
+        const auto page = decodePageCore(stored.value()->core);
+        const QVector<PanelMediaRef> panelMedia = page ? panelMediaOf(*page) : QVector<PanelMediaRef>();
+        if (!repository->upgradeContactPage(account, panelMedia).hasValue()) {
+            qCWarning(contactsLog) << "Could not upgrade a stored profile page";
+            continue;
+        }
+        // That client also refused cores over 24 KiB, so the owner may have
+        // published since: ask once, spread out like the startup requests.
+        if (deliverableContact(account))
+            schedule(account, Trigger::Refresh, nowMs + randomBelow(m_limits.startupRequestJitterMs));
+    }
 }
 
 void ProfilePageSync::scheduleStartupRequests()

@@ -388,7 +388,7 @@ public:
             {QStringLiteral("boxes"), QStringLiteral("Boxes")},     {QStringLiteral("text"), QStringLiteral("Text")},
             {QStringLiteral("name"), QStringLiteral("Name")},       {QStringLiteral("about"), QStringLiteral("About")},
             {QStringLiteral("friends"), QStringLiteral("Friends")}, {QStringLiteral("song"), QStringLiteral("Song")},
-            {QStringLiteral("layout"), QStringLiteral("Layout")}};
+            {QStringLiteral("layout"), QStringLiteral("Layout")},   {QStringLiteral("panels"), QStringLiteral("Panels")}};
         return item(QStringLiteral("profile") + names.value(name) + QStringLiteral("Tab"));
     }
     // The input inside the editor text field `name` (a TextInput or TextEdit).
@@ -526,18 +526,19 @@ private slots:
         QCOMPARE(f.frame()->property("shownPage").value<QObject *>(), profiles.draft());
     }
 
-    void railHasNineTabsAndRemembersTheLast()
+    void railHasTenTabsAndRemembersTheLast()
     {
         const QStringList names{QStringLiteral("themes"), QStringLiteral("background"), QStringLiteral("boxes"),
                                 QStringLiteral("text"),   QStringLiteral("name"),       QStringLiteral("about"),
-                                QStringLiteral("friends"), QStringLiteral("song"),      QStringLiteral("layout")};
+                                QStringLiteral("friends"), QStringLiteral("song"),      QStringLiteral("layout"),
+                                QStringLiteral("panels")};
         {
             EditorFixture f;
             QVERIFY(f.ready());
             // Themes the first time.
             QCOMPARE(f.profiles().lastTab(), int(EditorTab::ThemesTab));
             QVERIFY(f.tabItem(QStringLiteral("themes")));
-            // Nine tabs, Design then Content, top to bottom.
+            // Ten tabs, Design then Content, top to bottom.
             qreal previous = -1;
             for (const QString &name : names) {
                 QQuickItem *tab = f.item(QStringLiteral("profileEditorTab_") + name);
@@ -561,8 +562,11 @@ private slots:
         again.item(QStringLiteral("profileEditorRail"))->forceActiveFocus();
         again.key(Qt::Key_Down);
         QCOMPARE(again.profiles().lastTab(), int(EditorTab::LayoutTab));
+        again.key(Qt::Key_Down);
+        QCOMPARE(again.profiles().lastTab(), int(EditorTab::PanelsTab));
         again.key(Qt::Key_Down); // the last stays the last
-        QCOMPARE(again.profiles().lastTab(), int(EditorTab::LayoutTab));
+        QCOMPARE(again.profiles().lastTab(), int(EditorTab::PanelsTab));
+        again.key(Qt::Key_Up);
         again.key(Qt::Key_Up);
         again.key(Qt::Key_Up);
         QCOMPARE(again.profiles().lastTab(), int(EditorTab::FriendsTab));
@@ -2441,25 +2445,127 @@ private slots:
         QTRY_VERIFY(!f.isOpen(QStringLiteral("profileLeaveDialog")));
     }
 
+    // --- Panels (docs/profile-panels.md) ------------------------------------------
+
+    // "Add new panel", a template, then filling the panel in: every step is
+    // on the draft and in the preview at once, undo brings a deleted panel
+    // back, and a save publishes it.
+    void addNewPanelAndFillItIn()
+    {
+        EditorFixture f;
+        QVERIFY(f.ready());
+        f.openTab(QStringLiteral("panels"));
+        QCOMPARE(f.draft().panelIds().size(), 0);
+
+        f.click(QStringLiteral("profileAddPanelButton"));
+        QTRY_VERIFY(f.visibleItem(QStringLiteral("profilePanelTemplate_") + QString::number(int(Profile::PanelTemplate::GamesPanel))));
+        f.click(QStringLiteral("profilePanelTemplate_") + QString::number(int(Profile::PanelTemplate::GamesPanel)));
+        QTRY_COMPARE(f.draft().panelIds().size(), 1);
+        const int panelId = f.draft().panelIds().first().toInt();
+        const QString panel = QString::number(panelId);
+        // The new panel opens with its title ready to type over.
+        QTRY_VERIFY(f.focusIn(QStringLiteral("profilePanelTitle_") + panel));
+        f.key(Qt::Key_A, Qt::ControlModifier);
+        f.type(QStringLiteral("Top games"));
+        QTRY_COMPARE(f.draft().panel(panelId).value(QStringLiteral("title")).toString(), QStringLiteral("Top games"));
+        QQuickItem *box = nullptr;
+        QTRY_VERIFY((box = f.visibleItem(QStringLiteral("profilePanelBox_") + panel)) != nullptr);
+        QTRY_COMPARE(box->property("title").toString(), QStringLiteral("Top games"));
+
+        // The games list's first item.
+        const int listId = f.draft().panel(panelId).value(QStringLiteral("blockIds")).toList().first().toInt();
+        const QString list = QString::number(listId);
+        f.focusField(QStringLiteral("profileItemTitle_") + list + QStringLiteral("_0"));
+        f.type(QStringLiteral("Halo 3"));
+        QTRY_COMPARE(f.draft().block(listId).value(QStringLiteral("items")).toList().first().toMap()
+                         .value(QStringLiteral("title")).toString(),
+                     QStringLiteral("Halo 3"));
+        QTRY_VERIFY(box->property("hasPreviewContent").toBool());
+
+        // A text block under it.
+        f.click(QStringLiteral("profileAddBlock_Text"));
+        QTRY_COMPARE(f.draft().panel(panelId).value(QStringLiteral("blockIds")).toList().size(), 2);
+        const int textId = f.draft().panel(panelId).value(QStringLiteral("blockIds")).toList().last().toInt();
+        f.focusField(QStringLiteral("profileBlockText_") + QString::number(textId));
+        f.type(QStringLiteral("Add me on Xbox Live!"));
+        QTRY_COMPARE(f.draft().block(textId).value(QStringLiteral("text")).toString(),
+                     QStringLiteral("Add me on Xbox Live!"));
+        QTRY_VERIFY(f.visibleItem(QStringLiteral("profilePanelText_") + QString::number(textId)));
+
+        if (const QByteArray directory = qgetenv("OPENCHAT_CAPTURE_DIR"); !directory.isEmpty()) {
+            QTest::qWait(100);
+            f.window()->grabWindow().save(QString::fromLocal8Bit(directory) + QStringLiteral("/panels-editor.png"));
+        }
+
+        // The panel shows in Layout, where it moves like any box.
+        f.openTab(QStringLiteral("layout"));
+        const int layoutId = ProfilePageObject::panelModuleBase + panelId;
+        QTRY_VERIFY(f.visibleItem(QStringLiteral("profileLayoutRow_") + QString::number(layoutId)));
+        f.profiles().moveModule(layoutId, int(Profile::Column::NarrowColumn), 0);
+        QCOMPARE(f.draft().panel(panelId).value(QStringLiteral("column")).toInt(), int(Profile::Column::NarrowColumn));
+        f.profiles().undo();
+        QCOMPARE(f.draft().panel(panelId).value(QStringLiteral("column")).toInt(), int(Profile::Column::WideColumn));
+
+        // Deleting is one undo step away from coming back.
+        f.openTab(QStringLiteral("panels"));
+        f.draft().removePanel(panelId);
+        QTRY_COMPARE(f.draft().panelIds().size(), 0);
+        QTRY_VERIFY(!f.visibleItem(QStringLiteral("profilePanelBox_") + panel));
+        f.profiles().undo();
+        QTRY_COMPARE(f.draft().panelIds().size(), 1);
+        QCOMPARE(f.draft().panel(panelId).value(QStringLiteral("title")).toString(), QStringLiteral("Top games"));
+
+        // Saved, it is on the page everyone sees.
+        QVERIFY(f.profiles().publish());
+        QTRY_VERIFY(!f.profiles().editing());
+        QCOMPARE(f.profiles().view()->panelIds(), (QVariantList{panelId}));
+        QTRY_VERIFY(f.visibleItem(QStringLiteral("profilePanelBox_") + panel));
+    }
+
+    // The preview's "Add new panel" tile opens the Panels tab's choices.
+    void previewTileOpensTheTemplates()
+    {
+        EditorFixture f;
+        QVERIFY(f.ready());
+        f.openTab(QStringLiteral("themes"));
+        QQuickItem *tile = nullptr;
+        QTRY_VERIFY((tile = f.visibleItem(QStringLiteral("profileAddPanelTile"))) != nullptr);
+        // It ends the wide column: scroll the preview down to it.
+        QQuickItem *flick = f.visibleItem(QStringLiteral("profilePageFlickable"));
+        QVERIFY(flick);
+        const qreal bottom = flick->property("contentHeight").toReal() - flick->height();
+        flick->setProperty("contentY", std::max(0.0, bottom));
+        f.click(tile);
+        QTRY_VERIFY(f.tabItem(QStringLiteral("panels")));
+        QTRY_VERIFY(f.visibleItem(QStringLiteral("profilePanelTemplate_") + QString::number(int(Profile::PanelTemplate::TextPanel))));
+        // At the limit the tile goes and the button says why.
+        for (int i = 0; i < Profile::PanelBounds::maxPanels; ++i)
+            f.draft().addPanel(int(Profile::PanelTemplate::BlankPanel));
+        QCOMPARE(f.draft().panelIds().size(), Profile::PanelBounds::maxPanels);
+        QTRY_VERIFY(!f.visibleItem(QStringLiteral("profileAddPanelTile")));
+        QVERIFY(!f.item(QStringLiteral("profileAddPanelButton"))->isEnabled());
+    }
+
     void editorFitsTheMinimumWindow()
     {
         EditorFixture f(QSize(720, 560));
         QVERIFY(f.ready());
         f.draft().setHeadline(QStringLiteral("Unsaved"));
         QTest::qWait(20);
-        // All nine tabs fit: clamp(floor((railH − 12 − 44) / 9), 44, 52).
+        // All ten tabs fit: clamp(floor((railH − 12 − 44) / 10), 40, 52).
         const qreal railHeight = f.item(QStringLiteral("profileEditorRail"))->height();
         QCOMPARE(railHeight, 560.0 - 48.0);
-        for (const char *name : {"themes", "background", "boxes", "text", "name", "about", "friends", "song", "layout"}) {
+        for (const char *name : {"themes", "background", "boxes", "text", "name", "about", "friends", "song", "layout",
+                                 "panels"}) {
             QQuickItem *tab = f.item(QStringLiteral("profileEditorTab_") + QString::fromLatin1(name));
             QVERIFY2(tab->mapToScene(QPointF(0, tab->height())).y() <= 560, name);
-            QCOMPARE(tab->height(), std::clamp(std::floor((railHeight - 12 - 44) / 9), 44.0, 52.0));
+            QCOMPARE(tab->height(), std::clamp(std::floor((railHeight - 12 - 44) / 10), 40.0, 52.0));
         }
         // With a CallStrip under the bar too, the tabs shrink and still fit.
         f.editor()->setHeight(560 - 48 - 40);
-        for (const char *name : {"themes", "layout"}) {
+        for (const char *name : {"themes", "panels"}) {
             QQuickItem *tab = f.item(QStringLiteral("profileEditorTab_") + QString::fromLatin1(name));
-            QTRY_COMPARE(tab->height(), std::floor((560.0 - 48 - 40 - 12 - 44) / 9));
+            QTRY_COMPARE(tab->height(), std::floor((560.0 - 48 - 40 - 12 - 44) / 10));
             // (the rail's columns lay out on the next polish)
             QTRY_VERIFY2(tab->mapToItem(f.editor(), QPointF(0, tab->height())).y() <= f.editor()->height(), name);
         }

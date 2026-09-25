@@ -2557,6 +2557,80 @@ private slots:
         QCOMPARE(d.backgroundImageKey(), QString());
     }
 
+    // Pictures for a panel: several at once, in order, each re-encoded within
+    // the panels' budget, shown in the draft, and published with the page.
+    void importPanelPicturesInOrder()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString wide = writePicture(dir, QStringLiteral("wide.png"), QSize(2400, 1200));
+        const QString small = writePicture(dir, QStringLiteral("small.png"), QSize(300, 400));
+        const QString junk = dir.filePath(QStringLiteral("junk.png"));
+        QFile file(junk);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("not a picture");
+        file.close();
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        ProfilePageObject &d = *p.draft();
+        const int panel = d.addPanel(int(Profile::PanelTemplate::PhotoPanel));
+        QVERIFY(panel > 0);
+        const int block = d.panel(panel).value(QStringLiteral("blockIds")).toList().first().toInt();
+
+        p.importPanelPictures(block, {QUrl::fromLocalFile(wide), QUrl::fromLocalFile(junk),
+                                      QUrl::fromLocalFile(small)});
+        QVERIFY(p.panelImporting());
+        QCOMPARE(p.panelImportBlock(), block);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.panelImporting(), 30'000);
+        // The broken file is told about and skipped; the others land in order.
+        QVERIFY(!p.notice().isEmpty());
+        const QVariantList images = d.block(block).value(QStringLiteral("images")).toList();
+        QCOMPARE(images.size(), 2);
+        QCOMPARE(images.at(0).toMap().value(QStringLiteral("width")).toInt(), 1280); // at most 1280 px
+        QCOMPARE(images.at(0).toMap().value(QStringLiteral("height")).toInt(), 640);
+        QCOMPARE(images.at(1).toMap().value(QStringLiteral("width")).toInt(), 300);  // never enlarged
+        for (const QVariant &image : images) {
+            QVERIFY(image.toMap().value(QStringLiteral("present")).toBool());
+            QVERIFY(image.toMap().value(QStringLiteral("bytes")).toLongLong() <= ProfileController::panelPictureBytes);
+        }
+        QCOMPARE(d.panelMediaCount(), 2);
+
+        // Undo takes the last picture off again; the publish carries the rest.
+        p.undo();
+        QCOMPARE(d.block(block).value(QStringLiteral("images")).toList().size(), 1);
+        QVERIFY(p.publish());
+        QTRY_VERIFY(!p.editing());
+        const QVariantList published = p.view()->block(block).value(QStringLiteral("images")).toList();
+        QCOMPARE(published.size(), 1);
+        QVERIFY(published.first().toMap().value(QStringLiteral("present")).toBool());
+    }
+
+    // A panel whose blob went missing (an undo past the collection's grace)
+    // loses just that picture at the save, with a notice, not the page.
+    void publishDropsPanelMediaThatIsGone()
+    {
+        ChatController chat;
+        ProfileController &p = *chat.profiles();
+        p.openOwn();
+        QVERIFY(p.beginEditing());
+        ProfilePageObject &d = *p.draft();
+        const int panel = d.addPanel(int(Profile::PanelTemplate::PhotoPanel));
+        const int block = d.panel(panel).value(QStringLiteral("blockIds")).toList().first().toInt();
+        Profile::MediaRef ghost;
+        ghost.sha256 = QByteArray(32, '\x42');
+        ghost.bytes = 1'000;
+        ghost.width = ghost.height = 100;
+        QVERIFY(d.appendImage(block, ghost));
+        d.setBlockText(block, QStringLiteral("ignored: not a text block"));
+        QVERIFY(!p.publish()); // the owner is told and saves again
+        QVERIFY(p.notice().contains(QStringLiteral("no longer on this device")));
+        QCOMPARE(d.block(block).value(QStringLiteral("images")).toList().size(), 0);
+        QVERIFY(d.panelIds().contains(panel));
+        QVERIFY(p.publish());
+    }
+
     void importBackgroundRefusalSetsNotice()
     {
         QTemporaryDir dir;

@@ -1552,7 +1552,7 @@ private slots:
         const PageRequestMessage two{qint64(0), {hashOf('\x01'), hashOf('\x02')}};
         QVERIFY(decodePageRequest(encodePageRequest(two)) == two);
 
-        // The encoder keeps at most two well-formed, distinct hashes.
+        // The encoder keeps at most six well-formed, distinct hashes.
         const PageRequestMessage messy{Profile::maxRevision,
                                        {hashOf('\x01'), hashOf('\x01'), hashOf('\x02').left(31), hashOf('\x03'),
                                         hashOf('\x04')}};
@@ -1561,14 +1561,14 @@ private slots:
         const auto decoded = decodePageRequest(messyPayload);
         QVERIFY(decoded);
         QCOMPARE(decoded->haveRevision, std::optional<qint64>(Profile::maxRevision));
-        QCOMPARE(decoded->wantMedia, (QVector<QByteArray>{hashOf('\x01'), hashOf('\x03')}));
+        QCOMPARE(decoded->wantMedia, (QVector<QByteArray>{hashOf('\x01'), hashOf('\x03'), hashOf('\x04')}));
     }
 
-    void requestDecoderKeepsTwoDistinctHashes()
+    void requestDecoderKeepsDistinctHashes()
     {
         // Written by hand, not by the encoder (which already trims): a
         // hostile request naming one blob over and over must not make the
-        // owner answer with it more than once, nor ask for more than two.
+        // owner answer with it more than once, nor ask for more than six.
         const QByteArray h1 = hashOf('\x01'), h2 = hashOf('\x02'), h3 = hashOf('\x03');
         const QCborMap base = bodyOf(encodePageRequest({qint64(5), {}}));
         const auto requestWanting = [&](const QCborArray &wanted) { return tagged(setIn(base, {3}, wanted)); };
@@ -1578,7 +1578,7 @@ private slots:
         auto decoded = decodePageRequest(repeated);
         QVERIFY(decoded);
         QCOMPARE(decoded->haveRevision, std::optional<qint64>(5));
-        QCOMPARE(decoded->wantMedia, (QVector<QByteArray>{h1, h2}));
+        QCOMPARE(decoded->wantMedia, (QVector<QByteArray>{h1, h2, h3}));
 
         // As many copies of one hash as fit under the size cap still ask for it once.
         QCborArray copies;
@@ -1625,7 +1625,7 @@ private slots:
         QTest::newRow("version as text") << tagged(setIn(valid, {0}, u"1"_s)) << unknown;
         QTest::newRow("missing type") << tagged(removeIn(valid, {1})) << unknown;
         QTest::newRow("unknown type") << tagged(setIn(valid, {1}, 4)) << unknown;
-        QTest::newRow("unknown media kind") << tagged(setIn(background, {2}, 3)) << unknown;
+        QTest::newRow("unknown media kind") << tagged(setIn(background, {2}, 9)) << unknown;
         QTest::newRow("oversize media message")
             << tagged(setIn(mediaMap(Profile::MediaKind::BackgroundImageMedia,
                                      jpegLike(1, maxBackgroundImageBytes)),
@@ -1936,7 +1936,8 @@ private slots:
         const int textUnits = B::displayName + B::headline + 3 * B::infoLine + 6 * B::interest + 4 * B::detail
             + B::aboutMe + B::meet + B::songTitle + B::songArtist + Profile::maxTopFriends * B::friendName;
         QVERIFY2(payload.size() > 3 * textUnits, "the fixture must really fill every field");
-        QVERIFY2(payload.size() <= maxPageCoreBytes, qPrintable(QString::number(payload.size())));
+        // A page without panels always reaches a 0.2.9 client, whose cap is the old one.
+        QVERIFY2(payload.size() <= legacyMaxPageCoreBytes, qPrintable(QString::number(payload.size())));
         const auto decoded = decodePageCore(payload);
         QVERIFY(decoded);
         QVERIFY(*decoded == Profile::normalized(page));
@@ -1949,7 +1950,9 @@ private slots:
         QCOMPARE(maxBackgroundImageBytes, 229'376);
         QCOMPARE(maxSongBytes, 229'376);
         QCOMPARE(maxPageMediaMessageBytes, 229'888);
-        QCOMPARE(maxPageCoreBytes, 24'576);
+        QCOMPARE(maxPageCoreBytes, 98'304);
+        QCOMPARE(legacyMaxPageCoreBytes, 24'576);
+        QCOMPARE(maxRequestedMedia, 6);
         QCOMPARE(maxPageRequestBytes, 256);
         // The other wire bounds clients must agree on, and the scan limit
         // that keeps a progressive "scan bomb" out. Tests elsewhere build
@@ -2348,7 +2351,7 @@ private slots:
         // QML registers Profile's enumerators unscoped as well (Profile.Stars),
         // so one name in two enums would make one of them unreachable.
         const QMetaObject &meta = Profile::staticMetaObject;
-        QCOMPARE(meta.enumeratorCount(), 28);
+        QCOMPARE(meta.enumeratorCount(), 38);
         QSet<QByteArray> names;
         for (int i = 0; i < meta.enumeratorCount(); ++i) {
             const QMetaEnum enumerator = meta.enumerator(i);

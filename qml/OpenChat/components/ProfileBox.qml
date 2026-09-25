@@ -16,6 +16,8 @@ Item {
     property bool alt: false
     property string title: ""
     property string suffix: ""
+    // A ProfileGlyph kind before the title (custom panels' icons).
+    property string glyph: ""
     property string titleObjectName: "profileBoxTitle"
     property int pad: 12
     default property alias content: body.data
@@ -95,6 +97,7 @@ Item {
         dark: box.render ? (box.alt ? box.render.altStripDark : box.render.stripDark) : false
         title: box.title
         suffix: box.suffix
+        glyph: box.glyph
         titleObjectName: box.hasStrip ? box.titleObjectName : ""
         titleColor: box.render ? (box.alt ? box.render.altHeaderText : box.render.headerText) : "black"
         titleFamily: box.render ? box.render.headingFamily : ""
@@ -118,10 +121,20 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: parent.width
             spacing: 6
+            ProfileGlyph {
+                id: plainGlyph
+                visible: box.glyph.length > 0
+                anchors.verticalCenter: parent.verticalCenter
+                width: visible ? Math.round(box.plainTitleSize * 1.05) : 0
+                height: width
+                kind: box.glyph
+                ink: box.render ? (box.alt ? box.render.altHeaderText : box.render.headerText) : "black"
+            }
             Text {
                 objectName: plainTitle.visible ? box.titleObjectName : ""
                 anchors.verticalCenter: parent.verticalCenter
-                width: Math.min(implicitWidth, parent.width - (plainSuffix.visible ? plainSuffix.implicitWidth + 6 : 0))
+                width: Math.min(implicitWidth, parent.width - (plainSuffix.visible ? plainSuffix.implicitWidth + 6 : 0)
+                                               - (plainGlyph.visible ? plainGlyph.width + 6 : 0))
                 elide: Text.ElideRight
                 text: box.title
                 textFormat: Text.PlainText

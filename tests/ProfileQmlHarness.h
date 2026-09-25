@@ -22,6 +22,7 @@
 #include "app/TransportSettings.h"
 #include "app/VoiceEffectHost.h"
 #include "case/DailyCaseController.h"
+#include "controllers/ChatAttachmentMedia.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
@@ -79,6 +80,7 @@ inline void registerNativeTypes()
     qmlRegisterType<AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
     qmlRegisterType<ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
     qmlRegisterType<TextLineSpacing>("OpenChat.Native", 1, 0, "TextLineSpacing");
+    qmlRegisterType<ChatAttachmentMedia>("OpenChat.Native", 1, 0, "ChatAttachmentMedia");
     registerCosmeticQmlTypes();
     registerProfileQmlTypes();
     qmlRegisterUncreatableType<ChatController>("OpenChat.Native", 1, 0, "ChatController",

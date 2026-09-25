@@ -3,13 +3,21 @@
 #include "models/CallParticipantModel.h"
 #include "models/ContactListModel.h"
 #include "models/MessageListModel.h"
+#include "models/StagedAttachmentModel.h"
 
+using OpenChat::AttachmentTransferState;
 using OpenChat::CallParticipantModel;
 using OpenChat::CallParticipantRow;
 using OpenChat::Contact;
 using OpenChat::ContactListModel;
+using OpenChat::Message;
+using OpenChat::MessageDeliveryState;
+using OpenChat::MessageDirection;
+using OpenChat::MessageKind;
 using OpenChat::MessageListModel;
 using OpenChat::Presence;
+using OpenChat::StagedAttachment;
+using OpenChat::StagedAttachmentModel;
 
 namespace {
 
@@ -20,6 +28,30 @@ QVector<Contact> seedContacts()
         {"sarah", "Sarah", Presence::Away, true, "sarah"},
         {"tom", "Tom", Presence::Offline, false, "mono"},
     };
+}
+
+// A photo someone is sending: three of its five parts are here.
+Message incomingPhoto()
+{
+    Message message{MessageDirection::Incoming, QStringLiteral("Look"), QTime(9, 30), MessageKind::Attachment,
+                    QDate(2026, 9, 25)};
+    message.stableId = QStringLiteral("00aa");
+    message.attachmentKind = 1;
+    message.fileName = QStringLiteral("ferry.jpg");
+    message.mimeType = QStringLiteral("image/jpeg");
+    message.byteCount = 1'100'000;
+    message.mediaWidth = 2048;
+    message.mediaHeight = 1536;
+    message.transferDone = 3;
+    message.transferTotal = 5;
+    message.transferPeer = QStringLiteral("Alice");
+    message.hasPreview = true;
+    return message;
+}
+
+QList<int> changedRoles(const QSignalSpy &spy, int at)
+{
+    return spy.at(at).at(2).value<QList<int>>();
 }
 
 } // namespace
@@ -197,6 +229,238 @@ private slots:
         QVERIFY(model.appendOutgoing(QStringLiteral("Reply"), QTime(10, 16)));
         QCOMPARE(model.count(), 2);
         QCOMPARE(countChanged.count(), 2);
+    }
+
+    void attachmentRowsExposeEveryRole()
+    {
+        MessageListModel model;
+        Message audio{MessageDirection::Outgoing, QString(), QTime(9, 31), MessageKind::Attachment,
+                      QDate(2026, 9, 25)};
+        audio.stableId = QStringLiteral("00bb");
+        audio.attachmentKind = 3;
+        audio.byteCount = 2'516'582;
+        audio.durationMs = 190'000;
+        audio.peaks = {0, 128, 255};
+        audio.transferState = AttachmentTransferState::Ready;
+        audio.transferDone = audio.transferTotal = 12;
+        model.setMessages({incomingPhoto(), audio});
+        const auto data = [&model](int row, int role) { return model.data(model.index(row), role); };
+
+        // Appended: the roles QML already binds to keep their numbers.
+        QCOMPARE(int(MessageListModel::AttachmentKindRole), int(MessageListModel::SenderAccountRole) + 1);
+        const QHash<int, QByteArray> names = model.roleNames();
+        for (const char *name : {"attachmentKind", "fileName", "mimeType", "byteCount", "sizeText", "mediaWidth",
+                                 "mediaHeight", "durationMs", "peaks", "transferState", "transferReason",
+                                 "transferProgress", "transferText", "hasPreview", "previewRevision", "canCancel",
+                                 "canRetry", "canSave"})
+            QVERIFY2(names.values().contains(QByteArray(name)), name);
+
+        QCOMPARE(data(0, MessageListModel::KindRole).toInt(), 4);
+        QCOMPARE(data(0, MessageListModel::AttachmentKindRole).toInt(), 1);
+        QCOMPARE(data(0, MessageListModel::FileNameRole).toString(), QStringLiteral("ferry.jpg"));
+        QCOMPARE(data(0, MessageListModel::MimeTypeRole).toString(), QStringLiteral("image/jpeg"));
+        QCOMPARE(data(0, MessageListModel::ByteCountRole).toDouble(), 1'100'000.0);
+        QCOMPARE(data(0, MessageListModel::SizeTextRole).toString(), QStringLiteral("1.0 MB"));
+        QCOMPARE(data(0, MessageListModel::MediaWidthRole).toInt(), 2048);
+        QCOMPARE(data(0, MessageListModel::MediaHeightRole).toInt(), 1536);
+        QCOMPARE(data(0, MessageListModel::TransferStateRole).toInt(), 0);
+        QCOMPARE(data(0, MessageListModel::TransferProgressRole).toReal(), 0.6);
+        QCOMPARE(data(0, MessageListModel::TransferTextRole).toString(), QStringLiteral("Receiving… 3 of 5"));
+        QVERIFY(data(0, MessageListModel::HasPreviewRole).toBool());
+        QCOMPARE(data(0, MessageListModel::PreviewRevisionRole).toInt(), 0);
+        QVERIFY(!data(0, MessageListModel::CanCancelRole).toBool());
+        QVERIFY(!data(0, MessageListModel::CanRetryRole).toBool());
+        QVERIFY(!data(0, MessageListModel::CanSaveRole).toBool());
+        QVERIFY(!data(0, MessageListModel::EditableRole).toBool());
+
+        QCOMPARE(data(1, MessageListModel::DurationMsRole).toDouble(), 190'000.0);
+        QCOMPARE(data(1, MessageListModel::PeaksRole).toList(), (QVariantList{0, 128, 255}));
+        QCOMPARE(data(1, MessageListModel::SizeTextRole).toString(), QStringLiteral("2.4 MB"));
+        QCOMPARE(data(1, MessageListModel::TransferProgressRole).toReal(), 1.0);
+        QCOMPARE(data(1, MessageListModel::TransferTextRole).toString(), QString());
+        // Audio is played, not saved; a caption is never edited.
+        QVERIFY(!data(1, MessageListModel::CanSaveRole).toBool());
+        QVERIFY(!data(1, MessageListModel::EditableRole).toBool());
+        // Anything else has none of it.
+        model.setMessages({{MessageDirection::Incoming, QStringLiteral("Hi"), QTime(9, 0), MessageKind::Text}});
+        QCOMPARE(data(0, MessageListModel::AttachmentKindRole).toInt(), 0);
+        QCOMPARE(data(0, MessageListModel::SizeTextRole).toString(), QString());
+        QCOMPARE(data(0, MessageListModel::TransferTextRole).toString(), QString());
+    }
+
+    void transferTextSaysWhereTheBytesAre()
+    {
+        MessageListModel model;
+        Message photo = incomingPhoto();
+        const auto text = [&model](const Message &message) { return model.transferText(message); };
+        QCOMPARE(text(photo), QStringLiteral("Receiving… 3 of 5"));
+        photo.transferDone = 0;
+        QCOMPARE(text(photo), QStringLiteral("Waiting for Alice"));
+        photo.transferState = AttachmentTransferState::Failed;
+        photo.transferReason = 1;
+        QCOMPARE(text(photo), QStringLiteral("Couldn't receive this photo"));
+        photo.transferReason = 2;
+        QCOMPARE(text(photo), QStringLiteral("Not enough space to receive this"));
+        photo.transferState = AttachmentTransferState::Cancelled;
+        photo.transferReason = 3;
+        QCOMPARE(text(photo), QStringLiteral("Alice stopped sending this"));
+        photo.transferState = AttachmentTransferState::Unavailable;
+        QCOMPARE(text(photo), QStringLiteral("Couldn't show this attachment"));
+
+        Message mine = incomingPhoto();
+        mine.direction = MessageDirection::Outgoing;
+        mine.transferPeer.clear();
+        mine.transferDone = 2;
+        QCOMPARE(text(mine), QStringLiteral("Sending… 40%"));
+        mine.deliveryState = MessageDeliveryState::Failed;
+        QCOMPARE(text(mine), QStringLiteral("Couldn't send"));
+        QVERIFY(mine.canRetryTransfer());
+        QVERIFY(!mine.canCancelTransfer());
+        mine.deliveryState = MessageDeliveryState::Sent;
+        QVERIFY(mine.canCancelTransfer());
+        mine.transferState = AttachmentTransferState::Cancelled;
+        mine.transferReason = 3;
+        QCOMPARE(text(mine), QStringLiteral("You stopped sending this"));
+        QVERIFY(mine.canRetryTransfer());
+        mine.transferReason = 4;
+        QCOMPARE(text(mine), QStringLiteral("Couldn't send"));
+
+        // A call holds this device's bytes back, and its bubbles say so.
+        mine.transferState = AttachmentTransferState::Transferring;
+        model.setMessages({incomingPhoto(), mine});
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        model.setCallActive(true);
+        QCOMPARE(changed.count(), 1);
+        QCOMPARE(changed.first().at(0).toModelIndex().row(), 1);
+        QCOMPARE(changedRoles(changed, 0), QList<int>{MessageListModel::TransferTextRole});
+        QCOMPARE(model.data(model.index(1), MessageListModel::TransferTextRole).toString(),
+                 QStringLiteral("Waiting for the call to end"));
+        QCOMPARE(model.data(model.index(0), MessageListModel::TransferTextRole).toString(),
+                 QStringLiteral("Receiving… 3 of 5"));
+        model.setCallActive(true);
+        QCOMPARE(changed.count(), 1);
+    }
+
+    void transfersAndPreviewsChangeOnlyTheirRoles()
+    {
+        MessageListModel model;
+        model.setMessages({incomingPhoto()});
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+
+        QVERIFY(model.updateTransfer(QStringLiteral("00aa"), AttachmentTransferState::Transferring, 0, 4, 5));
+        QCOMPARE(changed.count(), 1);
+        const QList<int> roles = changedRoles(changed, 0);
+        QVERIFY(roles.contains(MessageListModel::TransferStateRole));
+        QVERIFY(roles.contains(MessageListModel::TransferProgressRole));
+        QVERIFY(roles.contains(MessageListModel::TransferTextRole));
+        QVERIFY(roles.contains(MessageListModel::CanSaveRole));
+        QVERIFY(!roles.contains(MessageListModel::BodyRole));
+        QVERIFY(!roles.contains(MessageListModel::PreviewRevisionRole));
+        QCOMPARE(model.data(model.index(0), MessageListModel::TransferTextRole).toString(),
+                 QStringLiteral("Receiving… 4 of 5"));
+        // The same again changes nothing.
+        QVERIFY(model.updateTransfer(QStringLiteral("00aa"), AttachmentTransferState::Transferring, 0, 4, 5));
+        QCOMPARE(changed.count(), 1);
+        QVERIFY(model.updateTransfer(QStringLiteral("00aa"), AttachmentTransferState::Ready, 0, 5, 5));
+        QVERIFY(model.data(model.index(0), MessageListModel::CanSaveRole).toBool());
+        QVERIFY(!model.updateTransfer(QStringLiteral("nothing"), AttachmentTransferState::Ready, 0, 1, 1));
+
+        QVERIFY(model.bumpPreview(QStringLiteral("00aa")));
+        QCOMPARE(changedRoles(changed, 2),
+                 (QList<int>{MessageListModel::HasPreviewRole, MessageListModel::PreviewRevisionRole}));
+        QCOMPARE(model.data(model.index(0), MessageListModel::PreviewRevisionRole).toInt(), 1);
+
+        // An attachment's actions follow its message's delivery too.
+        Message mine = incomingPhoto();
+        mine.stableId = QStringLiteral("00cc");
+        mine.direction = MessageDirection::Outgoing;
+        mine.deliveryState = MessageDeliveryState::Sending;
+        model.appendMessage(mine);
+        QVERIFY(model.updateDeliveryState(QStringLiteral("00cc"), MessageDeliveryState::Failed));
+        const QList<int> delivery = changedRoles(changed, changed.count() - 1);
+        QVERIFY(delivery.contains(MessageListModel::CanRetryRole));
+        QVERIFY(delivery.contains(MessageListModel::TransferTextRole));
+        QVERIFY(model.data(model.index(1), MessageListModel::CanRetryRole).toBool());
+    }
+
+    void sizesAndLengthsReadAsCardsPrintThem()
+    {
+        QCOMPARE(MessageListModel::sizeText(0), QStringLiteral("0 bytes"));
+        QCOMPARE(MessageListModel::sizeText(1), QStringLiteral("1 byte"));
+        QCOMPARE(MessageListModel::sizeText(1023), QStringLiteral("1023 bytes"));
+        QCOMPARE(MessageListModel::sizeText(1024), QStringLiteral("1 KB"));
+        QCOMPARE(MessageListModel::sizeText(340 * 1024 + 100), QStringLiteral("340 KB"));
+        QCOMPARE(MessageListModel::sizeText(2'516'582), QStringLiteral("2.4 MB"));
+        QCOMPARE(MessageListModel::sizeText(16LL * 1024 * 1024), QStringLiteral("16 MB"));
+        QCOMPARE(MessageListModel::durationText(42'000), QStringLiteral("0:42"));
+        QCOMPARE(MessageListModel::durationText(245'999), QStringLiteral("4:05"));
+        QCOMPARE(MessageListModel::durationText(-5), QStringLiteral("0:00"));
+    }
+
+    void stagedCardsSignalOnlyWhatMoved()
+    {
+        StagedAttachmentModel model;
+        QSignalSpy count(&model, &StagedAttachmentModel::countChanged);
+        QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        const QHash<int, QByteArray> names = model.roleNames();
+        for (const char *name : {"stagedId", "kind", "name", "sizeText", "progress", "ready", "failed", "error",
+                                 "notice", "previewKey", "durationText"})
+            QVERIFY2(names.values().contains(QByteArray(name)), name);
+
+        StagedAttachment video;
+        video.id = QStringLiteral("v");
+        video.kind = 2;
+        video.name = QStringLiteral("walk.mp4");
+        model.append(video);
+        StagedAttachment file;
+        file.id = QStringLiteral("f");
+        file.name = QStringLiteral("plan.pdf");
+        file.byteCount = 2048;
+        model.append(file);
+        QCOMPARE(model.count(), 2);
+        QCOMPARE(count.count(), 2);
+        QCOMPARE(inserted.count(), 2);
+        const auto data = [&model](int row, int role) { return model.data(model.index(row), role); };
+        QCOMPARE(data(0, StagedAttachmentModel::SizeTextRole).toString(), QString());
+        QCOMPARE(data(1, StagedAttachmentModel::SizeTextRole).toString(), QStringLiteral("2 KB"));
+        QCOMPARE(data(0, StagedAttachmentModel::DurationTextRole).toString(), QString());
+
+        // Progress in steps of a percent, whatever the importer reports.
+        QVERIFY(model.setProgress(QStringLiteral("v"), 0.004));
+        QCOMPARE(changed.count(), 0);
+        QVERIFY(model.setProgress(QStringLiteral("v"), 0.25));
+        QCOMPARE(changed.count(), 1);
+        QCOMPARE(changedRoles(changed, 0), QList<int>{StagedAttachmentModel::ProgressRole});
+        QCOMPARE(data(0, StagedAttachmentModel::ProgressRole).toReal(), 0.25);
+
+        // Ready: only the roles that moved.
+        video.ready = true;
+        video.progress = 1.0;
+        video.byteCount = 3 * 1024 * 1024;
+        video.durationMs = 60'000;
+        video.previewKey = QStringLiteral("staged:v");
+        video.notice = QStringLiteral("Only the first minute will be sent.");
+        QVERIFY(model.update(video));
+        const QList<int> roles = changedRoles(changed, 1);
+        QVERIFY(roles.contains(StagedAttachmentModel::ReadyRole));
+        QVERIFY(roles.contains(StagedAttachmentModel::SizeTextRole));
+        QVERIFY(roles.contains(StagedAttachmentModel::PreviewKeyRole));
+        QVERIFY(roles.contains(StagedAttachmentModel::DurationTextRole));
+        QVERIFY(!roles.contains(StagedAttachmentModel::NameRole));
+        QVERIFY(!roles.contains(StagedAttachmentModel::ErrorRole));
+        QCOMPARE(data(0, StagedAttachmentModel::DurationTextRole).toString(), QStringLiteral("1:00"));
+        QCOMPARE(data(0, StagedAttachmentModel::NoticeRole).toString(),
+                 QStringLiteral("Only the first minute will be sent."));
+        QVERIFY(model.update(video));
+        QCOMPARE(changed.count(), 2);
+
+        QVERIFY(model.remove(QStringLiteral("f")));
+        QVERIFY(!model.remove(QStringLiteral("f")));
+        QCOMPARE(model.count(), 1);
+        model.clear();
+        QCOMPARE(model.count(), 0);
+        QCOMPARE(count.count(), 4);
     }
 
     // A group call tile opens its member's profile by account, contact or

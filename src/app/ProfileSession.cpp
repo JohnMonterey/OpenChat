@@ -357,6 +357,8 @@ bool ProfileSession::isUnlocked() const noexcept { return m_unlocked; }
 
 ProfileId ProfileSession::profileId() const noexcept { return m_profileId; }
 
+QString ProfileSession::profileDirectory() const { return m_paths.profileDirectory; }
+
 Result<DevicePublicCredential, ProfileSessionError>
 ProfileSession::publicCredential() const {
   if (!m_unlocked || !m_identity)

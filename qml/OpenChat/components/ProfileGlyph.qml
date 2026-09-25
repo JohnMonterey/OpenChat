@@ -12,8 +12,8 @@ Item {
     // note, music, copy, idCard, envelope, phone, video, palette, grip, undo,
     // redo, plus, minus, cross, down, up, swap, image, star, text, sparkle,
     // layout, boxes, friends, link, upload, play, pause, preview, dice,
-    // shieldCheck, gamepad, film, heart, book, chat, trophy. An unknown kind
-    // draws nothing.
+    // shieldCheck, gamepad, film, heart, book, chat, trophy, file, download.
+    // An unknown kind draws nothing.
     property string kind: "envelope"
     property color ink: Theme.iconInk
     // Line width in pixels; a few kinds ask for a heavier line of their own.
@@ -265,6 +265,17 @@ Item {
         case "upload":
             stroke = M(0.5, 0.66) + L(0.5, 0.14) + M(0.28, 0.34) + L(0.5, 0.12) + L(0.72, 0.34)
                    + M(0.14, 0.62) + L(0.14, 0.86) + L(0.86, 0.86) + L(0.86, 0.62);
+            break;
+        case "download":
+            stroke = M(0.5, 0.12) + L(0.5, 0.64) + M(0.28, 0.42) + L(0.5, 0.64) + L(0.72, 0.42)
+                   + M(0.14, 0.62) + L(0.14, 0.86) + L(0.86, 0.86) + L(0.86, 0.62);
+            break;
+        case "file":
+            // A sheet with its corner folded down, and two lines of text.
+            stroke = M(0.22, 0.14) + Q(0.22, 0.08, 0.28, 0.08) + L(0.58, 0.08) + L(0.8, 0.3)
+                   + L(0.8, 0.86) + Q(0.8, 0.92, 0.74, 0.92) + L(0.28, 0.92) + Q(0.22, 0.92, 0.22, 0.86) + Z
+                   + M(0.58, 0.08) + L(0.58, 0.3) + L(0.8, 0.3)
+                   + M(0.35, 0.54) + L(0.67, 0.54) + M(0.35, 0.72) + L(0.58, 0.72);
             break;
         case "sparkle":
             fill = sparkle(0.42, 0.46, 0.36) + sparkle(0.8, 0.2, 0.16);

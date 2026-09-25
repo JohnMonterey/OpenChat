@@ -1,8 +1,42 @@
 #include "models/MessageListModel.h"
 
 #include <QLocale>
+#include <QVariantList>
+
+#include <algorithm>
 
 namespace OpenChat {
+
+namespace {
+
+// Every role an attachment's transfer moves (updateTransfer).
+const QList<int> transferRoles{
+    MessageListModel::TransferStateRole, MessageListModel::TransferReasonRole,
+    MessageListModel::TransferProgressRole, MessageListModel::TransferTextRole,
+    MessageListModel::CanCancelRole, MessageListModel::CanRetryRole,
+    MessageListModel::CanSaveRole,
+};
+
+// The stored failure reasons (AttachmentFailure) the bubble tells apart.
+constexpr int reasonNoSpace = 2;
+constexpr int reasonSenderCancelled = 3;
+
+// What a failed incoming attachment is called in "Couldn't receive this …".
+QString receivedNoun(int attachmentKind)
+{
+    switch (attachmentKind) {
+    case 1:
+        return QStringLiteral("photo");
+    case 2:
+        return QStringLiteral("video");
+    case 3:
+        return QStringLiteral("audio file");
+    default:
+        return QStringLiteral("file");
+    }
+}
+
+} // namespace
 
 MessageListModel::MessageListModel(QObject *parent)
     : QAbstractListModel(parent)
@@ -62,6 +96,51 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         return message.quotedBody;
     case SenderAccountRole:
         return message.senderAccount;
+    case AttachmentKindRole:
+        return message.attachmentKind;
+    case FileNameRole:
+        return message.fileName;
+    case MimeTypeRole:
+        return message.mimeType;
+    case ByteCountRole:
+        return double(message.byteCount);
+    case SizeTextRole:
+        return message.attachmentKind == 0 ? QString() : sizeText(message.byteCount);
+    case MediaWidthRole:
+        return message.mediaWidth;
+    case MediaHeightRole:
+        return message.mediaHeight;
+    case DurationMsRole:
+        return double(message.durationMs);
+    case PeaksRole: {
+        QVariantList peaks;
+        peaks.reserve(message.peaks.size());
+        for (const int peak : message.peaks)
+            peaks.append(peak);
+        return peaks;
+    }
+    case TransferStateRole:
+        return static_cast<int>(message.transferState);
+    case TransferReasonRole:
+        return message.transferReason;
+    case TransferProgressRole:
+        if (message.transferState == AttachmentTransferState::Ready)
+            return 1.0;
+        return message.transferTotal > 0
+            ? std::clamp(qreal(message.transferDone) / qreal(message.transferTotal), 0.0, 1.0)
+            : 0.0;
+    case TransferTextRole:
+        return transferText(message);
+    case HasPreviewRole:
+        return message.hasPreview;
+    case PreviewRevisionRole:
+        return message.previewRevision;
+    case CanCancelRole:
+        return message.canCancelTransfer();
+    case CanRetryRole:
+        return message.canRetryTransfer();
+    case CanSaveRole:
+        return message.canSaveAttachment();
     default:
         return {};
     }
@@ -88,12 +167,95 @@ QHash<int, QByteArray> MessageListModel::roleNames() const
         {QuotedSenderRole, "quotedSender"},
         {QuotedBodyRole, "quotedBody"},
         {SenderAccountRole, "senderAccount"},
+        {AttachmentKindRole, "attachmentKind"},
+        {FileNameRole, "fileName"},
+        {MimeTypeRole, "mimeType"},
+        {ByteCountRole, "byteCount"},
+        {SizeTextRole, "sizeText"},
+        {MediaWidthRole, "mediaWidth"},
+        {MediaHeightRole, "mediaHeight"},
+        {DurationMsRole, "durationMs"},
+        {PeaksRole, "peaks"},
+        {TransferStateRole, "transferState"},
+        {TransferReasonRole, "transferReason"},
+        {TransferProgressRole, "transferProgress"},
+        {TransferTextRole, "transferText"},
+        {HasPreviewRole, "hasPreview"},
+        {PreviewRevisionRole, "previewRevision"},
+        {CanCancelRole, "canCancel"},
+        {CanRetryRole, "canRetry"},
+        {CanSaveRole, "canSave"},
     };
 }
 
 int MessageListModel::count() const
 {
     return m_messages.size();
+}
+
+QString MessageListModel::sizeText(qint64 bytes)
+{
+    constexpr qint64 kib = 1024;
+    constexpr qint64 mib = 1024 * kib;
+    const QLocale english(QLocale::English);
+    if (bytes < kib)
+        return bytes == 1 ? QStringLiteral("1 byte") : QStringLiteral("%1 bytes").arg(std::max<qint64>(bytes, 0));
+    if (bytes < mib)
+        return QStringLiteral("%1 KB").arg(std::max<qint64>(1, (bytes + kib / 2) / kib));
+    const double megabytes = double(bytes) / double(mib);
+    // One decimal while it says something ("2.4 MB"), none from ten up.
+    if (megabytes < 9.95)
+        return QStringLiteral("%1 MB").arg(english.toString(megabytes, 'f', 1));
+    return QStringLiteral("%1 MB").arg(qint64(megabytes + 0.5));
+}
+
+QString MessageListModel::durationText(qint64 durationMs)
+{
+    const qint64 seconds = std::max<qint64>(durationMs, 0) / 1000;
+    return QStringLiteral("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10, QLatin1Char('0'));
+}
+
+QString MessageListModel::transferText(const Message &message) const
+{
+    if (message.kind != MessageKind::Attachment)
+        return {};
+    const bool outgoing = message.direction == MessageDirection::Outgoing;
+    const QString sender = message.transferPeer.isEmpty() ? QStringLiteral("The sender")
+                                                          : message.transferPeer;
+    switch (message.transferState) {
+    case AttachmentTransferState::Ready:
+        return {};
+    case AttachmentTransferState::Unavailable:
+        return QStringLiteral("Couldn't show this attachment");
+    case AttachmentTransferState::Failed:
+        if (outgoing)
+            return QStringLiteral("Couldn't send");
+        if (message.transferReason == reasonNoSpace)
+            return QStringLiteral("Not enough space to receive this");
+        return QStringLiteral("Couldn't receive this %1").arg(receivedNoun(message.attachmentKind));
+    case AttachmentTransferState::Cancelled:
+        if (message.transferReason != reasonSenderCancelled)
+            return outgoing ? QStringLiteral("Couldn't send")
+                            : QStringLiteral("Couldn't receive this %1").arg(receivedNoun(message.attachmentKind));
+        return outgoing ? QStringLiteral("You stopped sending this")
+                        : QStringLiteral("%1 stopped sending this").arg(sender);
+    case AttachmentTransferState::Transferring:
+        break;
+    }
+    if (outgoing) {
+        if (message.deliveryState == MessageDeliveryState::Failed)
+            return QStringLiteral("Couldn't send");
+        if (m_callActive)
+            return QStringLiteral("Waiting for the call to end");
+        const int percent = message.transferTotal > 0
+            ? int(std::clamp<qint64>(qint64(message.transferDone) * 100 / message.transferTotal, 0, 100))
+            : 0;
+        return QStringLiteral("Sending… %1%").arg(percent);
+    }
+    // Nothing has come yet: the sender has not started (or is offline).
+    if (message.transferDone <= 0 && !message.transferPeer.isEmpty())
+        return QStringLiteral("Waiting for %1").arg(message.transferPeer);
+    return QStringLiteral("Receiving… %1 of %2").arg(message.transferDone).arg(message.transferTotal);
 }
 
 void MessageListModel::setMessages(QVector<Message> messages)
@@ -146,9 +308,57 @@ bool MessageListModel::updateDeliveryState(const QString &stableId, MessageDeliv
         return true;
     message.deliveryState = state;
     message.failureReason = failureReason;
-    // Whether it can be edited follows from whether the relay took it.
-    emit dataChanged(index(row), index(row), {DeliveryStateRole, FailureReasonRole, EditableRole});
+    // Whether it can be edited follows from whether the relay took it; an
+    // attachment's own actions and status line follow from it too.
+    QList<int> roles{DeliveryStateRole, FailureReasonRole, EditableRole};
+    if (message.kind == MessageKind::Attachment)
+        roles << TransferTextRole << CanCancelRole << CanRetryRole;
+    emit dataChanged(index(row), index(row), roles);
     return true;
+}
+
+bool MessageListModel::updateTransfer(const QString &stableId, AttachmentTransferState state,
+                                      int reason, int done, int total)
+{
+    const int row = rowOf(stableId);
+    if (row < 0)
+        return false;
+    Message &message = m_messages[row];
+    if (message.transferState == state && message.transferReason == reason
+        && message.transferDone == done && message.transferTotal == total)
+        return true;
+    message.transferState = state;
+    message.transferReason = reason;
+    message.transferDone = done;
+    message.transferTotal = total;
+    emit dataChanged(index(row), index(row), transferRoles);
+    return true;
+}
+
+bool MessageListModel::bumpPreview(const QString &stableId)
+{
+    const int row = rowOf(stableId);
+    if (row < 0)
+        return false;
+    Message &message = m_messages[row];
+    message.hasPreview = true;
+    ++message.previewRevision;
+    emit dataChanged(index(row), index(row), {HasPreviewRole, PreviewRevisionRole});
+    return true;
+}
+
+void MessageListModel::setCallActive(bool active)
+{
+    if (m_callActive == active)
+        return;
+    m_callActive = active;
+    // Only this device's transferring attachments read differently.
+    for (int row = 0; row < m_messages.size(); ++row) {
+        const Message &message = m_messages.at(row);
+        if (message.kind == MessageKind::Attachment && message.direction == MessageDirection::Outgoing
+            && message.transferState == AttachmentTransferState::Transferring)
+            emit dataChanged(index(row), index(row), {TransferTextRole});
+    }
 }
 
 bool MessageListModel::updateBody(const QString &stableId, const QString &body)

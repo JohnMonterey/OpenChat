@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Dialogs
 import QtQuick.Window
 import OpenChat
 import OpenChat.Native
@@ -168,6 +169,8 @@ Window {
         target: root.profiles
         function onNavigationChanged() {
             if (root.profiles.open) {
+                // The page covers the chat's enlarged picture too.
+                chatMediaViewer.close(true);
                 profileCloseTimer.stop();
                 root.profileShown = true;
                 return;
@@ -406,8 +409,11 @@ Window {
                 anchors.top: securityBanner.bottom
                 anchors.bottom: messageComposer.top
                 controller: root.chatController
+                callActive: root.inCall
                 visible: root.chatController.hasCurrentContact && !root.callFullscreen
                 onTyped: (text) => messageComposer.takeTyping(text)
+                onMediaRequested: (info, source) => chatMediaViewer.show(info, source)
+                onSaveRequested: stableId => attachmentSaveDialog.saveFor(stableId)
             }
 
             Composer {
@@ -422,6 +428,17 @@ Window {
                 controller: root.chatController
                 visible: root.chatController.hasCurrentContact && !root.callFullscreen
                 onMessageSent: history.positionAtEnd()
+            }
+
+            // Files dragged in from the desktop go to the composer's tray,
+            // while the chat is there to take them.
+            AttachDropOverlay {
+                anchors.fill: parent
+                accepting: conversationPane.visible && root.chatController.hasCurrentContact
+                           && !root.callFullscreen && messageComposer.canAttach && !root.profiles.open
+                           && !root.contactDialogOpen && !root.caseRequested
+                           && !chatMediaViewer.open && !mediaZoom.expanded
+                onFilesDropped: files => messageComposer.attach(files)
             }
         }
 
@@ -547,6 +564,52 @@ Window {
         z: 30
     }
 
+    // A photo or a video from the chat, opened large; above everything else,
+    // like the enlarged call picture.
+    ChatMediaViewer {
+        id: chatMediaViewer
+        z: 31
+        controller: root.chatController
+        callActive: root.inCall
+        onSaveRequested: stableId => attachmentSaveDialog.saveFor(stableId)
+        onClosed: {
+            if (!root.profiles.open)
+                messageComposer.takeTyping("");
+        }
+    }
+    // Where a photo or a file from the chat is saved: the Downloads folder,
+    // under the name it came with.
+    FileDialog {
+        id: attachmentSaveDialog
+        objectName: "saveAttachmentDialog"
+        property string stableId: ""
+        title: "Save"
+        fileMode: FileDialog.SaveFile
+        function saveFor(stableId) {
+            const controller = root.chatController;
+            if (typeof controller.saveAttachment !== "function")
+                return;
+            attachmentSaveDialog.stableId = stableId;
+            const folder = String(controller.attachmentFolderUrl());
+            attachmentSaveDialog.currentFolder = folder;
+            attachmentSaveDialog.selectedFile = folder.replace(/\/+$/, "") + "/"
+                + encodeURIComponent(controller.suggestedSaveName(stableId));
+            attachmentSaveDialog.open();
+        }
+        onAccepted: {
+            root.chatController.saveAttachment(attachmentSaveDialog.stableId, selectedFile);
+            attachmentSaveDialog.giveBackKeyboard();
+        }
+        onRejected: attachmentSaveDialog.giveBackKeyboard()
+        // To the viewer it was asked from, or else the composer.
+        function giveBackKeyboard() {
+            if (chatMediaViewer.open)
+                chatMediaViewer.forceActiveFocus();
+            else if (!root.profiles.open)
+                messageComposer.takeTyping("");
+        }
+    }
+
     Binding {
         target: root.tray
         property: "callState"
@@ -567,14 +630,15 @@ Window {
     }
 
     // Escape hands the window back when the call fills it. The enlarged
-    // picture has its own Escape and goes first, so one press closes one thing.
+    // picture and the chat's viewer have their own Escape and go first, so one
+    // press closes one thing.
     // An open profile covers the call and takes Escape itself.
     readonly property bool contactDialogOpen: root.contactController !== null
         && (root.contactController.safetyNumberOpen || root.contactController.dialogOpen)
     Shortcut {
         sequences: ["Escape"]
         enabled: root.callFullscreen && !mediaZoom.expanded && !root.profiles.open
-                 && !root.contactDialogOpen
+                 && !root.contactDialogOpen && !chatMediaViewer.open
         onActivated: root.callFullscreen = false
     }
     // The Safety Number and Add Contact dialogs close on Escape too, and
@@ -614,7 +678,7 @@ Window {
     Shortcut {
         sequence: "Ctrl+I"
         enabled: !root.profiles.open && root.chatController.hasCurrentContact
-                 && !root.chatController.currentIsGroup
+                 && !root.chatController.currentIsGroup && !chatMediaViewer.open
         onActivated: root.profiles.openContact(root.chatController.currentContactId)
     }
 

@@ -11,11 +11,13 @@
 #include "call/CallSignal.h"
 #include "call/SyncCallTransport.h"
 #include "controllers/CallController.h"
+#include "controllers/ChatAttachmentMedia.h"
 #include "controllers/ChatController.h"
 #include "crypto/MlsClient.h"
 #include "domain/ChatTypes.h"
 #include "domain/Contact.h"
 #include "models/Message.h"
+#include "models/StagedAttachmentModel.h"
 #include "network/SyncEngine.h"
 #include "protocol/CiphertextEnvelope.h"
 #include "security/KeyVault.h"
@@ -27,7 +29,10 @@
 
 #include "domain/ProfileUpdate.h"
 #include "profile/ProfileMediaStore.h"
+#include "profile/ProfilePanelMedia.h"
 #include "profile/ProfileRenderPolicy.h"
+#include "profile/SongPlayer.h"
+#include "security/AttachmentSeal.h"
 #include "render/AvatarStore.h"
 
 #include "app/ProfilePageSync.h"
@@ -258,6 +263,39 @@ QString writePhoto(const QTemporaryDir &dir, const QString &name, const QColor &
     if (!image.save(path, "PNG"))
         return {};
     return path;
+}
+
+// Writes `bytes` to `dir` as `name` and returns its path.
+QString writeFile(const QTemporaryDir &dir, const QString &name, const QByteArray &bytes)
+{
+    QFile file(dir.filePath(name));
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size())
+        return {};
+    return file.fileName();
+}
+
+// Bytes nobody would guess, the same every run.
+QByteArray patternBytes(qsizetype size)
+{
+    QByteArray bytes(size, Qt::Uninitialized);
+    quint32 state = 2463534242u;
+    for (qsizetype index = 0; index < size; ++index) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        bytes[index] = char(state & 0xFF);
+    }
+    return bytes;
+}
+
+// The row of the open chat whose `role` is `value`, or -1.
+int rowWhere(const MessageListModel *messages, int role, const QVariant &value)
+{
+    for (int row = 0; row < messages->rowCount(); ++row) {
+        if (messages->data(messages->index(row), role) == value)
+            return row;
+    }
+    return -1;
 }
 
 // The last envelope of `kind` the fake transport saw, decrypted by the peer
@@ -2096,6 +2134,565 @@ private slots:
         QVERIFY(controller.plaintextVisible());
         QCOMPARE(controller.messages()->rowCount(), 5);
         QVERIFY(controller.securityNoticeText().isEmpty());
+    }
+
+    // --- Attachments (docs/chat-attachments.md)
+
+    void attachmentsArePreparedInTheTrayAndSentAsRows()
+    {
+        using namespace OpenChat;
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString photo = writePhoto(dir, QStringLiteral("beach.png"), Qt::blue);
+        const QString notes = writeFile(dir, QStringLiteral("notes.txt"), QByteArray("Bring sunscreen.\n"));
+        ChatController controller;
+        auto *tray = qobject_cast<StagedAttachmentModel *>(controller.stagedAttachments());
+        QVERIFY(tray);
+        const auto card = [tray](int row, int role) { return tray->data(tray->index(row), role); };
+        QSignalSpy changed(&controller, &ChatController::stagedAttachmentsChanged);
+
+        controller.attachFiles({QUrl::fromLocalFile(photo), QUrl::fromLocalFile(notes)});
+        QCOMPARE(tray->rowCount(), 2);
+        QVERIFY(controller.hasStagedAttachments());
+        QVERIFY(controller.stagingBusy());
+        QVERIFY(changed.count() > 0);
+        // Nothing typed, yet something to send.
+        QVERIFY(controller.canSend());
+        QCOMPARE(card(0, StagedAttachmentModel::KindRole).toInt(), int(AttachmentKind::Image));
+        QCOMPARE(card(1, StagedAttachmentModel::NameRole).toString(), QStringLiteral("notes.txt"));
+        QCOMPARE(card(1, StagedAttachmentModel::SizeTextRole).toString(), QStringLiteral("17 bytes"));
+
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy(), 20'000);
+        QVERIFY(card(0, StagedAttachmentModel::ReadyRole).toBool());
+        QVERIFY(card(1, StagedAttachmentModel::ReadyRole).toBool());
+        QCOMPARE(card(0, StagedAttachmentModel::ProgressRole).toReal(), 1.0);
+        // The photo is shown by its preview; the name says what will be sent.
+        const QString previewKey = card(0, StagedAttachmentModel::PreviewKeyRole).toString();
+        QVERIFY(!previewKey.isEmpty());
+        QVERIFY(PanelMediaLibrary::instance().contains(previewKey));
+        QCOMPARE(card(0, StagedAttachmentModel::NameRole).toString(), QStringLiteral("beach.jpg"));
+
+        MessageListModel *messages = controller.messages();
+        const auto role = [messages](int row, int role) { return messages->data(messages->index(row), role); };
+        const int before = messages->rowCount();
+        controller.setComposerText(QStringLiteral("From the trip"));
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(messages->rowCount(), before + 2);
+        // The caption goes with the first; both are ready at once in a preview.
+        QCOMPARE(role(before, MessageListModel::KindRole).toInt(), int(MessageKind::Attachment));
+        QCOMPARE(role(before, MessageListModel::AttachmentKindRole).toInt(), int(AttachmentKind::Image));
+        QCOMPARE(role(before, MessageListModel::BodyRole).toString(), QStringLiteral("From the trip"));
+        QCOMPARE(role(before, MessageListModel::MediaWidthRole).toInt(), 120);
+        QCOMPARE(role(before, MessageListModel::MediaHeightRole).toInt(), 90);
+        QCOMPARE(role(before, MessageListModel::TransferStateRole).toInt(), int(AttachmentTransferState::Ready));
+        QVERIFY(role(before, MessageListModel::CanSaveRole).toBool());
+        QVERIFY(role(before, MessageListModel::HasPreviewRole).toBool());
+        QVERIFY(!role(before, MessageListModel::EditableRole).toBool());
+        QCOMPARE(role(before + 1, MessageListModel::AttachmentKindRole).toInt(), int(AttachmentKind::File));
+        QCOMPARE(role(before + 1, MessageListModel::BodyRole).toString(), QString());
+        QCOMPARE(role(before + 1, MessageListModel::FileNameRole).toString(), QStringLiteral("notes.txt"));
+        QCOMPARE(role(before + 1, MessageListModel::MimeTypeRole).toString(), QStringLiteral("text/plain"));
+        QCOMPARE(role(before + 1, MessageListModel::ByteCountRole).toDouble(), 17.0);
+        QCOMPARE(role(before + 1, MessageListModel::TransferTextRole).toString(), QString());
+        // The tray and the composer are empty again, and its keys released.
+        QCOMPARE(tray->rowCount(), 0);
+        QVERIFY(!controller.hasStagedAttachments());
+        QCOMPARE(controller.composerText(), QString());
+        QVERIFY(!controller.canSend());
+        QVERIFY(!PanelMediaLibrary::instance().contains(previewKey));
+    }
+
+    void aSendAskedForEarlyWaitsForTheTray()
+    {
+        using namespace OpenChat;
+        QTemporaryDir dir;
+        const QString photo = writePhoto(dir, QStringLiteral("dog.png"), Qt::darkGreen);
+        ChatController controller;
+        MessageListModel *messages = controller.messages();
+        const int before = messages->rowCount();
+
+        controller.attachFiles({QUrl::fromLocalFile(photo)});
+        QVERIFY(controller.stagingBusy());
+        controller.setComposerText(QStringLiteral("Soon"));
+        QVERIFY(controller.canSend());
+        QVERIFY(controller.sendMessage());
+        QVERIFY(controller.sendWhenReady());
+        // The text stays until it goes, with its photo.
+        QCOMPARE(controller.composerText(), QStringLiteral("Soon"));
+        QCOMPARE(messages->rowCount(), before);
+        QTRY_COMPARE_WITH_TIMEOUT(messages->rowCount(), before + 1, 20'000);
+        QVERIFY(!controller.sendWhenReady());
+        QCOMPARE(controller.composerText(), QString());
+        QCOMPARE(messages->data(messages->index(before), MessageListModel::BodyRole).toString(),
+                 QStringLiteral("Soon"));
+
+        // Changing the text meanwhile means the message is not finished.
+        controller.attachFiles({QUrl::fromLocalFile(photo)});
+        controller.setComposerText(QStringLiteral("Wait"));
+        QVERIFY(controller.sendMessage());
+        QVERIFY(controller.sendWhenReady());
+        controller.setComposerText(QStringLiteral("Wait, one more"));
+        QVERIFY(!controller.sendWhenReady());
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy(), 20'000);
+        QTest::qWait(20);
+        QCOMPARE(messages->rowCount(), before + 1);
+        // So does removing a card, or starting an edit.
+        controller.attachFiles({QUrl::fromLocalFile(photo)});
+        QVERIFY(controller.sendMessage());
+        QVERIFY(controller.sendWhenReady());
+        auto *tray = qobject_cast<StagedAttachmentModel *>(controller.stagedAttachments());
+        const QString second = tray->data(tray->index(1), StagedAttachmentModel::StagedIdRole).toString();
+        controller.removeStagedAttachment(second);
+        QVERIFY(!controller.sendWhenReady());
+        QCOMPARE(tray->rowCount(), 1);
+        controller.clearStagedAttachments();
+        QCOMPARE(tray->rowCount(), 0);
+        QVERIFY(!controller.hasStagedAttachments());
+    }
+
+    void attachRefusalsSayWhy()
+    {
+        using namespace OpenChat;
+        QTemporaryDir dir;
+        ChatController controller;
+        auto *tray = qobject_cast<StagedAttachmentModel *>(controller.stagedAttachments());
+        QSignalSpy notice(&controller, &ChatController::attachmentNoticeChanged);
+
+        controller.attachFiles({QUrl(QStringLiteral("https://example.com/cat.jpg"))});
+        QCOMPARE(controller.attachmentNotice(), QStringLiteral("Only files on this computer can be attached."));
+        QCOMPARE(tray->rowCount(), 0);
+        controller.attachFiles({QUrl::fromLocalFile(dir.path())});
+        QCOMPARE(controller.attachmentNotice(), QStringLiteral("Folders can't be attached."));
+        // A file goes as it is: too large, it is refused before any of it is read.
+        QFile large(dir.filePath(QStringLiteral("backup.bin")));
+        QVERIFY(large.open(QIODevice::WriteOnly));
+        QVERIFY(large.resize(AttachmentLimits::maxFileBytes + 1));
+        large.close();
+        controller.attachFiles({QUrl::fromLocalFile(large.fileName())});
+        QCOMPARE(controller.attachmentNotice(), QStringLiteral("Files up to 16 MB can be sent."));
+        QCOMPARE(tray->rowCount(), 0);
+        controller.clearAttachmentNotice();
+        QCOMPARE(controller.attachmentNotice(), QString());
+        QVERIFY(notice.count() >= 4);
+
+        // Ten at a time.
+        QList<QUrl> many;
+        for (int index = 0; index < AttachmentLimits::maxStaged + 1; ++index)
+            many.append(QUrl::fromLocalFile(writeFile(dir, QStringLiteral("n%1.txt").arg(index), "x")));
+        controller.attachFiles(many);
+        QCOMPARE(tray->rowCount(), AttachmentLimits::maxStaged);
+        QCOMPARE(controller.attachmentNotice(), QStringLiteral("Up to 10 attachments can be sent at once."));
+        controller.clearStagedAttachments();
+
+        // Nothing is attached to an edit.
+        const QString mine = controller.messages()->data(controller.messages()->index(1),
+                                                         MessageListModel::StableIdRole).toString();
+        QVERIFY(controller.beginEdit(mine));
+        controller.attachFiles({many.first()});
+        QCOMPARE(tray->rowCount(), 0);
+        controller.cancelComposeMode();
+    }
+
+    void theTrayBelongsToItsChatAndHidesWhenLocked()
+    {
+        using namespace OpenChat;
+        QTemporaryDir dir;
+        const QString photo = writePhoto(dir, QStringLiteral("cat.png"), Qt::red);
+        ChatController controller;
+        auto *tray = qobject_cast<StagedAttachmentModel *>(controller.stagedAttachments());
+        controller.attachFiles({QUrl::fromLocalFile(photo)});
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy(), 20'000);
+        const QString key = tray->data(tray->index(0), StagedAttachmentModel::PreviewKeyRole).toString();
+        QVERIFY(PanelMediaLibrary::instance().contains(key));
+
+        // Locked: the user's own pictures are not on screen either.
+        controller.setSessionState(ChatController::SessionState::Locked);
+        QCOMPARE(tray->rowCount(), 0);
+        QVERIFY(!controller.hasStagedAttachments());
+        QVERIFY(!PanelMediaLibrary::instance().contains(key));
+        controller.attachFiles({QUrl::fromLocalFile(photo)});
+        QCOMPARE(tray->rowCount(), 0);
+        QVERIFY(!controller.canSend());
+        controller.setSessionState(ChatController::SessionState::Ready);
+        QCOMPARE(tray->rowCount(), 1);
+        QVERIFY(controller.hasStagedAttachments());
+        QVERIFY(PanelMediaLibrary::instance().contains(key));
+
+        // Another chat has a tray of its own.
+        QVERIFY(controller.selectContact(QStringLiteral("sarah")));
+        QCOMPARE(tray->rowCount(), 0);
+        QVERIFY(!PanelMediaLibrary::instance().contains(key));
+    }
+
+    void attachmentsAreQuotedAndCopiedByWhatTheyAre()
+    {
+        using namespace OpenChat;
+        ChatController controller;
+        MessageListModel *messages = controller.messages();
+        const int reference = messages->rowCount();
+        controller.injectDemoAttachmentsForCapture();
+        QCOMPARE(messages->rowCount(), reference + 5);
+        const auto role = [messages](int row, int role) { return messages->data(messages->index(row), role); };
+        const auto idOf = [&](int attachmentKind, int direction) {
+            for (int row = reference; row < messages->rowCount(); ++row) {
+                if (role(row, MessageListModel::AttachmentKindRole).toInt() == attachmentKind
+                    && role(row, MessageListModel::DirectionRole).toInt() == direction)
+                    return role(row, MessageListModel::StableIdRole).toString();
+            }
+            return QString();
+        };
+        const QString photo = idOf(int(AttachmentKind::Image), int(MessageDirection::Incoming));
+        const QString audio = idOf(int(AttachmentKind::Audio), int(MessageDirection::Incoming));
+        const QString file = idOf(int(AttachmentKind::File), int(MessageDirection::Outgoing));
+        QVERIFY(!photo.isEmpty() && !audio.isEmpty() && !file.isEmpty());
+        // The demo leaves the reference conversation as it was.
+        QCOMPARE(role(0, MessageListModel::BodyRole).toString(), QStringLiteral("Hey Daniel!"));
+        // One photo still arriving, one waiting in the tray.
+        const int arriving =
+            rowWhere(messages, MessageListModel::TransferTextRole, QStringLiteral("Receiving… 3 of 7"));
+        QVERIFY(arriving >= reference);
+        QCOMPARE(role(arriving, MessageListModel::TransferProgressRole).toReal(), 3.0 / 7.0);
+        QVERIFY(controller.hasStagedAttachments());
+
+        // A quote says what it answers.
+        QVERIFY(controller.beginReply(photo));
+        QCOMPARE(controller.composeTargetText(), QStringLiteral("Photo: The view from the ferry this morning"));
+        controller.clearStagedAttachments();
+        controller.setComposerText(QStringLiteral("Wow"));
+        QVERIFY(controller.sendMessage());
+        const int reply = messages->rowCount() - 1;
+        QCOMPARE(role(reply, MessageListModel::QuotedBodyRole).toString(),
+                 QStringLiteral("Photo: The view from the ferry this morning"));
+        QVERIFY(controller.beginReply(audio));
+        QCOMPARE(controller.composeTargetText(), QStringLiteral("Audio"));
+        controller.cancelComposeMode();
+
+        // Copy takes a caption, and there is nothing to take without one;
+        // a caption is never edited.
+        QVERIFY(controller.copyMessage(photo));
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("The view from the ferry this morning"));
+        QVERIFY(!controller.copyMessage(audio));
+        QVERIFY(!controller.beginEdit(file));
+
+        // Saving: photos and files, to a local file, under the name proposed.
+        QCOMPARE(controller.suggestedSaveName(photo), QStringLiteral("IMG_2041.jpg"));
+        QCOMPARE(controller.suggestedSaveName(file), QStringLiteral("Trip itinerary.pdf"));
+        QTemporaryDir dir;
+        const QString target = dir.filePath(QStringLiteral("plan.pdf"));
+        QVERIFY(!controller.saveAttachment(file, QUrl(QStringLiteral("https://example.com/plan.pdf"))));
+        QVERIFY(!controller.saveAttachment(audio, QUrl::fromLocalFile(target)));
+        QVERIFY(controller.saveAttachment(file, QUrl::fromLocalFile(target)));
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(target), 10'000);
+        QFile saved(target);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QVERIFY(saved.readAll().startsWith("%PDF-1.4"));
+        QVERIFY(QUrl(controller.attachmentFolderUrl()).isLocalFile());
+        // And a photo onto the clipboard as a picture.
+        QVERIFY(controller.copyAttachmentImage(photo));
+        QTRY_VERIFY_WITH_TIMEOUT(!QGuiApplication::clipboard()->image().isNull(), 10'000);
+        QCOMPARE(QGuiApplication::clipboard()->image().size(), QSize(1600, 1200));
+        QVERIFY(!controller.copyAttachmentImage(file));
+    }
+
+    void attachmentMediaFollowsTheRowAndTheLock()
+    {
+        using namespace OpenChat;
+        ChatController controller;
+        MessageListModel *messages = controller.messages();
+        controller.injectDemoAttachmentsForCapture();
+        const auto role = [messages](int row, int role) { return messages->data(messages->index(row), role); };
+        const int photoRow = rowWhere(messages, MessageListModel::FileNameRole, QStringLiteral("IMG_2041.jpg"));
+        const int arrivingRow = rowWhere(messages, MessageListModel::FileNameRole, QStringLiteral("IMG_2057.jpg"));
+        const int audioRow = rowWhere(messages, MessageListModel::AttachmentKindRole, int(AttachmentKind::Audio));
+        QVERIFY(photoRow >= 0 && arrivingRow >= 0 && audioRow >= 0);
+        PanelMediaLibrary &library = PanelMediaLibrary::instance();
+
+        auto photo = std::make_unique<ChatAttachmentMedia>();
+        QSignalSpy changed(photo.get(), &ChatAttachmentMedia::changed);
+        photo->setController(&controller);
+        photo->setStableId(role(photoRow, MessageListModel::StableIdRole).toString());
+        photo->setTransferState(role(photoRow, MessageListModel::TransferStateRole).toInt());
+        // The preview at once; the whole photo only when asked for.
+        const QString preview = photo->previewKey();
+        QVERIFY(!preview.isEmpty());
+        QVERIFY(library.contains(preview));
+        QVERIFY(photo->imageKey().isEmpty());
+        QVERIFY(!photo->ready());
+        photo->setWantFull(true);
+        QVERIFY(photo->loading());
+        QTRY_VERIFY_WITH_TIMEOUT(photo->ready(), 10'000);
+        QVERIFY(!photo->loading());
+        QVERIFY(changed.count() > 0);
+        QVERIFY(library.get(photo->imageKey()).startsWith("\xFF\xD8"));
+
+        // Still arriving: its preview, and nothing more until it is here.
+        ChatAttachmentMedia arriving;
+        arriving.setController(&controller);
+        arriving.setStableId(role(arrivingRow, MessageListModel::StableIdRole).toString());
+        arriving.setWantFull(true);
+        QVERIFY(!arriving.previewKey().isEmpty());
+        QTest::qWait(20);
+        QVERIFY(arriving.imageKey().isEmpty());
+        QVERIFY(!arriving.ready());
+        QVERIFY(!arriving.loading());
+
+        // A song only when the player asks for it.
+        ChatAttachmentMedia audio;
+        audio.setController(&controller);
+        audio.setStableId(role(audioRow, MessageListModel::StableIdRole).toString());
+        audio.setTransferState(int(AttachmentTransferState::Ready));
+        QVERIFY(audio.songKey().isEmpty());
+        audio.setWantSong(true);
+        QTRY_VERIFY_WITH_TIMEOUT(audio.ready(), 10'000);
+        QVERIFY(!SongLibrary::instance().get(audio.songKey()).isEmpty());
+        audio.setWantSong(false);
+        QVERIFY(audio.songKey().isEmpty());
+
+        // Locked: every key goes, and nothing is handed out.
+        const QString image = photo->imageKey();
+        controller.setSessionState(ChatController::SessionState::Locked);
+        QVERIFY(photo->previewKey().isEmpty());
+        QVERIFY(photo->imageKey().isEmpty());
+        QVERIFY(!library.contains(preview));
+        QVERIFY(!library.contains(image));
+        QVERIFY(controller.attachmentPreview(role(photoRow, MessageListModel::StableIdRole).toString()).isEmpty());
+        controller.setSessionState(ChatController::SessionState::Ready);
+        QVERIFY(!photo->previewKey().isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(photo->ready(), 10'000);
+
+        // A handle releases what it put when it goes.
+        const QString again = photo->imageKey();
+        photo.reset();
+        QVERIFY(!library.contains(again));
+        // Safe with no controller at all.
+        ChatAttachmentMedia orphan;
+        orphan.setStableId(QStringLiteral("0011"));
+        orphan.setWantFull(true);
+        QVERIFY(orphan.previewKey().isEmpty());
+        QVERIFY(!orphan.loading());
+    }
+
+    void liveAttachmentsTravelThroughTheEngine()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        MessageListModel *messages = controller.messages();
+        const auto role = [messages](int row, int role) { return messages->data(messages->index(row), role); };
+        QTemporaryDir dir;
+        const QByteArray bytes = patternBytes(AttachmentLimits::partBytes + 3'000);
+        const QString notes = writeFile(dir, QStringLiteral("notes.bin"), bytes);
+
+        controller.attachFiles({QUrl::fromLocalFile(notes)});
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy(), 20'000);
+        controller.setComposerText(QStringLiteral("The notes"));
+        QVERIFY(controller.sendMessage());
+        QCOMPARE(controller.composerText(), QString());
+        // Sealed into the store first, then queued: the row follows.
+        QTRY_COMPARE_WITH_TIMEOUT(messages->rowCount(), 1, 20'000);
+        QCOMPARE(role(0, MessageListModel::KindRole).toInt(), int(MessageKind::Attachment));
+        QCOMPARE(role(0, MessageListModel::BodyRole).toString(), QStringLiteral("The notes"));
+        QCOMPARE(role(0, MessageListModel::FileNameRole).toString(), QStringLiteral("notes.bin"));
+        QCOMPARE(role(0, MessageListModel::TransferStateRole).toInt(), int(AttachmentTransferState::Transferring));
+        QCOMPARE(role(0, MessageListModel::TransferTextRole).toString(), QStringLiteral("Sending… 0%"));
+        QVERIFY(role(0, MessageListModel::CanCancelRole).toBool());
+
+        // The peer reads what it is, and the key to its bytes.
+        QCOMPARE(live.transport->sent.size(), qsizetype(1));
+        const CiphertextEnvelopeV1 message = live.transport->sent.at(0);
+        QCOMPARE(message.messageKind, EnvelopeMessageKind::MlsPrivateMessage);
+        const auto processed = live.peer->process(live.conversation, message.ciphertext);
+        QVERIFY(processed.hasValue());
+        const auto content = decodeMessageContent(processed.value().applicationData);
+        QVERIFY(content && content->attachment);
+        QCOMPARE(content->type, MessageContent::Type::Attachment);
+        QCOMPARE(content->body, QStringLiteral("The notes"));
+        const AttachmentDescriptor descriptor = *content->attachment;
+        QCOMPARE(descriptor.byteCount, bytes.size());
+        QCOMPARE(descriptor.partCount, 2);
+
+        // Once the relay has the message, its bytes follow, a frame at a time.
+        QSignalSpy frames(live.session->syncEngine(), &SyncEngine::messageStateChanged);
+        live.transport->onRelayAccepted(message.envelopeId, 1);
+        QSet<QByteArray> accepted{message.envelopeId.bytes()};
+        quint64 sequence = 1;
+        const auto acceptFrames = [&] {
+            for (const CiphertextEnvelopeV1 &envelope : live.transport->sent) {
+                if (envelope.messageKind == EnvelopeMessageKind::AttachmentControl
+                    && !accepted.contains(envelope.envelopeId.bytes())) {
+                    accepted.insert(envelope.envelopeId.bytes());
+                    live.transport->onRelayAccepted(envelope.envelopeId, ++sequence);
+                }
+            }
+            return role(0, MessageListModel::TransferStateRole).toInt() == int(AttachmentTransferState::Ready);
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(acceptFrames(), 20'000);
+        QCOMPARE(role(0, MessageListModel::TransferTextRole).toString(), QString());
+        QVERIFY(!role(0, MessageListModel::CanCancelRole).toBool());
+        QVERIFY(role(0, MessageListModel::CanSaveRole).toBool());
+        // What went is exactly the file, sealed under the message's key.
+        QByteArray reassembled;
+        for (const CiphertextEnvelopeV1 &envelope : live.transport->sent) {
+            if (envelope.messageKind != EnvelopeMessageKind::AttachmentControl)
+                continue;
+            QCOMPARE(envelope.recipientDeviceId, live.peerDevice);
+            const auto split = splitAttachmentFrame(envelope.ciphertext);
+            QVERIFY(split);
+            if (split->first.type != AttachmentFrameType::Part)
+                continue;
+            const auto part = openAttachmentFrame(descriptor.key, envelope.ciphertext);
+            QVERIFY(part);
+            reassembled += *part;
+        }
+        QCOMPARE(reassembled, bytes);
+        // And it reads back here for the bubble.
+        std::optional<QByteArray> loaded;
+        controller.loadAttachmentBlob(role(0, MessageListModel::StableIdRole).toString(), &controller,
+                                      [&loaded](const QByteArray &blob) { loaded = blob; });
+        QTRY_VERIFY_WITH_TIMEOUT(loaded.has_value(), 10'000);
+        QCOMPARE(*loaded, bytes);
+    }
+
+    void liveIncomingAttachmentsArriveAndCanBeSaved()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        QSignalSpy notified(&controller, &ChatController::messageNotificationRequested);
+        MessageListModel *messages = controller.messages();
+        const auto role = [messages](int row, int role) { return messages->data(messages->index(row), role); };
+
+        const QByteArray bytes = patternBytes(AttachmentLimits::partBytes + 1'234);
+        AttachmentDescriptor descriptor;
+        descriptor.key = randomAttachmentKey();
+        descriptor.kind = AttachmentKind::File;
+        descriptor.byteCount = bytes.size();
+        descriptor.sha256 = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
+        descriptor.partCount = attachmentPartCount(bytes.size());
+        descriptor.fileName = QStringLiteral("report.pdf");
+        descriptor.mimeType = QStringLiteral("application/pdf");
+        QVERIFY(live.deliverFromPeer(
+            EnvelopeMessageKind::MlsPrivateMessage,
+            encodeMessageContent(MessageContent::attachmentMessage(QStringLiteral("Q3 numbers"), descriptor))));
+        QCOMPARE(messages->rowCount(), 1);
+        QCOMPARE(role(0, MessageListModel::KindRole).toInt(), int(MessageKind::Attachment));
+        QCOMPARE(role(0, MessageListModel::FileNameRole).toString(), QStringLiteral("report.pdf"));
+        QCOMPARE(role(0, MessageListModel::SizeTextRole).toString(), QStringLiteral("225 KB"));
+        QCOMPARE(role(0, MessageListModel::TransferTextRole).toString(), QStringLiteral("Waiting for bob"));
+        QVERIFY(!role(0, MessageListModel::CanCancelRole).toBool());
+        QVERIFY(!role(0, MessageListModel::CanSaveRole).toBool());
+        // Announced by what it is.
+        QCOMPARE(notified.count(), 1);
+        QCOMPARE(notified.first().at(2).toString(), QStringLiteral("report.pdf: Q3 numbers"));
+
+        const auto part = [&](int index) {
+            return sealAttachmentFrame(descriptor.key, AttachmentFrameType::Part, descriptor.attachmentId,
+                                       quint32(index),
+                                       QByteArrayView(bytes).mid(qsizetype(index) * AttachmentLimits::partBytes,
+                                                                 attachmentPartSize(descriptor, index)));
+        };
+        deliver(live, live.peerAccount, live.peerDevice, live.conversation, EnvelopeMessageKind::AttachmentControl,
+                part(1));
+        QCOMPARE(role(0, MessageListModel::TransferTextRole).toString(), QStringLiteral("Receiving… 1 of 2"));
+        QCOMPARE(role(0, MessageListModel::TransferProgressRole).toReal(), 0.5);
+        deliver(live, live.peerAccount, live.peerDevice, live.conversation, EnvelopeMessageKind::AttachmentControl,
+                part(0));
+        QTRY_COMPARE_WITH_TIMEOUT(role(0, MessageListModel::TransferStateRole).toInt(),
+                                  int(AttachmentTransferState::Ready), 10'000);
+        QVERIFY(role(0, MessageListModel::CanSaveRole).toBool());
+
+        const QString stableId = role(0, MessageListModel::StableIdRole).toString();
+        QCOMPARE(controller.suggestedSaveName(stableId), QStringLiteral("report.pdf"));
+        QTemporaryDir dir;
+        const QString target = dir.filePath(QStringLiteral("report.pdf"));
+        QVERIFY(controller.saveAttachment(stableId, QUrl::fromLocalFile(target)));
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(target).size() == bytes.size(), 10'000);
+        QFile saved(target);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QCOMPARE(saved.readAll(), bytes);
+
+        // History reads it back the same, and a locked profile hands nothing out.
+        ChatController reloaded;
+        reloaded.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        MessageListModel *history = reloaded.messages();
+        QCOMPARE(history->data(history->index(0), MessageListModel::TransferStateRole).toInt(),
+                 int(AttachmentTransferState::Ready));
+        controller.setSessionState(ChatController::SessionState::Locked);
+        std::optional<QByteArray> loaded;
+        controller.loadAttachmentBlob(stableId, &controller, [&loaded](const QByteArray &blob) { loaded = blob; });
+        QTRY_VERIFY_WITH_TIMEOUT(loaded.has_value(), 10'000);
+        QVERIFY(loaded->isEmpty());
+        QVERIFY(!controller.saveAttachment(stableId, QUrl::fromLocalFile(target)));
+    }
+
+    void liveRetrySendsANewAttachment()
+    {
+        using namespace OpenChat;
+        LiveFixture live;
+        QVERIFY(live.setUp());
+        QVERIFY(live.acceptPeer(QStringLiteral("bob")));
+        ContactRequestService requests(*live.session, *live.session->syncEngine());
+        ChatController controller;
+        controller.setLiveServices(live.session.get(), live.session->syncEngine(), &requests);
+        MessageListModel *messages = controller.messages();
+        const auto role = [messages](int row, int role) { return messages->data(messages->index(row), role); };
+        QTemporaryDir dir;
+        const QByteArray bytes = patternBytes(5'000);
+        controller.attachFiles({QUrl::fromLocalFile(writeFile(dir, QStringLiteral("plan.txt"), bytes))});
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy(), 20'000);
+        controller.setComposerText(QStringLiteral("The plan"));
+        QVERIFY(controller.sendMessage());
+        QTRY_COMPARE_WITH_TIMEOUT(messages->rowCount(), 1, 20'000);
+        const QString first = role(0, MessageListModel::StableIdRole).toString();
+
+        // Stopped before the relay even had it.
+        QVERIFY(controller.cancelAttachment(first));
+        QCOMPARE(role(0, MessageListModel::TransferStateRole).toInt(), int(AttachmentTransferState::Cancelled));
+        QCOMPARE(role(0, MessageListModel::TransferTextRole).toString(),
+                 QStringLiteral("You stopped sending this"));
+        QVERIFY(role(0, MessageListModel::CanRetryRole).toBool());
+        QVERIFY(!controller.cancelAttachment(first));
+
+        // Again: back in the tray with its caption, then a new attachment.
+        QVERIFY(controller.retryAttachment(first));
+        QCOMPARE(controller.composerText(), QStringLiteral("The plan"));
+        QTRY_VERIFY_WITH_TIMEOUT(!controller.stagingBusy() && controller.hasStagedAttachments(), 20'000);
+        QVERIFY(controller.sendMessage());
+        QTRY_COMPARE_WITH_TIMEOUT(messages->rowCount(), 2, 20'000);
+        QVERIFY(role(1, MessageListModel::StableIdRole).toString() != first);
+
+        QVector<AttachmentDescriptor> descriptors;
+        for (const CiphertextEnvelopeV1 &envelope : live.transport->sent) {
+            if (envelope.messageKind != EnvelopeMessageKind::MlsPrivateMessage)
+                continue;
+            const auto processed = live.peer->process(live.conversation, envelope.ciphertext);
+            QVERIFY(processed.hasValue());
+            const auto content = decodeMessageContent(processed.value().applicationData);
+            QVERIFY(content && content->attachment);
+            descriptors.append(*content->attachment);
+            QCOMPARE(content->body, QStringLiteral("The plan"));
+        }
+        QCOMPARE(descriptors.size(), 2);
+        QVERIFY(descriptors.at(0).attachmentId != descriptors.at(1).attachmentId);
+        QVERIFY(descriptors.at(0).key != descriptors.at(1).key);
+        QCOMPARE(descriptors.at(0).sha256, descriptors.at(1).sha256);
+        // The peer was told the first one stopped.
+        int cancels = 0;
+        for (const CiphertextEnvelopeV1 &envelope : live.transport->sent) {
+            const auto split = splitAttachmentFrame(envelope.ciphertext);
+            if (envelope.messageKind == EnvelopeMessageKind::AttachmentControl && split
+                && split->first.type == AttachmentFrameType::Cancel)
+                ++cancels;
+        }
+        QCOMPARE(cancels, 1);
     }
 };
 

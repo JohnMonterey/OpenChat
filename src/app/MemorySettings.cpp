@@ -1,5 +1,6 @@
 #include "app/MemorySettings.h"
 
+#include "controllers/ChatAttachments.h"
 #include "profile/ProfileMediaStore.h"
 #include "profile/ProfilePanelMedia.h"
 #include "profile/ProfileRenderPolicy.h"
@@ -104,6 +105,9 @@ void MemorySettings::apply()
     // Panel pictures keep a smaller cache of decoded pictures.
     PanelMediaLibrary::instance().setDecodedBudget(m_lowMemoryMode ? PanelMediaLibrary::lowMemoryDecodedBudget
                                                                    : PanelMediaLibrary::defaultDecodedBudget);
+    // So do the chat's recently shown photos, videos and songs.
+    ChatAttachments::setMediaCacheBudget(m_lowMemoryMode ? ChatAttachments::lowMemoryMediaCacheBudget
+                                                         : ChatAttachments::defaultMediaCacheBudget);
     if (m_lowMemoryMode) {
         releaseFreedHeap();
         m_trimTimer.start();

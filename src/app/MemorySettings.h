@@ -13,8 +13,9 @@ namespace OpenChat {
 // (lowMemoryModeAtStartup) and a change waits for a restart: drawing without
 // the graphics card, and leaving Qt Multimedia unloaded until a call or the
 // audio settings need it. The rest follows the switch at once: profile
-// pictures are kept compressed and decoded only to be drawn, and the heap is
-// handed back to the system every minute.
+// pictures are kept compressed and decoded only to be drawn, the chat keeps
+// fewer recently shown attachments, and the heap is handed back to the system
+// every minute.
 class MemorySettings final : public QObject
 {
     Q_OBJECT

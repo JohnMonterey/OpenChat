@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Dialogs
 import QtQuick.Shapes
+import QtQuick.Window
 import OpenChat
 import OpenChat.Native
 
@@ -23,14 +25,32 @@ Item {
     readonly property bool editingMessage: controller.editingMessageId.length > 0
     readonly property bool composing: editingMessage || controller.replyingToMessageId.length > 0
     readonly property real composeBarHeight: composing ? 26 : 0
-    implicitHeight: composeBarHeight + inputHeight + 2 * margin
+    // Attachments: the "+" left of the field opens a menu of what can be
+    // sent, and what is picked waits in a tray above the field (under a line
+    // saying why, when something could not be taken). Nothing can be attached
+    // to an edit, or while the chat's messages are hidden.
+    readonly property bool canAttach: typeof controller.attachFiles === "function"
+                                      && controller.plaintextVisible === true && !editingMessage
+    readonly property real noticeHeight: attachmentNotice.shown ? 26 : 0
+    readonly property real trayHeight: stagedTray.shown ? stagedTray.height + 10 : 0
+    readonly property real stackHeight: noticeHeight + trayHeight
+    implicitHeight: stackHeight + composeBarHeight + inputHeight + 2 * margin
                     + (lengthCounter.visible ? lengthCounter.implicitHeight + lengthCounter.anchors.topMargin : 0)
 
     // Whichever chat is open, the keyboard is in its composer, so typing and
     // Enter go to it. Only a change of chat moves focus, not a refresh of it.
     readonly property string chatId: controller.currentContactId
-    onChatIdChanged: input.forceActiveFocus()
+    onChatIdChanged: {
+        attachMenu.close();
+        input.forceActiveFocus();
+    }
     Component.onCompleted: input.forceActiveFocus()
+    // The menu goes when attaching stops being possible (an edit begins, the
+    // messages are hidden) or the chat is covered or gone (a profile opens
+    // over it, the call fills the window).
+    onCanAttachChanged: if (!canAttach) attachMenu.close()
+    onEnabledChanged: if (!enabled) attachMenu.close()
+    onVisibleChanged: if (!visible) attachMenu.close()
 
     // Picking Edit or Reply under a message hands the keyboard back here, at
     // the end of the text.
@@ -57,6 +77,31 @@ Item {
             input.insert(input.cursorPosition, text);
     }
 
+    // Opens the attach menu above the "+". From the keyboard (Ctrl+O) its
+    // first row is picked out, ready for Enter.
+    function openAttachMenu(fromKeyboard) {
+        if (!composer.canAttach)
+            return;
+        attachMenu.open();
+        if (fromKeyboard)
+            attachMenu.currentIndex = 0;
+    }
+
+    // Local files (picked, dropped or pasted) go to the tray, each as the kind
+    // its name says.
+    function attach(files) {
+        if (composer.canAttach && files.length > 0)
+            controller.attachFiles(files);
+    }
+
+    // What a dialog of the menu's handed back, then the keyboard to the field.
+    function pickedFrom(dialog) {
+        const files = dialog.selectedFiles.length > 0 ? dialog.selectedFiles
+                    : dialog.selectedFile.toString().length > 0 ? [dialog.selectedFile] : [];
+        composer.attach(files);
+        input.forceActiveFocus();
+    }
+
     // Enter sends. The rest is the editing code editors are loved for; every
     // edit is one undo step. Returns whether the key was used.
     function handleKey(event) {
@@ -65,8 +110,18 @@ Item {
         const alt = (event.modifiers & Qt.AltModifier) !== 0;
         const start = input.selectionStart;
         const end = input.selectionEnd;
+        // A picture, or files copied in a file manager, on the clipboard is
+        // attached; anything else pastes as ever.
+        if (event.matches(StandardKey.Paste))
+            return composer.canAttach && typeof controller.attachClipboard === "function"
+                && controller.attachClipboard() === true;
         let result = null;
         switch (event.key) {
+        case Qt.Key_O:
+            if (!ctrl || shift || alt)
+                return false;
+            composer.openAttachMenu(true);
+            return true;
         case Qt.Key_Escape:
             if (!composing || ctrl || shift || alt)
                 return false;
@@ -162,12 +217,30 @@ Item {
         color: Theme.rule
     }
 
+    AttachmentNotice {
+        id: attachmentNotice
+        x: inputFrame.x
+        y: 8
+        width: inputFrame.width
+        height: implicitHeight
+        controller: composer.controller
+    }
+
+    StagedAttachmentTray {
+        id: stagedTray
+        x: inputFrame.x
+        y: composer.margin + composer.noticeHeight
+        width: inputFrame.width
+        height: implicitHeight
+        controller: composer.controller
+    }
+
     Item {
         id: composeBar
         objectName: "composeBar"
         visible: composer.composing
         x: inputFrame.x + 2
-        y: 8
+        y: 8 + composer.stackHeight
         width: inputFrame.width - 4
         height: 22
 
@@ -238,12 +311,91 @@ Item {
         }
     }
 
+    // Level with the field's last line, so it stays by the text as the field
+    // grows. The field starts after it, and keeps the old right margin (the
+    // outgoing bubbles' edge).
+    AttachButton {
+        id: attachButton
+        x: 17
+        anchors.bottom: inputFrame.bottom
+        width: composer.singleLineHeight
+        height: composer.singleLineHeight
+        enabled: composer.canAttach
+        open: attachMenu.visible
+        onActivated: wasOpen => {
+            if (wasOpen)
+                attachMenu.close();
+            else
+                composer.openAttachMenu(false);
+        }
+    }
+
+    AttachmentMenu {
+        id: attachMenu
+        parent: attachButton
+        x: 0
+        y: -height - 6
+        videoSupported: composer.controller.videoAttachmentsSupported !== false
+        onPicked: kind => {
+            const dialog = kind === 1 ? photoDialog : kind === 2 ? videoDialog
+                         : kind === 3 ? audioDialog : fileDialog;
+            dialog.open();
+        }
+        // The keyboard goes back to the field unless something else took it
+        // (a click into the search field, a dialog the pick opened).
+        onClosed: {
+            const window = composer.Window.window;
+            const holder = window ? window.activeFocusItem : null;
+            if (composer.enabled && composer.visible && (holder === null || holder === window.contentItem))
+                input.forceActiveFocus();
+        }
+    }
+
+    // What each row offers; "All files" is always there too, and whatever is
+    // picked is sent as the kind its name says.
+    FileDialog {
+        id: photoDialog
+        objectName: "attachPhotoDialog"
+        title: "Send photos"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["Photos (*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff)", "All files (*)"]
+        onAccepted: composer.pickedFrom(photoDialog)
+        onRejected: input.forceActiveFocus()
+    }
+    FileDialog {
+        id: videoDialog
+        objectName: "attachVideoDialog"
+        title: "Send a video"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["Videos (*.mp4 *.m4v *.mov *.webm *.mkv *.avi *.wmv)", "All files (*)"]
+        onAccepted: composer.pickedFrom(videoDialog)
+        onRejected: input.forceActiveFocus()
+    }
+    FileDialog {
+        id: audioDialog
+        objectName: "attachAudioDialog"
+        title: "Send audio"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["Audio (*.mp3 *.m4a *.aac *.wav *.ogg *.oga *.opus *.flac)", "All files (*)"]
+        onAccepted: composer.pickedFrom(audioDialog)
+        onRejected: input.forceActiveFocus()
+    }
+    FileDialog {
+        id: fileDialog
+        objectName: "attachFileDialog"
+        title: "Send files"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["All files (*)"]
+        onAccepted: composer.pickedFrom(fileDialog)
+        onRejected: input.forceActiveFocus()
+    }
+
     Item {
         id: inputFrame
         objectName: "composerInputFrame"
-        x: 17
-        y: composer.margin + composer.composeBarHeight
-        width: parent.width - 2 * x
+        x: 65
+        y: composer.margin + composer.stackHeight + composer.composeBarHeight
+        width: parent.width - x - 17
         height: composer.inputHeight
 
         Rectangle {
@@ -259,9 +411,9 @@ Item {
             id: inputScroll
             objectName: "messageInputScroll"
             anchors.left: parent.left
-            anchors.right: attachment.left
+            anchors.right: parent.right
             anchors.leftMargin: 12
-            anchors.rightMargin: 15
+            anchors.rightMargin: 22
             anchors.verticalCenter: parent.verticalCenter
             height: Math.min(input.height, parent.height - 16)
             contentWidth: width
@@ -288,9 +440,9 @@ Item {
             ScrollBar.vertical: ScrollBar {
                 id: inputScrollBar
                 objectName: "messageInputScrollBar"
-                // In the gutter between the text and the attachment button.
+                // In the gutter between the text and the field's right edge.
                 parent: inputFrame
-                x: attachment.x - width - 4
+                x: inputFrame.width - width - 5
                 y: inputScroll.y
                 height: inputScroll.height
                 padding: 0
@@ -339,45 +491,6 @@ Item {
                         composer.controller.setComposerText(text);
                 }
                 Keys.onPressed: event => event.accepted = composer.handleKey(event)
-            }
-        }
-
-        Item {
-            id: attachment
-            objectName: "attachmentButton"
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            anchors.right: parent.right
-            width: 38
-
-            Rectangle {
-                anchors.fill: parent
-                radius: 5
-                color: Theme.fieldAccessory
-            }
-            Rectangle {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                width: parent.width / 2
-                height: parent.height
-                color: Theme.fieldAccessory
-            }
-
-            Rectangle {
-                anchors.left: parent.left
-                width: 1
-                height: parent.height
-                color: Theme.fieldDivider
-            }
-            Image {
-                anchors.centerIn: parent
-                width: 11
-                height: 7
-                source: Qt.resolvedUrl("../../../assets/icons/chevron-down" + (Theme.darkMode ? "-dark.svg" : ".svg"))
-            }
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
             }
         }
 

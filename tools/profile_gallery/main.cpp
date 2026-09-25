@@ -37,6 +37,7 @@
 #include "app/TransportSettings.h"
 #include "case/DailyCaseController.h"
 #include "controllers/CallController.h"
+#include "controllers/ChatAttachmentMedia.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
 #include "controllers/OnboardingController.h"
@@ -72,6 +73,7 @@ void registerTypes()
     qmlRegisterType<OpenChat::BubbleBackground>("OpenChat.Native", 1, 0, "BubbleBackground");
     qmlRegisterType<OpenChat::CallVideoItem>("OpenChat.Native", 1, 0, "CallVideoItem");
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
+    qmlRegisterType<OpenChat::ChatAttachmentMedia>("OpenChat.Native", 1, 0, "ChatAttachmentMedia");
     OpenChat::registerCosmeticQmlTypes();
     OpenChat::registerProfileQmlTypes();
     qmlRegisterUncreatableType<OpenChat::ChatController>(

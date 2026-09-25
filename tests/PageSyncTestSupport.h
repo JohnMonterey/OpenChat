@@ -290,6 +290,41 @@ public:
         return conversation;
     }
 
+    // A group conversation of every one of `members` (at least two): the
+    // first creates the MLS group and adds the others with one Welcome, and
+    // each stores it as a Group conversation. Nobody's contacts change.
+    std::optional<OpenChat::ConversationId> makeGroupOf(const QList<Peer *> &members)
+    {
+        using namespace OpenChat;
+        if (members.size() < 2)
+            return std::nullopt;
+        const ConversationId conversation = ConversationId::generate();
+        QList<QByteArray> keyPackages;
+        for (qsizetype index = 1; index < members.size(); ++index) {
+            auto keyPackage = members.at(index)->session->mls()->generateKeyPackage();
+            if (!keyPackage.hasValue() || !members.at(index)->session->persistMlsState().hasValue())
+                return std::nullopt;
+            keyPackages.append(keyPackage.value());
+        }
+        Peer &creator = *members.first();
+        if (!creator.session->mls()->createGroup(conversation).hasValue())
+            return std::nullopt;
+        auto added = creator.session->mls()->addMembers(conversation, keyPackages);
+        if (!added.hasValue() || !creator.session->persistMlsState().hasValue())
+            return std::nullopt;
+        for (qsizetype index = 1; index < members.size(); ++index) {
+            Peer &joiner = *members.at(index);
+            if (!joiner.session->mls()->joinGroup(conversation, added.value().welcome).hasValue()
+                || !joiner.session->persistMlsState().hasValue())
+                return std::nullopt;
+        }
+        for (Peer *member : members) {
+            if (!upsertConversation(*member, conversation, ConversationKind::Group))
+                return std::nullopt;
+        }
+        return conversation;
+    }
+
     // x accepts y (their row was PendingOutgoing).
     [[nodiscard]] bool acceptContact(Peer &x, const Peer &y)
     {
@@ -349,6 +384,19 @@ public:
         if (from.transport.onRelayAccepted)
             from.transport.onRelayAccepted(envelope.envelopeId, sequence);
         to.engine().handleEnvelope(envelope, sequence);
+    }
+
+    // The relay takes one envelope from `from` (acknowledging it to its
+    // engine) but holds it back: the test hands it on later, or never (a
+    // loss). Returns the envelope and the sequence it would arrive under.
+    std::pair<OpenChat::CiphertextEnvelopeV1, quint64> acceptOnly(Peer &from, Peer &to, qsizetype index)
+    {
+        const OpenChat::CiphertextEnvelopeV1 envelope = from.transport.sent.at(index);
+        from.routed.insert(envelope.envelopeId.bytes());
+        const quint64 sequence = ++to.inboundSequence;
+        if (from.transport.onRelayAccepted)
+            from.transport.onRelayAccepted(envelope.envelopeId, sequence);
+        return {envelope, sequence};
     }
 
     // Delivers every pending envelope from `from` to `to`; returns how many.

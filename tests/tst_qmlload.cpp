@@ -8,7 +8,9 @@
 #include <QQmlComponent>
 #include <QFile>
 #include <QFileInfo>
+#include <QBuffer>
 #include <QImage>
+#include <QMimeData>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTemporaryDir>
@@ -57,6 +59,8 @@
 #include "cosmetics/BubbleSkins.h"
 #include "controllers/ProfileController.h"
 #include "controllers/ProfileReferencePages.h"
+#include "profile/ProfilePanelMedia.h"
+#include "profile/SongPlayer.h"
 #include "ProfileQmlHarness.h"
 
 namespace {
@@ -375,6 +379,125 @@ void captureProfileShot(QQuickWindow *window, const QString &name)
 void failOnQmlWarnings()
 {
     QTest::failOnWarning(QRegularExpression(QStringLiteral("\\.qml:\\d+")));
+}
+
+// Saves the window under OPENCHAT_ATTACHMENT_CAPTURES, when set, as
+// <name>.png: the attachment surfaces as the tests leave them.
+void captureAttachmentShot(QQuickWindow *window, const QString &name)
+{
+    const QString directory = qEnvironmentVariable("OPENCHAT_ATTACHMENT_CAPTURES");
+    if (directory.isEmpty())
+        return;
+    QDir().mkpath(directory);
+    QVERIFY(window->grabWindow().save(QDir(directory).filePath(name + QStringLiteral(".png"))));
+}
+
+// A small real picture on disk, for the attach tests to pick.
+QString writeTestPicture(const QTemporaryDir &dir, const QString &name, const QColor &colour)
+{
+    QImage image(160, 120, QImage::Format_RGB32);
+    image.fill(colour);
+    const QString path = dir.filePath(name);
+    return image.save(path) ? path : QString();
+}
+
+// Lays `items` out one under another (or side by side) in a window and
+// saves it under OPENCHAT_ATTACHMENT_CAPTURES as <name>.png, when that is set.
+void captureItems(const QList<QQuickItem *> &items, const QString &name, bool across, const QColor &background)
+{
+    const QString directory = qEnvironmentVariable("OPENCHAT_ATTACHMENT_CAPTURES");
+    if (directory.isEmpty())
+        return;
+    QQuickWindow window;
+    window.setColor(background);
+    qreal x = 12;
+    qreal y = 12;
+    qreal width = 0;
+    qreal height = 0;
+    for (QQuickItem *item : items) {
+        item->setParentItem(window.contentItem());
+        item->setPosition(QPointF(x, y));
+        const qreal itemHeight = item->height() > 0 ? item->height() : item->implicitHeight();
+        if (across) {
+            x += item->width() + 10;
+            width = x;
+            height = std::max(height, y + itemHeight + 12);
+        } else {
+            y += itemHeight + 8;
+            width = std::max(width, x + item->width() + 12);
+            height = y + 4;
+        }
+    }
+    window.resize(int(std::ceil(width)), int(std::ceil(height)));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTest::qWait(300);
+    QDir().mkpath(directory);
+    QVERIFY(window.grabWindow().save(QDir(directory).filePath(name + QStringLiteral(".png"))));
+    for (QQuickItem *item : items)
+        item->setParentItem(nullptr);
+}
+
+// A sound device that plays nothing: the chat's audio player pulls from it
+// only when a test reads the stream it was given.
+class SilentSongOutput final : public OpenChat::SongOutput
+{
+public:
+    explicit SilentSongOutput(int channels, QIODevice **stream) : m_stream(stream)
+    {
+        m_format.setSampleRate(48000);
+        m_format.setChannelCount(channels);
+        m_format.setSampleFormat(QAudioFormat::Int16);
+    }
+    ~SilentSongOutput() override { *m_stream = nullptr; }
+    [[nodiscard]] QAudioFormat format() const override { return m_format; }
+    [[nodiscard]] int bufferMs() const override { return 0; }
+    bool start(QIODevice *stream) override
+    {
+        *m_stream = stream;
+        return true;
+    }
+    void stop() override { *m_stream = nullptr; }
+
+private:
+    QAudioFormat m_format;
+    QIODevice **m_stream;
+};
+
+// A JPEG of `size` in PanelMediaLibrary under `key`, for a picture to show.
+void putTestPicture(const QString &key, QSize size, const QColor &top, const QColor &bottom)
+{
+    QImage image(size, QImage::Format_RGB32);
+    for (int row = 0; row < size.height(); ++row) {
+        const qreal t = qreal(row) / std::max(1, size.height() - 1);
+        const QColor colour = QColor::fromRgbF(top.redF() + (bottom.redF() - top.redF()) * t,
+                                               top.greenF() + (bottom.greenF() - top.greenF()) * t,
+                                               top.blueF() + (bottom.blueF() - top.blueF()) * t);
+        for (int column = 0; column < size.width(); ++column)
+            image.setPixelColor(column, row, colour);
+    }
+    QByteArray jpeg;
+    QBuffer buffer(&jpeg);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "JPEG", 85);
+    OpenChat::PanelMediaLibrary::instance().put(key, jpeg);
+}
+
+// Every Text and TextEdit under `root` showing `needle`: what peer strings
+// reach the screen through.
+QList<QQuickItem *> textItemsShowing(QQuickItem *root, const QString &needle)
+{
+    QList<QQuickItem *> found;
+    const auto visit = [&](const auto &self, QQuickItem *item) -> void {
+        const QMetaObject *meta = item->metaObject();
+        if (meta->indexOfProperty("textFormat") >= 0
+            && item->property("text").toString().contains(needle))
+            found.append(item);
+        for (QQuickItem *child : item->childItems())
+            self(self, child);
+    };
+    visit(visit, root);
+    return found;
 }
 
 } // namespace
@@ -2174,21 +2297,24 @@ private slots:
         QObject *root = engine.rootObjects().constFirst();
         QObject *composer = root->findChild<QObject *>(QStringLiteral("messageComposer"));
         QObject *frame = root->findChild<QObject *>(QStringLiteral("composerInputFrame"));
-        QObject *attachment = root->findChild<QObject *>(QStringLiteral("attachmentButton"));
         QObject *input = root->findChild<QObject *>(QStringLiteral("messageInput"));
+        auto *attach = qobject_cast<QQuickItem *>(
+            root->findChild<QObject *>(QStringLiteral("attachButton")));
         QVERIFY(composer);
         QVERIFY(frame);
-        QVERIFY(attachment);
+        QVERIFY(attach);
         QVERIFY(input);
+        // The old chevron segment inside the field is gone.
+        QVERIFY(!root->findChild<QObject *>(QStringLiteral("attachmentButton")));
 
         QCoreApplication::processEvents();
         const qreal singleLineHeight = frame->property("height").toReal();
         QCOMPARE(singleLineHeight, 40.0);
-        QCOMPARE(attachment->property("height").toReal(), singleLineHeight);
-        QCOMPARE(attachment->property("y").toReal(), 0.0);
 
         // Holding one line, the composer lines up with the sidebar's navigation
-        // bar beside it, and the field spans it with even margins either side.
+        // bar beside it. The round "+" sits at the old field margin, as tall
+        // as one line and level with the field; the field starts after it and
+        // keeps its right margin (the outgoing bubbles' edge).
         auto *composerItem = qobject_cast<QQuickItem *>(composer);
         auto *bottomNav = qobject_cast<QQuickItem *>(
             root->findChild<QObject *>(QStringLiteral("bottomNav")));
@@ -2196,13 +2322,20 @@ private slots:
         QVERIFY(composerItem && bottomNav && frameItem);
         QCOMPARE(composerItem->height(), bottomNav->height());
         QCOMPARE(composerItem->mapToScene(QPointF()).y(), bottomNav->mapToScene(QPointF()).y());
-        QCOMPARE(composerItem->width() - (frameItem->x() + frameItem->width()), frameItem->x());
+        QCOMPARE(attach->x(), 17.0);
+        QCOMPARE(attach->width(), singleLineHeight);
+        QCOMPARE(attach->height(), singleLineHeight);
+        QCOMPARE(attach->y() + attach->height(), frameItem->y() + frameItem->height());
+        QCOMPARE(frameItem->x(), 65.0);
+        QCOMPARE(composerItem->width() - (frameItem->x() + frameItem->width()), 17.0);
 
         QVERIFY(input->setProperty("text", QStringLiteral("First line\nSecond line\nThird line")));
         QCoreApplication::processEvents();
         const qreal multilineHeight = frame->property("height").toReal();
         QVERIFY(multilineHeight > singleLineHeight);
-        QCOMPARE(attachment->property("height").toReal(), multilineHeight);
+        // The "+" stays one line tall, level with the field's last line.
+        QCOMPARE(attach->height(), singleLineHeight);
+        QCOMPARE(attach->y() + attach->height(), frameItem->y() + frameItem->height());
         QCOMPARE(composer->property("height").toReal(), multilineHeight + 24.0);
 
         // Far more lines than fit: the field stops at its cap and the text
@@ -2465,6 +2598,1075 @@ private slots:
 
         QVERIFY(input->setProperty("text", QString()));
         QVERIFY(!counter->isVisible());
+    }
+
+    // The "+" left of the field opens the attach menu above itself; a click
+    // on the cross it has become closes it again, and so do Esc and a click
+    // anywhere else. Ctrl+O in the field opens it too, its first row picked
+    // out for the arrows and Enter. The keyboard goes back to the field after
+    // Esc, and stays wherever an outside click put it.
+    void theAttachMenuOpensAboveThePlusAndTogglesWithIt()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to click into");
+
+        auto *button = findVisualItem(window->contentItem(), QStringLiteral("attachButton"));
+        auto *glyph = findVisualItem(window->contentItem(), QStringLiteral("attachButtonGlyph"));
+        auto *menu = window->findChild<QObject *>(QStringLiteral("attachmentMenu"));
+        auto *input = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("messageInput")));
+        QVERIFY(button && glyph && menu && input);
+        QTRY_VERIFY(input->hasActiveFocus());
+        QVERIFY(button->isEnabled());
+        QVERIFY(!menu->property("visible").toBool());
+        QCOMPARE(button->property("activeFocusOnTab").toBool(), false);
+        captureAttachmentShot(window, QStringLiteral("composer-idle"));
+
+        // A click opens it above the "+", whose plus turns into a cross.
+        clickItem(window, button);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTRY_COMPARE(glyph->rotation(), 45.0);
+        QVERIFY(menu->property("y").toReal() + menu->property("height").toReal() <= 0.0);
+        const QStringList rows{QStringLiteral("attachPhoto"), QStringLiteral("attachVideo"),
+                               QStringLiteral("attachAudio"), QStringLiteral("attachFile")};
+        for (const QString &name : rows) {
+            auto *row = menu->findChild<QQuickItem *>(name);
+            QVERIFY2(row && row->isVisible(), qPrintable(name));
+            QVERIFY(row->mapToScene(QPointF(0, row->height())).y() < button->mapToScene(QPointF()).y());
+        }
+        QCOMPARE(menu->findChild<QQuickItem *>(QStringLiteral("attachVideo"))->isEnabled(),
+                 controller.videoAttachmentsSupported());
+        QTest::qWait(400);
+        captureAttachmentShot(window, QStringLiteral("menu-open"));
+
+        // The cross closes it: the press on it does not count as outside.
+        clickItem(window, button);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        QTRY_COMPARE(glyph->rotation(), 0.0);
+        QTRY_VERIFY(input->hasActiveFocus());
+
+        // From the keyboard: Ctrl+O, the arrows, and Esc back to the field.
+        QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QCOMPARE(menu->property("currentIndex").toInt(), 0);
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(menu->property("currentIndex").toInt(), 1);
+        QTest::qWait(400);
+        captureAttachmentShot(window, QStringLiteral("menu-keyboard"));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        QTRY_VERIFY(input->hasActiveFocus());
+        QCOMPARE(controller.composerText(), QString());
+
+        // A click elsewhere closes it and the keyboard stays where it went.
+        clickItem(window, button);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        auto *search = findVisualItem(window->contentItem(), QStringLiteral("contactSearch"));
+        QVERIFY(search);
+        clickItem(window, search);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        QTest::qWait(50);
+        QVERIFY(search->hasActiveFocus());
+        QVERIFY(!input->hasActiveFocus());
+        input->forceActiveFocus();
+
+        // Nothing is attached to an edit, or while the messages are hidden:
+        // the "+" is off and Ctrl+O does nothing.
+        const QString mine = controller.messages()->data(controller.messages()->index(1),
+                                                         OpenChat::MessageListModel::StableIdRole).toString();
+        QVERIFY(controller.beginEdit(mine));
+        QTRY_VERIFY(!button->isEnabled());
+        QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier);
+        QTest::qWait(50);
+        QVERIFY(!menu->property("visible").toBool());
+        controller.cancelComposeMode();
+        QTRY_VERIFY(button->isEnabled());
+        clickItem(window, button);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        // Hiding the messages takes an open menu away with it.
+        controller.setSessionState(OpenChat::ChatController::SessionState::Locked);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        QVERIFY(!button->isEnabled());
+        controller.setSessionState(OpenChat::ChatController::SessionState::Ready);
+        QTRY_VERIFY(button->isEnabled());
+    }
+
+    // Each row asks for its kind of file (the dialog also offers any file);
+    // what is picked lands in the tray above the field as a card, the
+    // composer growing to hold it, and the card's × takes it out again. A
+    // pick the controller cannot take says why on a line above the tray.
+    void pickingAKindOpensItsDialogAndTheFileLandsInTheTray()
+    {
+        failOnQmlWarnings();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString picture = writeTestPicture(dir, QStringLiteral("harbour.png"), QColor("#4a8fc0"));
+        QVERIFY(!picture.isEmpty());
+
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to click into");
+
+        auto *button = findVisualItem(window->contentItem(), QStringLiteral("attachButton"));
+        auto *menu = window->findChild<QObject *>(QStringLiteral("attachmentMenu"));
+        auto *composer = findVisualItem(window->contentItem(), QStringLiteral("messageComposer"));
+        auto *tray = findVisualItem(window->contentItem(), QStringLiteral("stagedAttachments"));
+        auto *input = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("messageInput")));
+        QVERIFY(button && menu && composer && tray && input);
+        QVERIFY(!tray->isVisible());
+        const qreal restingHeight = composer->height();
+
+        // Every row opens its own dialog.
+        const QList<std::pair<QString, QString>> rows{
+            {QStringLiteral("attachPhoto"), QStringLiteral("attachPhotoDialog")},
+            {QStringLiteral("attachVideo"), QStringLiteral("attachVideoDialog")},
+            {QStringLiteral("attachAudio"), QStringLiteral("attachAudioDialog")},
+            {QStringLiteral("attachFile"), QStringLiteral("attachFileDialog")}};
+        for (const auto &[rowName, dialogName] : rows) {
+            QObject *dialog = window->findChild<QObject *>(dialogName);
+            QVERIFY2(dialog, qPrintable(dialogName));
+            QCOMPARE(dialog->property("fileMode").toInt(), 1); // FileDialog.OpenFiles
+            if (!controller.videoAttachmentsSupported() && rowName == QLatin1String("attachVideo"))
+                continue;
+            clickItem(window, button);
+            QTRY_VERIFY(menu->property("opened").toBool());
+            auto *row = menu->findChild<QQuickItem *>(rowName);
+            QVERIFY(row);
+            QTest::qWait(300); // the rows rise into place
+            clickItem(window, row);
+            QTRY_VERIFY2(dialog->property("visible").toBool(), qPrintable(dialogName));
+            QTRY_VERIFY(!menu->property("visible").toBool());
+            QMetaObject::invokeMethod(dialog, "close");
+            QTRY_VERIFY(!dialog->property("visible").toBool());
+            window->requestActivate();
+            QVERIFY(QTest::qWaitForWindowActive(window));
+        }
+
+        // The photo dialog's pick is staged: a card in the tray, which the
+        // composer grows to hold.
+        QObject *photos = window->findChild<QObject *>(QStringLiteral("attachPhotoDialog"));
+        photos->setProperty("selectedFile", QUrl::fromLocalFile(picture));
+        QMetaObject::invokeMethod(photos, "accepted");
+        QTRY_VERIFY(controller.hasStagedAttachments());
+        QTRY_VERIFY(tray->isVisible());
+        QTRY_COMPARE(composer->height(), restingHeight + tray->height() + 10.0);
+        QTRY_VERIFY(input->hasActiveFocus());
+        // The tray's list makes its card on its next layout, which a busy
+        // machine can put after the tray has already grown.
+        QQuickItem *card = nullptr;
+        QTRY_VERIFY((card = findVisualItem(tray, QStringLiteral("stagedAttachmentCard"))));
+        QCOMPARE(card->property("name").toString(), QStringLiteral("harbour.png"));
+        QCOMPARE(card->property("kind").toInt(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(card->property("ready").toBool(), 20'000);
+        QTRY_VERIFY(findVisualItem(card, QStringLiteral("stagedAttachmentThumbnail"))->property("ready").toBool());
+        // Something to send now, with no text.
+        QVERIFY(controller.canSend());
+        QTest::qWait(200);
+        captureAttachmentShot(window, QStringLiteral("tray-photo"));
+
+        // A second pick, of a file, makes a second card beside it.
+        const QString notes = dir.filePath(QStringLiteral("Meeting notes.txt"));
+        {
+            QFile file(notes);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("Bring the tickets.\n");
+        }
+        QObject *files = window->findChild<QObject *>(QStringLiteral("attachFileDialog"));
+        files->setProperty("selectedFile", QUrl::fromLocalFile(notes));
+        QMetaObject::invokeMethod(files, "accepted");
+        auto *model = qobject_cast<QAbstractItemModel *>(controller.stagedAttachments());
+        QVERIFY(model);
+        QTRY_COMPARE(model->rowCount(), 2);
+        QTRY_VERIFY_WITH_TIMEOUT(model->data(model->index(1, 0),
+                                             model->roleNames().key("ready")).toBool(), 20'000);
+        QTest::qWait(200);
+        captureAttachmentShot(window, QStringLiteral("tray-photo-and-file"));
+
+        // Something that cannot be attached says why, above the tray, until
+        // it is dismissed.
+        auto *notice = findVisualItem(window->contentItem(), QStringLiteral("attachmentNotice"));
+        QVERIFY(notice && !notice->isVisible());
+        controller.attachFiles({QUrl(QStringLiteral("https://example.com/cat.png"))});
+        QTRY_VERIFY(notice->isVisible());
+        QVERIFY(!controller.attachmentNotice().isEmpty());
+        QTRY_COMPARE(composer->height(), restingHeight + tray->height() + 10.0 + 26.0);
+        captureAttachmentShot(window, QStringLiteral("tray-notice"));
+        clickItem(window, findVisualItem(notice, QStringLiteral("attachmentNoticeDismiss")));
+        QTRY_VERIFY(!notice->isVisible());
+        QVERIFY(controller.attachmentNotice().isEmpty());
+
+        // The ×s take the cards back out, and the composer settles back.
+        while (model->rowCount() > 0) {
+            const int before = model->rowCount();
+            QQuickItem *remove = nullptr;
+            QTRY_VERIFY((remove = findVisualItem(tray, QStringLiteral("removeStagedAttachment"))));
+            clickItem(window, remove);
+            QTRY_COMPARE(model->rowCount(), before - 1);
+            QTest::qWait(200); // the card shrinks away
+        }
+        QTRY_VERIFY(!controller.hasStagedAttachments());
+        QTRY_VERIFY(!tray->isVisible());
+        QTRY_COMPARE(composer->height(), restingHeight);
+    }
+
+    // Files dragged in from the desktop are attached, but only local files
+    // and only while the open chat can take them: not while a message is
+    // being edited, while the messages are hidden, or under a profile.
+    void droppedFilesAreAttachedOnlyWhileTheChatCanTakeThem()
+    {
+        failOnQmlWarnings();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString picture = writeTestPicture(dir, QStringLiteral("dropped.png"), QColor("#c07a4a"));
+        QVERIFY(!picture.isEmpty());
+
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to drop onto");
+        auto *drop = findVisualItem(window->contentItem(), QStringLiteral("attachDropOverlay"));
+        auto *history = findVisualItem(window->contentItem(), QStringLiteral("messageHistory"));
+        QVERIFY(drop && history);
+        QVERIFY(drop->property("accepting").toBool());
+
+        // A drag over the chat, as the desktop sends one: the well shows
+        // while it hovers, and the drop stages the local file (not the link).
+        const QPoint over = centreOf(history);
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(picture), QUrl(QStringLiteral("https://example.com/a.png"))});
+        QDragEnterEvent enter(over, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &enter);
+        QDragMoveEvent move(over, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &move);
+        QTRY_VERIFY(drop->property("hovering").toBool());
+        captureAttachmentShot(window, QStringLiteral("drop-hover"));
+        QDropEvent dropped(over, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &dropped);
+        QTRY_VERIFY(!drop->property("hovering").toBool());
+        QTRY_VERIFY(controller.hasStagedAttachments());
+        auto *model = qobject_cast<QAbstractItemModel *>(controller.stagedAttachments());
+        QVERIFY(model);
+        QCOMPARE(model->rowCount(), 1);
+        QCOMPARE(model->data(model->index(0, 0), model->roleNames().key("name")).toString(),
+                 QStringLiteral("dropped.png"));
+        controller.clearStagedAttachments();
+
+        // A drag of links only is refused outright.
+        QMimeData links;
+        links.setUrls({QUrl(QStringLiteral("https://example.com/a.png"))});
+        QDragEnterEvent linkEnter(over, Qt::CopyAction, &links, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &linkEnter);
+        QTest::qWait(20);
+        QVERIFY(!drop->property("hovering").toBool());
+        QDragLeaveEvent leave;
+        QCoreApplication::sendEvent(window, &leave);
+
+        // Editing a message, hidden messages and an open profile: no drops.
+        const QString mine = controller.messages()->data(controller.messages()->index(1),
+                                                         OpenChat::MessageListModel::StableIdRole).toString();
+        QVERIFY(controller.beginEdit(mine));
+        QTRY_VERIFY(!drop->property("accepting").toBool());
+        controller.cancelComposeMode();
+        QTRY_VERIFY(drop->property("accepting").toBool());
+        controller.setSessionState(OpenChat::ChatController::SessionState::Locked);
+        QTRY_VERIFY(!drop->property("accepting").toBool());
+        controller.setSessionState(OpenChat::ChatController::SessionState::Ready);
+        QTRY_VERIFY(drop->property("accepting").toBool());
+        controller.profiles()->openContact(controller.currentContactId());
+        QTRY_VERIFY(!drop->property("accepting").toBool());
+        QDragEnterEvent underProfile(over, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &underProfile);
+        QDropEvent droppedUnderProfile(over, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &droppedUnderProfile);
+        QTest::qWait(50);
+        QVERIFY(!controller.hasStagedAttachments());
+    }
+
+    // An attachment's bubble, for each kind, with and without a caption, as
+    // a reply, sent and received: the block loads (by URL, so a bubble on its
+    // own needs nothing it does not use), the bubble takes its width from the
+    // block, a caption wraps under it, a quote sits above it, and a picture
+    // without a caption carries its time on itself. Pictures keep their shape
+    // within bounds. Under a skin and in the dark theme the rows take the
+    // bubble's inks. Nothing warns.
+    void attachmentBubblesDrawEveryKindWithoutWarnings()
+    {
+        failOnQmlWarnings();
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            "OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        QVariantList peaks;
+        for (int i = 0; i < 96; ++i)
+            peaks.append(40 + (i * 37) % 200);
+        const QStringList names{QString(), QStringLiteral("IMG_2041.jpg"), QStringLiteral("Evening walk.mp4"),
+                                QStringLiteral("Harbour tune.m4a"), QStringLiteral("Trip itinerary.pdf")};
+        const auto bubble = [&](int attachmentKind, int direction, const QString &caption, bool reply,
+                                const QVariantMap &extra = {}) {
+            const bool visual = attachmentKind == 1 || attachmentKind == 2;
+            QVariantMap properties{
+                {"direction", direction}, {"deliveryState", 3}, {"body", caption},
+                {"timestamp", "10:15 AM"}, {"kind", 4}, {"dateLabel", ""},
+                {"showDateDivider", false}, {"senderName", ""}, {"width", 720},
+                {"stableId", "m1"}, {"attachmentKind", attachmentKind},
+                {"fileName", names.value(attachmentKind)}, {"sizeText", "148 KB"},
+                {"mediaWidth", visual ? 1600 : 0}, {"mediaHeight", visual ? 1200 : 0},
+                {"durationMs", attachmentKind == 2 || attachmentKind == 3 ? 42000.0 : 0.0},
+                {"peaks", attachmentKind == 3 ? peaks : QVariantList()}, {"transferState", 1},
+                {"canSave", attachmentKind == 1 || attachmentKind == 4}};
+            if (reply) {
+                properties.insert("replyToId", "m0");
+                properties.insert("quotedSender", "Michael");
+                properties.insert("quotedBody", "Could you send me the plan?");
+            }
+            for (auto it = extra.cbegin(); it != extra.cend(); ++it)
+                properties.insert(it.key(), it.value());
+            return std::unique_ptr<QObject>(component.createWithInitialProperties(properties));
+        };
+        const QStringList blocks{QString(), QStringLiteral("chatImageBlock"), QStringLiteral("chatVideoBlock"),
+                                 QStringLiteral("chatAudioRow"), QStringLiteral("chatFileRow")};
+
+        for (int kind = 1; kind <= 4; ++kind) {
+            for (const int direction : {0, 1}) {
+                for (const bool captioned : {false, true}) {
+                    for (const bool reply : {false, true}) {
+                        const QString label = QStringLiteral("kind %1, %2, %3, %4")
+                            .arg(kind).arg(direction ? "sent" : "received")
+                            .arg(captioned ? "captioned" : "bare").arg(reply ? "reply" : "new");
+                        const auto message = bubble(kind, direction,
+                                                    captioned ? QStringLiteral("The view from the ferry")
+                                                              : QString(), reply);
+                        QVERIFY2(message, qPrintable(component.errorString()));
+                        auto *loader = message->findChild<QQuickItem *>(QStringLiteral("attachmentLoader"));
+                        QVERIFY2(loader && loader->property("status").toInt() == 1, qPrintable(label));
+                        QVERIFY2(loader->findChild<QQuickItem *>(blocks.at(kind)), qPrintable(label));
+                        auto *bubbleItem = message->findChild<QQuickItem *>(QStringLiteral("messageBubble"));
+                        auto *body = message->findChild<QQuickItem *>(QStringLiteral("messageBody"));
+                        auto *time = message->findChild<QQuickItem *>(QStringLiteral("messageTimestamp"));
+                        auto *quote = message->findChild<QQuickItem *>(QStringLiteral("messageQuote"));
+                        QVERIFY(bubbleItem && body && time && quote);
+                        const bool visual = kind == 1 || kind == 2;
+                        const qreal boxWidth = message->property("mediaBoxWidth").toReal();
+                        // The block sits in the bubble, which is as wide as it.
+                        QCOMPARE(loader->width(), boxWidth);
+                        QCOMPARE(bubbleItem->width(), boxWidth + (visual ? 17.0 : 37.0));
+                        QVERIFY2(loader->x() >= bubbleItem->x() && loader->y() >= bubbleItem->y()
+                                     && loader->x() + loader->width() <= bubbleItem->x() + bubbleItem->width()
+                                     && loader->y() + loader->height() <= bubbleItem->y() + bubbleItem->height(),
+                                 qPrintable(label));
+                        if (visual)
+                            QCOMPARE(loader->x() - bubbleItem->x(), direction ? 4.0 : 13.0);
+                        // The caption under it, left-aligned and wrapped to it.
+                        QCOMPARE(body->isVisible(), captioned);
+                        if (captioned) {
+                            QVERIFY(body->y() >= loader->y() + loader->height());
+                            QCOMPARE(body->x(), bubbleItem->x() + message->property("contentLeftInset").toReal());
+                            QVERIFY(body->y() + body->height() <= bubbleItem->y() + bubbleItem->height());
+                        }
+                        // A picture with no caption carries its own time.
+                        QCOMPARE(time->isVisible(), captioned || !visual);
+                        // A reply quotes what it answers, above the block.
+                        QCOMPARE(quote->isVisible(), reply);
+                        if (reply)
+                            QVERIFY(quote->y() + quote->height() <= loader->y());
+                    }
+                }
+            }
+        }
+
+        // Pictures keep their shape between 2:5 and 5:2 inside 320 x 320,
+        // never narrower than 140; an unknown shape is 4:3.
+        const QList<std::tuple<int, int, qreal, qreal>> shapes{
+            {1600, 1200, 320, 240}, {1200, 1600, 240, 320}, {8192, 100, 320, 128},
+            {100, 8192, 140, 320}, {0, 0, 320, 240}, {1080, 1080, 320, 320}};
+        for (const auto &[w, h, expectedWidth, expectedHeight] : shapes) {
+            const auto message = bubble(1, 0, QString(), false, {{"mediaWidth", w}, {"mediaHeight", h}});
+            QVERIFY(message);
+            QCOMPARE(message->property("mediaBoxWidth").toReal(), expectedWidth);
+            QCOMPARE(message->property("mediaBoxHeight").toReal(), expectedHeight);
+        }
+
+        // Under a skin the rows read in the skin's inks, raised.
+        const QString nebula = QStringLiteral("bubble.nebula");
+        appearance->setOwnedCosmetics({nebula});
+        appearance->setBubbleSkin(nebula);
+        {
+            const auto file = bubble(4, 1, QStringLiteral("Here's the plan"), false);
+            auto *name = file->findChild<QQuickItem *>(QStringLiteral("chatFileName"));
+            QVERIFY(name);
+            QCOMPARE(name->property("color").value<QColor>(), OpenChat::BubbleSkins::textColor(nebula));
+            QCOMPARE(name->property("style").toInt(), 2); // Text.Raised
+            const auto sound = bubble(3, 1, QString(), false);
+            auto *clock = sound->findChild<QQuickItem *>(QStringLiteral("chatAudioTime"));
+            QVERIFY(clock);
+            QCOMPARE(clock->property("color").value<QColor>(), OpenChat::BubbleSkins::secondaryTextColor(nebula));
+            for (int kind = 1; kind <= 4; ++kind)
+                QVERIFY(bubble(kind, 1, QStringLiteral("Skinned"), true));
+        }
+        appearance->setBubbleSkin(QString());
+
+        // And in the dark.
+        appearance->setDarkMode(true);
+        for (int kind = 1; kind <= 4; ++kind) {
+            for (const int direction : {0, 1})
+                QVERIFY(bubble(kind, direction, QStringLiteral("In the dark"), kind == 2));
+        }
+        const auto darkFile = bubble(4, 0, QString(), false);
+        QCOMPARE(darkFile->findChild<QQuickItem *>(QStringLiteral("chatFileName"))->property("color").value<QColor>(),
+                 QColor("#e0eaf3"));
+        appearance->setDarkMode(false);
+
+        // Every transfer state renders too: on its way (one's own, with the
+        // cross that stops it), failed, stopped by the sender, unavailable.
+        for (int kind = 0; kind <= 4; ++kind) {
+            for (const int state : {0, 2, 3, 4}) {
+                const auto message = bubble(kind, state == 0 ? 1 : 0, QString(), false,
+                                            {{"transferState", state}, {"transferProgress", 0.4},
+                                             {"transferText", state == 0 ? "Sending… 40%" : "Couldn't receive this file"},
+                                             {"canCancel", state == 0}, {"canSave", false}});
+                QVERIFY(message);
+                auto *cancel = message->findChild<QQuickItem *>(QStringLiteral("cancelAttachment"));
+                QVERIFY2(cancel && cancel->isVisible() == (state == 0), qPrintable(QString::number(kind)));
+            }
+        }
+
+        // A picture of the transfer states, sent and received, in both
+        // themes (only when OPENCHAT_ATTACHMENT_CAPTURES asks for one).
+        if (qEnvironmentVariableIsEmpty("OPENCHAT_ATTACHMENT_CAPTURES"))
+            return;
+        for (const bool dark : {false, true}) {
+            appearance->setDarkMode(dark);
+            std::vector<std::unique_ptr<QObject>> made;
+            QList<QQuickItem *> items;
+            const auto add = [&](int kind, int direction, int state, const QString &text, bool retry = false) {
+                made.push_back(bubble(kind, direction, QString(), false,
+                                      {{"transferState", state}, {"transferProgress", 0.4}, {"transferText", text},
+                                       {"canCancel", state == 0 && direction == 1}, {"canRetry", retry},
+                                       {"canSave", false}, {"width", 640}}));
+                items.append(qobject_cast<QQuickItem *>(made.back().get()));
+            };
+            add(1, 1, 0, QStringLiteral("Sending… 40%"));
+            add(4, 0, 0, QStringLiteral("Receiving… 3 of 7"));
+            add(3, 1, 0, QStringLiteral("Waiting for the call to end"));
+            add(2, 0, 2, QStringLiteral("Couldn't receive this video"));
+            add(4, 1, 3, QStringLiteral("You stopped sending this"), true);
+            add(0, 0, 4, QStringLiteral("Couldn't show this attachment"));
+            captureItems(items, dark ? QStringLiteral("bubble-states-dark") : QStringLiteral("bubble-states-light"),
+                         false, dark ? QColor("#18232e") : QColor("#f8fbfd"));
+        }
+        appearance->setDarkMode(false);
+    }
+
+    // A tray card for every state: a photo or video that is ready (or on
+    // its way) is just its thumbnail, anything with words to show is a wider
+    // card; a card being prepared fills a bar, and one that failed says why in
+    // the error colour. In both themes, and nothing warns.
+    void stagedCardsDrawEveryState()
+    {
+        failOnQmlWarnings();
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            "OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "StagedAttachmentCard");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        putTestPicture(QStringLiteral("test:harbour"), QSize(320, 240), QColor("#f2b48a"), QColor("#4a5d8c"));
+        putTestPicture(QStringLiteral("test:clip"), QSize(320, 180), QColor("#2c3550"), QColor("#7d5a86"));
+        const auto guard = qScopeGuard([] {
+            OpenChat::PanelMediaLibrary::instance().release(QStringLiteral("test:harbour"));
+            OpenChat::PanelMediaLibrary::instance().release(QStringLiteral("test:clip"));
+        });
+
+        struct Card { int kind; QString name; qreal progress; bool ready; bool failed; QString error;
+                      QString notice; QString previewKey; QString durationText; qreal width; };
+        const QList<Card> cards{
+            {1, "Harbour.jpg", 1, true, false, {}, {}, "test:harbour", {}, 60},
+            {2, "Evening walk.mp4", 1, true, false, {}, {}, "test:clip", "0:42", 60},
+            {1, "IMG_2057.jpg", 0.4, false, false, {}, {}, {}, {}, 60},
+            {2, "Holiday.mov", 1, true, false, {}, "Only the first minute will be sent.", "test:clip", "1:00", 256},
+            {3, "Harbour tune.m4a", 1, true, false, {}, {}, {}, "2:05", 200},
+            {4, "Quarterly report.pdf", 0.7, false, false, {}, {}, {}, {}, 200},
+            {4, "Backup.zip", 0, false, true, "Files up to 16 MB can be sent.", {}, {}, {}, 256}};
+        for (const bool dark : {false, true}) {
+            appearance->setDarkMode(dark);
+            std::vector<std::unique_ptr<QQuickItem>> made;
+            QList<QQuickItem *> items;
+            for (int i = 0; i < cards.size(); ++i) {
+                const Card &card = cards.at(i);
+                made.emplace_back(qobject_cast<QQuickItem *>(component.createWithInitialProperties({
+                    {"index", i}, {"stagedId", QString::number(i)}, {"kind", card.kind},
+                    {"name", card.name}, {"sizeText", "2.4 MB"}, {"progress", card.progress},
+                    {"ready", card.ready}, {"failed", card.failed}, {"error", card.error},
+                    {"notice", card.notice}, {"previewKey", card.previewKey},
+                    {"durationText", card.durationText}})));
+                QQuickItem *item = made.back().get();
+                QVERIFY2(item, qPrintable(component.errorString()));
+                QCOMPARE(item->width(), card.width);
+                QCOMPARE(item->height(), 60.0);
+                auto *progress = item->findChild<QQuickItem *>(QStringLiteral("stagedAttachmentProgress"));
+                QVERIFY(progress);
+                QCOMPARE(progress->property("visible").toBool(), !card.ready && !card.failed);
+                if (card.width > 60) {
+                    auto *status = item->findChild<QQuickItem *>(QStringLiteral("stagedAttachmentStatus"));
+                    QVERIFY(status);
+                    if (card.failed) {
+                        QCOMPARE(status->property("text").toString(), card.error);
+                        QCOMPARE(status->property("color").value<QColor>(),
+                                 dark ? QColor("#ffa99e") : QColor("#c0392b"));
+                    } else if (!card.notice.isEmpty()) {
+                        QCOMPARE(status->property("text").toString(), card.notice);
+                    }
+                }
+                items.append(item);
+            }
+            captureItems(items, dark ? QStringLiteral("tray-cards-dark") : QStringLiteral("tray-cards-light"),
+                         true, dark ? QColor("#1e2e3b") : QColor("#eef4f8"));
+        }
+        appearance->setDarkMode(false);
+    }
+
+    // What came from the other side (a file's name, a caption, a sender's
+    // name in the transfer line, a quote) is only ever shown as plain text,
+    // wherever an attachment shows it.
+    void attachmentPeerStringsArePlainText()
+    {
+        failOnQmlWarnings();
+        QQmlEngine engine;
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        QQmlComponent component(&engine);
+        component.loadFromModule("OpenChat", "MessageDelegate");
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+
+        const QString name = QStringLiteral("<font color=\"#ff0000\">invoice</font>.pdf");
+        const QString caption = QStringLiteral("<img src=\"http://example.com/beacon.png\">caption");
+        const QString sender = QStringLiteral("<b>Mallory</b>");
+        for (int kind = 0; kind <= 4; ++kind) {
+            for (const int state : {0, 1, 2}) {
+                std::unique_ptr<QObject> message(component.createWithInitialProperties({
+                    {"direction", 0}, {"deliveryState", 3}, {"body", caption},
+                    {"timestamp", "10:15 AM"}, {"kind", 4}, {"dateLabel", ""},
+                    {"showDateDivider", false}, {"senderName", sender}, {"width", 720},
+                    {"attachmentKind", kind}, {"fileName", name}, {"mimeType", "text/<i>x</i>"},
+                    {"sizeText", "1 MB"}, {"durationMs", 1000.0}, {"transferState", state},
+                    {"transferText", state == 1 ? QString() : QStringLiteral("Waiting for ") + sender},
+                    {"quotedSender", sender}, {"quotedBody", caption}}));
+                QVERIFY2(message, qPrintable(component.errorString()));
+                auto *root = qobject_cast<QQuickItem *>(message.get());
+                for (const QString &needle : {QStringLiteral("<font"), QStringLiteral("<img"),
+                                              QStringLiteral("<b>")}) {
+                    for (QQuickItem *text : textItemsShowing(root, needle)) {
+                        QVERIFY2(text->property("textFormat").toInt() == 0, // PlainText
+                                 qPrintable(QStringLiteral("%1 shows %2 as markup")
+                                                .arg(text->objectName(), needle)));
+                    }
+                }
+                if (kind == 4)
+                    QVERIFY(!textItemsShowing(root, QStringLiteral("<font")).isEmpty());
+            }
+        }
+
+        // The tray's cards and the notice line too.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString odd = dir.filePath(QStringLiteral("<b>odd<b>.txt"));
+        {
+            QFile file(odd);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("x");
+        }
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine app;
+        app.setInitialProperties({{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        app.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        app.loadFromModule("OpenChat", "Main");
+        QCOMPARE(app.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(app.rootObjects().constFirst());
+        QVERIFY(window);
+        controller.attachFiles({QUrl::fromLocalFile(odd)});
+        auto *tray = findVisualItem(window->contentItem(), QStringLiteral("stagedAttachments"));
+        QVERIFY(tray);
+        QTRY_VERIFY(findVisualItem(tray, QStringLiteral("stagedAttachmentName")));
+        QCOMPARE(findVisualItem(tray, QStringLiteral("stagedAttachmentName"))->property("textFormat").toInt(), 0);
+        QCOMPARE(findVisualItem(tray, QStringLiteral("stagedAttachmentStatus"))->property("textFormat").toInt(), 0);
+        for (QQuickItem *text : textItemsShowing(tray, QStringLiteral("odd")))
+            QCOMPARE(text->property("textFormat").toInt(), 0);
+        auto *notice = findVisualItem(window->contentItem(), QStringLiteral("attachmentNoticeText"));
+        QVERIFY(notice);
+        QCOMPARE(notice->property("textFormat").toInt(), 0);
+    }
+
+    // The chat with a sample of every kind (--attachment-demo): each bubble
+    // shows its block, a hovered attachment offers Reply, Copy only with a
+    // caption, never Edit, and Save for a complete photo or file, whose
+    // dialog proposes the file's own name and writes it where asked.
+    void attachmentBubblesInTheChatOfferTheirActions()
+    {
+        failOnQmlWarnings();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        OpenChat::ChatController controller;
+        controller.injectDemoAttachmentsForCapture();
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to hover over");
+        window->resize(1000, 1400);
+        QTest::qWait(100);
+
+        auto *messages = controller.messages();
+        const auto role = [messages](int row, int role) { return messages->data(messages->index(row), role); };
+        const auto rowOf = [&](int attachmentKind, int direction) {
+            for (int row = messages->rowCount() - 1; row >= 0; --row) {
+                if (role(row, OpenChat::MessageListModel::KindRole).toInt() == 4
+                    && role(row, OpenChat::MessageListModel::AttachmentKindRole).toInt() == attachmentKind
+                    && role(row, OpenChat::MessageListModel::DirectionRole).toInt() == direction
+                    && role(row, OpenChat::MessageListModel::TransferStateRole).toInt() == 1)
+                    return row;
+            }
+            return -1;
+        };
+        const auto delegateFor = [window](const QString &stableId) -> QQuickItem * {
+            QQuickItem *found = nullptr;
+            const auto visit = [&](const auto &self, QQuickItem *item) -> void {
+                if (item->objectName() == QLatin1String("messageBubble") && item->parentItem()
+                    && item->parentItem()->property("stableId").toString() == stableId)
+                    found = item->parentItem();
+                for (QQuickItem *child : item->childItems())
+                    self(self, child);
+            };
+            visit(visit, window->contentItem());
+            return found;
+        };
+        auto *history = findVisualItem(window->contentItem(), QStringLiteral("messageHistory"));
+        QVERIFY(history);
+        // Scrolls a row into view and returns its delegate, once there.
+        const auto show = [&](int row) {
+            const QString stableId = role(row, OpenChat::MessageListModel::StableIdRole).toString();
+            QMetaObject::invokeMethod(history, "showMessage", Q_ARG(QVariant, stableId));
+            QQuickItem *delegate = nullptr;
+            return QTest::qWaitFor([&] { return (delegate = delegateFor(stableId)) != nullptr; }, 2000)
+                ? delegate : nullptr;
+        };
+        const auto hover = [window](QQuickItem *item) {
+            QTest::mouseMove(window, item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint());
+        };
+        const auto action = [](QQuickItem *delegate, const char *name) {
+            return delegate->findChild<QQuickItem *>(QLatin1String(name));
+        };
+
+        // Every kind is there, each drawn by its own block.
+        const int photoRow = rowOf(1, 0);
+        const int videoRow = rowOf(2, 1);
+        const int audioRow = rowOf(3, 0);
+        const int fileRow = rowOf(4, 1);
+        QVERIFY(photoRow >= 0 && videoRow >= 0 && audioRow >= 0 && fileRow >= 0);
+        QQuickItem *photo = show(photoRow);
+        QVERIFY(photo && photo->findChild<QQuickItem *>(QStringLiteral("chatImageBlock")));
+        QTRY_VERIFY_WITH_TIMEOUT(photo->findChild<QQuickItem *>(QStringLiteral("chatImage"))->property("ready").toBool(),
+                                 10'000);
+        QQuickItem *audio = show(audioRow);
+        QVERIFY(audio && audio->findChild<QQuickItem *>(QStringLiteral("chatAudioRow")));
+        QQuickItem *file = show(fileRow);
+        QVERIFY(file && file->findChild<QQuickItem *>(QStringLiteral("chatFileRow")));
+        QQuickItem *video = show(videoRow);
+        QVERIFY(video && video->findChild<QQuickItem *>(QStringLiteral("chatVideoBlock")));
+        QMetaObject::invokeMethod(history, "positionAtEnd");
+        QTest::qWait(200);
+        captureAttachmentShot(window, QStringLiteral("bubbles-light"));
+
+        // A captioned file: Copy (the caption), Reply and Save; never Edit.
+        file = show(fileRow);
+        hover(file->findChild<QQuickItem *>(QStringLiteral("messageBubble")));
+        QTRY_VERIFY(action(file, "messageActions")->isVisible());
+        QVERIFY(action(file, "messageCopyAction")->isVisible());
+        QVERIFY(action(file, "messageReplyAction")->isVisible());
+        QVERIFY(action(file, "messageSaveAction")->isVisible());
+        QVERIFY(!action(file, "messageEditAction")->isVisible());
+        clickItem(window, action(file, "messageCopyAction"));
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("Here's the plan for Saturday"));
+
+        // A bare sound: Reply only.
+        audio = show(audioRow);
+        hover(audio->findChild<QQuickItem *>(QStringLiteral("messageBubble")));
+        QTRY_VERIFY(action(audio, "messageActions")->isVisible());
+        QVERIFY(!action(audio, "messageCopyAction")->isVisible());
+        QVERIFY(!action(audio, "messageEditAction")->isVisible());
+        QVERIFY(!action(audio, "messageSaveAction")->isVisible());
+        QVERIFY(action(audio, "messageReplyAction")->isVisible());
+
+        // Save asks where, proposing the file's own name, and writes it there.
+        file = show(fileRow);
+        hover(file->findChild<QQuickItem *>(QStringLiteral("messageBubble")));
+        QTRY_VERIFY(action(file, "messageSaveAction")->isVisible());
+        QObject *saveDialog = window->findChild<QObject *>(QStringLiteral("saveAttachmentDialog"));
+        QVERIFY(saveDialog);
+        clickItem(window, action(file, "messageSaveAction"));
+        QTRY_VERIFY(saveDialog->property("visible").toBool());
+        QCOMPARE(saveDialog->property("selectedFile").toUrl().fileName(), QStringLiteral("Trip itinerary.pdf"));
+        const QString target = dir.filePath(QStringLiteral("itinerary.pdf"));
+        saveDialog->setProperty("selectedFile", QUrl::fromLocalFile(target));
+        QMetaObject::invokeMethod(saveDialog, "accepted");
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(target).size() > 0, 10'000);
+        QMetaObject::invokeMethod(saveDialog, "close");
+        QTRY_VERIFY(!saveDialog->property("visible").toBool());
+
+        // The same chat in the dark.
+        OpenChat::AppearanceSettings *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+            "OpenChat.Native", "AppearanceSettings");
+        QVERIFY(appearance);
+        appearance->setDarkMode(true);
+        QMetaObject::invokeMethod(history, "positionAtEnd");
+        QTest::qWait(200);
+        captureAttachmentShot(window, QStringLiteral("bubbles-dark"));
+        appearance->setDarkMode(false);
+    }
+
+    // A photo whose bytes finish arriving while its bubble is on screen
+    // shows whole there without anything being rebuilt: the bubble's media
+    // handle follows the transfer state, dropping the whole picture while it
+    // is on its way and fetching it once it is here.
+    void aPhotoThatFinishesArrivingOnScreenShowsWhole()
+    {
+        failOnQmlWarnings();
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString picture = writeTestPicture(dir, QStringLiteral("arriving.png"), QColor("#6a9cc8"));
+        QVERIFY(!picture.isEmpty());
+        OpenChat::ChatController controller;
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform");
+
+        controller.attachFiles({QUrl::fromLocalFile(picture)});
+        auto *staged = qobject_cast<QAbstractItemModel *>(controller.stagedAttachments());
+        QVERIFY(staged);
+        QTRY_VERIFY_WITH_TIMEOUT(staged->rowCount() == 1
+                                     && staged->data(staged->index(0, 0), staged->roleNames().key("ready")).toBool(),
+                                 20'000);
+        auto *messages = controller.messages();
+        const int before = messages->rowCount();
+        QVERIFY(controller.sendMessage());
+        QTRY_COMPARE(messages->rowCount(), before + 1);
+        const QString id = messages->data(messages->index(before), OpenChat::MessageListModel::StableIdRole).toString();
+        QCOMPARE(messages->data(messages->index(before), OpenChat::MessageListModel::AttachmentKindRole).toInt(), 1);
+        // On its way: three of seven parts here.
+        QVERIFY(messages->updateTransfer(id, OpenChat::AttachmentTransferState::Transferring, 0, 3, 7));
+
+        QQuickItem *block = nullptr;
+        QTRY_VERIFY(([&] {
+            const auto visit = [&](const auto &self, QQuickItem *item) -> void {
+                auto *owner = item->property("row").value<QQuickItem *>();
+                if (item->objectName() == QLatin1String("chatImageBlock") && owner
+                    && owner->property("stableId").toString() == id)
+                    block = item;
+                for (QQuickItem *child : item->childItems())
+                    self(self, child);
+            };
+            visit(visit, window->contentItem());
+            return block != nullptr;
+        }()));
+        auto *image = block->findChild<QQuickItem *>(QStringLiteral("chatImage"));
+        auto *overlay = block->findChild<QQuickItem *>(QStringLiteral("chatTransferOverlay"));
+        QQuickItem *holder = block;
+        while (holder && holder->objectName() != QLatin1String("attachmentBlock"))
+            holder = holder->parentItem();
+        QVERIFY(image && overlay && holder);
+        auto *media = holder->findChild<QObject *>(QStringLiteral("attachmentMedia"));
+        QVERIFY(media);
+        QTRY_VERIFY(overlay->isVisible());
+        QTRY_VERIFY(media->property("imageKey").toString().isEmpty());
+        QVERIFY(!image->property("ready").toBool());
+
+        // The last part lands: the same bubble fetches and shows the photo.
+        QVERIFY(messages->updateTransfer(id, OpenChat::AttachmentTransferState::Ready, 0, 7, 7));
+        QTRY_VERIFY_WITH_TIMEOUT(!media->property("imageKey").toString().isEmpty(), 10'000);
+        QTRY_VERIFY_WITH_TIMEOUT(image->property("ready").toBool(), 10'000);
+        QVERIFY(!overlay->isVisible());
+    }
+
+    // A sound in the chat plays in the chat's one player, not in its bubble:
+    // the bubble shows what the player does (pause, the bars filling, the
+    // time), the sound keeps playing after its bubble has scrolled away, and
+    // it stops when a call starts or another chat opens.
+    void aSoundPlaysInTheChatsOnePlayerAndOutlivesItsBubble()
+    {
+        failOnQmlWarnings();
+        QIODevice *stream = nullptr;
+        int streamChannels = 0;
+        OpenChat::SongPlayer::setOutputFactoryForTesting([&stream, &streamChannels](int channels, QString &) {
+            streamChannels = channels;
+            return std::make_unique<SilentSongOutput>(channels, &stream);
+        });
+        const auto restore = qScopeGuard([] { OpenChat::SongPlayer::setOutputFactoryForTesting({}); });
+        OpenChat::ChatController controller;
+        controller.injectDemoAttachmentsForCapture();
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to click into");
+        window->resize(1000, 1200);
+        QTest::qWait(100);
+
+        auto *messages = controller.messages();
+        QString id;
+        for (int row = 0; row < messages->rowCount(); ++row) {
+            if (messages->data(messages->index(row), OpenChat::MessageListModel::AttachmentKindRole).toInt() == 3)
+                id = messages->data(messages->index(row), OpenChat::MessageListModel::StableIdRole).toString();
+        }
+        if (id.isEmpty())
+            QSKIP("This build made no sample sound");
+        auto *history = findVisualItem(window->contentItem(), QStringLiteral("messageHistory"));
+        QObject *player = history->findChild<QObject *>(QStringLiteral("chatAudioPlayer"));
+        QVERIFY(history && player);
+        const auto rowFor = [window, &id]() -> QQuickItem * {
+            QQuickItem *found = nullptr;
+            const auto visit = [&](const auto &self, QQuickItem *item) -> void {
+                auto *owner = item->property("row").value<QQuickItem *>();
+                if (item->objectName() == QLatin1String("chatAudioRow") && owner
+                    && owner->property("stableId").toString() == id)
+                    found = item;
+                for (QQuickItem *child : item->childItems())
+                    self(self, child);
+            };
+            visit(visit, window->contentItem());
+            return found;
+        };
+        QMetaObject::invokeMethod(history, "showMessage", Q_ARG(QVariant, id));
+        QQuickItem *row = nullptr;
+        QTRY_VERIFY((row = rowFor()));
+        auto *play = row->findChild<QQuickItem *>(QStringLiteral("chatAudioPlay"));
+        auto *time = row->findChild<QQuickItem *>(QStringLiteral("chatAudioTime"));
+        QVERIFY(play && time);
+        QTest::qWait(200);
+
+        // Play: the chat's player loads this sound and plays it; the bubble
+        // says so and follows it along.
+        clickItem(window, play);
+        QTRY_COMPARE(player->property("activeId").toString(), id);
+        QTRY_VERIFY(player->property("playing").toBool());
+        QVERIFY(row->property("playing").toBool());
+        QTRY_VERIFY(stream != nullptr);
+        stream->read(qint64(48000) * 2 * streamChannels * 2); // two seconds of it
+        QTRY_VERIFY(row->property("positionMs").toReal() >= 1500);
+        QVERIFY(time->property("text").toString().startsWith(QStringLiteral("0:0")));
+        captureAttachmentShot(window, QStringLiteral("audio-playing"));
+
+        // Its bubble scrolls away and is gone; the sound plays on.
+        window->resize(1000, 560);
+        QMetaObject::invokeMethod(history, "showMessage",
+                                  Q_ARG(QVariant, messages->data(messages->index(0),
+                                                                 OpenChat::MessageListModel::StableIdRole)));
+        QTRY_VERIFY(rowFor() == nullptr);
+        QVERIFY(player->property("playing").toBool());
+        QCOMPARE(player->property("activeId").toString(), id);
+
+        // A call silences it.
+        history->setProperty("callActive", true);
+        QTRY_VERIFY(!player->property("playing").toBool());
+        history->setProperty("callActive", false);
+
+        // Another chat stops it for good.
+        window->resize(1000, 1200);
+        QTest::qWait(100);
+        QMetaObject::invokeMethod(history, "showMessage", Q_ARG(QVariant, id));
+        QTRY_VERIFY((row = rowFor()));
+        QTest::qWait(100);
+        if (!player->property("playing").toBool())
+            clickItem(window, row->findChild<QQuickItem *>(QStringLiteral("chatAudioPlay")));
+        QTRY_VERIFY(player->property("playing").toBool());
+        QVERIFY(controller.selectContact(QStringLiteral("alex")));
+        QTRY_VERIFY(!player->property("playing").toBool());
+        QCOMPARE(player->property("activeId").toString(), QString());
+    }
+
+    // A photo opens large over the window from its bubble, holding its own
+    // copy of the picture; Esc, a click outside it or the cross put it away,
+    // and hiding the messages (a lock) takes it away at once with everything
+    // it held. While it is up, Ctrl+I opens no profile over it. A video opens
+    // playing, with its controls under it.
+    void theViewerOpensPicturesLargeAndGoesWhenTheMessagesAreHidden()
+    {
+        failOnQmlWarnings();
+        OpenChat::ChatController controller;
+        controller.injectDemoAttachmentsForCapture();
+        QQmlApplicationEngine engine;
+        engine.setInitialProperties(
+            {{QStringLiteral("chatController"), QVariant::fromValue(&controller)}});
+        engine.addImportPath(QStringLiteral(OPENCHAT_SOURCE_DIR "/qml"));
+        engine.loadFromModule("OpenChat", "Main");
+        QCOMPARE(engine.rootObjects().size(), 1);
+        QQuickWindow *window = showActiveWindow(engine.rootObjects().constFirst());
+        if (!window)
+            QSKIP("No active window on this platform to click into");
+        window->resize(1000, 900);
+        QTest::qWait(100);
+
+        auto *messages = controller.messages();
+        int photoRow = -1;
+        int videoRow = -1;
+        for (int row = 0; row < messages->rowCount(); ++row) {
+            const QModelIndex index = messages->index(row);
+            if (messages->data(index, OpenChat::MessageListModel::TransferStateRole).toInt() != 1)
+                continue;
+            const int kind = messages->data(index, OpenChat::MessageListModel::AttachmentKindRole).toInt();
+            if (kind == 1 && photoRow < 0)
+                photoRow = row;
+            if (kind == 2 && videoRow < 0)
+                videoRow = row;
+        }
+        QVERIFY(photoRow >= 0);
+        const auto idOf = [messages](int row) {
+            return messages->data(messages->index(row), OpenChat::MessageListModel::StableIdRole).toString();
+        };
+        auto *history = findVisualItem(window->contentItem(), QStringLiteral("messageHistory"));
+        auto *viewer = findVisualItem(window->contentItem(), QStringLiteral("chatMediaViewer"));
+        auto *input = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("messageInput")));
+        QVERIFY(history && viewer && input);
+        QVERIFY(!viewer->isVisible());
+        // Scrolls a row into view and returns its attachment block, once there.
+        const auto blockOf = [&](int row, const char *name) -> QQuickItem * {
+            QMetaObject::invokeMethod(history, "showMessage", Q_ARG(QVariant, idOf(row)));
+            QQuickItem *block = nullptr;
+            const auto find = [&] {
+                const auto visit = [&](const auto &self, QQuickItem *item) -> void {
+                    auto *owner = item->property("row").value<QQuickItem *>();
+                    if (item->objectName() == QLatin1String(name) && owner
+                        && owner->property("stableId").toString() == idOf(row))
+                        block = item;
+                    for (QQuickItem *child : item->childItems())
+                        self(self, child);
+                };
+                visit(visit, window->contentItem());
+                return block != nullptr;
+            };
+            return QTest::qWaitFor(find, 2000) ? block : nullptr;
+        };
+
+        QQuickItem *photo = blockOf(photoRow, "chatImageBlock");
+        QVERIFY(photo);
+        QTest::qWait(250);
+        clickItem(window, photo);
+        QTRY_VERIFY(viewer->property("expanded").toBool());
+        QVERIFY(viewer->isVisible());
+        QCOMPARE(viewer->property("stableId").toString(), idOf(photoRow));
+        auto *picture = findVisualItem(viewer, QStringLiteral("chatMediaViewerImage"));
+        QVERIFY(picture);
+        QTRY_VERIFY_WITH_TIMEOUT(picture->property("ready").toBool(), 10'000);
+        QTest::qWait(300);
+        captureAttachmentShot(window, QStringLiteral("viewer-photo"));
+        if (!qEnvironmentVariableIsEmpty("OPENCHAT_ATTACHMENT_CAPTURES")) {
+            auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+                "OpenChat.Native", "AppearanceSettings");
+            appearance->setDarkMode(true);
+            QTest::qWait(100);
+            captureAttachmentShot(window, QStringLiteral("viewer-photo-dark"));
+            appearance->setDarkMode(false);
+        }
+        // Ctrl+I opens no profile over it; Esc closes it and hands the
+        // keyboard back to the field.
+        QTest::keyClick(window, Qt::Key_I, Qt::ControlModifier);
+        QTest::qWait(50);
+        QVERIFY(!controller.profiles()->property("open").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!viewer->property("expanded").toBool());
+        QTRY_VERIFY(!viewer->isVisible());
+        QCOMPARE(viewer->property("stableId").toString(), QString());
+        QTRY_VERIFY(input->hasActiveFocus());
+
+        // A click outside the picture closes it too.
+        photo = blockOf(photoRow, "chatImageBlock");
+        clickItem(window, photo);
+        QTRY_VERIFY(viewer->property("expanded").toBool());
+        QTest::qWait(300);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, QPoint(12, window->height() - 12));
+        QTRY_VERIFY(!viewer->isVisible());
+
+        // A lock takes it away at once, with the picture it held.
+        photo = blockOf(photoRow, "chatImageBlock");
+        clickItem(window, photo);
+        QTRY_VERIFY(viewer->property("expanded").toBool());
+        auto *media = viewer->findChild<QObject *>(QStringLiteral("chatMediaViewerMedia"));
+        QVERIFY(media);
+        QTRY_VERIFY(!media->property("imageKey").toString().isEmpty());
+        controller.setSessionState(OpenChat::ChatController::SessionState::Locked);
+        QVERIFY(!viewer->isVisible());
+        QCOMPARE(viewer->property("stableId").toString(), QString());
+        QTRY_VERIFY(media->property("imageKey").toString().isEmpty());
+        controller.setSessionState(OpenChat::ChatController::SessionState::Ready);
+
+        // A video opens playing, its controls under it.
+        if (videoRow < 0 || !controller.videoAttachmentsSupported())
+            return;
+        QQuickItem *video = blockOf(videoRow, "chatVideoBlock");
+        QVERIFY(video);
+        QTest::qWait(250);
+        clickItem(window, video);
+        QTRY_VERIFY(viewer->property("expanded").toBool());
+        auto *controls = findVisualItem(viewer, QStringLiteral("chatMediaViewerControls"));
+        QVERIFY(controls);
+        QTRY_VERIFY(controls->isVisible());
+        QTRY_VERIFY_WITH_TIMEOUT(viewer->findChild<QObject *>(QStringLiteral("chatMediaViewerPlayer")), 15'000);
+        QObject *player = viewer->findChild<QObject *>(QStringLiteral("chatMediaViewerPlayer"));
+        QTRY_VERIFY_WITH_TIMEOUT(player->property("hasPicture").toBool(), 15'000);
+        QTest::qWait(300);
+        captureAttachmentShot(window, QStringLiteral("viewer-video"));
+        if (!qEnvironmentVariableIsEmpty("OPENCHAT_ATTACHMENT_CAPTURES")) {
+            auto *appearance = engine.singletonInstance<OpenChat::AppearanceSettings *>(
+                "OpenChat.Native", "AppearanceSettings");
+            appearance->setDarkMode(true);
+            QTest::qWait(100);
+            captureAttachmentShot(window, QStringLiteral("viewer-video-dark"));
+            appearance->setDarkMode(false);
+        }
+        // Its play button pauses it where it is.
+        clickItem(window, findVisualItem(viewer, QStringLiteral("chatMediaViewerPlay")));
+        QTRY_VERIFY(player->property("paused").toBool());
+        clickItem(window, findVisualItem(viewer, QStringLiteral("chatMediaViewerClose")));
+        QTRY_VERIFY(!viewer->isVisible());
     }
 
     void messageActionsSitInTheGapAndDriveEditAndReply()

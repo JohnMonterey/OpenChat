@@ -55,6 +55,7 @@
 #include "call/QtAudioIo.h"
 #include "call/SyncCallTransport.h"
 #include "controllers/CallController.h"
+#include "controllers/ChatAttachmentMedia.h"
 #include "controllers/ChatController.h"
 #include "controllers/ContactController.h"
 #include "controllers/CrashReportController.h"
@@ -184,6 +185,8 @@ void registerQmlTypes()
     qmlRegisterType<OpenChat::AvatarArtwork>("OpenChat.Native", 1, 0, "AvatarArtwork");
     qmlRegisterType<OpenChat::ComposerEditing>("OpenChat.Native", 1, 0, "ComposerEditing");
     qmlRegisterType<OpenChat::TextLineSpacing>("OpenChat.Native", 1, 0, "TextLineSpacing");
+    // What a chat attachment's bubble shows (docs/chat-attachments.md).
+    qmlRegisterType<OpenChat::ChatAttachmentMedia>("OpenChat.Native", 1, 0, "ChatAttachmentMedia");
     // Avatar frames, presence beads, name flair and profile scenes.
     OpenChat::registerCosmeticQmlTypes();
     // The profile pages' painted pieces, song player and Profile enums. Their
@@ -227,16 +230,17 @@ void applyWindowSizing(QCommandLineParser &parser, QQuickWindow *window,
 }
 
 // Schedules a one-shot window grab when --capture is set, exiting the process
-// with the grab's success. Byte-for-byte the historical capture behaviour.
+// with the grab's success. Byte-for-byte the historical capture behaviour, but
+// never sooner than `minimumDelay` (for a surface that animates into place).
 void scheduleCaptureIfRequested(QCommandLineParser &parser, QQuickWindow *window,
                                 const QCommandLineOption &captureOption,
-                                const QCommandLineOption &delayOption)
+                                const QCommandLineOption &delayOption, int minimumDelay = 0)
 {
     if (!parser.isSet(captureOption))
         return;
     bool delayValid = false;
     const int requestedDelay = parser.value(delayOption).toInt(&delayValid);
-    const int delay = delayValid ? std::max(0, requestedDelay) : 500;
+    const int delay = std::max(minimumDelay, delayValid ? std::max(0, requestedDelay) : 500);
     const QString capturePath = QDir::current().absoluteFilePath(parser.value(captureOption));
     QTimer::singleShot(delay, window, [window, capturePath] {
         const bool saved = window->grabWindow().save(capturePath, "PNG");
@@ -245,14 +249,18 @@ void scheduleCaptureIfRequested(QCommandLineParser &parser, QQuickWindow *window
 }
 
 // Profile pages keep their media uploads and their answers to page requests
-// back while a call rings, runs or is just over, so the call keeps the link.
-// Every surface that has both controllers wires this the same way.
+// back while a call rings, runs or is just over, so the call keeps the link;
+// chat attachments hold their bytes back the same way. Every surface that has
+// both controllers wires this the same way.
 void followCallsInProfiles(OpenChat::ChatController &chats, OpenChat::CallController &calls)
 {
     OpenChat::ProfileController *profiles = chats.profiles();
     profiles->setCallActive(calls.inCall());
     QObject::connect(&calls, &OpenChat::CallController::callChanged, profiles,
                      [profiles, &calls] { profiles->setCallActive(calls.inCall()); });
+    chats.setCallActive(calls.inCall());
+    QObject::connect(&calls, &OpenChat::CallController::callChanged, &chats,
+                     [&chats, &calls] { chats.setCallActive(calls.inCall()); });
 }
 
 // The first item named `name` in the window's visual tree, depth first.
@@ -1136,6 +1144,46 @@ int runChatWindow(QGuiApplication &application, QCommandLineParser &parser,
     return application.exec();
 }
 
+// Loads the chat window on the reference mock with the attachment surfaces up:
+// --attachment-menu opens the composer's attach menu over its "+", and
+// --attachment-demo fills the open chat with sample attachments of every kind
+// (made in-process; the reference conversation is otherwise untouched) and
+// puts a photo in the tray. Preview paths used to launch and capture them.
+int runAttachmentWindow(QGuiApplication &application, QCommandLineParser &parser,
+                        const QCommandLineOption &captureOption,
+                        const QCommandLineOption &delayOption,
+                        const QCommandLineOption &widthOption,
+                        const QCommandLineOption &heightOption, bool menu, bool demo)
+{
+    OpenChat::ChatController chatController;
+    if (demo)
+        chatController.injectDemoAttachmentsForCapture();
+    QQmlApplicationEngine engine;
+    engine.setInitialProperties(
+        {{QStringLiteral("chatController"), QVariant::fromValue(&chatController)}});
+    QObject::connect(
+        &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
+        [] { QCoreApplication::exit(EXIT_FAILURE); }, Qt::QueuedConnection);
+    engine.loadFromModule("OpenChat", "Main");
+
+    if (engine.rootObjects().isEmpty())
+        return EXIT_FAILURE;
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window)
+        return EXIT_FAILURE;
+
+    applyWindowSizing(parser, window, widthOption, heightOption);
+    if (menu) {
+        // Opened once the window is laid out, so it rises from where the "+"
+        // really is.
+        if (auto *attachMenu = window->findChild<QObject *>(QStringLiteral("attachmentMenu")))
+            QMetaObject::invokeMethod(attachMenu, "open", Qt::QueuedConnection);
+    }
+    // The menu takes a moment to rise into place, row after row.
+    scheduleCaptureIfRequested(parser, window, captureOption, delayOption, menu ? 700 : 0);
+    return application.exec();
+}
+
 // Loads the onboarding surface directly with a preview OnboardingController (the
 // default placeholder Starter, no real services). Committable preview path used
 // to launch and capture the onboarding screens.
@@ -1820,6 +1868,13 @@ int main(int argc, char *argv[])
         QStringLiteral("call-zoom"),
         QStringLiteral("Preview the far end's share or camera enlarged over the window "
                        "(combine with --call-video or --call-screen)."));
+    const QCommandLineOption attachmentMenuOption(
+        QStringLiteral("attachment-menu"),
+        QStringLiteral("Preview the composer's attach menu, open over its \"+\"."));
+    const QCommandLineOption attachmentDemoOption(
+        QStringLiteral("attachment-demo"),
+        QStringLiteral("Preview a chat with a photo, a video, a sound and a file in it (sent and "
+                       "received, one still arriving) and a photo waiting to be sent."));
     const QCommandLineOption profileOption(
         QStringLiteral("profile"),
         QStringLiteral("Preview a contact's profile page in the style of preset <slug>: %1.")
@@ -1848,7 +1903,7 @@ int main(int argc, char *argv[])
                        callIncomingOption, callVideoOption, callGroupOption, callScreenOption,
                        callPickerOption, callFullscreenOption, callZoomOption, profileOption,
                        crashReportOption, crashTestOption, screenCheckOption,
-                       uglyVoiceDebugOption});
+                       uglyVoiceDebugOption, attachmentMenuOption, attachmentDemoOption});
     parser.process(application);
 
     registerQmlTypes();
@@ -1917,6 +1972,14 @@ int main(int argc, char *argv[])
                              parser.isSet(callGroupOption), parser.isSet(callScreenOption),
                              parser.isSet(callPickerOption), parser.isSet(callFullscreenOption),
                              parser.isSet(callZoomOption), uglyVoiceDebug);
+
+    // Attachment preview: the attach menu open, or a chat full of sample
+    // attachments, checked before the plain capture path so --attachment-menu
+    // --capture routes here.
+    if (parser.isSet(attachmentMenuOption) || parser.isSet(attachmentDemoOption))
+        return runAttachmentWindow(application, parser, captureOption, delayOption, widthOption,
+                                   heightOption, parser.isSet(attachmentMenuOption),
+                                   parser.isSet(attachmentDemoOption));
 
     // Capture path: render the chat window exactly as before.
     if (parser.isSet(captureOption))

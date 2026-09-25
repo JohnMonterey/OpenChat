@@ -66,6 +66,7 @@
 #include <QSqlQuery>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QUrl>
 #include <QUuid>
 #include <QtTest/QtTest>
 
@@ -687,6 +688,49 @@ void EndToEndTest::pipelineDeliversMessagesOverRealTls()
     QCOMPARE(aliceReceived->flow, MessageFlow::Incoming);
     QCOMPARE(aliceReceived->conversationId.bytes(), conversation.bytes());
     QCOMPARE(aliceChat.messages()->rowCount(), 2);
+
+    // --- A photo from Alice's tray to Bob's bubble: prepared, sealed into her
+    //     attachment store, its message through MLS and its preview and parts
+    //     as sealed frames, all over the same live stream. ---
+    QTemporaryDir photoDir;
+    QVERIFY(photoDir.isValid());
+    QImage harbour(640, 480, QImage::Format_RGB32);
+    for (int y = 0; y < harbour.height(); ++y) {
+        for (int x = 0; x < harbour.width(); ++x)
+            harbour.setPixel(x, y, qRgb(x * 255 / 640, y * 255 / 480, 160));
+    }
+    const QString photoPath = photoDir.filePath(QStringLiteral("harbour.png"));
+    QVERIFY(harbour.save(photoPath, "PNG"));
+    aliceChat.attachFiles({QUrl::fromLocalFile(photoPath)});
+    QVERIFY(aliceChat.hasStagedAttachments());
+    QTRY_VERIFY_WITH_TIMEOUT(!aliceChat.stagingBusy(), 30000);
+    aliceChat.setComposerText(QStringLiteral("The harbour"));
+    QVERIFY(aliceChat.sendMessage());
+    QTRY_COMPARE_WITH_TIMEOUT(bobChat.messages()->rowCount(), 3, 30000);
+    const auto bobRow = [&](int role) { return bobChat.messages()->data(bobChat.messages()->index(2), role); };
+    const auto aliceRow = [&](int role) {
+        return aliceChat.messages()->data(aliceChat.messages()->index(2), role);
+    };
+    QCOMPARE(bobRow(MessageListModel::KindRole).toInt(), static_cast<int>(MessageKind::Attachment));
+    QCOMPARE(bobRow(MessageListModel::AttachmentKindRole).toInt(), 1);
+    QCOMPARE(bobRow(MessageListModel::BodyRole).toString(), QStringLiteral("The harbour"));
+    QCOMPARE(bobRow(MessageListModel::MediaWidthRole).toInt(), 640);
+    QCOMPARE(bobRow(MessageListModel::MediaHeightRole).toInt(), 480);
+    QTRY_COMPARE_WITH_TIMEOUT(bobRow(MessageListModel::TransferStateRole).toInt(),
+                              static_cast<int>(AttachmentTransferState::Ready), 30000);
+    QTRY_COMPARE_WITH_TIMEOUT(aliceRow(MessageListModel::TransferStateRole).toInt(),
+                              static_cast<int>(AttachmentTransferState::Ready), 30000);
+    const QString photoId = bobRow(MessageListModel::StableIdRole).toString();
+    QCOMPARE(aliceRow(MessageListModel::StableIdRole).toString(), photoId);
+    QVERIFY(!bobChat.attachmentPreview(photoId).isEmpty());
+    std::optional<QByteArray> bobPhoto;
+    std::optional<QByteArray> alicePhoto;
+    bobChat.loadAttachmentBlob(photoId, &bobChat, [&](const QByteArray &blob) { bobPhoto = blob; });
+    aliceChat.loadAttachmentBlob(photoId, &aliceChat, [&](const QByteArray &blob) { alicePhoto = blob; });
+    QTRY_VERIFY_WITH_TIMEOUT(bobPhoto.has_value() && alicePhoto.has_value(), 30000);
+    QVERIFY(bobPhoto->startsWith("\xFF\xD8"));
+    QCOMPARE(*bobPhoto, *alicePhoto);
+    QCOMPARE(QImage::fromData(*bobPhoto).size(), QSize(640, 480));
 
     // --- Reverse directory lookup: Bob learns Alice's handle from her id. ---
     std::optional<QString> resolvedHandle;

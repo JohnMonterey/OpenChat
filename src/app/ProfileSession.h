@@ -82,6 +82,10 @@ public:
   // The local profile this session opens; fixed for the session's lifetime,
   // readable even while locked.
   [[nodiscard]] ProfileId profileId() const noexcept;
+  // The directory the profile's files live in (its database, and chat
+  // attachments' sealed bytes under attachments/); removing the profile
+  // removes it whole.
+  [[nodiscard]] QString profileDirectory() const;
   [[nodiscard]] Result<DevicePublicCredential, ProfileSessionError>
   publicCredential() const;
   [[nodiscard]] Result<QByteArray, ProfileSessionError>

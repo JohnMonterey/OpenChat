@@ -26,11 +26,42 @@ Item {
     // This device is changing the text in the composer: the bubble says so in
     // place of the text. Everyone else still sees the message as it was.
     property bool editing: false
+    // An attachment (kind 4, its caption the body): what it is, from its
+    // descriptor, and how its transfer stands. The bubble draws it with
+    // AttachmentBlock, loaded only for such a message, so a bubble on its own
+    // never needs the media types.
+    property int attachmentKind: 0
+    property string fileName: ""
+    property string mimeType: ""
+    property real byteCount: 0
+    property string sizeText: ""
+    property int mediaWidth: 0
+    property int mediaHeight: 0
+    property real durationMs: 0
+    property var peaks: []
+    property int transferState: 1
+    property int transferReason: 0
+    property real transferProgress: 0
+    property string transferText: ""
+    property bool hasPreview: false
+    property int previewRevision: 0
+    property bool canCancel: false
+    property bool canRetry: false
+    property bool canSave: false
+    // The chat's controller (for the attachment's media) and its one audio
+    // player; null for a bubble on its own.
+    property var chatController: null
+    property var chatAudio: null
     // The actions under a hovered message, and a click on a reply's quote.
     signal copyRequested
     signal editRequested
     signal replyRequested
     signal quoteActivated
+    // An attachment's: a photo or video asked to be opened large (from
+    // `source`, the picture in the bubble), Save, and stopping its sending.
+    signal mediaOpened(Item source)
+    signal saveRequested
+    signal cancelRequested
     // Selecting text gives the message the keyboard, for Ctrl+C. Anything
     // typed then is meant for the composer: it goes there, with the keyboard
     // (empty text for Esc).
@@ -39,7 +70,8 @@ Item {
     readonly property bool eventRow: kind === 2 || kind === 3
     readonly property bool callEvent: kind === 3
     readonly property bool showSender: !eventRow && !outgoing && senderName.length > 0
-    readonly property bool isReply: kind === 0 && (quotedSender.length > 0 || quotedBody.length > 0)
+    readonly property bool attachment: kind === 4
+    readonly property bool isReply: (kind === 0 || attachment) && (quotedSender.length > 0 || quotedBody.length > 0)
     readonly property string shownText: editing ? "editing..." : body
     // Who sent an incoming message (account hex), to wear their skin.
     property string senderAccount: ""
@@ -65,15 +97,44 @@ Item {
     // A reply's quote sits above its text; a short answer to a long message
     // still leaves the quote room to be read.
     readonly property real quoteHeight: isReply ? 40 : 0
+    // An attachment's block. A photo or a video keeps its own shape (4:3
+    // while unknown), held between a tall 2:5 and a wide 5:2 and fitted into
+    // 320 x 320, never narrower than 140; it sits 4 px inside the bubble's
+    // body. A sound or a file is a row as wide as a short message, inside the
+    // text's padding. Either way the bubble is as wide as the block and a
+    // caption wraps to it; without a caption a picture's bubble ends at the
+    // picture (the time rides on it) and a row's at the time under it.
+    readonly property bool visualMedia: attachment && (attachmentKind === 1 || attachmentKind === 2)
+    readonly property bool hasCaption: attachment && body.length > 0
+    readonly property real mediaAspect: mediaWidth > 0 && mediaHeight > 0
+        ? Math.max(0.4, Math.min(2.5, mediaWidth / mediaHeight)) : 4 / 3
+    readonly property real mediaBoxWidth: !attachment ? 0
+        : visualMedia
+          ? Math.round(Math.min(maximumBubbleWidth - bubbleTailWidth - 8,
+                                Math.max(140, Math.min(320, 320 * mediaAspect))))
+          : Math.min(260, maximumBubbleWidth - horizontalContentInset)
+    readonly property real mediaBoxHeight: !attachment ? 0
+        : visualMedia ? Math.round(Math.min(320, mediaBoxWidth / mediaAspect))
+        : attachmentKind === 3 ? 40 : 44
+    readonly property real mediaTop: isReply ? 50 : visualMedia ? 4 : 11
+    readonly property real mediaBottom: mediaTop + mediaBoxHeight
     readonly property real preferredBubbleWidth: kind === 1
         ? 158
-        : Math.max(messageBody.paintedWidth + horizontalContentInset,
-                   messageTime.implicitWidth + horizontalContentInset,
-                   isReply ? Math.min(quote.naturalWidth, 280) + horizontalContentInset : 0)
+        : attachment
+          ? mediaBoxWidth + (visualMedia ? bubbleTailWidth + 8 : horizontalContentInset)
+          : Math.max(messageBody.paintedWidth + horizontalContentInset,
+                     messageTime.implicitWidth + horizontalContentInset,
+                     isReply ? Math.min(quote.naturalWidth, 280) + horizontalContentInset : 0)
     readonly property real bubbleWidth: Math.min(maximumBubbleWidth, preferredBubbleWidth)
     readonly property real bubbleHeight: kind === 1
         ? 54
-        : Math.max(54, quoteHeight + messageBody.paintedHeight + messageTime.implicitHeight + 21)
+        : attachment
+          ? mediaBottom + (hasCaption
+                           ? (visualMedia ? 7 : 6) + messageBody.paintedHeight + messageTime.implicitHeight + 10
+                           : visualMedia ? 4 : messageTime.implicitHeight + 10)
+          : Math.max(54, quoteHeight + messageBody.paintedHeight + messageTime.implicitHeight + 21)
+    // The bubble, for an attachment block to take its skin's colours from.
+    readonly property BubbleBackground bubbleItem: bubble
     readonly property real dateSectionHeight: showDateDivider ? 64 : 0
     // Under the bubble, in order: the retry prompt of a failed send, "edited",
     // and the actions the pointer brings up. The actions live in the gap every
@@ -102,6 +163,7 @@ Item {
         width: delegateRoot.maximumBubbleWidth
         elide: Text.ElideRight
         text: delegateRoot.senderName
+        textFormat: Text.PlainText
         color: Theme.categoryText
         font.family: Theme.uiFont
         font.pixelSize: 12
@@ -112,7 +174,10 @@ Item {
     Text {
         id: retryText
         objectName: "messageRetry"
-        visible: !delegateRoot.eventRow && delegateRoot.outgoing && delegateRoot.deliveryState === 6
+        // An attachment is tried again as a new one (canRetry covers a send
+        // that failed and a transfer that did).
+        visible: !delegateRoot.eventRow && delegateRoot.outgoing
+                 && (delegateRoot.attachment ? delegateRoot.canRetry : delegateRoot.deliveryState === 6)
         anchors.right: bubble.right
         anchors.rightMargin: delegateRoot.bubbleTailWidth
         y: delegateRoot.footerY + 4
@@ -294,6 +359,20 @@ Item {
         }
     }
 
+    // An attachment: the photo, the video, the sound or the file, under the
+    // quote of what it answers. Loaded by URL, and only for an attachment,
+    // so a bubble made on its own never compiles the media types.
+    Loader {
+        id: attachmentLoader
+        objectName: "attachmentLoader"
+        active: delegateRoot.attachment && !delegateRoot.eventRow
+        x: bubble.x + (delegateRoot.visualMedia ? delegateRoot.bodyLeadingInset + 4 : delegateRoot.contentLeftInset)
+        y: bubble.y + delegateRoot.mediaTop
+        width: delegateRoot.mediaBoxWidth
+        height: delegateRoot.mediaBoxHeight
+        Component.onCompleted: setSource(Qt.resolvedUrl("AttachmentBlock.qml"), { row: delegateRoot })
+    }
+
     // On a skin the text is raised, as Text.Raised draws it: the same layout
     // once more in the shadow colour, a pixel lower, under the real text.
     TextEdit {
@@ -323,16 +402,21 @@ Item {
         // The raised look a skin asks for, drawn by bodyShadow.
         property int style: bubble.skinned && !delegateRoot.editing ? Text.Raised : Text.Normal
         property color styleColor: bubble.skinned ? bubble.skinTextShadowColor : "transparent"
-        visible: !delegateRoot.eventRow
-        x: delegateRoot.kind === 1 || delegateRoot.isReply
+        // An attachment's caption, under it; none, and it takes no room.
+        visible: !delegateRoot.eventRow && (!delegateRoot.attachment || delegateRoot.hasCaption)
+        x: delegateRoot.kind === 1 || delegateRoot.isReply || delegateRoot.attachment
             ? bubble.x + delegateRoot.contentLeftInset
             : bubble.x + delegateRoot.contentLeftInset
               + (bubble.width - delegateRoot.horizontalContentInset - paintedWidth) / 2
-        y: bubble.y + (delegateRoot.kind === 1 ? 10 : 11) + delegateRoot.quoteHeight
+        y: delegateRoot.attachment
+            ? bubble.y + delegateRoot.mediaBottom + (delegateRoot.visualMedia ? 7 : 6)
+            : bubble.y + (delegateRoot.kind === 1 ? 10 : 11) + delegateRoot.quoteHeight
         width: delegateRoot.kind === 1
             ? bubble.width - messageTime.implicitWidth - (delegateRoot.outgoing ? 49 : 58)
-            : Math.min(naturalMessageBody.implicitWidth,
-                       delegateRoot.maximumBubbleWidth - delegateRoot.horizontalContentInset)
+            : delegateRoot.attachment
+              ? bubble.width - delegateRoot.horizontalContentInset
+              : Math.min(naturalMessageBody.implicitWidth,
+                         delegateRoot.maximumBubbleWidth - delegateRoot.horizontalContentInset)
         readOnly: true
         selectByMouse: !delegateRoot.editing
         text: delegateRoot.shownText
@@ -368,14 +452,18 @@ Item {
 
     Text {
         id: messageTime
-        visible: !delegateRoot.eventRow
+        // On a photo or a video with no caption the time rides on the
+        // picture instead (AttachmentBlock draws it there).
+        visible: !delegateRoot.eventRow && !(delegateRoot.visualMedia && !delegateRoot.hasCaption)
         objectName: "messageTimestamp"
         x: delegateRoot.kind === 1
             ? bubble.x + bubble.width - implicitWidth - (delegateRoot.outgoing ? 14 : 13)
             : bubble.x + delegateRoot.contentLeftInset
         y: delegateRoot.kind === 1
             ? bubble.y + bubble.height - implicitHeight - 11
-            : messageBody.y + messageBody.paintedHeight + 3
+            : delegateRoot.attachment && !delegateRoot.hasCaption
+              ? bubble.y + delegateRoot.mediaBottom + 3
+              : messageBody.y + messageBody.paintedHeight + 3
         width: delegateRoot.kind === 1
             ? implicitWidth
             : bubble.width - delegateRoot.horizontalContentInset
@@ -407,14 +495,17 @@ Item {
 
     // Copy, edit (one's own messages) and reply: bare glyphs lined up with the
     // text's edge, shown while the pointer is on the message. The hovered one
-    // is named beside the row, on the side away from the bubble's edge.
+    // is named beside the row, on the side away from the bubble's edge. An
+    // attachment copies only its caption (and without one offers no Copy), is
+    // never edited, and a complete photo or file can be saved.
     Item {
         id: actions
         objectName: "messageActions"
         // How far a button's glyph sits inside its slot.
         readonly property real glyphInset: (copyAction.width - copyAction.glyphSize) / 2
         readonly property var hoveredAction: copyAction.hovered ? copyAction
-            : editAction.hovered ? editAction : replyAction.hovered ? replyAction : null
+            : editAction.hovered ? editAction : replyAction.hovered ? replyAction
+            : saveAction.hovered ? saveAction : null
         property bool justCopied: false
         visible: !delegateRoot.eventRow && actionHover.hovered
         x: delegateRoot.outgoing
@@ -433,6 +524,7 @@ Item {
                 objectName: "messageCopyAction"
                 icon: "copy"
                 label: actions.justCopied ? "Copied" : "Copy"
+                visible: !delegateRoot.attachment || delegateRoot.hasCaption
                 height: parent.height
                 onClicked: {
                     delegateRoot.copyRequested();
@@ -445,7 +537,7 @@ Item {
                 objectName: "messageEditAction"
                 icon: "edit"
                 label: "Edit"
-                visible: delegateRoot.editable && !delegateRoot.editing
+                visible: delegateRoot.editable && !delegateRoot.editing && !delegateRoot.attachment
                 height: parent.height
                 onClicked: delegateRoot.editRequested()
             }
@@ -456,6 +548,15 @@ Item {
                 label: "Reply"
                 height: parent.height
                 onClicked: delegateRoot.replyRequested()
+            }
+            MessageActionButton {
+                id: saveAction
+                objectName: "messageSaveAction"
+                icon: "save"
+                label: "Save"
+                visible: delegateRoot.attachment && delegateRoot.canSave
+                height: parent.height
+                onClicked: delegateRoot.saveRequested()
             }
         }
 

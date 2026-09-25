@@ -19,8 +19,11 @@
 
 #include <QVariantList>
 
+#include <functional>
+
 namespace OpenChat {
 
+class ChatAttachments;
 class ContactRequestService;
 class GroupService;
 class ProfileSession;
@@ -106,6 +109,19 @@ class ChatController final : public QObject
     // Profile pages: every surface that shows a person's picture opens their
     // profile through this one instance.
     Q_PROPERTY(OpenChat::ProfileController *profiles READ profiles CONSTANT)
+    // Chat attachments (docs/chat-attachments.md). What the user picked sits
+    // in the tray above the composer (a StagedAttachmentModel) while it is
+    // prepared; a send takes every ready card, the composer's text becoming
+    // the first one's caption. stagingBusy: a card is still being prepared;
+    // sendWhenReady: a send was asked for meanwhile and follows once they all
+    // are. attachmentNotice is a one-line refusal ("Files up to 16 MB can be
+    // sent."), empty when there is nothing to say.
+    Q_PROPERTY(QObject *stagedAttachments READ stagedAttachments CONSTANT)
+    Q_PROPERTY(bool hasStagedAttachments READ hasStagedAttachments NOTIFY stagedAttachmentsChanged)
+    Q_PROPERTY(bool stagingBusy READ stagingBusy NOTIFY stagedAttachmentsChanged)
+    Q_PROPERTY(bool sendWhenReady READ sendWhenReady NOTIFY stagedAttachmentsChanged)
+    Q_PROPERTY(bool videoAttachmentsSupported READ videoAttachmentsSupported CONSTANT)
+    Q_PROPERTY(QString attachmentNotice READ attachmentNotice NOTIFY attachmentNoticeChanged)
 
 public:
     bool conversationVisible() const { return m_conversationVisible; }
@@ -229,7 +245,60 @@ public:
     Q_INVOKABLE bool beginEdit(const QString &messageId);
     Q_INVOKABLE bool beginReply(const QString &messageId);
     Q_INVOKABLE void cancelComposeMode();
+    // An attachment's caption only; false when it has none.
     Q_INVOKABLE bool copyMessage(const QString &messageId);
+
+    // --- Attachments (docs/chat-attachments.md)
+    [[nodiscard]] QObject *stagedAttachments() const;
+    [[nodiscard]] bool hasStagedAttachments() const;
+    [[nodiscard]] bool stagingBusy() const;
+    [[nodiscard]] bool sendWhenReady() const;
+    [[nodiscard]] static bool videoAttachmentsSupported();
+    [[nodiscard]] QString attachmentNotice() const;
+    // Stages local files for the open chat, each prepared as what its name
+    // says it is (a photo, video, audio file or any other file), at most
+    // AttachmentLimits::maxStaged at a time. Anything else (a web address, a
+    // folder, one too many) is left out and attachmentNotice says why.
+    Q_INVOKABLE void attachFiles(const QList<QUrl> &files);
+    // Stages what the clipboard holds: copied local files, or a picture.
+    // False when it holds neither (the field then pastes as usual).
+    Q_INVOKABLE bool attachClipboard();
+    Q_INVOKABLE void removeStagedAttachment(const QString &id);
+    Q_INVOKABLE void clearStagedAttachments();
+    // Stops sending an attachment of the open chat this device is still
+    // sending; its recipients are told. False for anything else.
+    Q_INVOKABLE bool cancelAttachment(const QString &stableId);
+    // Puts an attachment this device failed to send back in the tray (it
+    // goes as a new attachment, under a new id and key) and its caption back
+    // in the composer. False for anything else.
+    Q_INVOKABLE bool retryAttachment(const QString &stableId);
+    // Writes a received or sent photo or file, complete, to `target` (a
+    // local file; a download mark is set where the system has one). Returns
+    // whether the save started; attachmentNotice says if it then fails.
+    Q_INVOKABLE bool saveAttachment(const QString &stableId, const QUrl &target);
+    // The name the Save dialog proposes: the file's own name, or a photo's
+    // with ".jpg" (the photo is a JPEG whatever it was called).
+    Q_INVOKABLE QString suggestedSaveName(const QString &stableId) const;
+    // A complete photo onto the clipboard, as a picture. Returns whether the
+    // copy started.
+    Q_INVOKABLE bool copyAttachmentImage(const QString &stableId);
+    // Where the Save dialog opens: the Downloads folder, as a file URL.
+    Q_INVOKABLE QString attachmentFolderUrl() const;
+    Q_INVOKABLE void clearAttachmentNotice();
+    // For ChatAttachmentMedia, the bubbles' media handles: an attachment's
+    // preview JPEG (empty when it has none yet), and its whole blob, handed
+    // to `done` on this thread once read (empty when it cannot be) unless
+    // `context` is gone by then. Both refuse while plaintext is withheld.
+    [[nodiscard]] QByteArray attachmentPreview(const QString &stableId);
+    void loadAttachmentBlob(const QString &stableId, const QObject *context,
+                            std::function<void(const QByteArray &blob)> done);
+    // While a call rings, runs or is still shown, attachments wait (their
+    // bytes would take the link from it), and their bubbles say so.
+    void setCallActive(bool active);
+    // --attachment-demo: sample attachments of every kind, made here, in the
+    // open mock chat (never in the reference conversation otherwise), with a
+    // photo waiting in the tray. Mock mode only.
+    void injectDemoAttachmentsForCapture();
     Q_INVOKABLE void setSessionState(SessionState state);
     // Opening the Call section (even when it is already open) clears the
     // missed-call count.
@@ -309,6 +378,8 @@ signals:
     void currentSettingsCategoryChanged();
     void groupNoticeChanged();
     void groupCandidatesChanged();
+    void stagedAttachmentsChanged();
+    void attachmentNoticeChanged();
 
     // A message arrived that the desktop should announce: the chat it belongs
     // to (an AccountId hex, the same id selectContact takes), the sender's
@@ -468,6 +539,11 @@ private:
     QHash<QString, LiveGroup> m_liveGroups;        // keyed by "group:" + ConversationId hex
     QHash<QByteArray, QString> m_contactByConversation; // ConversationId bytes -> Contact.id
     int m_mockGroupCounter = 0;
+    // The attachment half of the controller: the tray and its imports, the
+    // sends, the transfers of a live profile and the media the bubbles show.
+    // It reads the state above, so it goes before it.
+    friend class ChatAttachments;
+    std::unique_ptr<ChatAttachments> m_attachments;
     // Declared last, so it is destroyed first: it reads the roster and the
     // local profile above until its very end (its destructor saves the
     // editor's pending draft). Not a QObject child, for the same reason.

@@ -2,13 +2,13 @@ import QtQuick
 import QtQuick.Shapes
 import OpenChat
 
-// One bare glyph in the row under a hovered message: copy, edit or reply.
-// The glyph is drawn small so the row fits in the gap every message already
-// leaves below it; the whole slot around it, wider and taller than the
-// glyph, takes the click. The row names the hovered action beside itself.
+// One bare glyph in the row under a hovered message: copy, edit, reply or
+// save. The glyph is drawn small so the row fits in the gap every message
+// already leaves below it; the whole slot around it, wider and taller than
+// the glyph, takes the click. The row names the hovered action beside itself.
 Item {
     id: action
-    // "copy", "edit" or "reply".
+    // "copy", "edit", "reply" or "save".
     property string icon: "copy"
     // What the action does, for the row's caption and for screen readers.
     property string label: ""
@@ -43,8 +43,11 @@ Item {
                       : action.icon === "reply"
                         // An arrow turning back to the left.
                         ? "M 4.2 1.8 L 1 5 L 4.2 8.2 M 1 5 H 6.5 A 3.5 3.5 0 0 1 10 8.5 V 10"
-                        // Two sheets, one behind the other.
-                        : "M 1 3.6 H 7.4 V 10 H 1 Z M 3.6 3.6 V 1 H 10 V 7.4 H 7.4"
+                        : action.icon === "save"
+                          // An arrow down into a tray.
+                          ? "M 5.5 1 V 7 M 2.8 4.4 L 5.5 7 L 8.2 4.4 M 1 7.4 V 10 H 10 V 7.4"
+                          // Two sheets, one behind the other.
+                          : "M 1 3.6 H 7.4 V 10 H 1 Z M 3.6 3.6 V 1 H 10 V 7.4 H 7.4"
             }
         }
     }

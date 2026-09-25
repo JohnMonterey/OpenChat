@@ -144,6 +144,17 @@ set(profile_controller_sources
     src/controllers/ProfileEditHistory.cpp
 )
 
+# ChatController's attachment half (docs/chat-attachments.md): the tray and its
+# model, the sends and live transfers, and the bubbles' media handle. Compiled
+# beside ChatController.cpp in every target that compiles it, like the list
+# above.
+set(chat_attachment_sources
+    src/controllers/ChatAttachments.cpp
+    src/controllers/ChatAttachmentDemo.cpp
+    src/controllers/ChatAttachmentMedia.cpp
+    src/models/StagedAttachmentModel.cpp
+)
+
 set_source_files_properties(qml/OpenChat/Theme.qml qml/OpenChat/VocalFx.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
 )
@@ -151,6 +162,7 @@ set_source_files_properties(qml/OpenChat/Theme.qml qml/OpenChat/VocalFx.qml PROP
 qt_add_executable(OpenChat
     src/main.cpp
     src/controllers/ChatController.cpp
+    ${chat_attachment_sources}
     ${profile_controller_sources}
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
@@ -243,6 +255,22 @@ qt_add_qml_module(OpenChat
         qml/OpenChat/components/MessageDelegate.qml
         qml/OpenChat/components/MessageHistory.qml
         qml/OpenChat/components/Composer.qml
+        qml/OpenChat/components/AttachButton.qml
+        qml/OpenChat/components/AttachmentChip.qml
+        qml/OpenChat/components/AttachmentMenu.qml
+        qml/OpenChat/components/AttachmentNotice.qml
+        qml/OpenChat/components/StagedAttachmentCard.qml
+        qml/OpenChat/components/StagedAttachmentTray.qml
+        qml/OpenChat/components/AttachDropOverlay.qml
+        qml/OpenChat/components/AttachmentBlock.qml
+        qml/OpenChat/components/ChatImageBlock.qml
+        qml/OpenChat/components/ChatVideoBlock.qml
+        qml/OpenChat/components/ChatAudioRow.qml
+        qml/OpenChat/components/ChatFileRow.qml
+        qml/OpenChat/components/ChatTransferOverlay.qml
+        qml/OpenChat/components/ChatTimeChip.qml
+        qml/OpenChat/components/ChatCancelCross.qml
+        qml/OpenChat/components/ChatMediaViewer.qml
         qml/OpenChat/components/DailyCaseButton.qml
         qml/OpenChat/components/DailyCaseModal.qml
         qml/OpenChat/components/CaseReel.qml
@@ -841,6 +869,8 @@ add_library(openchat_app STATIC
     src/app/DeviceLink.cpp
     src/app/KeyPackageSupply.cpp
     src/app/ProfilePageSync.cpp
+    src/app/AttachmentFileStore.cpp
+    src/app/AttachmentTransfer.cpp
 )
 target_include_directories(openchat_app PUBLIC src)
 target_link_libraries(openchat_app
@@ -1032,6 +1062,31 @@ target_link_libraries(tst_profilepagesync PRIVATE
 add_test(NAME tst_profilepagesync COMMAND tst_profilepagesync)
 set_tests_properties(tst_profilepagesync PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# Chat attachments' bytes between real peers (AttachmentTransfer over
+# tests/PageSyncTestSupport.h): photos and a 16 MB file end to end, a group's
+# paced fan-out, a link or a call that pauses it, restarts, frames before
+# their message, lost and damaged parts, cancelling, full disks and the
+# collection of what never got a message. Qt6::Gui makes the test photos.
+add_executable(tst_attachmenttransfer
+    tests/tst_attachmenttransfer.cpp
+    tests/PageSyncTestSupport.h
+)
+target_include_directories(tst_attachmenttransfer PRIVATE src tests)
+target_link_libraries(tst_attachmenttransfer PRIVATE
+    openchat_app
+    openchat_network
+    openchat_crypto
+    openchat_storage
+    openchat_security
+    openchat_domain
+    openchat_sqlcipher
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+)
+add_test(NAME tst_attachmenttransfer COMMAND tst_attachmenttransfer)
+set_tests_properties(tst_attachmenttransfer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 600)
+
 add_executable(tst_syncadapters tests/tst_syncadapters.cpp)
 target_include_directories(tst_syncadapters PRIVATE src)
 target_link_libraries(tst_syncadapters PRIVATE
@@ -1166,6 +1221,7 @@ add_executable(tst_e2e
     tests/tst_e2e.cpp
     tests/relay/RelayTestSupport.cpp
     src/controllers/ChatController.cpp
+    ${chat_attachment_sources}
     ${profile_controller_sources}
     src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
@@ -1262,6 +1318,7 @@ add_executable(tst_models
     src/models/ContactListModel.cpp
     src/models/MessageListModel.cpp
     src/models/CallParticipantModel.cpp
+    src/models/StagedAttachmentModel.cpp
 )
 target_include_directories(tst_models PRIVATE src)
 target_link_libraries(tst_models PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
@@ -1272,6 +1329,7 @@ add_test(NAME tst_models COMMAND tst_models)
 add_executable(tst_chatcontroller
     tests/tst_chatcontroller.cpp
     src/controllers/ChatController.cpp
+    ${chat_attachment_sources}
     ${profile_controller_sources}
     src/controllers/CallController.cpp
     src/models/ContactListModel.cpp
@@ -1511,6 +1569,7 @@ add_executable(tst_qmlload
     tests/tst_qmlload.cpp
     tests/ProfileQmlHarness.h
     src/controllers/ChatController.cpp
+    ${chat_attachment_sources}
     ${profile_controller_sources}
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
@@ -1573,6 +1632,7 @@ set_tests_properties(tst_qmlload PROPERTIES
 set(profile_qml_test_sources
     tests/ProfileQmlHarness.h
     src/controllers/ChatController.cpp
+    ${chat_attachment_sources}
     src/controllers/CallController.cpp
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
@@ -1676,6 +1736,7 @@ set_tests_properties(tst_profileeditor PROPERTIES
 add_executable(openchat-profile-gallery
     tools/profile_gallery/main.cpp
     src/controllers/ChatController.cpp
+    ${chat_attachment_sources}
     ${profile_controller_sources}
     src/controllers/ContactController.cpp
     src/controllers/OnboardingController.cpp
@@ -1763,6 +1824,10 @@ add_openchat_capture_test(capture_video_fullscreen 720 560 "--call-video;--call-
 # profilePage item visible in the window, her own custom page), so the capture
 # cannot pass on the chat window underneath.
 add_openchat_capture_test(capture_profile 860 680 "--profile;scene-queen")
+# The composer's attach menu open over its "+", and a chat holding a sample of
+# every kind of attachment with a photo waiting in the tray.
+add_openchat_capture_test(capture_attachment_menu 860 680 --attachment-menu)
+add_openchat_capture_test(capture_attachment_demo 860 680 --attachment-demo)
 
 # The add-contact preview sub-mode: renders the dialog over a populated mock
 # Requests list. Uses the same verify runner with the extra --add-contact argument.

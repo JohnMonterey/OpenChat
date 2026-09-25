@@ -165,4 +165,28 @@ QtObject {
     readonly property color avatarHalo: darkMode ? "#4d80bde6" : "#4478acd3"
     readonly property color accentOrbRim: darkMode ? "#9fd0f2" : "#3a78a6"
     readonly property color unsavedDot: darkMode ? "#f0c24b" : "#d99a12"
+
+    // Chat attachments. Each kind has one hue, worn by its glossy chip in the
+    // attach menu, the tray and the file row: the chip's gradient and rim are
+    // drawn from it, so a kind reads the same wherever it appears. The glyph on
+    // a chip is always light.
+    readonly property color attachPhoto: darkMode ? "#3d88c4" : "#3f98dc"
+    readonly property color attachVideo: darkMode ? "#c3604a" : "#e0694f"
+    readonly property color attachAudio: darkMode ? "#7c62bf" : "#8b6bd6"
+    readonly property color attachFile: darkMode ? "#c1903a" : "#e1a23c"
+    readonly property color attachChipGlyph: "#ffffff"
+    // The attach menu's drop shadow, a little softer than a tooltip's.
+    readonly property color menuShadow: darkMode ? "#50000000" : "#1f3f6482"
+    // A staged attachment's card in the tray: a raised field, lighter than
+    // the composer under it.
+    readonly property color stagedCardTop: darkMode ? "#283d4e" : "#ffffff"
+    readonly property color stagedCardBottom: darkMode ? "#1f3241" : "#f2f7fa"
+    readonly property color stagedCardBorder: darkMode ? "#4b657a" : "#bccbd7"
+    // Where a picture will be, until it is.
+    readonly property color mediaPlaceholder: darkMode ? "#152330" : "#dce7ef"
+    // Transfers and playback: a sunken track and the switch's blue in it.
+    readonly property color progressTrack: darkMode ? "#2b3f4f" : "#d6e2eb"
+    readonly property color progressFill: darkMode ? "#78b6e2" : "#4990c6"
+    readonly property color waveformIdle: darkMode ? "#58738a" : "#b1c3d2"
+    readonly property color waveformPlayed: darkMode ? "#8fc9ef" : "#3f86c0"
 }

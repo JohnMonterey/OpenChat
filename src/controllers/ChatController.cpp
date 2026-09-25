@@ -1,6 +1,8 @@
 #include "controllers/ChatController.h"
 #include "network/RelayClient.h"
 
+#include "controllers/ChatAttachments.h"
+
 #include "app/ContactRequestService.h"
 #include "app/GroupService.h"
 #include "app/ProfileSession.h"
@@ -22,6 +24,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
+#include <QStandardPaths>
 #include <QUuid>
 
 #include <algorithm>
@@ -133,6 +136,7 @@ void giveMockId(Message &message)
 
 ChatController::ChatController(QObject *parent)
     : QObject(parent)
+    , m_attachments(std::make_unique<ChatAttachments>(*this))
     , m_profiles(std::make_unique<ProfileController>(*this))
 {
     m_contacts.setContacts(referenceContacts());
@@ -480,7 +484,13 @@ QString ChatController::composerText() const
 
 bool ChatController::canSend() const
 {
-    if (m_sessionState != SessionState::Ready || m_composerText.trimmed().isEmpty())
+    if (m_sessionState != SessionState::Ready)
+        return false;
+    // An edit sends text alone; a new message may be (or only be) the
+    // attachments in the tray, ready or still being prepared (then the send
+    // waits for them).
+    const bool attachments = m_editingMessageId.isEmpty() && m_attachments->sendable();
+    if (m_composerText.trimmed().isEmpty() && !attachments)
         return false;
     return !m_live || currentLiveChatSendable();
 }
@@ -603,7 +613,8 @@ bool ChatController::selectContact(const QString &id)
     if (!contact)
         return false;
 
-    // An edit or a reply belongs to the chat it was started in.
+    // An edit or a reply belongs to the chat it was started in (so does the
+    // tray; refreshVisibleMessages empties it).
     cancelComposeMode();
     const bool wasSendable = canSend();
     m_currentContactId = id;
@@ -738,6 +749,9 @@ void ChatController::setComposerText(const QString &text)
 
     const bool wasSendable = canSend();
     m_composerText = bounded;
+    // A send waiting for the tray takes the text as it was: a change to it
+    // means the message is not finished.
+    m_attachments->cancelSendWhenReady();
     emit composerTextChanged();
     updateCanSend(wasSendable);
 }
@@ -751,11 +765,29 @@ bool ChatController::sendMessage()
         return false;
 
     const QString body = m_composerText.trimmed();
+    if (!m_editingMessageId.isEmpty())
+        return !body.isEmpty() && sendEdit(body);
+    const std::optional<Message> answered = m_messages.messageById(m_replyingToMessageId);
+    if (m_attachments->sendable()) {
+        if (m_live && !currentLiveChatSendable())
+            return false;
+        // The text is the first attachment's caption, the reply its quote.
+        switch (m_attachments->send(body, answered)) {
+        case ChatAttachments::SendOutcome::Nothing:
+            // Nothing could go: the text still can, on its own.
+            if (body.isEmpty())
+                return false;
+            break;
+        case ChatAttachments::SendOutcome::Waiting:
+            return true;
+        case ChatAttachments::SendOutcome::Sent:
+            setComposerText({});
+            cancelComposeMode();
+            return true;
+        }
+    }
     if (body.isEmpty())
         return false;
-    if (!m_editingMessageId.isEmpty())
-        return sendEdit(body);
-    const std::optional<Message> answered = m_messages.messageById(m_replyingToMessageId);
 
     if (m_live) {
         if (m_engine == nullptr)
@@ -793,7 +825,7 @@ bool ChatController::sendMessage()
     if (answered) {
         message.replyToId = answered->stableId;
         message.quotedSender = authorName(*answered);
-        message.quotedBody = quoteExcerpt(answered->body);
+        message.quotedBody = quoteExcerpt(ChatAttachments::summaryOf(*answered));
     }
     m_messages.appendMessage(message);
     m_messagesByContact[m_currentContactId].append(message);
@@ -854,6 +886,8 @@ bool ChatController::beginEdit(const QString &messageId)
     if (messageId == m_editingMessageId)
         return true;
     // Keep what was being typed; a second edit keeps the first one's draft.
+    // Nothing is attached to an edit: a send waiting for the tray stops.
+    m_attachments->cancelSendWhenReady();
     const QString draft = m_editingMessageId.isEmpty() ? m_composerText : m_draftBeforeEdit;
     m_replyingToMessageId.clear();
     m_editingMessageId = messageId;
@@ -877,7 +911,7 @@ bool ChatController::beginReply(const QString &messageId)
         cancelComposeMode();
     m_replyingToMessageId = messageId;
     m_composeTargetName = authorName(*message);
-    m_composeTargetText = quoteExcerpt(message->body);
+    m_composeTargetText = quoteExcerpt(ChatAttachments::summaryOf(*message));
     emit composeModeChanged();
     return true;
 }
@@ -909,6 +943,9 @@ bool ChatController::copyMessage(const QString &messageId)
     QClipboard *clipboard = QGuiApplication::clipboard();
     if (clipboard == nullptr)
         return false;
+    // An attachment copies its caption, and nothing when it has none.
+    if (message->kind == MessageKind::Attachment && message->body.isEmpty())
+        return false;
     clipboard->setText(message->body);
     return true;
 }
@@ -919,7 +956,9 @@ std::optional<MessageQuote> ChatController::quoteFor(const Message &message) con
     const auto sender = DeviceId::fromBytes(QByteArray::fromHex(message.senderDevice.toLatin1()));
     if (!target || !sender)
         return std::nullopt;
-    return MessageQuote{*target, *sender, message.body};
+    // An attachment is quoted by what it is ("Photo: …"): the receiver may
+    // not hold it.
+    return MessageQuote{*target, *sender, ChatAttachments::summaryOf(message)};
 }
 
 QString ChatController::authorName(const Message &message) const
@@ -980,6 +1019,11 @@ void ChatController::setSessionState(SessionState state)
     // the history ends it.
     if (!statePermitsPlaintext(state))
         cancelComposeMode();
+    // The tray shows the user's own pictures: hidden with the history.
+    m_attachments->setWithheld(!statePermitsPlaintext(state));
+    // A send waiting for the tray needs a state that sends.
+    if (state != SessionState::Ready)
+        m_attachments->cancelSendWhenReady();
     if (visibilityChanged)
         refreshVisibleMessages();
     refreshChatActivity();
@@ -1066,6 +1110,122 @@ void ChatController::setNavSection(NavSection section)
     m_navSection = section;
     refreshChatActivity();
     emit navSectionChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Attachments (ChatAttachments does the work)
+// ---------------------------------------------------------------------------
+
+QObject *ChatController::stagedAttachments() const
+{
+    return m_attachments->model();
+}
+
+bool ChatController::hasStagedAttachments() const
+{
+    return plaintextVisible() && m_attachments->hasStaged();
+}
+
+bool ChatController::stagingBusy() const
+{
+    return plaintextVisible() && m_attachments->busy();
+}
+
+bool ChatController::sendWhenReady() const
+{
+    return m_attachments->sendWhenReady();
+}
+
+bool ChatController::videoAttachmentsSupported()
+{
+    return ChatAttachmentImporter::videoSupported();
+}
+
+QString ChatController::attachmentNotice() const
+{
+    return m_attachments->notice();
+}
+
+void ChatController::attachFiles(const QList<QUrl> &files)
+{
+    m_attachments->attachFiles(files);
+}
+
+bool ChatController::attachClipboard()
+{
+    return m_attachments->attachClipboard();
+}
+
+void ChatController::removeStagedAttachment(const QString &id)
+{
+    m_attachments->remove(id);
+}
+
+void ChatController::clearStagedAttachments()
+{
+    m_attachments->clear();
+}
+
+bool ChatController::cancelAttachment(const QString &stableId)
+{
+    return m_attachments->cancel(stableId);
+}
+
+bool ChatController::retryAttachment(const QString &stableId)
+{
+    return m_attachments->retry(stableId);
+}
+
+bool ChatController::saveAttachment(const QString &stableId, const QUrl &target)
+{
+    return m_attachments->save(stableId, target);
+}
+
+QString ChatController::suggestedSaveName(const QString &stableId) const
+{
+    return m_attachments->suggestedSaveName(stableId);
+}
+
+bool ChatController::copyAttachmentImage(const QString &stableId)
+{
+    return m_attachments->copyImage(stableId);
+}
+
+QString ChatController::attachmentFolderUrl() const
+{
+    QString folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (folder.isEmpty())
+        folder = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+    return QUrl::fromLocalFile(folder).toString();
+}
+
+void ChatController::clearAttachmentNotice()
+{
+    m_attachments->setNotice({});
+}
+
+QByteArray ChatController::attachmentPreview(const QString &stableId)
+{
+    if (!statePermitsPlaintext(m_sessionState))
+        return {};
+    return m_attachments->preview(stableId);
+}
+
+void ChatController::loadAttachmentBlob(const QString &stableId, const QObject *context,
+                                        std::function<void(const QByteArray &blob)> done)
+{
+    m_attachments->loadBlob(stableId, context, std::move(done));
+}
+
+void ChatController::setCallActive(bool active)
+{
+    m_messages.setCallActive(active);
+    m_attachments->setCallActive(active);
+}
+
+void ChatController::injectDemoAttachmentsForCapture()
+{
+    m_attachments->injectDemo();
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,6 +1333,8 @@ void ChatController::setLiveServices(ProfileSession *session, SyncEngine *engine
     emit chatUnreadCountChanged();
     // Profile pages ride the same session and engine, over the roster just loaded.
     m_profiles->setLiveServices(session, engine, requests);
+    // So do attachments' bytes; the tray (made for the mock) starts empty.
+    m_attachments->setLiveServices(*session, *engine);
 }
 
 void ChatController::setPresenceRelay(RelayClient *relay)
@@ -1336,6 +1498,8 @@ void ChatController::loadRoster()
     emit currentContactChanged();
     emit groupCandidatesChanged();
     updateCanSend(wasSendable);
+    // Attachments to members who left stop; to members still here, go on.
+    m_attachments->rosterChanged();
     if (m_presenceRelay) {
         refreshPresence();
         // The roster may have gained someone; a burst of reloads asks once.
@@ -1560,6 +1724,10 @@ Message ChatController::messageFor(const MessageRecord &record) const
         // One to one: the contact is who spoke.
         message.senderAccount = conversation;
     }
+    // Who an incoming attachment's bytes are waiting on.
+    if (record.kind == ContentKind::Attachment && record.flow == MessageFlow::Incoming)
+        message.transferPeer = message.senderName.isEmpty() ? nameForDevice(conversation, record.senderDeviceId)
+                                                            : message.senderName;
     return message;
 }
 
@@ -1591,6 +1759,33 @@ Message ChatController::toMessage(const MessageRecord &record)
     if (record.replyToId) {
         message.replyToId = record.replyToId->toHex();
         message.quotedBody = record.quotedBody;
+    }
+    if (record.kind == ContentKind::Attachment) {
+        message.kind = MessageKind::Attachment;
+        if (record.attachment) {
+            ChatAttachments::describe(message, *record.attachment);
+            switch (record.attachmentState) {
+            case int(AttachmentState::Complete):
+                message.transferState = AttachmentTransferState::Ready;
+                break;
+            case int(AttachmentState::Failed):
+                message.transferState = AttachmentTransferState::Failed;
+                break;
+            case int(AttachmentState::Cancelled):
+                message.transferState = AttachmentTransferState::Cancelled;
+                break;
+            default:
+                message.transferState = AttachmentTransferState::Transferring;
+                break;
+            }
+            message.transferReason = record.attachmentReason;
+            message.transferDone = std::clamp(record.attachmentDone, 0, message.transferTotal);
+        } else {
+            // Its description could not be stored or read back: the bubble
+            // can only say so (and show the caption).
+            message.attachmentKind = int(AttachmentKind::File);
+            message.transferState = AttachmentTransferState::Unavailable;
+        }
     }
     return message;
 }
@@ -1628,10 +1823,14 @@ void ChatController::onMessageReceived(const MessageRecord &record)
     if (const auto chat = m_liveChats.constFind(contactId); chat != m_liveChats.cend()
         && record.kind != ContentKind::System) {
         const Contact row = contactRowFor(*chat);
-        const bool showBody = statePermitsPlaintext(m_sessionState)
-            && (record.kind == ContentKind::Text || record.kind == ContentKind::Emoji);
-        emit messageNotificationRequested(contactId, row.name,
-                                          showBody ? record.body : QString(), row.avatarKey);
+        const bool plaintext = statePermitsPlaintext(m_sessionState);
+        QString body;
+        if (plaintext && (record.kind == ContentKind::Text || record.kind == ContentKind::Emoji))
+            body = record.body;
+        // An attachment is announced by what it is ("Photo: …").
+        if (plaintext && record.kind == ContentKind::Attachment)
+            body = ChatAttachments::summaryOf(toMessage(record));
+        emit messageNotificationRequested(contactId, row.name, body, row.avatarKey);
     }
 
     if (contactId == m_currentContactId) {
@@ -1710,6 +1909,8 @@ bool ChatController::statePermitsPlaintext(SessionState state)
 
 void ChatController::refreshVisibleMessages()
 {
+    // Whichever way the open chat changed, its tray is its own.
+    m_attachments->chatShown(m_currentContactId);
     if (statePermitsPlaintext(m_sessionState))
         m_messages.setMessages(m_messagesByContact.value(m_currentContactId));
     else

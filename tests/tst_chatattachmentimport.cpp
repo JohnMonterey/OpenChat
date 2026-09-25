@@ -3,10 +3,13 @@
 #include "domain/ProfilePageCodec.h"
 #include "domain/SongContainer.h"
 #include "media/WavFile.h"
+#include "profile/SongImport.h"
 #include "profile/ChatAttachmentImport.h"
 #include "profile/ClipCodec.h"
 
 #include <QFile>
+#include <QTimer>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QImageReader>
 #include <QPainter>
@@ -162,6 +165,7 @@ private slots:
     void filesOverSixteenMegabytesAreRefused();
     void emptyMissingAndFolderPathsAreRefused();
     void cancelStopsAJobWithoutAWord();
+    void droppingAnAudioCardNeverWaitsForItsImport();
     void aNewStartReplacesTheJobUnderWay();
     void videoSupportFollowsTheCodec();
 
@@ -673,6 +677,48 @@ void ChatAttachmentImportTest::cancelStopsAJobWithoutAWord()
     QVERIFY(finished.wait(30'000));
     QCOMPARE(finished.at(0).at(0).value<PreparedAttachment>().blob, QByteArray("after"));
     QCOMPARE(failed.count(), 0);
+}
+
+void ChatAttachmentImportTest::droppingAnAudioCardNeverWaitsForItsImport()
+{
+    // Five minutes of 48 kHz stereo (58 MB): reading and converting it runs
+    // on a worker in steps that do not stop half way. Taking the card out
+    // must not hold the window while they finish.
+    WavAudio long_;
+    long_.sampleRate = 48'000;
+    long_.channels = 2;
+    long_.samples.resize(qsizetype(48'000) * 2 * 300);
+    for (qsizetype index = 0; index < long_.samples.size(); ++index)
+        long_.samples[index] = qint16((index / 2) % 110 < 55 ? 6'000 : -6'000); // a square wave, quickly made
+    const QString path = writeWav(u"long take.wav"_s, long_);
+    long_ = {};
+
+    auto *importer = new ChatAttachmentImporter;
+    importer->start(path);
+    QVERIFY(importer->busy());
+    QTest::qWait(30); // under way on its worker
+    QElapsedTimer blocked;
+    blocked.start();
+    delete importer;
+    const qint64 deleteMs = blocked.elapsed();
+    // Nor later, when what was dropped is deleted: the event loop keeps
+    // turning, a tick every 10 ms or so.
+    qint64 longestGapMs = 0;
+    QElapsedTimer sinceTick;
+    sinceTick.start();
+    QTimer ticks;
+    ticks.setInterval(10);
+    QObject::connect(&ticks, &QTimer::timeout, &ticks, [&] {
+        longestGapMs = std::max(longestGapMs, sinceTick.restart());
+    });
+    ticks.start();
+    QTest::qWait(1'500);
+    ticks.stop();
+    longestGapMs = std::max(longestGapMs, sinceTick.elapsed()); // a wait past the end counts too
+    QVERIFY2(deleteMs < 150, qPrintable(QString::number(deleteMs)));
+    QVERIFY2(longestGapMs < 150, qPrintable(QString::number(longestGapMs)));
+    // And it does go once its worker is done.
+    QTRY_VERIFY_WITH_TIMEOUT(QCoreApplication::instance()->findChildren<SongImporter *>().isEmpty(), 60'000);
 }
 
 void ChatAttachmentImportTest::aNewStartReplacesTheJobUnderWay()

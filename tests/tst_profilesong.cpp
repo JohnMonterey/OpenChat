@@ -436,6 +436,7 @@ private slots:
     void encodeWholeFindsTheSamplesBehindOtherChunks();
     void encodeWholeRefusesSilence();
     void encodeWholeThroughTheDecoder();
+    void encodeWholeStreamsAWavTooDenseToReadWhole();
 
     // Playback
     void songStreamProducesDecodedPcmAndEnds();
@@ -1563,6 +1564,31 @@ void ProfileSongTest::encodeWholeRefusesSilence()
     importer.encodeWhole(m_dir.filePath(u"not-there.wav"_s), chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
     QVERIFY(failed.wait(30'000));
     QCOMPARE(failed.at(1).at(0).value<SongImportError>(), SongImportError::FileMissing);
+}
+
+void ProfileSongTest::encodeWholeStreamsAWavTooDenseToReadWhole()
+{
+    // A recording whose first five minutes are more than the importer reads
+    // into memory (32-bit float at 96 kHz runs past it before then) goes
+    // through the decoder rather than being refused as too large.
+    const QString path = writeFile(u"dense.wav"_s, makeWav(tone(440.0, 10.0, 44'100, 1, 0.3)));
+    SongImportLimits limits;
+    limits.maxWavReadBytes = 200'000; // stands in for 192 MiB: this file is about 880 KB
+    SongImporter importer(limits);
+    QSignalSpy whole(&importer, &SongImporter::encodedWhole);
+    QSignalSpy failed(&importer, &SongImporter::failed);
+    importer.encodeWhole(path, chatSongEncodeOptions(), AttachmentLimits::maxPeaks);
+    if (!SongImporter::canDecodeCompressed()) {
+        // With nothing to stream it, it is too large as before.
+        QVERIFY(failed.wait(30'000));
+        QCOMPARE(failed.at(0).at(0).value<SongImportError>(), SongImportError::FileTooLarge);
+        return;
+    }
+    QVERIFY(whole.wait(60'000));
+    QCOMPARE(failed.count(), 0);
+    const auto song = whole.at(0).at(0).value<EncodedSong>();
+    QVERIFY(!song.trimmed);
+    QVERIFY2(std::abs(song.durationMs - 10'000) <= 30, qPrintable(QString::number(song.durationMs)));
 }
 
 void ProfileSongTest::encodeWholeThroughTheDecoder()

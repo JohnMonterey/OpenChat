@@ -37,6 +37,10 @@ struct SongImportLimits final {
     qint64 maxSourceMs = 15LL * 60 * 1000; // only the first 15 minutes can be picked from
     int timeoutMs = 30'000;
     int peakBuckets = 120;
+    // A whole file's WAV is read into memory only up to this (a 5-minute
+    // 96 kHz 24-bit stereo recording is about 170 MB); a denser one goes
+    // through the decoder, which streams it.
+    qint64 maxWavReadBytes = 192LL * 1024 * 1024;
 };
 
 // What the song editor shows once a file is picked: its card, its waveform
@@ -88,6 +92,9 @@ class SongImporter final : public QObject
 public:
     explicit SongImporter(SongImportLimits limits = {}, QObject *parent = nullptr);
     ~SongImporter() override; // cancels and waits for the worker
+    // Nothing is running on its worker (after cancel(), a step that does not
+    // stop half way may still be finishing, and deleting it waits for that).
+    [[nodiscard]] bool isIdle() const;
 
     void analyse(const QString &path);
     // The window is clamped so it fits the source; `encoded` reports where it

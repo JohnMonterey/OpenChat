@@ -37,10 +37,6 @@ constexpr int tagProbeMs = 3'000;
 constexpr int lookAfterWindowMs = 2'000;
 constexpr int peakBlockMs = 10;
 constexpr int songWindowMs = SongContainer::maxDurationMs;
-// A whole file's WAV is read no further than its kept part and the look past
-// it, and never more than this in all (a 5-minute 96 kHz 24-bit stereo
-// recording is about 170 MB).
-constexpr qint64 maxWholeWavBytes = 192LL * 1024 * 1024;
 constexpr qsizetype fmtFieldBytes = 16;
 // Reading a whole file's WAV is quick beside encoding it: this much of the
 // progress, the encode the rest. A compressed file's decode takes half.
@@ -350,17 +346,12 @@ struct WindowClip final {
     return window;
 }
 
-// The start of a WAV, as far as `keepMs` and the look past it reach. The
-// chunk headers are walked on disk to find where the samples begin and how
-// wide a frame is, so a long recording (or one with cover art in front) is
-// never read to its end; one whose data the walk does not reach is read
-// whole, if it is small enough. WavFile clamps the cut-off data chunk.
-[[nodiscard]] Result<WavAudio, SongImportError> readWavHead(const QString &path, qint64 keepMs)
+// How many bytes from its start hold a WAV's first `keepMs` and the look past
+// it. The chunk headers are walked on disk to find where the samples begin and
+// how wide a frame is, so a long recording (or one with cover art in front) is
+// never read to its end; one whose data the walk does not reach counts whole.
+[[nodiscard]] qint64 wavHeadBytes(QFile &file, qint64 keepMs)
 {
-    using Outcome = Result<WavAudio, SongImportError>;
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
-        return Outcome::failure(SongImportError::FileMissing);
     const qint64 size = file.size();
     qint64 dataOffset = -1;
     qint64 frameBytes = 0;
@@ -391,7 +382,26 @@ struct WindowClip final {
         const qint64 frames = (std::max<qint64>(keepMs, 0) + lookAfterWindowMs) * rate / 1000;
         wanted = std::min(size, dataOffset + frames * frameBytes);
     }
-    if (wanted > maxWholeWavBytes)
+    return wanted;
+}
+
+[[nodiscard]] qint64 wavHeadBytes(const QString &path, qint64 keepMs)
+{
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? wavHeadBytes(file, keepMs) : -1;
+}
+
+// The start of a WAV, as far as `keepMs` and the look past it reach
+// (wavHeadBytes), if it is small enough. WavFile clamps the cut-off data chunk.
+[[nodiscard]] Result<WavAudio, SongImportError> readWavHead(const QString &path, qint64 keepMs,
+                                                           qint64 maxBytes)
+{
+    using Outcome = Result<WavAudio, SongImportError>;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return Outcome::failure(SongImportError::FileMissing);
+    const qint64 wanted = wavHeadBytes(file, keepMs);
+    if (wanted > maxBytes)
         return Outcome::failure(SongImportError::FileTooLarge);
     if (!file.seek(0))
         return Outcome::failure(SongImportError::FileMissing);
@@ -900,6 +910,11 @@ SongImporter::~SongImporter()
     m_pool.waitForDone();
 }
 
+bool SongImporter::isIdle() const
+{
+    return m_pool.activeThreadCount() == 0;
+}
+
 bool SongImporter::canDecodeCompressed()
 {
     const QAudioDecoder probe;
@@ -1021,19 +1036,29 @@ void SongImporter::encodeWhole(const QString &path, const SongEncodeOptions &opt
         postFailure(generation, *refused);
         return;
     }
-    if (!m_forceDecoder && isRiffWave(path)) {
+    // A WAV too dense to read whole in memory (32-bit float at 96 kHz, say,
+    // runs past it before five minutes) goes through the decoder instead,
+    // which streams it, when this computer has one.
+    const bool wavFitsInMemory = wavHeadBytes(path, options.maxDurationMs) <= m_limits.maxWavReadBytes;
+    if (!m_forceDecoder && isRiffWave(path) && (wavFitsInMemory || !canDecodeCompressed())) {
         runOnWorker(generation, SongImportError::EncodeFailed,
-                    [this, generation, path, options, buckets = m_wholePeakBuckets, hook = m_encodeHook] {
+                    [this, generation, path, options, buckets = m_wholePeakBuckets, hook = m_encodeHook,
+                     maxBytes = m_limits.maxWavReadBytes] {
                         WholeClip whole;
                         {
-                            auto read = readWavHead(path, options.maxDurationMs);
+                            auto read = readWavHead(path, options.maxDurationMs, maxBytes);
                             if (!read) {
                                 postFailure(generation, read.error());
                                 return;
                             }
+                            // Cancelled while reading: nothing more is done.
+                            if (!isCurrent(generation))
+                                return;
                             whole = sliceWhole(std::move(read).value(), options.maxDurationMs,
                                                options.silenceThresholdDb);
                         }
+                        if (!isCurrent(generation))
+                            return;
                         postProgress(generation, wavReadProgress);
                         encodeWholeAndPost(generation, whole.clip, whole.trimmed, options, buckets, wavReadProgress,
                                            hook);

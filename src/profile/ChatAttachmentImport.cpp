@@ -9,6 +9,7 @@
 #include "profile/SongImport.h"
 
 #include <QBuffer>
+#include <QCoreApplication>
 #include <QColor>
 #include <QElapsedTimer>
 #include <QFile>
@@ -443,6 +444,32 @@ private:
         importer->disconnect();
         importer->cancel();
         importer.release()->deleteLater();
+    }
+    // A song import can be in a step that does not stop half way (reading
+    // and converting a large WAV), and deleting its importer waits for that:
+    // it goes once its worker is idle, never holding up this thread. Until
+    // then the application holds it, so it is still waited for at exit.
+    static void retire(std::unique_ptr<SongImporter> &importer)
+    {
+        if (!importer)
+            return;
+        importer->disconnect();
+        importer->cancel();
+        SongImporter *retired = importer.release();
+        if (retired->isIdle()) {
+            retired->deleteLater();
+            return;
+        }
+        retired->setParent(QCoreApplication::instance());
+        auto *poll = new QTimer(retired);
+        poll->setInterval(50);
+        QObject::connect(poll, &QTimer::timeout, retired, [retired, poll] {
+            if (!retired->isIdle())
+                return;
+            poll->stop();
+            retired->deleteLater();
+        });
+        poll->start();
     }
 
     [[nodiscard]] std::shared_ptr<Job> newJob()

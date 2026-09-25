@@ -2771,9 +2771,12 @@ private slots:
         // machine can put after the tray has already grown.
         QQuickItem *card = nullptr;
         QTRY_VERIFY((card = findVisualItem(tray, QStringLiteral("stagedAttachmentCard"))));
-        QCOMPARE(card->property("name").toString(), QStringLiteral("harbour.png"));
         QCOMPARE(card->property("kind").toInt(), 1);
+        // Named after the picked file while it is prepared, then after what
+        // will be sent (a JPEG); a fast machine may already be done here, so
+        // the name is checked once it is ready.
         QTRY_VERIFY_WITH_TIMEOUT(card->property("ready").toBool(), 20'000);
+        QCOMPARE(card->property("name").toString(), QStringLiteral("harbour.jpg"));
         QTRY_VERIFY(findVisualItem(card, QStringLiteral("stagedAttachmentThumbnail"))->property("ready").toBool());
         // Something to send now, with no text.
         QVERIFY(controller.canSend());
